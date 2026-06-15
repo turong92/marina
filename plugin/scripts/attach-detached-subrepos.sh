@@ -56,6 +56,37 @@ print(" ".join(str(s) for s in match.get("subrepos", [])))
 PY
 }
 
+registry_source_root_for() {
+  command -v python3 >/dev/null 2>&1 || return 3
+  [[ -f "$PROJECTS_FILE" ]] || return 3
+  python3 - "$PROJECTS_FILE" "$1" <<'PY'
+import json, os, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(3)
+root = os.path.realpath(os.path.expanduser(sys.argv[2]))
+codex_wt = os.path.realpath(os.path.expanduser(os.environ.get("CODEX_WORKTREES_ROOT") or "~/.codex/worktrees"))
+projects = data.get("projects", [])
+norm = lambda p: os.path.realpath(os.path.expanduser(p.get("root", "")))
+match = None
+for p in projects:
+    pr = norm(p)
+    if root == pr or root.startswith(pr + os.sep):
+        match = p; break
+if match is None and os.path.dirname(os.path.dirname(root)) == codex_wt:
+    base = os.path.basename(root)
+    for p in projects:
+        if os.path.basename(norm(p)) == base:
+            match = p; break
+if match is None and len(projects) == 1:
+    match = projects[0]
+if match is None:
+    sys.exit(3)
+print(norm(match))
+PY
+}
+
 resolve_subrepos() {
   local from_registry
   if [[ -n "${MARINA_SUBREPOS:-}" ]]; then
@@ -80,9 +111,13 @@ resolve_dest_root() {
 
 # SOURCE_ROOT = 원본(main) 체크아웃. env 우선, 없으면 서브레포 git 토폴로지, 없으면 DEST_ROOT.
 resolve_source_root() {
-  local candidate common_dir source_repo source_root
+  local candidate common_dir source_repo source_root from_registry
   if [[ -n "${SOURCE_ROOT:-}" ]]; then
     ( cd "$SOURCE_ROOT" 2>/dev/null && pwd -P ) || die "SOURCE_ROOT 디렉토리 없음: $SOURCE_ROOT"
+    return
+  fi
+  if from_registry="$(registry_source_root_for "$DEST_ROOT")"; then
+    printf '%s\n' "$from_registry"
     return
   fi
   for candidate in "${SUBREPOS[@]}"; do
