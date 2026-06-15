@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# marina — 전역 dev 런처 + 관제 대시보드 진입점.
+#
+#   marina add <path> | rm <id> | ls        # 프로젝트 레지스트리 (~/.marina/projects.json)
+#   marina dashboard                         # 전역 대시보드(:3900) 기동 (기본)
+#   marina stop | dashboard-stop | open      # 대시보드 제어
+#   marina status | ports | web | be | all   # 현재 worktree(cwd) 의 서비스
+#
+# 스크립트는 모두 이 파일의 형제(scripts/) — 어디서 실행하든 위치독립.
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SESSION="$SCRIPT_DIR/marina.sh"
+DASHBOARD="$SCRIPT_DIR/marina-dashboard.sh"
+ATTACH="$SCRIPT_DIR/attach-detached-subrepos.sh"
+
+usage() {
+  cat <<'EOF'
+usage:
+  registry (~/.marina/projects.json):
+    marina add <project-path>   # 서브레포·worktreeGlobs 자동 추론 후 등록
+    marina rm <id>
+    marina ls
+  dashboard (전역 :3900):
+    marina dashboard            # 기동 (기본)
+    marina dashboard-stop       # 대시보드만 정지
+    marina dashboard-status
+    marina open                 # 브라우저로 열기
+    marina logs [service]       # 로그 tail
+  current worktree (cwd):
+    marina status | ports
+    marina web | be | index | search | audio | all
+    marina restart <svc..>
+    marina attach               # 서브레포 attach 만
+    marina stop [svc..]         # 서비스 정지 (인자 없으면 대시보드까지)
+EOF
+}
+
+print_dashboard_url() {
+  echo
+  echo "Dashboard: http://${MARINA_CONTROL_HOST:-localhost}:${MARINA_CONTROL_PORT:-3900}"
+  echo
+}
+
+command="${1:-dashboard}"
+shift || true
+
+case "$command" in
+  add|rm|ls|projects)
+    "$SESSION" "$command" "$@"
+    ;;
+  dashboard|dash|up|start)
+    # attach 트리거는 marina 플러그인(.claude-plugin/.codex-plugin + hooks/hooks.json)이 담당한다 —
+    # 하네스마다 /plugin install 1회로 설치=신뢰(이름 달린 SessionStart 훅). 발견+lazy attach 가 안전망.
+    "$DASHBOARD" start
+    print_dashboard_url
+    ;;
+  attach|prepare)
+    "$ATTACH"
+    ;;
+  status|ports)
+    "$SESSION" "$command"
+    ;;
+  dashboard-status)
+    "$DASHBOARD" status
+    ;;
+  web|be|index|search|audio)
+    "$SESSION" start "--$command"
+    ;;
+  all)
+    "$SESSION" start --all
+    ;;
+  stop)
+    if [[ $# -eq 0 ]]; then
+      "$SESSION" stop
+      "$DASHBOARD" stop
+    else
+      "$SESSION" stop "$@"
+    fi
+    ;;
+  down|off|quit)
+    "$SESSION" stop
+    "$DASHBOARD" stop
+    ;;
+  dashboard-stop)
+    "$DASHBOARD" stop
+    ;;
+  restart)
+    if [[ $# -eq 0 ]]; then
+      echo "error: restart needs a service name, e.g. marina restart web be" >&2
+      exit 1
+    fi
+    "$SESSION" stop "$@"
+    # 구버전 버그: stop 은 전부 받고 start 는 첫 서비스만 올렸다 → 전 인자를 --flag 로 변환
+    restart_flags=()
+    for svc in "$@"; do restart_flags+=("--$svc"); done
+    "$SESSION" start "${restart_flags[@]}"
+    ;;
+  open)
+    url="http://${MARINA_CONTROL_HOST:-localhost}:${MARINA_CONTROL_PORT:-3900}"
+    if command -v open >/dev/null 2>&1; then open "$url"        # macOS
+    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"  # Linux
+    else echo "$url"
+    fi
+    ;;
+  logs)
+    "$SESSION" logs "$@"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    echo "error: unknown command: $command" >&2
+    usage >&2
+    exit 1
+    ;;
+esac

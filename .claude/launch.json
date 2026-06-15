@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "marina-preview",
+      "runtimeExecutable": "env",
+      "runtimeArgs": [
+        "MARINA_CONTROL_PORT=3901",
+        "/usr/bin/python3",
+        "scripts/marina-control.py"
+      ],
+      "port": 3901,
+      "autoPort": false
+    }
+  ]
+}
