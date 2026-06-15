@@ -1,5 +1,6 @@
 {
   "name": "marina",
+  "version": "0.1.0+codex.20260615083514",
   "description": "Multi-project worktree dev server launcher + dashboard. SessionStart hook attaches per-project subrepos (registry-driven).",
   "author": {
     "name": "Jeon Sumin"
@@ -18,7 +19,13 @@
     "displayName": "Marina",
     "shortDescription": "Worktree dev launcher + dashboard",
     "longDescription": "Marina launches and manages dev servers for every git worktree of your registered projects, attaches per-project subrepos on session start, and serves a :3900 dashboard for ports, logs, and cache.",
+    "developerName": "Jeon Sumin",
     "category": "Coding",
+    "defaultPrompt": [
+      "Show my Marina project worktrees.",
+      "Start the Marina dashboard.",
+      "Attach subrepos for this worktree."
+    ],
     "capabilities": [
       "Read",
       "Write"
