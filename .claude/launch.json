@@ -7,7 +7,7 @@
       "runtimeArgs": [
         "MARINA_CONTROL_PORT=3901",
         "/usr/bin/python3",
-        "scripts/marina-control.py"
+        "plugin/scripts/marina-control.py"
       ],
       "port": 3901,
       "autoPort": false

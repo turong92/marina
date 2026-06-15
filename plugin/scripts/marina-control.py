@@ -1533,7 +1533,7 @@ def bootout_session_dashboard(sid: str) -> None:
 
 
 # marina 가 띄울 수 있는 프로세스 패턴 — 세션 추적 밖에서 돌면 "유령"으로 표시.
-# 패턴은 marina-services.json 의 서비스별 orphanPattern(정규식)에서 온다 (내장 패턴 없음).
+# 내장은 marina 런처 자신(marina.sh)뿐 — 서비스별 패턴은 marina-services.json 의 orphanPattern(정규식)에서 온다.
 # 느슨하면 grep 등 패턴 문자열을 들고 있는 셸 명령까지 오탐하니 실제 기동 cmdline 형태로 조인다.
 ORPHAN_RULES: list[tuple[str, re.Pattern[str]]] = [
     ("marina", re.compile(r"marina\.sh (?:foreground|start)")),
@@ -3113,7 +3113,7 @@ INDEX_HTML = r"""<!doctype html>
       if (!selected) return;
       const {session} = serviceMeta(selected.root, selected.service);
       const web = session?.services.find(item => item.service === 'web');
-      if (web?.port) window.open(`http://localhost:${web.port}/ko`, '_blank');
+      if (web?.port) window.open(`http://localhost:${web.port}/`, '_blank');
     };
     document.getElementById('followLog').onclick = () => {
       followLog = !followLog;

@@ -4,7 +4,7 @@
 #   marina add <path> | rm <id> | ls        # 프로젝트 레지스트리 (~/.marina/projects.json)
 #   marina dashboard                         # 전역 대시보드(:3900) 기동 (기본)
 #   marina stop | dashboard-stop | open      # 대시보드 제어
-#   marina status | ports | web | be | all   # 현재 worktree(cwd) 의 서비스
+#   marina status | ports | all              # 현재 worktree(cwd) 의 서비스
 #
 # 스크립트는 모두 이 파일의 형제(scripts/) — 어디서 실행하든 위치독립.
 
@@ -30,7 +30,7 @@ usage:
     marina logs [service]       # 로그 tail
   current worktree (cwd):
     marina status | ports
-    marina web | be | index | search | audio | all
+    marina all                  # 정의된 전 서비스 기동 (개별 서비스는 restart <svc> 또는 대시보드)
     marina restart <svc..>
     marina attach               # 서브레포 attach 만
     marina stop [svc..]         # 서비스 정지 (인자 없으면 대시보드까지)
@@ -65,9 +65,6 @@ case "$command" in
   dashboard-status)
     "$DASHBOARD" status
     ;;
-  web|be|index|search|audio)
-    "$SESSION" start "--$command"
-    ;;
   all)
     "$SESSION" start --all
     ;;
@@ -88,7 +85,7 @@ case "$command" in
     ;;
   restart)
     if [[ $# -eq 0 ]]; then
-      echo "error: restart needs a service name, e.g. marina restart web be" >&2
+      echo "error: restart needs a service name, e.g. marina restart <service..>" >&2
       exit 1
     fi
     "$SESSION" stop "$@"

@@ -576,7 +576,9 @@ selected_services_from_args() {
     for svc in ${SERVICES[@]+"${SERVICES[@]}"}; do
       svc_cwd="$(service_json_field "$svc" cwd)"
       subrepo="${svc_cwd%%/*}"
-      [[ -n "$subrepo" && "$subrepo" != "." ]] || continue
+      # subrepo 빈 값(run 에 cwd 생략)이면 "." 로 폴백 — cwd="." 는 %%/* 가 이미 "." 반환.
+      # 둘 다 repo_changed "." (= ROOT 자체 git status) 로 판정 → 단일레포에서도 잡음 (구: skip 돼 누락)
+      [[ -n "$subrepo" ]] || subrepo="."
       repo_changed "$subrepo" && SELECTED+=("$svc")
     done
     any=true
