@@ -1,6 +1,5 @@
 {
   "name": "marina",
-  "version": "0.1.0",
   "description": "Multi-project worktree dev server launcher + dashboard. SessionStart hook attaches per-project subrepos (registry-driven).",
   "author": {
     "name": "Jeon Sumin"
