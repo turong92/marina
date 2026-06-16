@@ -1036,45 +1036,10 @@ def worktree_status_cached(root: Path, ttl: float = 15.0) -> dict[str, Any]:
     return status
 
 
-def services_file_for(root: Path) -> Path | None:
-    # 서비스 정의 파일 — 프로젝트 root 우선(팀이 커밋한 경우 존중), 없으면 중앙(~/.marina/services/<id>.json).
-    project = project_for(root)
-    proot = Path(project["root"]) if project else root
-    local = proot / "marina-services.json"
-    if local.exists():
-        return local
-    if project:
-        central = MARINA_HOME / "services" / f"{project['id']}.json"
-        if central.exists():
-            return central
-    return None
-
-
-def services_for(root: Path) -> tuple[str, ...]:
-    # root 가 속한 프로젝트의 서비스명 (per-project).
-    # 과거 전역 EXTRA_SERVICES("첫 프로젝트" 하나만 반영)가 모든 프로젝트에 누수되던 것을 root 기준 per-project 해석으로 교체.
-    # — 서비스 정의 파일 없는 프로젝트(예: homeserver)는 서비스 0개가 정상.
-    f = services_file_for(root)
-    if f is None:
-        return _BUILTIN_SERVICES
+def _read_services_file(path: Path) -> list[dict[str, Any]]:
+    # 한 서비스 정의 파일 파싱 → 검증된 full dict 목록 (없거나 비-dict → []).
     try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
-        return _BUILTIN_SERVICES
-    extra = tuple(
-        n for n in (str(s.get("name", "")).strip() for s in data.get("services", []))
-        if n and n.isidentifier() and n not in _BUILTIN_SERVICES
-    )
-    return _BUILTIN_SERVICES + extra
-
-
-def extra_services_for(root: Path) -> list[dict[str, Any]]:
-    # root 가 속한 프로젝트의 서비스 정의 (per-project). 부재/파싱실패 → []
-    f = services_file_for(root)
-    if f is None:
-        return []
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except Exception:
         return []
     if not isinstance(data, dict):
@@ -1084,13 +1049,34 @@ def extra_services_for(root: Path) -> list[dict[str, Any]]:
         name = str(item.get("name", "")).strip()
         base = item.get("portBase")
         if name and name.isidentifier() and isinstance(base, int) and name not in _BUILTIN_SERVICES:
-            caches = [str(c) for c in item.get("cachePaths", []) if isinstance(c, str)]
             orphan = item.get("orphanPattern")
             out.append({
-                "name": name, "portBase": base, "cachePaths": caches,
+                "name": name, "portBase": base,
+                "cwd": str(item.get("cwd", "")), "run": str(item.get("run", "")),
+                "cachePaths": [str(c) for c in item.get("cachePaths", []) if isinstance(c, str)],
                 "orphanPattern": orphan if isinstance(orphan, str) else None,
             })
     return out
+
+
+def extra_services_for(root: Path) -> list[dict[str, Any]]:
+    # root(팀) ∪ 중앙(개인) 서비스. name 겹치면 중앙 우선. 각 항목 source 태그.
+    project = project_for(root)
+    proot = Path(project["root"]) if project else root
+    merged: dict[str, dict[str, Any]] = {}
+    for s in _read_services_file(proot / "marina-services.json"):
+        merged[s["name"]] = {**s, "source": "root"}
+    if project:
+        for s in _read_services_file(MARINA_HOME / "services" / f"{project['id']}.json"):
+            merged[s["name"]] = {**s, "source": "central"}
+    return list(merged.values())
+
+
+def services_for(root: Path) -> tuple[str, ...]:
+    # root 가 속한 프로젝트의 서비스명 (per-project).
+    # 과거 전역 EXTRA_SERVICES("첫 프로젝트" 하나만 반영)가 모든 프로젝트에 누수되던 것을 root 기준 per-project 해석으로 교체.
+    # — 서비스 정의 파일 없는 프로젝트(예: homeserver)는 서비스 0개가 정상.
+    return _BUILTIN_SERVICES + tuple(s["name"] for s in extra_services_for(root))
 
 
 def port_base_for(root: Path) -> dict[str, int]:
@@ -1154,20 +1140,8 @@ def service_subrepo(cwd: str, subrepos: list[str]) -> str:
 
 def service_subrepo_map(root: Path) -> dict[str, str]:
     # {서비스명: 소속 subrepo} — 서비스 정의 파일의 cwd 기준.
-    f = services_file_for(root)
-    if f is None:
-        return {}
     subs = subrepos_of(root)
-    try:
-        data = json.loads(f.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    out: dict[str, str] = {}
-    for item in data.get("services", []):
-        name = str(item.get("name", "")).strip()
-        if name and name.isidentifier():
-            out[name] = service_subrepo(str(item.get("cwd", "")), subs)
-    return out
+    return {s["name"]: service_subrepo(s.get("cwd", ""), subs) for s in extra_services_for(root)}
 
 
 def _tagged_services(
@@ -1177,10 +1151,23 @@ def _tagged_services(
     listeners_by_port: dict[str, list[int]] | None,
 ) -> list[dict[str, Any]]:
     smap = service_subrepo_map(root)
+    extra = extra_services_for(root)
+    srcmap = {s["name"]: s.get("source", "root") for s in extra}
+    defmap = {s["name"]: s for s in extra}
     out: list[dict[str, Any]] = []
     for svc in services_for(root):
         st = service_status(root, svc, ports.get(svc), snapshot, listeners_by_port)
         st["subrepo"] = smap.get(svc, "")
+        st["source"] = srcmap.get(svc, "root")
+        d = defmap.get(svc)
+        if d:
+            st["def"] = {
+                "portBase": d.get("portBase"),
+                "cwd": d.get("cwd", ""),
+                "run": d.get("run", ""),
+                "cachePaths": d.get("cachePaths", []),
+                "orphanPattern": d.get("orphanPattern"),
+            }
         out.append(st)
     return out
 
@@ -1910,6 +1897,19 @@ INDEX_HTML = r"""<!doctype html>
     .browse-row .repo-badge { margin-left: auto; font-size: 11px; color: var(--sys-cont-primary-default); }
     .register-manual { display: flex; gap: 6px; }
     .register-manual button { height: 30px; padding: 0 12px; border: 1px solid var(--sys-cont-primary-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); }
+    /* 서비스 추가/편집 모달 */
+    .svc-modal-field { display: flex; flex-direction: column; gap: 4px; }
+    .svc-modal-field label { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .svc-modal-field input, .svc-modal-field textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); padding: 6px 10px; font: inherit; font-size: 13px; }
+    .svc-modal-field textarea { height: 64px; resize: vertical; line-height: 1.5; }
+    .svc-modal-adv { display: flex; flex-direction: column; gap: 8px; }
+    .svc-modal-adv-toggle { background: none; border: none; color: var(--sys-cont-neutral-light); font-size: 12px; cursor: pointer; padding: 0; text-align: left; height: auto; }
+    .svc-modal-adv-toggle:hover { color: var(--sys-cont-neutral-default); }
+    .svc-modal-actions { display: flex; gap: 8px; }
+    .svc-modal-actions button { height: 30px; padding: 0 14px; border-radius: 8px; }
+    .add-svc-btn { height: 22px; padding: 0 8px; font-size: 11px; font-weight: 700; border: 1px solid var(--sys-cont-primary-default); border-radius: 6px; color: var(--sys-cont-primary-default); background: var(--sys-bg-surface); }
+    .add-svc-btn:hover { background: var(--sys-bg-surface-hover); }
+    .svc-edit-btn, .svc-del-btn { height: 22px; min-width: 22px; padding: 0 5px; font-size: 12px; border-radius: 5px; }
     aside { border-right: 1px solid var(--sys-style-neutral-light); overflow-y: auto; min-height: 0; }
     section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
     .toolbar { display: flex; gap: 8px; align-items: center; }
@@ -1973,6 +1973,9 @@ INDEX_HTML = r"""<!doctype html>
     .svc.disabled:hover { background: transparent; }
     .svc.disabled .actions { display: none; }
     .svc-name { font-size: 13px; font-weight: 700; line-height: 1; }
+    .svc-src { font-size: 10px; padding: 1px 6px; border-radius: 6px; margin-left: 6px; }
+    .svc-src.central { background: hsl(36,90%,94%); color: hsl(30,80%,38%); }
+    .svc-src.root { background: var(--sys-style-neutral-light); color: var(--sys-cont-neutral-light); }
     .svc-port { color: var(--sys-cont-neutral-lightest); font-size: 12px; line-height: 1.6; margin-top: 3px; }
     .pill { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 24px; border-radius: 6px; font-size: 12px; font-weight: 700; }
     .run { background: hsl(148, 55%, 94%); color: var(--sys-cont-positive-default); }
@@ -2171,6 +2174,53 @@ INDEX_HTML = r"""<!doctype html>
           <button id="registerManualAdd">+ 추가</button>
         </div>
         <button id="registerConfirm" class="register-confirm">등록</button>
+      </div>
+    </div>
+  </div>
+  <div class="modal-backdrop" id="serviceBackdrop" hidden>
+    <div class="register-panel" id="servicePanel" style="width:540px">
+      <div class="register-head">
+        <span class="register-title" id="serviceModalTitle">서비스 추가</span>
+        <button id="serviceModalClose" title="닫기">✕</button>
+      </div>
+      <div class="register-error" id="serviceModalError" hidden></div>
+      <div class="svc-modal-field">
+        <label for="svcName">서비스 이름 *</label>
+        <input id="svcName" placeholder="예: web, be, index" />
+      </div>
+      <div class="svc-modal-field">
+        <label for="svcPortBase">portBase *</label>
+        <input id="svcPortBase" type="number" placeholder="예: 3000" />
+      </div>
+      <div class="svc-modal-field">
+        <label for="svcCwd">cwd (subrepo 상대경로, 비워두면 루트)</label>
+        <input id="svcCwd" list="svcCwdList" placeholder="예: web-app-monorepo" />
+        <datalist id="svcCwdList"></datalist>
+      </div>
+      <div class="svc-modal-field">
+        <label for="svcRun">실행 커맨드 * (치환자: {port} {profile} {python} {root})</label>
+        <textarea id="svcRun" placeholder="exec pnpm dev --port {port}"></textarea>
+      </div>
+      <div class="svc-modal-adv">
+        <button class="svc-modal-adv-toggle" id="svcAdvToggle" type="button">▸ 고급</button>
+        <div id="svcAdvFields" hidden>
+          <div class="svc-modal-field" style="margin-bottom:8px">
+            <label for="svcCachePaths">cachePaths (쉼표 구분, 루트 상대경로)</label>
+            <input id="svcCachePaths" placeholder="예: web-app-monorepo/.next, web-app-monorepo/node_modules" />
+          </div>
+          <div class="svc-modal-field">
+            <label for="svcOrphanPattern">orphanPattern (정규식 — 유령 프로세스 감지)</label>
+            <input id="svcOrphanPattern" placeholder="예: pnpm dev" />
+          </div>
+        </div>
+      </div>
+      <label class="register-check" style="margin-top:4px">
+        <input type="checkbox" id="svcTeamShare" />
+        팀 공유 (프로젝트 루트 marina-services.json 에 커밋)
+      </label>
+      <div class="svc-modal-actions">
+        <button id="svcModalSave" class="register-confirm">저장</button>
+        <button id="svcModalCancel">취소</button>
       </div>
     </div>
   </div>
@@ -2512,6 +2562,111 @@ INDEX_HTML = r"""<!doctype html>
       if (!session) return {session: null, service: null};
       return {session, service: session.services.find(item => item.service === service)};
     }
+
+    // ── 서비스 추가/편집 모달 ──────────────────────────────────────────────────
+    let svcModalTarget = null; // {root, subrepo, editName} — editName null 이면 신규
+
+    function showServiceModal(show) {
+      document.getElementById('serviceBackdrop').hidden = !show;
+    }
+
+    function openServiceModal(root, subrepo, svc) {
+      // svc=null → 신규 추가, svc=object → 편집
+      svcModalTarget = {root, subrepo, editName: svc ? svc.service : null};
+      document.getElementById('serviceModalTitle').textContent = svc ? ('서비스 편집 — ' + svc.service) : '서비스 추가';
+      document.getElementById('serviceModalError').hidden = true;
+      document.getElementById('svcName').value = svc ? svc.service : '';
+      document.getElementById('svcName').disabled = !!svc; // 편집 시 이름 고정
+      document.getElementById('svcTeamShare').disabled = !!svc; // 편집 시 저장 위치 고정
+      document.getElementById('svcPortBase').value = svc && svc.def ? (svc.def.portBase ?? '') : '';
+      document.getElementById('svcCwd').value = svc && svc.def ? (svc.def.cwd || '') : (subrepo || '');
+      document.getElementById('svcRun').value = svc && svc.def ? (svc.def.run || '') : '';
+      // 고급 필드
+      const cachePaths = svc && svc.def ? (svc.def.cachePaths || []).join(', ') : '';
+      document.getElementById('svcCachePaths').value = cachePaths;
+      document.getElementById('svcOrphanPattern').value = svc && svc.def ? (svc.def.orphanPattern || '') : '';
+      document.getElementById('svcAdvFields').hidden = true;
+      document.getElementById('svcAdvToggle').textContent = '▸ 고급';
+      // 팀 공유 체크박스: source=root → 팀 공유, source=central → 내 override
+      // 신규 추가 기본: 중앙(미체크) — 팀 공유는 opt-in
+      const teamShare = svc ? (svc.source === 'root') : false;
+      document.getElementById('svcTeamShare').checked = teamShare;
+      // datalist: 현재 세션의 subrepos
+      const dl = document.getElementById('svcCwdList');
+      dl.innerHTML = '';
+      const session = sessions.find(s => s.root === root);
+      const wt = worktreeData.find(w => w.root === root);
+      const subs = wt ? (wt.subrepos || []) : [];
+      for (const sub of subs) {
+        const opt = document.createElement('option');
+        opt.value = sub;
+        dl.appendChild(opt);
+      }
+      showServiceModal(true);
+    }
+
+    document.getElementById('serviceModalClose').onclick = () => showServiceModal(false);
+    document.getElementById('serviceBackdrop').onclick = (e) => { if (e.target.id === 'serviceBackdrop') showServiceModal(false); };
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !document.getElementById('serviceBackdrop').hidden) showServiceModal(false);
+    });
+    document.getElementById('svcAdvToggle').onclick = () => {
+      const adv = document.getElementById('svcAdvFields');
+      adv.hidden = !adv.hidden;
+      document.getElementById('svcAdvToggle').textContent = adv.hidden ? '▸ 고급' : '▾ 고급';
+    };
+    document.getElementById('svcModalCancel').onclick = () => showServiceModal(false);
+
+    document.getElementById('svcModalSave').onclick = async () => {
+      const errEl = document.getElementById('serviceModalError');
+      errEl.hidden = true;
+      if (!svcModalTarget) return;
+      const name = document.getElementById('svcName').value.trim();
+      const portBaseRaw = document.getElementById('svcPortBase').value.trim();
+      const cwd = document.getElementById('svcCwd').value.trim();
+      const run = document.getElementById('svcRun').value.trim();
+      const cachePathsRaw = document.getElementById('svcCachePaths').value.trim();
+      const orphanPattern = document.getElementById('svcOrphanPattern').value.trim();
+      const teamShare = document.getElementById('svcTeamShare').checked;
+      if (!name) { errEl.textContent = '서비스 이름은 필수입니다'; errEl.hidden = false; return; }
+      if (!run) { errEl.textContent = '실행 커맨드는 필수입니다'; errEl.hidden = false; return; }
+      const portBase = parseInt(portBaseRaw, 10);
+      if (!portBaseRaw || isNaN(portBase)) { errEl.textContent = 'portBase 는 숫자여야 합니다'; errEl.hidden = false; return; }
+      const svc = {name, portBase, cwd, run};
+      if (cachePathsRaw) {
+        svc.cachePaths = cachePathsRaw.split(',').map(s => s.trim()).filter(Boolean);
+      }
+      if (orphanPattern) svc.orphanPattern = orphanPattern;
+      const btn = document.getElementById('svcModalSave');
+      const label = btn.textContent;
+      btn.disabled = true; btn.textContent = '저장 중…';
+      try {
+        await api('/api/add-service', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({root: svcModalTarget.root, service: svc, central: !teamShare}),
+        });
+        showServiceModal(false);
+        await load({force: true});
+      } catch (e) {
+        errEl.textContent = String(e.message || e); errEl.hidden = false;
+      } finally {
+        btn.disabled = false; btn.textContent = label;
+      }
+    };
+
+    async function deleteSvc(session, svc) {
+      if (!confirm('서비스 \'' + svc.service + '\' 를 삭제할까요?')) return;
+      try {
+        await api('/api/remove-service', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({root: session.root, name: svc.service, central: svc.source === 'central'}),
+        });
+        await load({force: true});
+      } catch (e) {
+        alert('삭제 실패: ' + (e.message || e));
+      }
+    }
+    // ─────────────────────────────────────────────────────────────────────────
 
     // 진행 중 표시 + 중복 클릭 방지: 누른 버튼은 라벨 교체, group 버튼들은 함께 비활성화.
     // 완료 후 보통 재렌더로 교체되지만, 에러·취소 경로를 위해 finally 에서 원복.
@@ -3567,8 +3722,11 @@ INDEX_HTML = r"""<!doctype html>
       row.dataset.serviceKey = `${session.root}::${svc.service}`;
       const state = pillState(svc);
       row.title = disabled ? 'subrepo 미attach — attach 후 사용 가능' : '클릭하면 이 서비스의 로그를 우측에 표시';
+      const src = svc.source === 'central'
+        ? '<span class="svc-src central" title="내 로컬 override (~/.marina/services)">내 override</span>'
+        : '<span class="svc-src root" title="팀 공유 (marina-services.json, repo)">팀</span>';
       row.innerHTML = `
-        <div><div class="svc-name">${svc.service}</div><div class="svc-port"><span data-port>${svc.port ?? '-'}</span><span data-rss>${svc.running && svc.rssMb ? ` · ${svc.rssMb}MB` : ''}</span></div></div>
+        <div><div class="svc-name">${svc.service}${src}</div><div class="svc-port"><span data-port>${svc.port ?? '-'}</span><span data-rss>${svc.running && svc.rssMb ? ` · ${svc.rssMb}MB` : ''}</span></div></div>
         <div class="pill ${disabled ? 'stop' : state.cls}" data-state title="${escapeHtml(disabled ? 'subrepo 미attach' : state.title)}">${disabled ? '—' : state.text}</div>
         <div class="actions"></div>
       `;
@@ -3594,6 +3752,21 @@ INDEX_HTML = r"""<!doctype html>
         };
         actions.appendChild(btn);
       }
+      // 편집·삭제 — 사용자 정의 서비스(def 있음)에만 표시
+      if (svc.def) {
+        const editBtn = document.createElement('button');
+        editBtn.className = 'svc-edit-btn';
+        editBtn.textContent = '✎';
+        editBtn.title = '서비스 정의 편집';
+        editBtn.onclick = (event) => { event.stopPropagation(); openServiceModal(session.root, svc.subrepo || '', svc); };
+        actions.appendChild(editBtn);
+        const delBtn = document.createElement('button');
+        delBtn.className = 'svc-del-btn danger';
+        delBtn.textContent = '✕';
+        delBtn.title = '서비스 삭제';
+        delBtn.onclick = (event) => { event.stopPropagation(); deleteSvc(session, svc); };
+        actions.appendChild(delBtn);
+      }
       return row;
     }
 
@@ -3610,13 +3783,14 @@ INDEX_HTML = r"""<!doctype html>
         control = '<button class="subrepo-act primary" data-attach title="이 worktree 에 attach (git worktree add) — 같은 이름 브랜치 있으면 재사용">attach</button>';
       }
       const stateChip = o.isMain ? '' : `<span class="subrepo-chip ${o.isAttached ? 'on' : ''}">${o.isAttached ? 'attached' : 'detached'}</span>`;
+      const addSvcBtn = o.inUniverse ? '<button class="add-svc-btn" data-add-svc title="이 subrepo 에 서비스 추가">+ 서비스 추가</button>' : '';
       return `
         <div class="subrepo-main">
           ${chev}
           <span class="subrepo-name">${escapeHtml(name)}</span>
           ${o.count ? `<span class="subrepo-count">${o.count} svc</span>` : '<span class="subrepo-count muted">no svc</span>'}
         </div>
-        <div class="subrepo-ctl">${stateChip}${control}</div>
+        <div class="subrepo-ctl">${stateChip}${control}${addSvcBtn}</div>
       `;
     }
 
@@ -3680,6 +3854,8 @@ INDEX_HTML = r"""<!doctype html>
       if (attachBtn) attachBtn.onclick = (e) => { e.stopPropagation(); withBusy(attachBtn, '등록 중…', () => attachSubrepo(session, name)); };
       const detachBtn = head.querySelector('[data-detach]');
       if (detachBtn) detachBtn.onclick = (e) => { e.stopPropagation(); withBusy(detachBtn, '…', () => detachSubrepo(session, name)); };
+      const addSvcBtn = head.querySelector('[data-add-svc]');
+      if (addSvcBtn) addSvcBtn.onclick = (e) => { e.stopPropagation(); openServiceModal(session.root, name, null); };
     }
 
     function configInput(session, key, fallback = '') {
@@ -4203,6 +4379,32 @@ class Handler(BaseHTTPRequestHandler):
                     out = run_marina_registry("default", project["id"], ",".join(subs))
                 except subprocess.CalledProcessError as exc:
                     raise ValueError((exc.output or "").strip() or str(exc))
+                invalidate_registry_caches()
+                self.send_json({"ok": True, "output": out.strip()})
+                return
+
+            if self.path in ("/api/add-service", "/api/remove-service"):
+                project = project_for(root)
+                if not project:
+                    raise ValueError("미등록 프로젝트")
+                central = bool(body.get("central", True))
+                args = [] if central else ["--root"]
+                if self.path == "/api/add-service":
+                    svc = body.get("service")
+                    if not isinstance(svc, dict):
+                        raise ValueError("service must be an object")
+                    try:
+                        out = run_marina_registry("add-service", project["id"], json.dumps(svc, ensure_ascii=False), *args)
+                    except subprocess.CalledProcessError as exc:
+                        raise ValueError((exc.output or "").strip() or str(exc))
+                else:
+                    name = str(body.get("name", "")).strip()
+                    if not name:
+                        raise ValueError("name required")
+                    try:
+                        out = run_marina_registry("rm-service", project["id"], name, *args)
+                    except subprocess.CalledProcessError as exc:
+                        raise ValueError((exc.output or "").strip() or str(exc))
                 invalidate_registry_caches()
                 self.send_json({"ok": True, "output": out.strip()})
                 return

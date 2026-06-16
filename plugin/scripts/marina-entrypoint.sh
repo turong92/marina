@@ -54,7 +54,7 @@ command="${1:-dashboard}"
 shift || true
 
 case "$command" in
-  add|infer|rm|default|ls|projects)
+  add|infer|rm|default|ls|projects|add-service|rm-service)
     "$SESSION" "$command" "$@"
     ;;
   dashboard|dash|up|start)

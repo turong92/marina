@@ -134,6 +134,59 @@ print(f"defaultAttach[{target}]: {', '.join(want) or '(none — 새 worktree 자
 PY
 }
 
+service_target_file() {  # <id> [--root] → 쓸 파일 경로
+  local id="$1" use_root="${2:-}"
+  if [[ "$use_root" == "--root" ]]; then
+    local root; root="$(python3 - "$PROJECTS_FILE" "$id" <<'PY'
+import json,sys
+try: d=json.load(open(sys.argv[1],encoding="utf-8"))
+except Exception: sys.exit(1)
+m=next((p for p in d.get("projects",[]) if p.get("id")==sys.argv[2]),None)
+print(m["root"] if m else "", end="")
+PY
+)"; [[ -n "$root" ]] || die "unknown id: $id"; echo "$root/marina-services.json"
+  else echo "$MARINA_HOME/services/$id.json"; fi
+}
+service_add() {
+  local id="${1:-}" svc_json="${2:-}" root_flag="${3:-}"
+  [[ -n "$id" && -n "$svc_json" ]] || die "usage: marina add-service <id> '<json>' [--root]"
+  local file; file="$(service_target_file "$id" "$root_flag")" || exit $?
+  mkdir -p "$(dirname "$file")"
+  python3 - "$file" "$svc_json" <<'PY'
+import json,sys
+file,raw=sys.argv[1],sys.argv[2]
+try: svc=json.loads(raw)
+except Exception as e: print(f"bad json: {e}",file=sys.stderr); sys.exit(1)
+name=str(svc.get("name","")).strip()
+if not name or not name.isidentifier(): print("name must be an identifier",file=sys.stderr); sys.exit(1)
+if not isinstance(svc.get("portBase"),int): print("portBase must be int",file=sys.stderr); sys.exit(1)
+if not str(svc.get("run","")).strip(): print("run must be non-empty",file=sys.stderr); sys.exit(1)
+try: data=json.load(open(file,encoding="utf-8"))
+except Exception: data={"services":[]}
+if not isinstance(data,dict): data={"services":[]}
+svcs=[s for s in data.get("services",[]) if s.get("name")!=name]
+svcs.append(svc); data["services"]=svcs
+json.dump(data,open(file,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+print(f"service {name} -> {file}")
+PY
+}
+service_rm() {
+  local id="${1:-}" name="${2:-}" root_flag="${3:-}"
+  [[ -n "$id" && -n "$name" ]] || die "usage: marina rm-service <id> <name> [--root]"
+  local file; file="$(service_target_file "$id" "$root_flag")" || exit $?
+  [[ -f "$file" ]] || { echo "no services file: $file"; return 0; }
+  python3 - "$file" "$name" <<'PY'
+import json,sys
+file,name=sys.argv[1],sys.argv[2]
+try: data=json.load(open(file,encoding="utf-8"))
+except Exception: data={"services":[]}
+if not isinstance(data,dict): data={"services":[]}
+data["services"]=[s for s in data.get("services",[]) if s.get("name")!=name]
+json.dump(data,open(file,"w",encoding="utf-8"),ensure_ascii=False,indent=2)
+print(f"removed {name} from {file}")
+PY
+}
+
 registry_ls() {
   command -v python3 >/dev/null 2>&1 || die "python3 필요"
   if [[ ! -f "$PROJECTS_FILE" ]]; then
@@ -165,6 +218,8 @@ case "${1:-}" in
   rm)          shift; registry_rm "$@";    exit $? ;;
   default)     shift; registry_default "$@"; exit $? ;;
   ls|projects) registry_ls;               exit $? ;;
+  add-service) shift; service_add "$@";   exit $? ;;
+  rm-service)  shift; service_rm "$@";    exit $? ;;
 esac
 
 # ---- 워크스페이스 컨텍스트 (런처 명령용) — 위치독립 -------------------------
@@ -287,43 +342,53 @@ if [[ -x "$CODEX_NODE_BIN/node" ]]; then
 fi
 export COREPACK_ENABLE_PROJECT_SPEC="${COREPACK_ENABLE_PROJECT_SPEC:-0}"
 
-# 서비스 정의: 프로젝트 root 의 marina-services.json (내장 서비스 없음 — 전부 여기서).
+# 서비스 정의: root ∪ 중앙 서비스 머지 (내장 서비스 없음 — 전부 marina-services.json 에서).
 #   {"services": [{"name":"echo","portBase":8200,"cwd":".","run":"{python} -m http.server {port}"}]}
 # run 치환자: {port}{python}{root}{profile} + 세션 경로 {env_file}{tmp}{session}.
-# 우선순위: (1) worktree 자체 파일, (2) 원본(SOURCE_ROOT) 파일, (3) 중앙 ~/.marina/services/<id>.json.
-SERVICES_FILE="$ROOT/marina-services.json"
-[[ -f "$SERVICES_FILE" ]] || SERVICES_FILE="$SOURCE_ROOT/marina-services.json"
-if [[ ! -f "$SERVICES_FILE" ]]; then
-  _central="$(python3 - "$PROJECTS_FILE" "$SOURCE_ROOT" "$ROOT" "$MARINA_HOME" <<'PY'
+# 우선순위: root(SOURCE_ROOT) ∪ 중앙(~/.marina/services/<id>.json), name 충돌 시 중앙 우선.
+
+# root ∪ 중앙 서비스 머지 JSON 을 stdout 으로 (name 중앙 우선). 서비스 조회가 이걸 파싱한다.
+merged_services_json() {
+  python3 - "$ROOT" "$SOURCE_ROOT" "$PROJECTS_FILE" "$MARINA_HOME" <<'PY'
 import json, os, sys
-projects_file, source_root, root, home = sys.argv[1:5]
+root, source_root, projects_file, home = sys.argv[1:5]
+def read(p):
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+        return d.get("services", []) if isinstance(d, dict) else []
+    except Exception:
+        return []
+def norm(p): return os.path.realpath(os.path.expanduser(p))
+pid = ""; proot = source_root
 try:
     data = json.load(open(projects_file, encoding="utf-8"))
+    tgt = {norm(source_root), norm(root)}
+    for p in data.get("projects", []):
+        pr = norm(p.get("root", ""))
+        if pr in tgt or any(t == pr or t.startswith(pr + os.sep) for t in tgt):
+            pid = p.get("id", ""); proot = p.get("root", ""); break
 except Exception:
-    sys.exit(0)
-def norm(p): return os.path.realpath(os.path.expanduser(p))
-targets = {norm(source_root), norm(root)}
-pid = ""
-for p in data.get("projects", []):
-    pr = norm(p.get("root", ""))
-    if pr in targets or any(t == pr or t.startswith(pr + os.sep) for t in targets):
-        pid = p.get("id", ""); break
+    pass
+merged = {}
+root_file = os.path.join(norm(proot), "marina-services.json")
+for s in read(root_file):
+    n = s.get("name")
+    if n: merged[n] = s
 if pid:
-    cand = os.path.join(norm(home), "services", pid + ".json")
-    if os.path.isfile(cand):
-        print(cand)
+    for s in read(os.path.join(norm(home), "services", pid + ".json")):
+        n = s.get("name")
+        if n: merged[n] = s
+print(json.dumps({"services": list(merged.values())}, ensure_ascii=False))
 PY
-)"
-  [[ -n "$_central" ]] && SERVICES_FILE="$_central"
-fi
+}
 
 extra_services() {
-  [[ -f "$SERVICES_FILE" ]] || return 0
   command -v python3 >/dev/null 2>&1 || return 0
-  python3 - "$SERVICES_FILE" <<'PY'
+  local _merged; _merged="$(merged_services_json)"
+  python3 - "$_merged" <<'PY'
 import json, sys
 try:
-    for s in json.load(open(sys.argv[1])).get("services", []):
+    for s in json.loads(sys.argv[1]).get("services", []):
         name = str(s.get("name", "")).strip()
         if name and name.isidentifier() and isinstance(s.get("portBase"), int):
             print(name)
@@ -334,19 +399,16 @@ PY
 
 service_json_field() {
   local name="$1" field="$2"
-  [[ -f "$SERVICES_FILE" ]] || return 0
-  python3 - "$SERVICES_FILE" "$name" "$field" <<'PY'
+  local _merged; _merged="$(merged_services_json)"
+  python3 - "$_merged" "$name" "$field" <<'PY'
 import json, sys
-path, name, field = sys.argv[1:4]
-try:
-    for s in json.load(open(path)).get("services", []):
-        if s.get("name") == name:
-            value = s.get(field, "")
-            if isinstance(value, (str, int)):
-                print(value)
-            break
-except Exception:
-    pass
+data = json.loads(sys.argv[1])
+service, field = sys.argv[2], sys.argv[3]
+svc = next((s for s in data.get("services", []) if s.get("name") == service), None)
+if svc:
+    value = svc.get(field, "")
+    if isinstance(value, (str, int)):
+        print(value, end="")
 PY
 }
 
