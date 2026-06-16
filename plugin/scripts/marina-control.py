@@ -329,6 +329,67 @@ def _harnesses() -> list[str]:
     return out
 
 
+def _git_head(d: Path) -> str | None:
+    try:
+        out = subprocess.check_output(["git", "-C", str(d), "rev-parse", "HEAD"],
+                                      text=True, timeout=5, stderr=subprocess.DEVNULL)
+        sha = out.strip()[:12]
+        return sha if _SHA_RE.match(sha) else None
+    except Exception:
+        return None
+
+
+def _codex_marketplace() -> dict[str, str] | None:
+    # ~/.codex/config.toml 의 [marketplaces.marina-dev] 블록 (text-parse; py3.9 라 tomllib 없음)
+    try:
+        t = (CODEX_HOME / "config.toml").read_text(encoding="utf-8")
+    except Exception:
+        return None
+    m = re.search(r"\[marketplaces\.marina-dev\](.*?)(?=\n\[|\Z)", t, re.S)
+    if not m:
+        return None
+    src = re.search(r'source\s*=\s*"([^"]+)"', m.group(1))
+    typ = re.search(r'source_type\s*=\s*"([^"]+)"', m.group(1))
+    return {"source": src.group(1), "sourceType": typ.group(1) if typ else ""} if src else None
+
+
+def _harness_status() -> dict[str, Any]:
+    # 하네스별 설치 버전 + origin 대비 뒤처짐 (배너 칩용). claude=설치 복사본 SHA, codex=마켓 스냅샷 git HEAD(라이브 참조)
+    origin = _origin_sha()
+    auto = _autoupdate_state()
+    out: dict[str, Any] = {}
+    try:
+        data = json.loads((CLAUDE_CONFIG_DIR / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
+        ent = data["plugins"][PLUGIN_ID][0]
+        sha = str(ent.get("gitCommitSha") or Path(str(ent["installPath"])).name)[:12]
+        if _SHA_RE.match(sha):
+            out["claude"] = {"installed": sha, "behind": bool(origin and sha != origin), "autoUpdate": auto.get("claude")}
+    except Exception:
+        pass
+    mk = _codex_marketplace()
+    if mk:
+        sha = _git_head(Path(mk["source"]))
+        if sha:
+            out["codex"] = {"installed": sha, "behind": bool(origin and sha != origin), "sourceType": mk.get("sourceType", "")}
+    return out
+
+
+def update_codex() -> dict[str, Any]:
+    # codex 는 마켓 스냅샷 디렉토리를 라이브로 읽으므로, 그 git repo 를 origin/main 으로 ff-pull = codex 갱신
+    mk = _codex_marketplace()
+    if not mk:
+        raise ValueError("codex marina-dev 마켓플레이스를 찾을 수 없음 (codex 미설치?)")
+    src = Path(mk["source"])
+    try:
+        out = subprocess.check_output(["git", "-C", str(src), "pull", "--ff-only", "origin", "main"],
+                                      text=True, timeout=30, stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"codex 스냅샷 git pull 실패: {(exc.output or '').strip()[-200:]}")
+    except Exception as exc:
+        raise ValueError(f"codex 갱신 실패: {exc}")
+    return {"ok": True, "harness": "codex", "installed": _git_head(src), "output": out.strip()[-160:]}
+
+
 def update_status() -> dict[str, Any]:
     serving, installed, origin = _serving_sha(), _installed_sha(), _origin_sha()
     return {
@@ -338,6 +399,7 @@ def update_status() -> dict[str, Any]:
         "state": update_state(serving, installed, origin),
         "autoUpdate": _autoupdate_state(),
         "harnesses": _harnesses(),
+        "harnessStatus": _harness_status(),
     }
 
 
@@ -2147,6 +2209,10 @@ INDEX_HTML = r"""<!doctype html>
     .update-banner .ub-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; align-items: center; }
     .update-banner button { height: 26px; padding: 0 10px; font-size: 12px; font-weight: 700; }
     .update-banner .ub-note { font-size: 12px; opacity: 0.85; }
+    .ub-hrow { display: inline-flex; align-items: center; gap: 5px; }
+    .ub-hchip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 6px; font-size: 12px; font-weight: 700; background: rgba(125, 75, 0, 0.10); }
+    .ub-hchip.old { background: rgba(125, 75, 0, 0.20); }
+    .ub-hchip .sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; opacity: 0.8; }
     .orphan-pop { position: fixed; top: 60px; right: 16px; z-index: 30; width: min(520px, calc(100vw - 32px)); max-height: 70vh; overflow: auto; border: 1px solid var(--sys-style-neutral-default); border-radius: 10px; background: var(--sys-bg-surface); box-shadow: 0 8px 24px hsla(0, 0%, 0%, 0.18); padding: 12px 14px; }
     .orphan-head { color: var(--sys-cont-neutral-light); font-size: 12px; line-height: 1.6; }
     .mem.warn { color: var(--sys-cont-negative-default); font-weight: 700; }
@@ -3883,26 +3949,37 @@ INDEX_HTML = r"""<!doctype html>
         el.innerHTML = `<span class="ub-msg">업데이트 설치됨 — 재시작하면 적용</span>
           <span class="ub-sha">${escapeHtml(s.serving || '?')} → ${escapeHtml(s.installed || '?')}</span>
           <span class="ub-actions"><button data-restart class="primary">재시작</button></span>`;
-      } else { // new
-        const acts = [];
+      } else { // new — 하네스별 상태 칩 + 액션 + 전부 갱신
+        const hs = s.harnessStatus || {};
+        const rows = [];
         for (const h of (s.harnesses || [])) {
-          const on = s.autoUpdate?.[h];
-          if (on === true) acts.push(`<span class="ub-note">${escapeHtml(h)}: 다음 세션 시작에 자동 업데이트</span>`);
-          else if (on === false) acts.push(`<button data-enable="${escapeHtml(h)}">auto-update 켜기 (${escapeHtml(h)})</button>`);
-          // on === null → 버튼 없음 (codex 는 항상 null — 아래 안내로 처리)
+          const st = hs[h];
+          if (!st) continue;
+          const cur = !st.behind;
+          const chip = `<span class="ub-hchip ${cur ? 'cur' : 'old'}">${escapeHtml(h)} <span class="sha">${escapeHtml(st.installed || '?')}</span> ${cur ? '최신' : '뒤처짐'}</span>`;
+          let act = '';
+          if (h === 'claude') {
+            act = st.autoUpdate === true ? '<span class="ub-note">auto ✓ 다음 세션</span>'
+                : st.autoUpdate === false ? '<button data-enable="claude">auto-update 켜기</button>' : '';
+          } else if (h === 'codex') {
+            act = st.behind ? '<button data-update-codex>지금 갱신</button>' : '';
+          }
+          rows.push(`<span class="ub-hrow">${chip}${act}</span>`);
         }
-        if ((s.harnesses || []).includes('codex')) {
-          acts.push(`<span class="ub-note">codex: <code>codex plugin marketplace upgrade</code> 로 수동 갱신</span>`);
-        }
-        el.innerHTML = `<span class="ub-msg">새 버전 배포됨</span>
-          <span class="ub-sha">origin ${escapeHtml(s.origin || '?')} · 설치 ${escapeHtml(s.installed || '?')}</span>
-          <span class="ub-actions">${acts.join('')}</span>`;
+        const actionable = (s.harnesses || []).filter(h => { const st = hs[h]; if (!st) return false; return (h === 'claude' && st.autoUpdate === false) || (h === 'codex' && st.behind); }).length;
+        const allBtn = actionable >= 2 ? '<button data-update-all class="primary">전부 갱신</button>' : '';
+        el.innerHTML = `<span class="ub-msg">새 버전 ${escapeHtml(s.origin || '?')}</span>
+          <span class="ub-actions">${rows.join('')}${allBtn}</span>`;
       }
       const restartBtn = el.querySelector('[data-restart]');
       if (restartBtn) restartBtn.onclick = () => doRestartDashboard(restartBtn);
       for (const b of el.querySelectorAll('[data-enable]')) {
         b.onclick = () => doEnableAutoUpdate(b.dataset.enable, b);
       }
+      const codexBtn = el.querySelector('[data-update-codex]');
+      if (codexBtn) codexBtn.onclick = () => doUpdateCodex(codexBtn);
+      const allBtn = el.querySelector('[data-update-all]');
+      if (allBtn) allBtn.onclick = () => doUpdateAll(allBtn);
     }
 
     async function doRestartDashboard(btn) {
@@ -3924,6 +4001,31 @@ INDEX_HTML = r"""<!doctype html>
         if (r?.error) { alert(`auto-update 켜기 실패: ${r.error}`); btn.disabled = false; return; }
         alert(`${harness} auto-update 켜짐 — 다음 세션부터 자동 업데이트됩니다.`);
       } catch (e) { alert(e); btn.disabled = false; return; }
+      loadUpdateStatus().catch(() => {});
+    }
+
+    async function doUpdateCodex(btn) {
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
+      try {
+        const r = await api('/api/update-codex', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
+        if (r?.error) { alert(`codex 갱신 실패: ${r.error}`); btn.disabled = false; return; }
+      } catch (e) { alert(e); btn.disabled = false; return; }
+      loadUpdateStatus().catch(() => {});
+    }
+
+    async function doUpdateAll(btn) {
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
+      const errs = [];
+      // 배너에 실제 떠 있는 액션만 수행 — claude 켜기 / codex 갱신
+      if (document.querySelector('[data-enable="claude"]')) {
+        try { const r = await api('/api/set-autoupdate', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({harness: 'claude'})}); if (r?.error) errs.push('claude: ' + r.error); }
+        catch (e) { errs.push('claude: ' + e); }
+      }
+      if (document.querySelector('[data-update-codex]')) {
+        try { const r = await api('/api/update-codex', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'}); if (r?.error) errs.push('codex: ' + r.error); }
+        catch (e) { errs.push('codex: ' + e); }
+      }
+      if (errs.length) alert('일부 실패:\n' + errs.join('\n'));
       loadUpdateStatus().catch(() => {});
     }
 
@@ -4378,6 +4480,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("Codex 는 auto-update 설정이 없음 — `codex plugin marketplace upgrade` 로 수동 갱신")
                 else:
                     raise ValueError("harness must be 'claude' or 'codex'")
+                return
+
+            if self.path == "/api/update-codex":
+                self.send_json(update_codex())
                 return
 
             root = safe_root(str(body.get("root", "")))
