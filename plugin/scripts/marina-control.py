@@ -8,6 +8,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import subprocess
 import time
@@ -33,6 +34,11 @@ MARINA_ATTACH = CONTROL_SCRIPT.parent / "attach-detached-subrepos.sh"
 # 글로벌 프로젝트 레지스트리 — 한 데몬이 등록된 모든 프로젝트의 worktree 를 관리 (marina-standardization)
 MARINA_HOME = Path(os.environ.get("MARINA_HOME", str(Path.home() / ".marina")))
 PROJECTS_FILE = MARINA_HOME / "projects.json"
+# 하네스 config·플러그인 매니페스트 위치 (업데이트 알림용). CLAUDE_CONFIG_DIR 는 marina-resolve 와 동일 규칙.
+CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+MARKETPLACE = "marina-dev"
+PLUGIN_ID = "marina@marina-dev"
 # 내장 서비스 없음 — 모든 서비스는 프로젝트 root 의 marina-services.json 에서 정의 (완전 generic)
 _BUILTIN_SERVICES: tuple[str, ...] = ()
 _BUILTIN_PORT_BASE: dict[str, int] = {}
@@ -216,6 +222,140 @@ def default_attach_of(root: Path) -> list[str] | None:
         return None
     da = project.get("defaultAttach")
     return [str(s) for s in da] if isinstance(da, list) else None
+
+
+def update_state(serving: str | None, installed: str | None, origin: str | None) -> str:
+    # serving=실행 중 SHA, installed=받아진 SHA, origin=배포된 최신 SHA. 모두 short SHA.
+    # serving/installed 모르면 판정 불가(dev/repo 실행) → unknown(배너 없음).
+    if not serving or not installed:
+        return "unknown"
+    # origin 모르면(네트워크 실패) 무네트워크 판정: serving==installed 면 current, 아니면 stale.
+    if origin is None:
+        return "current" if serving == installed else "stale"
+    if serving == origin:
+        return "current"
+    if installed == origin:
+        return "stale"   # 파일은 최신, 데몬만 옛 코드 → 재시작
+    return "new"         # 배포된 게 받아진 것보다 최신 → 업데이트(다음 세션/수동) 필요
+
+
+_SHA_RE = re.compile(r"^([0-9a-f]{7,40}|\d+\.\d+)")
+_origin_cache: dict[str, Any] = {}
+
+
+def _serving_sha() -> str | None:
+    env = os.environ.get("MARINA_SERVING_SHA")
+    if env:
+        return env[:12]
+    # 설치 레이아웃: .../<marketplace>/marina/<SHA>/scripts/marina-control.py → <SHA> = parent.parent.name
+    name = CONTROL_SCRIPT.parent.parent.name
+    return name[:12] if _SHA_RE.match(name) else None   # 레포/dev 실행(name='plugin')은 None
+
+
+def _installed_sha() -> str | None:
+    env = os.environ.get("MARINA_INSTALLED_SHA")
+    if env:
+        return env[:12]
+    for mf in (CLAUDE_CONFIG_DIR / "plugins" / "installed_plugins.json",
+               CODEX_HOME / "plugins" / "installed_plugins.json"):
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+            raw = Path(str(data["plugins"][PLUGIN_ID][0]["installPath"])).name[:12]
+            if _SHA_RE.match(raw):   # _serving_sha 와 대칭 — 비-SHA installPath 는 무시(오탐 방지)
+                return raw
+        except Exception:
+            continue
+    return None
+
+
+def _marketplace_repo() -> str:
+    # settings.json 의 marina-dev source.repo (fork 대응), 없으면 기본.
+    try:
+        s = json.loads((CLAUDE_CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
+        repo = s["extraKnownMarketplaces"][MARKETPLACE]["source"]["repo"]
+        if isinstance(repo, str) and repo:
+            return repo
+    except Exception:
+        pass
+    return "turong92/marina"
+
+
+def _origin_sha() -> str | None:
+    env = os.environ.get("MARINA_ORIGIN_SHA")
+    if env:
+        return env[:12]
+    ttl = float(_env("UPDATE_TTL", "60"))
+    now = time.time()
+    if _origin_cache and now - _origin_cache.get("ts", 0) < ttl:
+        return _origin_cache.get("sha")
+    sha = _origin_cache.get("sha")  # 실패 시 마지막 값 유지
+    try:
+        out = subprocess.check_output(
+            ["git", "ls-remote", f"https://github.com/{_marketplace_repo()}.git", "main"],
+            text=True, timeout=5, stderr=subprocess.DEVNULL,
+        )
+        if out.strip():
+            sha = out.split()[0][:12]
+    except Exception:
+        pass
+    _origin_cache.update({"sha": sha, "ts": now})
+    return sha
+
+
+def _autoupdate_state() -> dict[str, Any]:
+    # 하네스별 marina-dev autoUpdate ON/OFF. 마켓플레이스 미등록/판정불가 → None.
+    out: dict[str, Any] = {"claude": None, "codex": None}
+    try:
+        s = json.loads((CLAUDE_CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
+        mk = s.get("extraKnownMarketplaces", {}).get(MARKETPLACE)
+        if isinstance(mk, dict):
+            out["claude"] = bool(mk.get("autoUpdate"))
+    except Exception:
+        pass
+    # Codex(config.toml)는 검증 게이트(UN-T5) 전까지 None 유지.
+    return out
+
+
+def _harnesses() -> list[str]:
+    # 설치된 하네스 감지. Claude=installed_plugins.json, Codex=config.toml 에 설치 기록(installed_plugins.json 없음).
+    out: list[str] = []
+    if (CLAUDE_CONFIG_DIR / "plugins" / "installed_plugins.json").exists():
+        out.append("claude")
+    try:
+        if f'[plugins."{PLUGIN_ID}"]' in (CODEX_HOME / "config.toml").read_text(encoding="utf-8"):
+            out.append("codex")
+    except Exception:
+        pass
+    return out
+
+
+def update_status() -> dict[str, Any]:
+    serving, installed, origin = _serving_sha(), _installed_sha(), _origin_sha()
+    return {
+        "serving": serving,
+        "installed": installed,
+        "origin": origin,
+        "state": update_state(serving, installed, origin),
+        "autoUpdate": _autoupdate_state(),
+        "harnesses": _harnesses(),
+    }
+
+
+def set_autoupdate_claude() -> dict[str, Any]:
+    path = CLAUDE_CONFIG_DIR / "settings.json"
+    try:
+        s = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"settings.json 읽기 실패: {exc}")
+    mk = s.get("extraKnownMarketplaces")
+    if not isinstance(mk, dict) or not isinstance(mk.get(MARKETPLACE), dict):
+        raise ValueError(f"{MARKETPLACE} 마켓플레이스 항목이 settings.json 에 없음 — /plugin 에서 켜줘")
+    mk[MARKETPLACE]["autoUpdate"] = True
+    # atomic write — Claude 가 동시에 settings.json 을 쓸 수 있으므로 temp→os.replace (truncate 손상 방지)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return {"ok": True, "harness": "claude", "note": "다음 세션부터 자동 업데이트됩니다"}
 
 
 def project_label(root: Path) -> str:
@@ -1986,6 +2126,13 @@ INDEX_HTML = r"""<!doctype html>
     .tool-label { color: var(--sys-cont-neutral-lightest); font-size: 12px; }
     .ghost-chip { color: var(--sys-cont-neutral-light); }
     .ghost-chip.alert { border-color: var(--sys-cont-negative-default); color: var(--sys-cont-negative-default); font-weight: 700; }
+    .update-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 16px; background: hsl(36, 90%, 94%); color: hsl(30, 80%, 30%); border-bottom: 1px solid var(--sys-style-neutral-light); font-size: 13px; }
+    .update-banner.stale { background: hsl(215, 90%, 95%); color: hsl(215, 70%, 35%); }
+    .update-banner .ub-msg { font-weight: 700; }
+    .update-banner .ub-sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; opacity: 0.8; }
+    .update-banner .ub-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; align-items: center; }
+    .update-banner button { height: 26px; padding: 0 10px; font-size: 12px; font-weight: 700; }
+    .update-banner .ub-note { font-size: 12px; opacity: 0.85; }
     .orphan-pop { position: fixed; top: 60px; right: 16px; z-index: 30; width: min(520px, calc(100vw - 32px)); max-height: 70vh; overflow: auto; border: 1px solid var(--sys-style-neutral-default); border-radius: 10px; background: var(--sys-bg-surface); box-shadow: 0 8px 24px hsla(0, 0%, 0%, 0.18); padding: 12px 14px; }
     .orphan-head { color: var(--sys-cont-neutral-light); font-size: 12px; line-height: 1.6; }
     .mem.warn { color: var(--sys-cont-negative-default); font-weight: 700; }
@@ -2053,6 +2200,7 @@ INDEX_HTML = r"""<!doctype html>
       <button id="refresh" title="새로고침 — 세션·유령·디스크 분석(du) 전체 재계산">↻</button>
     </div>
   </header>
+  <div class="update-banner" id="updateBanner" hidden></div>
   <div class="orphan-pop" id="orphanPanel" hidden></div>
   <main>
     <aside>
@@ -3695,6 +3843,66 @@ INDEX_HTML = r"""<!doctype html>
       }
     }
 
+    let updateBusy = false;
+    async function loadUpdateStatus() {
+      let s;
+      try { s = await api('/api/update-status'); } catch { return; }
+      renderUpdateBanner(s);
+    }
+
+    function renderUpdateBanner(s) {
+      const el = document.getElementById('updateBanner');
+      if (!s || s.state === 'current' || s.state === 'unknown') { el.hidden = true; el.innerHTML = ''; return; }
+      el.hidden = false;
+      el.classList.toggle('stale', s.state === 'stale');
+      if (s.state === 'stale') {
+        el.innerHTML = `<span class="ub-msg">업데이트 설치됨 — 재시작하면 적용</span>
+          <span class="ub-sha">${escapeHtml(s.serving || '?')} → ${escapeHtml(s.installed || '?')}</span>
+          <span class="ub-actions"><button data-restart class="primary">재시작</button></span>`;
+      } else { // new
+        const acts = [];
+        for (const h of (s.harnesses || [])) {
+          const on = s.autoUpdate?.[h];
+          if (on === true) acts.push(`<span class="ub-note">${escapeHtml(h)}: 다음 세션 시작에 자동 업데이트</span>`);
+          else if (on === false) acts.push(`<button data-enable="${escapeHtml(h)}">auto-update 켜기 (${escapeHtml(h)})</button>`);
+          // on === null → 버튼 없음 (codex 는 항상 null — 아래 안내로 처리)
+        }
+        if ((s.harnesses || []).includes('codex')) {
+          acts.push(`<span class="ub-note">codex: <code>codex plugin marketplace upgrade</code> 로 수동 갱신</span>`);
+        }
+        el.innerHTML = `<span class="ub-msg">새 버전 배포됨</span>
+          <span class="ub-sha">origin ${escapeHtml(s.origin || '?')} · 설치 ${escapeHtml(s.installed || '?')}</span>
+          <span class="ub-actions">${acts.join('')}</span>`;
+      }
+      const restartBtn = el.querySelector('[data-restart]');
+      if (restartBtn) restartBtn.onclick = () => doRestartDashboard(restartBtn);
+      for (const b of el.querySelectorAll('[data-enable]')) {
+        b.onclick = () => doEnableAutoUpdate(b.dataset.enable, b);
+      }
+    }
+
+    async function doRestartDashboard(btn) {
+      if (updateBusy) return;
+      if (!confirm('대시보드를 재시작해 새 코드로 띄울까요?\n(dev 서버는 그대로 유지됩니다 · 약 1초)')) return;
+      updateBusy = true;
+      btn.disabled = true; btn.textContent = '재시작 중…';
+      try {
+        await api('/api/restart-dashboard', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
+      } catch {}
+      // 데몬이 ~1초 내 돌아옴 — 폴링이 자동 재연결, 배너는 다음 update-status 에서 사라짐.
+      setTimeout(() => { updateBusy = false; loadUpdateStatus().catch(() => {}); }, 3000);
+    }
+
+    async function doEnableAutoUpdate(harness, btn) {
+      btn.disabled = true; btn.textContent = '…';
+      try {
+        const r = await api('/api/set-autoupdate', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({harness})});
+        if (r?.error) { alert(`auto-update 켜기 실패: ${r.error}`); btn.disabled = false; return; }
+        alert(`${harness} auto-update 켜짐 — 다음 세션부터 자동 업데이트됩니다.`);
+      } catch (e) { alert(e); btn.disabled = false; return; }
+      loadUpdateStatus().catch(() => {});
+    }
+
     document.getElementById('orphanChip').onclick = () => {
       const panel = document.getElementById('orphanPanel');
       panel.hidden = !panel.hidden;
@@ -3882,6 +4090,7 @@ INDEX_HTML = r"""<!doctype html>
         pollTick += 1;
         load({passive: true}).catch(console.error);
         if (pollTick % 2 === 0) loadOrphans().catch(console.error);
+        if (pollTick % 2 === 0) loadUpdateStatus().catch(console.error);
         // 60초마다 — 서버 10분 캐시를 타서 비용 ~0, 배지(삭제 권장)·디스크 표시 신선도 유지
         if (pollTick % 12 === 0) loadWorktrees().catch(console.error);
       }, 5000);
@@ -3896,12 +4105,14 @@ INDEX_HTML = r"""<!doctype html>
       load({passive: true}).catch(console.error);
       loadOrphans().catch(console.error);
       loadWorktrees().catch(console.error);
+      loadUpdateStatus().catch(console.error);
       startPolling();
     });
 
     load().catch(alert);
     loadOrphans().catch(console.error);
     loadWorktrees().catch(console.error);
+    loadUpdateStatus().catch(console.error);
     startPolling();
   </script>
 </body>
@@ -3966,6 +4177,10 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             refresh = query.get("refresh", ["0"])[0] == "1"
             self.send_json({"worktrees": [worktree_info(root, refresh) for root in discover_all_roots(refresh)]})
+            return
+
+        if parsed.path == "/api/update-status":
+            self.send_json(update_status())
             return
 
         if parsed.path == "/api/browse":
@@ -4109,6 +4324,36 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError((exc.output or "").strip() or str(exc))
                 invalidate_registry_caches()
                 self.send_json({"ok": True, "output": out.strip()})
+                return
+
+            if self.path == "/api/restart-dashboard":
+                # 응답 먼저(연결 flush) → detached 로 재기동(자기 종료 후에도 살아남게 setsid).
+                self.send_json({"ok": True, "restarting": True})
+                try:
+                    self.wfile.flush()   # 데몬 종료 전 응답이 클라이언트에 전달되도록 명시 flush
+                except Exception:
+                    pass
+                dash = CONTROL_SCRIPT.parent / "marina-dashboard.sh"
+                if os.environ.get("MARINA_RESTART_DRY_RUN") == "1":
+                    MARINA_HOME.mkdir(parents=True, exist_ok=True)
+                    with (MARINA_HOME / "restart-dry-run.log").open("a", encoding="utf-8") as fh:
+                        fh.write(f"would run: bash {dash} restart\n")
+                    return
+                subprocess.Popen(
+                    ["bash", "-c", f"sleep 1; exec bash {shlex.quote(str(dash))} restart"],
+                    start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                return
+
+            if self.path == "/api/set-autoupdate":
+                harness = str(body.get("harness", "")).strip()
+                if harness == "claude":
+                    self.send_json(set_autoupdate_claude())
+                elif harness == "codex":
+                    # 검증(2026-06-16): Codex 는 per-marketplace auto-update 설정이 없음(marketplace 서브커맨드 = add/list/upgrade/remove).
+                    raise ValueError("Codex 는 auto-update 설정이 없음 — `codex plugin marketplace upgrade` 로 수동 갱신")
+                else:
+                    raise ValueError("harness must be 'claude' or 'codex'")
                 return
 
             root = safe_root(str(body.get("root", "")))
