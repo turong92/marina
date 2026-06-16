@@ -1950,6 +1950,13 @@ INDEX_HTML = r"""<!doctype html>
     button.primary { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
     button.danger { color: var(--sys-cont-negative-default); }
     button.active { background: var(--sys-cont-neutral-default); border-color: var(--sys-cont-neutral-default); color: white; }
+    /* busy 표시 — 모든 진행중 버튼이 공통으로 쓰는 떠다니는 점 (currentColor 라 버튼 색 따라감) */
+    .busy-dots { display: inline-flex; align-items: center; gap: 3px; line-height: 1; }
+    .busy-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: busyfloat 0.9s ease-in-out infinite; }
+    .busy-dots i:nth-child(2) { animation-delay: 0.15s; }
+    .busy-dots i:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes busyfloat { 0%, 70%, 100% { transform: translateY(0); opacity: 0.45; } 35% { transform: translateY(-3px); opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .busy-dots i { animation: none; opacity: 0.6; } }
     input, select { height: 32px; min-width: 0; border: 1px solid var(--sys-style-neutral-default); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); padding: 0 10px; }
     main { display: grid; grid-template-columns: minmax(420px, 520px) 16px minmax(0, 1fr); height: calc(100vh - 56px); }
     .rail { display: flex; align-items: center; justify-content: center; background: var(--sys-bg-base); cursor: pointer; }
@@ -2032,8 +2039,11 @@ INDEX_HTML = r"""<!doctype html>
     .root .root-meta { white-space: nowrap; }
     .session-tools { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
     .session-tools button { height: 28px; min-width: 30px; padding: 0 6px; white-space: nowrap; font-size: 14px; }
+    .session-tools button.icon { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+    .session-tools button.icon svg { width: 16px; height: 16px; }
     /* 즉시 툴팁 — 네이티브 title 의 ~1s 지연 제거 (mouseover 위임이 title→data-tip 으로 흡수) */
-    #tip { position: fixed; z-index: 99; max-width: 380px; padding: 6px 10px; border-radius: 6px; background: var(--sys-cont-neutral-default); color: var(--sys-bg-surface); font-size: 12px; line-height: 1.55; pointer-events: none; opacity: 0; transform: translateX(-50%); transition: opacity .06s; white-space: pre-wrap; word-break: break-word; }
+    /* width:max-content — 박스 너비를 앵커 위치와 분리. 없으면 우측 끝 버튼(↗ 등)에서 shrink-to-fit 이 뷰포트 우변까지 짜부돼 한 글자씩 세로로 쏟아짐 (clamp 로직이 가로로 밀어줌) */
+    #tip { position: fixed; z-index: 99; width: max-content; max-width: min(380px, calc(100vw - 16px)); padding: 6px 10px; border-radius: 6px; background: var(--sys-cont-neutral-default); color: var(--sys-bg-surface); font-size: 12px; line-height: 1.55; pointer-events: none; opacity: 0; transform: translateX(-50%); transition: opacity .06s; white-space: pre-wrap; word-break: break-word; }
     #tip.on { opacity: 1; }
     .stat-row { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; }
     .pill-stat { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-base); color: var(--sys-cont-neutral-light); font-size: 11px; font-weight: 500; line-height: 1; white-space: nowrap; }
@@ -2065,11 +2075,15 @@ INDEX_HTML = r"""<!doctype html>
     .subrepo-count.muted { font-style: italic; }
     .subrepo-ctl { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
     .subrepo-chip { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 6px; font-size: 11px; font-weight: 700; background: var(--sys-style-neutral-light); color: var(--sys-cont-neutral-light); }
-    .subrepo-chip.on { background: hsl(148, 55%, 94%); color: var(--sys-cont-positive-default); }
     .subrepo-chip.warn { background: hsl(36, 90%, 94%); color: hsl(30, 80%, 38%); }
     .subrepo-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: var(--sys-cont-neutral-light); cursor: pointer; }
     .subrepo-toggle input { margin: 0; cursor: pointer; }
     .subrepo-act { height: 24px; padding: 0 10px; font-size: 11px; font-weight: 700; }
+    .subrepo-act.icon { width: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .subrepo-act.icon svg { width: 15px; height: 15px; display: block; }
+    .subrepo-act.default-toggle { color: var(--sys-cont-neutral-lightest); }   /* off: 흐린 윤곽 핀 */
+    .subrepo-act.default-toggle.on { color: var(--sys-cont-neutral-default); border-color: var(--sys-cont-neutral-default); background: var(--sys-style-neutral-light); }   /* on: 채워진 중립 핀 — 실행(파랑)과 구분 */
+    .subrepo-act.default-toggle.on svg { fill: currentColor; }
     .subrepo-body { display: grid; }
     .subrepo-body .svc { padding-left: 30px; }   /* nested 들여쓰기 */
     .svc.disabled { cursor: default; opacity: 0.5; }
@@ -2544,7 +2558,7 @@ INDEX_HTML = r"""<!doctype html>
       const btn = document.getElementById('registerConfirm');
       const label = btn.textContent;
       err.hidden = true;
-      btn.disabled = true; btn.textContent = '등록 중…';
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
       let res;
       try {
         res = await api('/api/add-project', {
@@ -2626,15 +2640,17 @@ INDEX_HTML = r"""<!doctype html>
 
     // 진행 중 표시 + 중복 클릭 방지: 누른 버튼은 라벨 교체, group 버튼들은 함께 비활성화.
     // 완료 후 보통 재렌더로 교체되지만, 에러·취소 경로를 위해 finally 에서 원복.
+    // 모든 진행중 표시 공통 — 떠다니는 점 3개. withBusy 의 label 인자는 이제 표시에 안 쓰임(점으로 통일), 호환 위해 시그니처만 유지
+    const BUSY_DOTS = '<span class="busy-dots" role="status" aria-label="처리 중"><i></i><i></i><i></i></span>';
     function withBusy(btn, label, fn, group) {
       if (btn.disabled) return;
       const targets = group ? Array.from(group) : [btn];
-      const original = btn.textContent;
+      const original = btn.innerHTML;   // innerHTML — 아이콘(SVG) 버튼도 보존 (textContent 면 복원 시 자식 노드 소실 → 빈 버튼)
       for (const b of targets) b.disabled = true;
-      btn.textContent = label;
+      btn.innerHTML = BUSY_DOTS;
       fn().catch(alert).finally(() => {
         for (const b of targets) b.disabled = false;
-        btn.textContent = original;
+        btn.innerHTML = original;
       });
     }
 
@@ -3411,8 +3427,11 @@ INDEX_HTML = r"""<!doctype html>
 
     function updateServiceStates() {
       for (const session of sessions) {
-        const summary = document.querySelector(`[data-root="${CSS.escape(session.root)}"] [data-run-summary]`);
+        const card = document.querySelector(`[data-root="${CSS.escape(session.root)}"]`);
+        const summary = card?.querySelector('[data-run-summary]');
         if (summary) summary.textContent = runSummaryText(session);
+        const stopAllBtn = card?.querySelector('[data-stop-all]');   // 시작/정지에 맞춰 정지(■) 표시 동기화 (busy 중엔 건드리지 않음)
+        if (stopAllBtn && !stopAllBtn.disabled) stopAllBtn.hidden = !session.services.some(svc => svc.running);
         for (const svc of session.services) {
           const row = document.querySelector(`[data-service-key="${CSS.escape(`${session.root}::${svc.service}`)}"]`);
           if (!row) continue;
@@ -3513,7 +3532,7 @@ INDEX_HTML = r"""<!doctype html>
               <div class="session-tools">
                 ${wt && wt.cacheMb > 50 ? '<button data-clear-cache title="Clear cache — 빌드 캐시 전체 회수 (marina-services.json cachePaths). 카테고리별 회수는 캐시 칩 클릭">♻</button>' : ''}
                 <button data-stop-all title="Stop all — 이 세션의 서비스 전부 정지">■</button>
-                <button data-cleanup title="Cleanup — 로그·pid·포트설정·alias 리셋 (코드는 무관)">⟲</button>
+                <button data-cleanup class="icon" title="Cleanup — 로그·pid·포트설정·alias 리셋 (코드는 무관)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20h-10.5l-4.21 -4.3a1 1 0 0 1 0 -1.41l10 -10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 0 1.41l-9.2 9.3"/><path d="M18 13.3l-6.3 -6.3"/></svg></button>
                 ${session.source === 'main' ? '' : '<button data-remove class="danger" title="Remove — worktree 삭제. 미머지 브랜치는 보존, 변경분은 confirm 후 폐기">✕</button>'}
               </div>
             </div>
@@ -3567,6 +3586,7 @@ INDEX_HTML = r"""<!doctype html>
         const saveRestartBtn = card.querySelector('[data-save-restart]');
         saveRestartBtn.onclick = () => withBusy(saveRestartBtn, 'Restarting…', () => saveConfig(session.root, card, true));
         const stopAllBtn = card.querySelector('[data-stop-all]');
+        stopAllBtn.hidden = !session.services.some(svc => svc.running);   // 정지할 게 없으면 숨김 — 개별 서비스 버튼과 동일한 상태적응
         stopAllBtn.onclick = () => withBusy(stopAllBtn, '…', () => sessionAction('stop-all', session), toolButtons);
         const cleanupBtn = card.querySelector('[data-cleanup]');
         cleanupBtn.onclick = () => withBusy(cleanupBtn, '…', () => sessionAction('cleanup', session), toolButtons);
@@ -3710,24 +3730,28 @@ INDEX_HTML = r"""<!doctype html>
 
     function renderSubrepoHead(name, o) {
       const chev = o.count ? `<span class="chev">${o.open ? '▾' : '▸'}</span>` : '<span class="chev"></span>';
+      // 아이콘 토글 — attached→unlink(=detach 동작), detached→link(=attach 동작). Tabler link/unlink (MIT). 상태는 행 흐림(.detached)+아이콘으로 구분, 별도 칩 없음
+      const UNLINK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a3.5 3.5 0 0 0 5 0l4 -4a3.5 3.5 0 0 0 -5 -5l-.5 .5"/><path d="M14 10a3.5 3.5 0 0 0 -5 0l-4 4a3.5 3.5 0 0 0 5 5l.5 -.5"/><path d="M16 21v-2"/><path d="M19 16h2"/><path d="M3 8h2"/><path d="M8 3v2"/></svg>';
+      const LINK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l6 -6"/><path d="M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464"/><path d="M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"/></svg>';
+      // 핀 토글 — main 카드의 "기본"(새 worktree 자동 attach 대상) 체크박스 대체. on 이면 채워진 파란 핀
+      const PIN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v6l-2 4v2h10v-2l-2 -4v-6"/><path d="M12 16l0 5"/><path d="M8 4l8 0"/></svg>';
       let control = '';
       if (!o.inUniverse) {
         control = '<span class="subrepo-chip warn" title="서비스 cwd 가 가리키는 subrepo 가 레지스트리에 없음 — ⚙ 에서 등록하면 attach 가능">미등록</span>';
       } else if (o.isMain) {
-        control = `<label class="subrepo-toggle" title="새 worktree 자동 attach 대상(전체 기본). 체크 해제해도 main 의 클론은 보존돼"><input type="checkbox" data-default-toggle ${o.isDefault ? 'checked' : ''}/> 기본</label>`;
+        control = `<button class="subrepo-act icon default-toggle ${o.isDefault ? 'on' : ''}" data-default-toggle aria-label="기본 attach 대상" title="기본 — 새 worktree 자동 attach 대상(전체 기본). 끄면 새 worktree 부터 제외 (main 의 클론은 보존)">${PIN_ICON}</button>`;
       } else if (o.isAttached) {
-        control = '<button class="subrepo-act" data-detach title="이 worktree 에서 detach (git worktree remove) — 브랜치·미머지 커밋은 보존">detach</button>';
+        control = `<button class="subrepo-act icon" data-detach aria-label="detach" title="이 worktree 에서 detach (git worktree remove) — 브랜치·미머지 커밋은 보존">${UNLINK_ICON}</button>`;
       } else {
-        control = '<button class="subrepo-act primary" data-attach title="이 worktree 에 attach (git worktree add) — 같은 이름 브랜치 있으면 재사용">attach</button>';
+        control = `<button class="subrepo-act icon primary" data-attach aria-label="attach" title="이 worktree 에 attach (git worktree add) — 같은 이름 브랜치 있으면 재사용">${LINK_ICON}</button>`;
       }
-      const stateChip = o.isMain ? '' : `<span class="subrepo-chip ${o.isAttached ? 'on' : ''}">${o.isAttached ? 'attached' : 'detached'}</span>`;
       return `
         <div class="subrepo-main">
           ${chev}
           <span class="subrepo-name">${escapeHtml(name)}</span>
           ${o.count ? `<span class="subrepo-count">${o.count} svc</span>` : '<span class="subrepo-count muted">no svc</span>'}
         </div>
-        <div class="subrepo-ctl">${stateChip}${control}</div>
+        <div class="subrepo-ctl">${control}</div>
       `;
     }
 
@@ -3785,10 +3809,10 @@ INDEX_HTML = r"""<!doctype html>
     function wireSubrepoToggle(head, session, wt, name, o) {
       if (o.isMain && o.inUniverse) {
         const cb = head.querySelector('[data-default-toggle]');
-        if (cb) cb.onchange = () => withBusy(cb, '…', () => setDefaultAttach(session, wt, name, cb.checked));
+        if (cb) cb.onclick = (e) => { e.stopPropagation(); withBusy(cb, '…', () => setDefaultAttach(session, wt, name, !o.isDefault)); };
       }
       const attachBtn = head.querySelector('[data-attach]');
-      if (attachBtn) attachBtn.onclick = (e) => { e.stopPropagation(); withBusy(attachBtn, '등록 중…', () => attachSubrepo(session, name)); };
+      if (attachBtn) attachBtn.onclick = (e) => { e.stopPropagation(); withBusy(attachBtn, '…', () => attachSubrepo(session, name)); };
       const detachBtn = head.querySelector('[data-detach]');
       if (detachBtn) detachBtn.onclick = (e) => { e.stopPropagation(); withBusy(detachBtn, '…', () => detachSubrepo(session, name)); };
     }
@@ -3885,7 +3909,7 @@ INDEX_HTML = r"""<!doctype html>
       if (updateBusy) return;
       if (!confirm('대시보드를 재시작해 새 코드로 띄울까요?\n(dev 서버는 그대로 유지됩니다 · 약 1초)')) return;
       updateBusy = true;
-      btn.disabled = true; btn.textContent = '재시작 중…';
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
       try {
         await api('/api/restart-dashboard', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
       } catch {}
@@ -3894,7 +3918,7 @@ INDEX_HTML = r"""<!doctype html>
     }
 
     async function doEnableAutoUpdate(harness, btn) {
-      btn.disabled = true; btn.textContent = '…';
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
       try {
         const r = await api('/api/set-autoupdate', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({harness})});
         if (r?.error) { alert(`auto-update 켜기 실패: ${r.error}`); btn.disabled = false; return; }
