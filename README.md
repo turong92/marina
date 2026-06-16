@@ -193,12 +193,12 @@ marina/
     ├── .codex-plugin/plugin.json
     ├── hooks/hooks.json              SessionStart 훅 선언
     └── scripts/
-        ├── marina.sh                       세션별 런처 + 레지스트리 CLI (add/rm/ls)
+        ├── marina.sh                       세션별 런처 + 레지스트리 CLI (add/infer/rm/ls)
         ├── marina-control.py               :3900 관제 대시보드 (단일 파일 서버+UI)
         ├── marina-dashboard.sh             대시보드 데몬 (launchd / nohup 폴백)
         ├── attach-detached-subrepos.sh     worktree 에 서브레포 git worktree attach
         ├── marina-session-start-hook.sh    세션 시작 attach 훅 (플러그인이 호출)
-        └── marina-entrypoint.sh            전역 진입점 (dashboard / add·rm·ls)
+        └── marina-entrypoint.sh            전역 진입점 (dashboard / add·infer·rm·ls)
 ```
 
 ## 핵심 기능

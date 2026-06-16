@@ -22,11 +22,12 @@ usage() {
   cat <<'EOF'
 usage:
   registry (~/.marina/projects.json):
-    marina add <project-path>   # 서브레포·worktreeGlobs 자동 추론 후 등록
+    marina add <project-path>     # 서브레포·worktreeGlobs 자동 추론 후 등록
+    marina infer <project-path>   # 추론만 — JSON 출력, 미기록
     marina rm <id>
     marina ls
-    marina install-cli          # 안정적 marina 셰임을 PATH 에 설치 (자동 업데이트 생존)
-    marina uninstall-cli        # 설치된 marina 셰임 제거
+    marina install-cli            # 안정적 marina 셰임을 PATH 에 설치 (자동 업데이트 생존)
+    marina uninstall-cli          # 설치된 marina 셰임 제거
   dashboard (전역 :3900):
     marina dashboard            # 기동 (기본)
     marina dashboard-stop       # 대시보드만 정지

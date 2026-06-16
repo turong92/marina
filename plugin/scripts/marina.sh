@@ -4,7 +4,7 @@
 # 런처 (대시보드가 ROOT 를 주입해 호출, 또는 worktree 안에서 직접):
 #   marina.sh start --web | status | logs web | stop | ports
 # 레지스트리 CLI (위치 무관 — ~/.marina/projects.json 편집):
-#   marina.sh add <project-path> | rm <id> | ls
+#   marina.sh add <project-path> | infer <project-path> | rm <id> | ls
 
 set -euo pipefail
 
@@ -297,7 +297,8 @@ usage:
     marina.sh status | status-all | ports
     marina.sh logs [service]
   registry (~/.marina/projects.json, 위치 무관):
-    marina.sh add <project-path>   # 서브레포·worktreeGlobs 자동 추론 후 등록
+    marina.sh add <project-path>     # 서브레포·worktreeGlobs 자동 추론 후 등록
+    marina.sh infer <project-path>   # 추론만 — JSON 출력, 미기록
     marina.sh rm <id>
     marina.sh ls
 
