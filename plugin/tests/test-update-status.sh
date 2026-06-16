@@ -34,7 +34,7 @@ cat > "$CLAUDE_CONFIG_DIR/settings.json" <<'JSON'
 {"extraKnownMarketplaces":{"marina-dev":{"source":{"source":"github","repo":"turong92/marina"}}}}
 JSON
 PORT=39730; base="http://127.0.0.1:$PORT"; hdr=(-H "Origin: http://127.0.0.1:$PORT")
-# serving=bbbb, installed(file)=aaaa, origin(env)=cccc → NEW; autoUpdate claude = false (key absent)
+# serving=bbbb, installed(file)=aaaa, origin(env)=cccc → NEW
 # codex config.toml (marina 설치 기록) → harnesses 에 codex 포함 검증. CODEX_HOME 격리로 결정적.
 mkdir -p "$TMP/codex"
 printf '[plugins."marina@marina-dev"]\nenabled = true\n' > "$TMP/codex/config.toml"
@@ -50,7 +50,7 @@ assert d['serving']=='bbbbbbbbbbbb', d
 assert d['installed']=='aaaaaaaaaaaa', d
 assert d['origin']=='cccccccccccc', d
 assert d['state']=='new', d
-assert d['autoUpdate']['claude'] is False, d
+assert 'autoUpdate' not in d, d   # autoUpdate 필드 제거됨
 assert sorted(d['harnesses'])==['claude','codex'], d   # claude=installed_plugins.json, codex=config.toml
 " || { echo "FAIL: update-status endpoint"; exit 1; }
 
