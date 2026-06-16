@@ -36,9 +36,55 @@ plugin/scripts/marina-entrypoint.sh ls                      # 등록 목록
 plugin/scripts/marina-entrypoint.sh dashboard               # 전역 대시보드(:3900) 기동
 ```
 
-대시보드 데몬은 macOS 에선 launchd 로 등록되어 로그인 시 자동 기동된다. launchctl 이
-없거나 실패하면 `nohup` 백그라운드로 폴백한다 (Linux 포함). 어느 쪽이든 PID 는
-`~/.marina/dashboard.pid`, 로그는 `~/.marina/dashboard.log`.
+대시보드 데몬은 OS 에 맞는 supervisor 로 등록되어 로그인·부팅 후 자동 기동된다:
+
+- **macOS** — launchd (`~/.marina/marina.dashboard.plist`), 로그인 시 자동 기동.
+- **Linux** — systemd user 유닛(`marina-dashboard.service`) + `loginctl enable-linger`
+  로 등록되어 로그아웃 후에도 살아남는다.
+- **폴백** — launchd·systemd 가 없거나 실패하면 `nohup` 백그라운드로 띄우고
+  `auto-restart NOT configured` 경고를 낸다 (재부팅 시 수동 재기동 필요).
+
+어느 쪽이든 PID 는 `~/.marina/dashboard.pid`, 로그는 `~/.marina/dashboard.log`.
+
+## 처음 실행 — 프로젝트를 한 번 등록
+
+플러그인을 설치하면 SessionStart 훅이 등록되지만, **프로젝트를 한 번 등록하기 전까지는
+아무것도 attach 하지 않는다**. 훅은 "이 worktree 가 등록된 프로젝트에 속하는가" 를 보고
+맞을 때만 서브레포를 붙이기 때문이다. 즉 설치 직후 첫 단계는 **프로젝트 1회 등록**이다.
+
+등록은 세 가지 중 아무 방법이나:
+
+```bash
+# 1) Claude 세션 안에서 — 현재 git 프로젝트를 바로 등록 (worktree 안에서 실행해도 main 체크아웃을 찾아 등록)
+/marina:register
+/marina:ls                  # 등록 목록 확인
+
+# 2) 터미널에서 — marina CLI 설치 후 (아래 "marina CLI" 참조)
+marina add /path/to/project
+marina ls
+
+# 3) 대시보드 UI — (예정, phase 3)
+```
+
+`add`/`register` 는 경로에서 서브레포(중첩 git 레포)와 worktree 글롭을 추론해 초안을
+만든다. 출력된 `id`·`subrepos` 가 맞는지 확인하고, 빠지거나 남는 게 있으면 다시 등록하거나
+`~/.marina/projects.json` 을 직접 고친다. 쓰지 않고 추론 결과만 보려면
+`marina infer /path/to/project` (JSON 출력, 레지스트리 미수정).
+
+### marina CLI — `install-cli`
+
+레포 안에서 `plugin/scripts/marina-entrypoint.sh ...` 로 바로 쓸 수도 있지만, 어디서나
+`marina` 한 단어로 부르려면 PATH 셰임을 설치한다 (선택):
+
+```bash
+plugin/scripts/marina-entrypoint.sh install-cli      # ~/.local/bin/marina 셰임 설치
+marina add /path/to/project                          # 이제 어디서나 marina
+plugin/scripts/marina-entrypoint.sh uninstall-cli    # 제거
+```
+
+셰임은 호출 때마다 현재 설치된 플러그인 경로를 스스로 해석한다 — 그래서 플러그인이 자동
+업데이트(새 SHA)돼도 셰임을 다시 깔 필요가 없다. `~/.local/bin` 이 PATH 에 없으면 설치
+시 안내가 나온다.
 
 ## 업데이트
 
