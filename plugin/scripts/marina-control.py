@@ -8,6 +8,7 @@ import json
 import os
 import re
 import signal
+import shlex
 import shutil
 import subprocess
 import time
@@ -33,6 +34,11 @@ MARINA_ATTACH = CONTROL_SCRIPT.parent / "attach-detached-subrepos.sh"
 # 글로벌 프로젝트 레지스트리 — 한 데몬이 등록된 모든 프로젝트의 worktree 를 관리 (marina-standardization)
 MARINA_HOME = Path(os.environ.get("MARINA_HOME", str(Path.home() / ".marina")))
 PROJECTS_FILE = MARINA_HOME / "projects.json"
+# 하네스 config·플러그인 매니페스트 위치 (업데이트 알림용). CLAUDE_CONFIG_DIR 는 marina-resolve 와 동일 규칙.
+CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
+CODEX_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
+MARKETPLACE = "marina-dev"
+PLUGIN_ID = "marina@marina-dev"
 # 내장 서비스 없음 — 모든 서비스는 프로젝트 root 의 marina-services.json 에서 정의 (완전 generic)
 _BUILTIN_SERVICES: tuple[str, ...] = ()
 _BUILTIN_PORT_BASE: dict[str, int] = {}
@@ -182,6 +188,202 @@ def default_attach_of(root: Path) -> list[str] | None:
         return None
     da = project.get("defaultAttach")
     return [str(s) for s in da] if isinstance(da, list) else None
+
+
+def update_state(serving: str | None, installed: str | None, origin: str | None) -> str:
+    # serving=실행 중 SHA, installed=받아진 SHA, origin=배포된 최신 SHA. 모두 short SHA.
+    # serving/installed 모르면 판정 불가(dev/repo 실행) → unknown(배너 없음).
+    if not serving or not installed:
+        return "unknown"
+    # origin 모르면(네트워크 실패) 무네트워크 판정: serving==installed 면 current, 아니면 stale.
+    if origin is None:
+        return "current" if serving == installed else "stale"
+    if serving == origin:
+        return "current"
+    if installed == origin:
+        return "stale"   # 파일은 최신, 데몬만 옛 코드 → 재시작
+    return "new"         # 배포된 게 받아진 것보다 최신 → 업데이트(다음 세션/수동) 필요
+
+
+_SHA_RE = re.compile(r"^([0-9a-f]{7,40}|\d+\.\d+)")
+_origin_cache: dict[str, Any] = {}
+
+
+def _serving_sha() -> str | None:
+    env = os.environ.get("MARINA_SERVING_SHA")
+    if env:
+        return env[:12]
+    # 설치 레이아웃: .../<marketplace>/marina/<SHA>/scripts/marina-control.py → <SHA> = parent.parent.name
+    name = CONTROL_SCRIPT.parent.parent.name
+    return name[:12] if _SHA_RE.match(name) else None   # 레포/dev 실행(name='plugin')은 None
+
+
+def _installed_sha() -> str | None:
+    env = os.environ.get("MARINA_INSTALLED_SHA")
+    if env:
+        return env[:12]
+    for mf in (CLAUDE_CONFIG_DIR / "plugins" / "installed_plugins.json",
+               CODEX_HOME / "plugins" / "installed_plugins.json"):
+        try:
+            data = json.loads(mf.read_text(encoding="utf-8"))
+            raw = Path(str(data["plugins"][PLUGIN_ID][0]["installPath"])).name[:12]
+            if _SHA_RE.match(raw):   # _serving_sha 와 대칭 — 비-SHA installPath 는 무시(오탐 방지)
+                return raw
+        except Exception:
+            continue
+    return None
+
+
+def _marketplace_repo() -> str:
+    # settings.json 의 marina-dev source.repo (fork 대응), 없으면 기본.
+    try:
+        s = json.loads((CLAUDE_CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
+        repo = s["extraKnownMarketplaces"][MARKETPLACE]["source"]["repo"]
+        if isinstance(repo, str) and repo:
+            return repo
+    except Exception:
+        pass
+    return "turong92/marina"
+
+
+def _origin_sha() -> str | None:
+    env = os.environ.get("MARINA_ORIGIN_SHA")
+    if env:
+        return env[:12]
+    ttl = float(_env("UPDATE_TTL", "60"))
+    now = time.time()
+    if _origin_cache and now - _origin_cache.get("ts", 0) < ttl:
+        return _origin_cache.get("sha")
+    sha = _origin_cache.get("sha")  # 실패 시 마지막 값 유지
+    try:
+        out = subprocess.check_output(
+            ["git", "ls-remote", f"https://github.com/{_marketplace_repo()}.git", "main"],
+            text=True, timeout=5, stderr=subprocess.DEVNULL,
+        )
+        if out.strip():
+            sha = out.split()[0][:12]
+    except Exception:
+        pass
+    _origin_cache.update({"sha": sha, "ts": now})
+    return sha
+
+
+def _autoupdate_state() -> dict[str, Any]:
+    # 하네스별 marina-dev autoUpdate ON/OFF. 마켓플레이스 미등록/판정불가 → None.
+    out: dict[str, Any] = {"claude": None, "codex": None}
+    try:
+        s = json.loads((CLAUDE_CONFIG_DIR / "settings.json").read_text(encoding="utf-8"))
+        mk = s.get("extraKnownMarketplaces", {}).get(MARKETPLACE)
+        if isinstance(mk, dict):
+            out["claude"] = bool(mk.get("autoUpdate"))
+    except Exception:
+        pass
+    # Codex(config.toml)는 검증 게이트(UN-T5) 전까지 None 유지.
+    return out
+
+
+def _harnesses() -> list[str]:
+    # 설치된 하네스 감지. Claude=installed_plugins.json, Codex=config.toml 에 설치 기록(installed_plugins.json 없음).
+    out: list[str] = []
+    if (CLAUDE_CONFIG_DIR / "plugins" / "installed_plugins.json").exists():
+        out.append("claude")
+    try:
+        if f'[plugins."{PLUGIN_ID}"]' in (CODEX_HOME / "config.toml").read_text(encoding="utf-8"):
+            out.append("codex")
+    except Exception:
+        pass
+    return out
+
+
+def _git_head(d: Path) -> str | None:
+    try:
+        out = subprocess.check_output(["git", "-C", str(d), "rev-parse", "HEAD"],
+                                      text=True, timeout=5, stderr=subprocess.DEVNULL)
+        sha = out.strip()[:12]
+        return sha if _SHA_RE.match(sha) else None
+    except Exception:
+        return None
+
+
+def _codex_marketplace() -> dict[str, str] | None:
+    # ~/.codex/config.toml 의 [marketplaces.marina-dev] 블록 (text-parse; py3.9 라 tomllib 없음)
+    try:
+        t = (CODEX_HOME / "config.toml").read_text(encoding="utf-8")
+    except Exception:
+        return None
+    m = re.search(r"\[marketplaces\.marina-dev\](.*?)(?=\n\[|\Z)", t, re.S)
+    if not m:
+        return None
+    src = re.search(r'source\s*=\s*"([^"]+)"', m.group(1))
+    typ = re.search(r'source_type\s*=\s*"([^"]+)"', m.group(1))
+    return {"source": src.group(1), "sourceType": typ.group(1) if typ else ""} if src else None
+
+
+def _harness_status() -> dict[str, Any]:
+    # 하네스별 설치 버전 + origin 대비 뒤처짐 (배너 칩용). claude=설치 복사본 SHA, codex=마켓 스냅샷 git HEAD(라이브 참조)
+    origin = _origin_sha()
+    auto = _autoupdate_state()
+    out: dict[str, Any] = {}
+    try:
+        data = json.loads((CLAUDE_CONFIG_DIR / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
+        ent = data["plugins"][PLUGIN_ID][0]
+        sha = str(ent.get("gitCommitSha") or Path(str(ent["installPath"])).name)[:12]
+        if _SHA_RE.match(sha):
+            out["claude"] = {"installed": sha, "behind": bool(origin and sha != origin), "autoUpdate": auto.get("claude")}
+    except Exception:
+        pass
+    mk = _codex_marketplace()
+    if mk:
+        sha = _git_head(Path(mk["source"]))
+        if sha:
+            out["codex"] = {"installed": sha, "behind": bool(origin and sha != origin), "sourceType": mk.get("sourceType", "")}
+    return out
+
+
+def update_codex() -> dict[str, Any]:
+    # codex 는 마켓 스냅샷 디렉토리를 라이브로 읽으므로, 그 git repo 를 origin/main 으로 ff-pull = codex 갱신
+    mk = _codex_marketplace()
+    if not mk:
+        raise ValueError("codex marina-dev 마켓플레이스를 찾을 수 없음 (codex 미설치?)")
+    src = Path(mk["source"])
+    try:
+        out = subprocess.check_output(["git", "-C", str(src), "pull", "--ff-only", "origin", "main"],
+                                      text=True, timeout=30, stderr=subprocess.STDOUT)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"codex 스냅샷 git pull 실패: {(exc.output or '').strip()[-200:]}")
+    except Exception as exc:
+        raise ValueError(f"codex 갱신 실패: {exc}")
+    return {"ok": True, "harness": "codex", "installed": _git_head(src), "output": out.strip()[-160:]}
+
+
+def update_status() -> dict[str, Any]:
+    serving, installed, origin = _serving_sha(), _installed_sha(), _origin_sha()
+    return {
+        "serving": serving,
+        "installed": installed,
+        "origin": origin,
+        "state": update_state(serving, installed, origin),
+        "autoUpdate": _autoupdate_state(),
+        "harnesses": _harnesses(),
+        "harnessStatus": _harness_status(),
+    }
+
+
+def set_autoupdate_claude() -> dict[str, Any]:
+    path = CLAUDE_CONFIG_DIR / "settings.json"
+    try:
+        s = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ValueError(f"settings.json 읽기 실패: {exc}")
+    mk = s.get("extraKnownMarketplaces")
+    if not isinstance(mk, dict) or not isinstance(mk.get(MARKETPLACE), dict):
+        raise ValueError(f"{MARKETPLACE} 마켓플레이스 항목이 settings.json 에 없음 — /plugin 에서 켜줘")
+    mk[MARKETPLACE]["autoUpdate"] = True
+    # atomic write — Claude 가 동시에 settings.json 을 쓸 수 있으므로 temp→os.replace (truncate 손상 방지)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(s, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, path)
+    return {"ok": True, "harness": "claude", "note": "다음 세션부터 자동 업데이트됩니다"}
 
 
 def project_label(root: Path) -> str:
@@ -1834,6 +2036,13 @@ INDEX_HTML = r"""<!doctype html>
     button.primary { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
     button.danger { color: var(--sys-cont-negative-default); }
     button.active { background: var(--sys-cont-neutral-default); border-color: var(--sys-cont-neutral-default); color: white; }
+    /* busy 표시 — 모든 진행중 버튼이 공통으로 쓰는 떠다니는 점 (currentColor 라 버튼 색 따라감) */
+    .busy-dots { display: inline-flex; align-items: center; gap: 3px; line-height: 1; }
+    .busy-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: busyfloat 0.9s ease-in-out infinite; }
+    .busy-dots i:nth-child(2) { animation-delay: 0.15s; }
+    .busy-dots i:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes busyfloat { 0%, 70%, 100% { transform: translateY(0); opacity: 0.45; } 35% { transform: translateY(-3px); opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .busy-dots i { animation: none; opacity: 0.6; } }
     input, select { height: 32px; min-width: 0; border: 1px solid var(--sys-style-neutral-default); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); padding: 0 10px; }
     main { display: grid; grid-template-columns: minmax(420px, 520px) 16px minmax(0, 1fr); height: calc(100vh - 56px); }
     .rail { display: flex; align-items: center; justify-content: center; background: var(--sys-bg-base); cursor: pointer; }
@@ -1929,8 +2138,11 @@ INDEX_HTML = r"""<!doctype html>
     .root .root-meta { white-space: nowrap; }
     .session-tools { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
     .session-tools button { height: 28px; min-width: 30px; padding: 0 6px; white-space: nowrap; font-size: 14px; }
+    .session-tools button.icon { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+    .session-tools button.icon svg { width: 16px; height: 16px; }
     /* 즉시 툴팁 — 네이티브 title 의 ~1s 지연 제거 (mouseover 위임이 title→data-tip 으로 흡수) */
-    #tip { position: fixed; z-index: 99; max-width: 380px; padding: 6px 10px; border-radius: 6px; background: var(--sys-cont-neutral-default); color: var(--sys-bg-surface); font-size: 12px; line-height: 1.55; pointer-events: none; opacity: 0; transform: translateX(-50%); transition: opacity .06s; white-space: pre-wrap; word-break: break-word; }
+    /* width:max-content — 박스 너비를 앵커 위치와 분리. 없으면 우측 끝 버튼(↗ 등)에서 shrink-to-fit 이 뷰포트 우변까지 짜부돼 한 글자씩 세로로 쏟아짐 (clamp 로직이 가로로 밀어줌) */
+    #tip { position: fixed; z-index: 99; width: max-content; max-width: min(380px, calc(100vw - 16px)); padding: 6px 10px; border-radius: 6px; background: var(--sys-cont-neutral-default); color: var(--sys-bg-surface); font-size: 12px; line-height: 1.55; pointer-events: none; opacity: 0; transform: translateX(-50%); transition: opacity .06s; white-space: pre-wrap; word-break: break-word; }
     #tip.on { opacity: 1; }
     .stat-row { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; }
     .pill-stat { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-base); color: var(--sys-cont-neutral-light); font-size: 11px; font-weight: 500; line-height: 1; white-space: nowrap; }
@@ -1962,11 +2174,15 @@ INDEX_HTML = r"""<!doctype html>
     .subrepo-count.muted { font-style: italic; }
     .subrepo-ctl { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
     .subrepo-chip { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 6px; font-size: 11px; font-weight: 700; background: var(--sys-style-neutral-light); color: var(--sys-cont-neutral-light); }
-    .subrepo-chip.on { background: hsl(148, 55%, 94%); color: var(--sys-cont-positive-default); }
     .subrepo-chip.warn { background: hsl(36, 90%, 94%); color: hsl(30, 80%, 38%); }
     .subrepo-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: var(--sys-cont-neutral-light); cursor: pointer; }
     .subrepo-toggle input { margin: 0; cursor: pointer; }
     .subrepo-act { height: 24px; padding: 0 10px; font-size: 11px; font-weight: 700; }
+    .subrepo-act.icon { width: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .subrepo-act.icon svg { width: 15px; height: 15px; display: block; }
+    .subrepo-act.default-toggle { color: var(--sys-cont-neutral-lightest); }   /* off: 흐린 윤곽 핀 */
+    .subrepo-act.default-toggle.on { color: var(--sys-cont-neutral-default); border-color: var(--sys-cont-neutral-default); background: var(--sys-style-neutral-light); }   /* on: 채워진 중립 핀 — 실행(파랑)과 구분 */
+    .subrepo-act.default-toggle.on svg { fill: currentColor; }
     .subrepo-body { display: grid; }
     .subrepo-body .svc { padding-left: 30px; }   /* nested 들여쓰기 */
     .svc.disabled { cursor: default; opacity: 0.5; }
@@ -2026,6 +2242,17 @@ INDEX_HTML = r"""<!doctype html>
     .tool-label { color: var(--sys-cont-neutral-lightest); font-size: 12px; }
     .ghost-chip { color: var(--sys-cont-neutral-light); }
     .ghost-chip.alert { border-color: var(--sys-cont-negative-default); color: var(--sys-cont-negative-default); font-weight: 700; }
+    .update-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 16px; background: hsl(36, 90%, 94%); color: hsl(30, 80%, 30%); border-bottom: 1px solid var(--sys-style-neutral-light); font-size: 13px; }
+    .update-banner.stale { background: hsl(215, 90%, 95%); color: hsl(215, 70%, 35%); }
+    .update-banner .ub-msg { font-weight: 700; }
+    .update-banner .ub-sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; opacity: 0.8; }
+    .update-banner .ub-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; align-items: center; }
+    .update-banner button { height: 26px; padding: 0 10px; font-size: 12px; font-weight: 700; }
+    .update-banner .ub-note { font-size: 12px; opacity: 0.85; }
+    .ub-hrow { display: inline-flex; align-items: center; gap: 5px; }
+    .ub-hchip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 6px; font-size: 12px; font-weight: 700; background: rgba(125, 75, 0, 0.10); }
+    .ub-hchip.old { background: rgba(125, 75, 0, 0.20); }
+    .ub-hchip .sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; opacity: 0.8; }
     .orphan-pop { position: fixed; top: 60px; right: 16px; z-index: 30; width: min(520px, calc(100vw - 32px)); max-height: 70vh; overflow: auto; border: 1px solid var(--sys-style-neutral-default); border-radius: 10px; background: var(--sys-bg-surface); box-shadow: 0 8px 24px hsla(0, 0%, 0%, 0.18); padding: 12px 14px; }
     .orphan-head { color: var(--sys-cont-neutral-light); font-size: 12px; line-height: 1.6; }
     .mem.warn { color: var(--sys-cont-negative-default); font-weight: 700; }
@@ -2093,6 +2320,7 @@ INDEX_HTML = r"""<!doctype html>
       <button id="refresh" title="새로고침 — 세션·유령·디스크 분석(du) 전체 재계산">↻</button>
     </div>
   </header>
+  <div class="update-banner" id="updateBanner" hidden></div>
   <div class="orphan-pop" id="orphanPanel" hidden></div>
   <main>
     <aside>
@@ -2483,7 +2711,7 @@ INDEX_HTML = r"""<!doctype html>
       const btn = document.getElementById('registerConfirm');
       const label = btn.textContent;
       err.hidden = true;
-      btn.disabled = true; btn.textContent = '등록 중…';
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
       let res;
       try {
         res = await api('/api/add-project', {
@@ -2670,15 +2898,17 @@ INDEX_HTML = r"""<!doctype html>
 
     // 진행 중 표시 + 중복 클릭 방지: 누른 버튼은 라벨 교체, group 버튼들은 함께 비활성화.
     // 완료 후 보통 재렌더로 교체되지만, 에러·취소 경로를 위해 finally 에서 원복.
+    // 모든 진행중 표시 공통 — 떠다니는 점 3개. withBusy 의 label 인자는 이제 표시에 안 쓰임(점으로 통일), 호환 위해 시그니처만 유지
+    const BUSY_DOTS = '<span class="busy-dots" role="status" aria-label="처리 중"><i></i><i></i><i></i></span>';
     function withBusy(btn, label, fn, group) {
       if (btn.disabled) return;
       const targets = group ? Array.from(group) : [btn];
-      const original = btn.textContent;
+      const original = btn.innerHTML;   // innerHTML — 아이콘(SVG) 버튼도 보존 (textContent 면 복원 시 자식 노드 소실 → 빈 버튼)
       for (const b of targets) b.disabled = true;
-      btn.textContent = label;
+      btn.innerHTML = BUSY_DOTS;
       fn().catch(alert).finally(() => {
         for (const b of targets) b.disabled = false;
-        btn.textContent = original;
+        btn.innerHTML = original;
       });
     }
 
@@ -3455,8 +3685,11 @@ INDEX_HTML = r"""<!doctype html>
 
     function updateServiceStates() {
       for (const session of sessions) {
-        const summary = document.querySelector(`[data-root="${CSS.escape(session.root)}"] [data-run-summary]`);
+        const card = document.querySelector(`[data-root="${CSS.escape(session.root)}"]`);
+        const summary = card?.querySelector('[data-run-summary]');
         if (summary) summary.textContent = runSummaryText(session);
+        const stopAllBtn = card?.querySelector('[data-stop-all]');   // 시작/정지에 맞춰 정지(■) 표시 동기화 (busy 중엔 건드리지 않음)
+        if (stopAllBtn && !stopAllBtn.disabled) stopAllBtn.hidden = !session.services.some(svc => svc.running);
         for (const svc of session.services) {
           const row = document.querySelector(`[data-service-key="${CSS.escape(`${session.root}::${svc.service}`)}"]`);
           if (!row) continue;
@@ -3557,7 +3790,7 @@ INDEX_HTML = r"""<!doctype html>
               <div class="session-tools">
                 ${wt && wt.cacheMb > 50 ? '<button data-clear-cache title="Clear cache — 빌드 캐시 전체 회수 (marina-services.json cachePaths). 카테고리별 회수는 캐시 칩 클릭">♻</button>' : ''}
                 <button data-stop-all title="Stop all — 이 세션의 서비스 전부 정지">■</button>
-                <button data-cleanup title="Cleanup — 로그·pid·포트설정·alias 리셋 (코드는 무관)">⟲</button>
+                <button data-cleanup class="icon" title="Cleanup — 로그·pid·포트설정·alias 리셋 (코드는 무관)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20h-10.5l-4.21 -4.3a1 1 0 0 1 0 -1.41l10 -10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 0 1.41l-9.2 9.3"/><path d="M18 13.3l-6.3 -6.3"/></svg></button>
                 ${session.source === 'main' ? '' : '<button data-remove class="danger" title="Remove — worktree 삭제. 미머지 브랜치는 보존, 변경분은 confirm 후 폐기">✕</button>'}
               </div>
             </div>
@@ -3611,6 +3844,7 @@ INDEX_HTML = r"""<!doctype html>
         const saveRestartBtn = card.querySelector('[data-save-restart]');
         saveRestartBtn.onclick = () => withBusy(saveRestartBtn, 'Restarting…', () => saveConfig(session.root, card, true));
         const stopAllBtn = card.querySelector('[data-stop-all]');
+        stopAllBtn.hidden = !session.services.some(svc => svc.running);   // 정지할 게 없으면 숨김 — 개별 서비스 버튼과 동일한 상태적응
         stopAllBtn.onclick = () => withBusy(stopAllBtn, '…', () => sessionAction('stop-all', session), toolButtons);
         const cleanupBtn = card.querySelector('[data-cleanup]');
         cleanupBtn.onclick = () => withBusy(cleanupBtn, '…', () => sessionAction('cleanup', session), toolButtons);
@@ -3772,17 +4006,21 @@ INDEX_HTML = r"""<!doctype html>
 
     function renderSubrepoHead(name, o) {
       const chev = o.count ? `<span class="chev">${o.open ? '▾' : '▸'}</span>` : '<span class="chev"></span>';
+      // 아이콘 토글 — attached→unlink(=detach 동작), detached→link(=attach 동작). Tabler link/unlink (MIT). 상태는 행 흐림(.detached)+아이콘으로 구분, 별도 칩 없음
+      const UNLINK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 14a3.5 3.5 0 0 0 5 0l4 -4a3.5 3.5 0 0 0 -5 -5l-.5 .5"/><path d="M14 10a3.5 3.5 0 0 0 -5 0l-4 4a3.5 3.5 0 0 0 5 5l.5 -.5"/><path d="M16 21v-2"/><path d="M19 16h2"/><path d="M3 8h2"/><path d="M8 3v2"/></svg>';
+      const LINK_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 15l6 -6"/><path d="M11 6l.463 -.536a5 5 0 0 1 7.071 7.072l-.534 .464"/><path d="M13 18l-.397 .534a5.068 5.068 0 0 1 -7.127 0a4.972 4.972 0 0 1 0 -7.071l.524 -.463"/></svg>';
+      // 핀 토글 — main 카드의 "기본"(새 worktree 자동 attach 대상) 체크박스 대체. on 이면 채워진 파란 핀
+      const PIN_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 4v6l-2 4v2h10v-2l-2 -4v-6"/><path d="M12 16l0 5"/><path d="M8 4l8 0"/></svg>';
       let control = '';
       if (!o.inUniverse) {
         control = '<span class="subrepo-chip warn" title="서비스 cwd 가 가리키는 subrepo 가 레지스트리에 없음 — ⚙ 에서 등록하면 attach 가능">미등록</span>';
       } else if (o.isMain) {
-        control = `<label class="subrepo-toggle" title="새 worktree 자동 attach 대상(전체 기본). 체크 해제해도 main 의 클론은 보존돼"><input type="checkbox" data-default-toggle ${o.isDefault ? 'checked' : ''}/> 기본</label>`;
+        control = `<button class="subrepo-act icon default-toggle ${o.isDefault ? 'on' : ''}" data-default-toggle aria-label="기본 attach 대상" title="기본 — 새 worktree 자동 attach 대상(전체 기본). 끄면 새 worktree 부터 제외 (main 의 클론은 보존)">${PIN_ICON}</button>`;
       } else if (o.isAttached) {
-        control = '<button class="subrepo-act" data-detach title="이 worktree 에서 detach (git worktree remove) — 브랜치·미머지 커밋은 보존">detach</button>';
+        control = `<button class="subrepo-act icon" data-detach aria-label="detach" title="이 worktree 에서 detach (git worktree remove) — 브랜치·미머지 커밋은 보존">${UNLINK_ICON}</button>`;
       } else {
-        control = '<button class="subrepo-act primary" data-attach title="이 worktree 에 attach (git worktree add) — 같은 이름 브랜치 있으면 재사용">attach</button>';
+        control = `<button class="subrepo-act icon primary" data-attach aria-label="attach" title="이 worktree 에 attach (git worktree add) — 같은 이름 브랜치 있으면 재사용">${LINK_ICON}</button>`;
       }
-      const stateChip = o.isMain ? '' : `<span class="subrepo-chip ${o.isAttached ? 'on' : ''}">${o.isAttached ? 'attached' : 'detached'}</span>`;
       const addSvcBtn = o.inUniverse ? '<button class="add-svc-btn" data-add-svc title="이 subrepo 에 서비스 추가">+ 서비스 추가</button>' : '';
       return `
         <div class="subrepo-main">
@@ -3790,7 +4028,7 @@ INDEX_HTML = r"""<!doctype html>
           <span class="subrepo-name">${escapeHtml(name)}</span>
           ${o.count ? `<span class="subrepo-count">${o.count} svc</span>` : '<span class="subrepo-count muted">no svc</span>'}
         </div>
-        <div class="subrepo-ctl">${stateChip}${control}${addSvcBtn}</div>
+        <div class="subrepo-ctl">${control}${addSvcBtn}</div>
       `;
     }
 
@@ -3848,10 +4086,10 @@ INDEX_HTML = r"""<!doctype html>
     function wireSubrepoToggle(head, session, wt, name, o) {
       if (o.isMain && o.inUniverse) {
         const cb = head.querySelector('[data-default-toggle]');
-        if (cb) cb.onchange = () => withBusy(cb, '…', () => setDefaultAttach(session, wt, name, cb.checked));
+        if (cb) cb.onclick = (e) => { e.stopPropagation(); withBusy(cb, '…', () => setDefaultAttach(session, wt, name, !o.isDefault)); };
       }
       const attachBtn = head.querySelector('[data-attach]');
-      if (attachBtn) attachBtn.onclick = (e) => { e.stopPropagation(); withBusy(attachBtn, '등록 중…', () => attachSubrepo(session, name)); };
+      if (attachBtn) attachBtn.onclick = (e) => { e.stopPropagation(); withBusy(attachBtn, '…', () => attachSubrepo(session, name)); };
       const detachBtn = head.querySelector('[data-detach]');
       if (detachBtn) detachBtn.onclick = (e) => { e.stopPropagation(); withBusy(detachBtn, '…', () => detachSubrepo(session, name)); };
       const addSvcBtn = head.querySelector('[data-add-svc]');
@@ -3906,6 +4144,102 @@ INDEX_HTML = r"""<!doctype html>
         const firstWeb = firstSession?.services.find(item => item.service === 'web') ?? firstSession?.services[0];
         if (firstSession && firstWeb) selectLog(firstSession.root, firstWeb.service, 'current', 'service');
       }
+    }
+
+    let updateBusy = false;
+    async function loadUpdateStatus() {
+      let s;
+      try { s = await api('/api/update-status'); } catch { return; }
+      renderUpdateBanner(s);
+    }
+
+    function renderUpdateBanner(s) {
+      const el = document.getElementById('updateBanner');
+      if (!s || s.state === 'current' || s.state === 'unknown') { el.hidden = true; el.innerHTML = ''; return; }
+      el.hidden = false;
+      el.classList.toggle('stale', s.state === 'stale');
+      if (s.state === 'stale') {
+        el.innerHTML = `<span class="ub-msg">업데이트 설치됨 — 재시작하면 적용</span>
+          <span class="ub-sha">${escapeHtml(s.serving || '?')} → ${escapeHtml(s.installed || '?')}</span>
+          <span class="ub-actions"><button data-restart class="primary">재시작</button></span>`;
+      } else { // new — 하네스별 상태 칩 + 액션 + 전부 갱신
+        const hs = s.harnessStatus || {};
+        const rows = [];
+        for (const h of (s.harnesses || [])) {
+          const st = hs[h];
+          if (!st) continue;
+          const cur = !st.behind;
+          const chip = `<span class="ub-hchip ${cur ? 'cur' : 'old'}">${escapeHtml(h)} <span class="sha">${escapeHtml(st.installed || '?')}</span> ${cur ? '최신' : '뒤처짐'}</span>`;
+          let act = '';
+          if (h === 'claude') {
+            act = st.autoUpdate === true ? '<span class="ub-note">auto ✓ 다음 세션</span>'
+                : st.autoUpdate === false ? '<button data-enable="claude">auto-update 켜기</button>' : '';
+          } else if (h === 'codex') {
+            act = st.behind ? '<button data-update-codex>지금 갱신</button>' : '';
+          }
+          rows.push(`<span class="ub-hrow">${chip}${act}</span>`);
+        }
+        const actionable = (s.harnesses || []).filter(h => { const st = hs[h]; if (!st) return false; return (h === 'claude' && st.autoUpdate === false) || (h === 'codex' && st.behind); }).length;
+        const allBtn = actionable >= 2 ? '<button data-update-all class="primary">전부 갱신</button>' : '';
+        el.innerHTML = `<span class="ub-msg">새 버전 ${escapeHtml(s.origin || '?')}</span>
+          <span class="ub-actions">${rows.join('')}${allBtn}</span>`;
+      }
+      const restartBtn = el.querySelector('[data-restart]');
+      if (restartBtn) restartBtn.onclick = () => doRestartDashboard(restartBtn);
+      for (const b of el.querySelectorAll('[data-enable]')) {
+        b.onclick = () => doEnableAutoUpdate(b.dataset.enable, b);
+      }
+      const codexBtn = el.querySelector('[data-update-codex]');
+      if (codexBtn) codexBtn.onclick = () => doUpdateCodex(codexBtn);
+      const allBtn = el.querySelector('[data-update-all]');
+      if (allBtn) allBtn.onclick = () => doUpdateAll(allBtn);
+    }
+
+    async function doRestartDashboard(btn) {
+      if (updateBusy) return;
+      if (!confirm('대시보드를 재시작해 새 코드로 띄울까요?\n(dev 서버는 그대로 유지됩니다 · 약 1초)')) return;
+      updateBusy = true;
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
+      try {
+        await api('/api/restart-dashboard', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
+      } catch {}
+      // 데몬이 ~1초 내 돌아옴 — 폴링이 자동 재연결, 배너는 다음 update-status 에서 사라짐.
+      setTimeout(() => { updateBusy = false; loadUpdateStatus().catch(() => {}); }, 3000);
+    }
+
+    async function doEnableAutoUpdate(harness, btn) {
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
+      try {
+        const r = await api('/api/set-autoupdate', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({harness})});
+        if (r?.error) { alert(`auto-update 켜기 실패: ${r.error}`); btn.disabled = false; return; }
+        alert(`${harness} auto-update 켜짐 — 다음 세션부터 자동 업데이트됩니다.`);
+      } catch (e) { alert(e); btn.disabled = false; return; }
+      loadUpdateStatus().catch(() => {});
+    }
+
+    async function doUpdateCodex(btn) {
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
+      try {
+        const r = await api('/api/update-codex', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
+        if (r?.error) { alert(`codex 갱신 실패: ${r.error}`); btn.disabled = false; return; }
+      } catch (e) { alert(e); btn.disabled = false; return; }
+      loadUpdateStatus().catch(() => {});
+    }
+
+    async function doUpdateAll(btn) {
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
+      const errs = [];
+      // 배너에 실제 떠 있는 액션만 수행 — claude 켜기 / codex 갱신
+      if (document.querySelector('[data-enable="claude"]')) {
+        try { const r = await api('/api/set-autoupdate', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({harness: 'claude'})}); if (r?.error) errs.push('claude: ' + r.error); }
+        catch (e) { errs.push('claude: ' + e); }
+      }
+      if (document.querySelector('[data-update-codex]')) {
+        try { const r = await api('/api/update-codex', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'}); if (r?.error) errs.push('codex: ' + r.error); }
+        catch (e) { errs.push('codex: ' + e); }
+      }
+      if (errs.length) alert('일부 실패:\n' + errs.join('\n'));
+      loadUpdateStatus().catch(() => {});
     }
 
     document.getElementById('orphanChip').onclick = () => {
@@ -4095,6 +4429,7 @@ INDEX_HTML = r"""<!doctype html>
         pollTick += 1;
         load({passive: true}).catch(console.error);
         if (pollTick % 2 === 0) loadOrphans().catch(console.error);
+        if (pollTick % 2 === 0) loadUpdateStatus().catch(console.error);
         // 60초마다 — 서버 10분 캐시를 타서 비용 ~0, 배지(삭제 권장)·디스크 표시 신선도 유지
         if (pollTick % 12 === 0) loadWorktrees().catch(console.error);
       }, 5000);
@@ -4109,12 +4444,14 @@ INDEX_HTML = r"""<!doctype html>
       load({passive: true}).catch(console.error);
       loadOrphans().catch(console.error);
       loadWorktrees().catch(console.error);
+      loadUpdateStatus().catch(console.error);
       startPolling();
     });
 
     load().catch(alert);
     loadOrphans().catch(console.error);
     loadWorktrees().catch(console.error);
+    loadUpdateStatus().catch(console.error);
     startPolling();
   </script>
 </body>
@@ -4179,6 +4516,10 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             refresh = query.get("refresh", ["0"])[0] == "1"
             self.send_json({"worktrees": [worktree_info(root, refresh) for root in discover_all_roots(refresh)]})
+            return
+
+        if parsed.path == "/api/update-status":
+            self.send_json(update_status())
             return
 
         if parsed.path == "/api/browse":
@@ -4322,6 +4663,40 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError((exc.output or "").strip() or str(exc))
                 invalidate_registry_caches()
                 self.send_json({"ok": True, "output": out.strip()})
+                return
+
+            if self.path == "/api/restart-dashboard":
+                # 응답 먼저(연결 flush) → detached 로 재기동(자기 종료 후에도 살아남게 setsid).
+                self.send_json({"ok": True, "restarting": True})
+                try:
+                    self.wfile.flush()   # 데몬 종료 전 응답이 클라이언트에 전달되도록 명시 flush
+                except Exception:
+                    pass
+                dash = CONTROL_SCRIPT.parent / "marina-dashboard.sh"
+                if os.environ.get("MARINA_RESTART_DRY_RUN") == "1":
+                    MARINA_HOME.mkdir(parents=True, exist_ok=True)
+                    with (MARINA_HOME / "restart-dry-run.log").open("a", encoding="utf-8") as fh:
+                        fh.write(f"would run: bash {dash} restart\n")
+                    return
+                subprocess.Popen(
+                    ["bash", "-c", f"sleep 1; exec bash {shlex.quote(str(dash))} restart"],
+                    start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+                return
+
+            if self.path == "/api/set-autoupdate":
+                harness = str(body.get("harness", "")).strip()
+                if harness == "claude":
+                    self.send_json(set_autoupdate_claude())
+                elif harness == "codex":
+                    # 검증(2026-06-16): Codex 는 per-marketplace auto-update 설정이 없음(marketplace 서브커맨드 = add/list/upgrade/remove).
+                    raise ValueError("Codex 는 auto-update 설정이 없음 — `codex plugin marketplace upgrade` 로 수동 갱신")
+                else:
+                    raise ValueError("harness must be 'claude' or 'codex'")
+                return
+
+            if self.path == "/api/update-codex":
+                self.send_json(update_codex())
                 return
 
             root = safe_root(str(body.get("root", "")))
