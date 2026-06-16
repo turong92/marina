@@ -290,9 +290,32 @@ export COREPACK_ENABLE_PROJECT_SPEC="${COREPACK_ENABLE_PROJECT_SPEC:-0}"
 # 서비스 정의: 프로젝트 root 의 marina-services.json (내장 서비스 없음 — 전부 여기서).
 #   {"services": [{"name":"echo","portBase":8200,"cwd":".","run":"{python} -m http.server {port}"}]}
 # run 치환자: {port}{python}{root}{profile} + 세션 경로 {env_file}{tmp}{session}.
-# worktree 자체 파일 우선, 없으면 원본(SOURCE_ROOT)에서 — control.py 와 동일 파일을 읽도록.
+# 우선순위: (1) worktree 자체 파일, (2) 원본(SOURCE_ROOT) 파일, (3) 중앙 ~/.marina/services/<id>.json.
 SERVICES_FILE="$ROOT/marina-services.json"
 [[ -f "$SERVICES_FILE" ]] || SERVICES_FILE="$SOURCE_ROOT/marina-services.json"
+if [[ ! -f "$SERVICES_FILE" ]]; then
+  _central="$(python3 - "$PROJECTS_FILE" "$SOURCE_ROOT" "$ROOT" "$MARINA_HOME" <<'PY'
+import json, os, sys
+projects_file, source_root, root, home = sys.argv[1:5]
+try:
+    data = json.load(open(projects_file, encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+def norm(p): return os.path.realpath(os.path.expanduser(p))
+targets = {norm(source_root), norm(root)}
+pid = ""
+for p in data.get("projects", []):
+    pr = norm(p.get("root", ""))
+    if pr in targets or any(t == pr or t.startswith(pr + os.sep) for t in targets):
+        pid = p.get("id", ""); break
+if pid:
+    cand = os.path.join(norm(home), "services", pid + ".json")
+    if os.path.isfile(cand):
+        print(cand)
+PY
+)"
+  [[ -n "$_central" ]] && SERVICES_FILE="$_central"
+fi
 
 extra_services() {
   [[ -f "$SERVICES_FILE" ]] || return 0
@@ -673,7 +696,7 @@ command_for() {
   run="${run//\{env_file\}/$(env_file "$service")}"
   run="${run//\{tmp\}/$(session_tmp)}"
   run="${run//\{session\}/$(session_id)}"
-  printf 'cd %q && exec %s' "$ROOT/${cwd:-.}" "$run"
+  printf 'cd %q && %s' "$ROOT/${cwd:-.}" "$run"
 }
 
 start_service() {
@@ -890,6 +913,13 @@ main() {
       ;;
     ports)
       print_ports
+      ;;
+    print-command)
+      # 서비스의 resolved 명령어를 stdout 에 출력하고 종료 (디버그·테스트용).
+      local svc="${1:-${SERVICES[0]:-}}"
+      [[ -n "$svc" ]] || die "print-command: service name required"
+      offset="$(port_offset)"
+      command_for "$svc" "$offset"
       ;;
     -h|--help|help)
       usage

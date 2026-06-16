@@ -138,6 +138,28 @@ plugin/scripts/marina-entrypoint.sh uninstall-cli    # 제거
 - 포트 = `portBase + 세션오프셋` (main 0 / worktree 는 id 해시로 안정적 대역).
 - `cachePaths`(선택): Clear cache 대상. `orphanPattern`(선택): 유령 프로세스 탐지 정규식.
 
+#### Running a service under docker
+
+`run` is any shell command, so docker compose works with **zero special support** — pass marina's
+tokens into the container so each worktree stays isolated:
+
+```jsonc
+{ "name": "api", "portBase": 18080, "cwd": "projects/kotlin-skeleton",
+  "run": "exec env HOST_PORT={port} COMPOSE_PROJECT_NAME=svc-{session} docker compose up --abort-on-container-exit" }
+```
+
+```yaml
+# the service's compose.yml must take the host port + project name from the env:
+services:
+  api:
+    ports: ["${HOST_PORT}:8080"]
+```
+
+`{port}` = `portBase` + per-worktree offset, `{session}` = per-worktree id → concurrent worktrees get
+distinct host ports and compose project names, exactly like a native service. Stop sends `SIGTERM`
+first, which makes `compose up` stop its containers. (Limit: a container that needs >5s to stop is
+force-killed and may linger; orphan detection matches the process, not the container.)
+
 ### 복잡한 기동 — 헬퍼 스크립트 패턴
 
 `run` 한 줄로 부족한 서비스(env 준비, 의존성 링크, 빌드 캐시 워밍 등)는 `run` 이

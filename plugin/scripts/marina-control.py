@@ -55,40 +55,6 @@ def _registered_roots() -> list[Path]:
     return roots
 
 
-def _load_extra_services() -> list[dict[str, Any]]:
-    # 워크스페이스 확장점 — marina.sh extra_services() 와 동일 스키마 (marina-services.json)
-    # 등록된 프로젝트 root 의 marina-services.json 을 찾는다.
-    # NOTE(stage 1): SERVICES/포트는 임포트 시점 전역 고정이라 marina-services.json 을 가진
-    #   "첫 프로젝트" 하나만 반영한다. 프로젝트별 서비스 분리는 멀티프로젝트(stage 3) 몫.
-    for root in _registered_roots():
-        path = root / "marina-services.json"
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        extras = []
-        for item in data.get("services", []):
-            name = str(item.get("name", "")).strip()
-            base = item.get("portBase")
-            if name and name.isidentifier() and isinstance(base, int) and name not in _BUILTIN_SERVICES:
-                # cachePaths(선택): 빌드 캐시 root 상대경로 — Clear cache 대상.
-                # orphanPattern(선택): 유령 프로세스 탐지 정규식.
-                caches = [str(c) for c in item.get("cachePaths", []) if isinstance(c, str)]
-                orphan = item.get("orphanPattern")
-                extras.append({
-                    "name": name,
-                    "portBase": base,
-                    "cachePaths": caches,
-                    "orphanPattern": orphan if isinstance(orphan, str) else None,
-                })
-        return extras
-    return []
-
-
-EXTRA_SERVICES = _load_extra_services()
-SERVICES = _BUILTIN_SERVICES + tuple(s["name"] for s in EXTRA_SERVICES)
-DEFAULT_PORT_BASE = {**_BUILTIN_PORT_BASE, **{s["name"]: s["portBase"] for s in EXTRA_SERVICES}}
-LOG_TARGETS = (*SERVICES, "console")
 LOG_TAIL_BYTES = 64 * 1024   # SSE 초기 표시 분량 — 이전 내용은 /api/logs/chunk 페이징
 LOG_CHUNK_BYTES = 64 * 1024  # "이전 더 보기" 1회 분량
 _projects_cache: list[dict[str, Any]] = []
@@ -376,7 +342,7 @@ def write_meta(root: Path, updates: dict[str, str]) -> dict[str, str]:
 def read_config(root: Path) -> dict[str, str]:
     config = dict(CONFIG_DEFAULTS)
     defaults = default_ports_for(root)
-    for service in SERVICES:
+    for service in services_for(root):
         port = defaults.get(service, "")
         config[config_key_for_service_port(service)] = port
         config[f"SERVICE_PROFILE_{service.upper()}"] = "local"
@@ -800,7 +766,7 @@ def read_overrides(root: Path) -> dict[str, str]:
 
 def default_ports_for(root: Path) -> dict[str, str]:
     offset = port_offset_for(root)
-    return {service: str(base + offset) for service, base in DEFAULT_PORT_BASE.items()}
+    return {service: str(base + offset) for service, base in port_base_for(root).items()}
 
 
 def ports_for(root: Path) -> dict[str, str]:
@@ -1070,14 +1036,29 @@ def worktree_status_cached(root: Path, ttl: float = 15.0) -> dict[str, Any]:
     return status
 
 
-def services_for(root: Path) -> tuple[str, ...]:
-    # root 가 속한 프로젝트의 marina-services.json 서비스명 (per-project).
-    # 전역 EXTRA_SERVICES("첫 프로젝트" 하나만)가 모든 프로젝트에 누수되던 것을 root 기준으로 해석
-    # — marina-services.json 없는 프로젝트(예: homeserver)는 서비스 0개가 정상.
+def services_file_for(root: Path) -> Path | None:
+    # 서비스 정의 파일 — 프로젝트 root 우선(팀이 커밋한 경우 존중), 없으면 중앙(~/.marina/services/<id>.json).
     project = project_for(root)
     proot = Path(project["root"]) if project else root
+    local = proot / "marina-services.json"
+    if local.exists():
+        return local
+    if project:
+        central = MARINA_HOME / "services" / f"{project['id']}.json"
+        if central.exists():
+            return central
+    return None
+
+
+def services_for(root: Path) -> tuple[str, ...]:
+    # root 가 속한 프로젝트의 서비스명 (per-project).
+    # 과거 전역 EXTRA_SERVICES("첫 프로젝트" 하나만 반영)가 모든 프로젝트에 누수되던 것을 root 기준 per-project 해석으로 교체.
+    # — 서비스 정의 파일 없는 프로젝트(예: homeserver)는 서비스 0개가 정상.
+    f = services_file_for(root)
+    if f is None:
+        return _BUILTIN_SERVICES
     try:
-        data = json.loads((proot / "marina-services.json").read_text(encoding="utf-8"))
+        data = json.loads(f.read_text(encoding="utf-8"))
     except Exception:
         return _BUILTIN_SERVICES
     extra = tuple(
@@ -1085,6 +1066,76 @@ def services_for(root: Path) -> tuple[str, ...]:
         if n and n.isidentifier() and n not in _BUILTIN_SERVICES
     )
     return _BUILTIN_SERVICES + extra
+
+
+def extra_services_for(root: Path) -> list[dict[str, Any]]:
+    # root 가 속한 프로젝트의 서비스 정의 (per-project). 부재/파싱실패 → []
+    f = services_file_for(root)
+    if f is None:
+        return []
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in data.get("services", []):
+        name = str(item.get("name", "")).strip()
+        base = item.get("portBase")
+        if name and name.isidentifier() and isinstance(base, int) and name not in _BUILTIN_SERVICES:
+            caches = [str(c) for c in item.get("cachePaths", []) if isinstance(c, str)]
+            orphan = item.get("orphanPattern")
+            out.append({
+                "name": name, "portBase": base, "cachePaths": caches,
+                "orphanPattern": orphan if isinstance(orphan, str) else None,
+            })
+    return out
+
+
+def port_base_for(root: Path) -> dict[str, int]:
+    return {**_BUILTIN_PORT_BASE, **{s["name"]: s["portBase"] for s in extra_services_for(root)}}
+
+
+def log_targets_for(root: Path) -> tuple[str, ...]:
+    return (*services_for(root), "console")
+
+
+# marina 가 띄울 수 있는 프로세스 패턴 — 세션 추적 밖에서 돌면 "유령"으로 표시.
+# 내장은 marina 런처 자신(marina.sh)뿐 — 서비스별 패턴은 marina-services.json 의 orphanPattern(정규식)에서 온다.
+# 느슨하면 grep 등 패턴 문자열을 들고 있는 셸 명령까지 오탐하니 실제 기동 cmdline 형태로 조인다.
+_BASE_ORPHAN_RULES: list[tuple[str, re.Pattern[str]]] = [
+    ("marina", re.compile(r"marina\.sh (?:foreground|start)")),
+]
+
+
+def orphan_rules_for(root: Path) -> list[tuple[str, "re.Pattern[str]"]]:
+    rules: list[tuple[str, re.Pattern[str]]] = list(_BASE_ORPHAN_RULES)
+    for svc in extra_services_for(root):
+        pat = svc.get("orphanPattern")
+        if isinstance(pat, str) and pat:
+            try:
+                rules.append((str(svc["name"]), re.compile(pat)))
+            except re.error:
+                pass
+    return rules
+
+
+def orphan_rules_all() -> list[tuple[str, "re.Pattern[str]"]]:
+    # 시스템 전역 sweep 용 — 등록된 모든 프로젝트의 규칙 합집합 (패턴 문자열로 dedup).
+    seen: set[str] = set()
+    rules: list[tuple[str, re.Pattern[str]]] = []
+    for name, pat in _BASE_ORPHAN_RULES:
+        key = f"{name}:{pat.pattern}"
+        if key not in seen:
+            seen.add(key)
+            rules.append((name, pat))
+    for root in discover_roots():
+        for name, pat in orphan_rules_for(root):
+            key = f"{name}:{pat.pattern}"
+            if key not in seen:
+                seen.add(key); rules.append((name, pat))
+    return rules
 
 
 def service_subrepo(cwd: str, subrepos: list[str]) -> str:
@@ -1102,12 +1153,13 @@ def service_subrepo(cwd: str, subrepos: list[str]) -> str:
 
 
 def service_subrepo_map(root: Path) -> dict[str, str]:
-    # {서비스명: 소속 subrepo} — 프로젝트 marina-services.json 의 cwd 기준.
-    project = project_for(root)
-    proot = Path(project["root"]) if project else root
+    # {서비스명: 소속 subrepo} — 서비스 정의 파일의 cwd 기준.
+    f = services_file_for(root)
+    if f is None:
+        return {}
     subs = subrepos_of(root)
     try:
-        data = json.loads((proot / "marina-services.json").read_text(encoding="utf-8"))
+        data = json.loads(f.read_text(encoding="utf-8"))
     except Exception:
         return {}
     out: dict[str, str] = {}
@@ -1163,8 +1215,8 @@ def safe_root(root_text: str) -> Path:
     return root
 
 
-def safe_service(service: str) -> str:
-    if service not in LOG_TARGETS:
+def safe_service(service: str, root: Path) -> str:
+    if service not in log_targets_for(root):
         raise ValueError("unknown service")
     return service
 
@@ -1257,7 +1309,7 @@ def stop_service(root: Path, service: str) -> dict[str, Any]:
 
 
 def stop_all(root: Path) -> dict[str, Any]:
-    return {service: stop_service(root, service) for service in SERVICES}
+    return {service: stop_service(root, service) for service in services_for(root)}
 
 
 def cleanup_session(root: Path) -> dict[str, Any]:
@@ -1587,17 +1639,17 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
 
 # worktree 안에서 재생성 가능한 빌드 캐시 — Clear cache 대상.
 # 카테고리 = 서비스명, 경로 = marina-services.json 의 서비스별 cachePaths(root 상대, glob 가능). 내장 경로 없음.
-def cache_guard_services(category: str) -> tuple[str, ...]:
+def cache_guard_services(category: str, root: Path) -> tuple[str, ...]:
     # 캐시 회수 전 가드할 서비스 — 카테고리(서비스명) 자신, "all"이면 cachePaths 가진 전 서비스.
     if category == "all":
-        return tuple(s["name"] for s in EXTRA_SERVICES if s.get("cachePaths"))
+        return tuple(s["name"] for s in extra_services_for(root) if s.get("cachePaths"))
     return (category,)
 
 
 def cache_paths_by_category(root: Path) -> dict[str, list[Path]]:
     root_resolved = root.resolve()
     result: dict[str, list[Path]] = {}
-    for svc in EXTRA_SERVICES:
+    for svc in extra_services_for(root):
         rels = svc.get("cachePaths") or []
         kept: list[Path] = []
         for rel in rels:
@@ -1630,8 +1682,8 @@ def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
         raise ValueError("unknown cache category")
     ports = ports_for(root)
     # 삭제 대상 캐시를 쓰는 서비스만 가드
-    for service in cache_guard_services(category):
-        if service in SERVICES and service_status(root, service, ports.get(service))["running"]:
+    for service in cache_guard_services(category, root):
+        if service in services_for(root) and service_status(root, service, ports.get(service))["running"]:
             raise ValueError(f"{service} 가 구동 중이야 — Stop 후 캐시를 비워줘")
     targets = [p for cat, paths in by_category.items() if category in ("all", cat) for p in paths]
     removed: list[str] = []
@@ -1665,7 +1717,7 @@ def fix_port_conflict(root: Path) -> dict[str, Any]:
     taken = _other_session_ports(root)
     listeners = listener_map()
     for offset in range(10, 90):
-        candidate = {svc: str(base + offset) for svc, base in DEFAULT_PORT_BASE.items()}
+        candidate = {svc: str(base + offset) for svc, base in port_base_for(root).items()}
         if any(p in taken or p in listeners for p in candidate.values()):
             continue
         updates = {config_key_for_service_port(svc): p for svc, p in candidate.items()}
@@ -1698,25 +1750,10 @@ def bootout_session_dashboard(sid: str) -> None:
         )
 
 
-# marina 가 띄울 수 있는 프로세스 패턴 — 세션 추적 밖에서 돌면 "유령"으로 표시.
-# 내장은 marina 런처 자신(marina.sh)뿐 — 서비스별 패턴은 marina-services.json 의 orphanPattern(정규식)에서 온다.
-# 느슨하면 grep 등 패턴 문자열을 들고 있는 셸 명령까지 오탐하니 실제 기동 cmdline 형태로 조인다.
-ORPHAN_RULES: list[tuple[str, re.Pattern[str]]] = [
-    ("marina", re.compile(r"marina\.sh (?:foreground|start)")),
-]
-for _svc in EXTRA_SERVICES:
-    _pat = _svc.get("orphanPattern")
-    if isinstance(_pat, str) and _pat:
-        try:
-            ORPHAN_RULES.append((str(_svc["name"]), re.compile(_pat)))
-        except re.error:
-            pass
-
-
 def tracked_pid_groups(snapshot: list[dict[str, Any]]) -> set[int]:
     tracked: set[int] = set()
     for root in discover_roots():
-        for service in SERVICES:
+        for service in services_for(root):
             pid = read_pid(pid_file(root, service))
             if pid and pid_alive(pid):
                 tracked.add(pid)
@@ -1735,7 +1772,7 @@ def orphan_processes() -> list[dict[str, Any]]:
     for row in snapshot:
         if row["pid"] in tracked or row["pid"] == os.getpid() or row["pgid"] == self_pgid:
             continue
-        for label, pattern in ORPHAN_RULES:
+        for label, pattern in orphan_rules_all():
             if pattern.search(row["command"]):
                 orphans.append({
                     "pid": row["pid"],
@@ -1758,7 +1795,7 @@ def kill_orphans(pids: list[int]) -> dict[str, Any]:
     valid: set[int] = set()
     for pid in pids:
         row = snapshot.get(pid)
-        if not row or not any(pattern.search(row["command"]) for _, pattern in ORPHAN_RULES):
+        if not row or not any(pattern.search(row["command"]) for _, pattern in orphan_rules_all()):
             results[str(pid)] = "skipped (no longer matches)"
             continue
         if pid in tracked:
@@ -4009,7 +4046,7 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             try:
                 root = safe_root(query.get("root", [""])[0])
-                service = safe_service(query.get("service", [""])[0])
+                service = safe_service(query.get("service", [""])[0], root)
                 run = query.get("run", ["current"])[0]
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
@@ -4188,7 +4225,7 @@ class Handler(BaseHTTPRequestHandler):
                     ))
                 return
 
-            service = safe_service(str(body.get("service", "")))
+            service = safe_service(str(body.get("service", "")), root)
             force = bool(body.get("force"))
             if self.path == "/api/start":
                 result = start_service(root, service, force=force)
