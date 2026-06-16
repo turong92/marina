@@ -18,48 +18,54 @@ die() {
 }
 
 # ---- 프로젝트 레지스트리 CLI (~/.marina/projects.json) — 위치 무관 ----------
-registry_add() {
+# 추론은 여기(registry_infer)가 단일 SoT — JSON 으로 출력만 하고 쓰지 않는다.
+# registry_add 는 이걸 소비해서 ~/.marina/projects.json 에 upsert 하고, 대시보드 API(phase 3)도 이걸 shell.
+registry_infer() {
   local path="${1:-}"
-  [[ -n "$path" ]] || die "usage: marina.sh add <project-path>"
+  [[ -n "$path" ]] || die "usage: marina.sh infer <project-path>"
   [[ -d "$path" ]] || die "디렉토리 없음: $path"
   command -v python3 >/dev/null 2>&1 || die "python3 필요"
-  local abs
-  abs="$(cd "$path" && pwd -P)" || die "경로 해석 실패: $path"
-  mkdir -p "$MARINA_HOME"
-  python3 - "$PROJECTS_FILE" "$abs" <<'PY'
+  local abs; abs="$(cd "$path" && pwd -P)" || die "경로 해석 실패: $path"
+  python3 - "$abs" <<'PY'
 import json, os, sys
-projects_file, root = sys.argv[1], sys.argv[2]
-try:
-    data = json.load(open(projects_file, encoding="utf-8"))
-    if not isinstance(data, dict):
-        data = {}
-except Exception:
-    data = {}
-projects = data.get("projects", [])
+root = sys.argv[1]
 # 서브레포 추론 — .git 디렉토리(=독립 클론)를 가진 1단계 하위 디렉토리.
 # (.git 파일은 worktree 링크 → main 체크아웃의 서브레포가 아니므로 제외)
 subrepos = sorted(
-    name for name in os.listdir(root)
-    if not name.startswith(".")
-    and os.path.isdir(os.path.join(root, name))
-    and os.path.isdir(os.path.join(root, name, ".git"))
+    n for n in os.listdir(root)
+    if not n.startswith(".")
+    and os.path.isdir(os.path.join(root, n))
+    and os.path.isdir(os.path.join(root, n, ".git"))
 )
 # worktreeGlobs 추론 — claude 는 항상, codex 는 ~/.codex 존재 시
 globs = [".claude/worktrees/*"]
 base = os.path.basename(root)
 if os.path.isdir(os.path.expanduser("~/.codex/worktrees")):
     globs.append(f"~/.codex/worktrees/*/{base}")
-entry = {"id": base, "root": root, "subrepos": subrepos, "worktreeGlobs": globs}
+print(json.dumps({"id": base, "root": root, "subrepos": subrepos, "worktreeGlobs": globs}, ensure_ascii=False))
+PY
+}
+
+registry_add() {
+  local entry; entry="$(registry_infer "${1:-}")" || exit $?
+  mkdir -p "$MARINA_HOME"
+  python3 - "$PROJECTS_FILE" "$entry" <<'PY'
+import json, os, sys
+projects_file, entry = sys.argv[1], json.loads(sys.argv[2])
+try:
+    data = json.load(open(projects_file, encoding="utf-8"))
+    if not isinstance(data, dict): data = {}
+except Exception:
+    data = {}
 norm = lambda p: os.path.realpath(os.path.expanduser(p))
-projects = [p for p in projects if norm(p.get("root", "")) != norm(root)]
+projects = [p for p in data.get("projects", []) if norm(p.get("root","")) != norm(entry["root"])]
 projects.append(entry)
 data["projects"] = projects
 data.setdefault("schemaVersion", 1)
-with open(projects_file, "w", encoding="utf-8") as fh:
-    json.dump(data, fh, ensure_ascii=False, indent=2)
-print(f"added: {entry['id']}  root={root}")
-print(f"  subrepos: {', '.join(subrepos) or '(none)'}")
-print(f"  worktreeGlobs: {', '.join(globs)}")
+json.dump(data, open(projects_file, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+print(f"added: {entry['id']}  root={entry['root']}")
+print(f"  subrepos: {', '.join(entry['subrepos']) or '(none)'}")
+print(f"  worktreeGlobs: {', '.join(entry['worktreeGlobs'])}")
 PY
 }
 
@@ -110,9 +116,10 @@ PY
 
 # 레지스트리 CLI 는 워크스페이스 컨텍스트(ROOT/SOURCE_ROOT) 해석 전에 처리하고 종료.
 case "${1:-}" in
-  add)         shift; registry_add "$@"; exit $? ;;
-  rm)          shift; registry_rm "$@";  exit $? ;;
-  ls|projects) registry_ls;             exit $? ;;
+  add)         shift; registry_add "$@";   exit $? ;;
+  infer)       shift; registry_infer "$@"; exit $? ;;
+  rm)          shift; registry_rm "$@";    exit $? ;;
+  ls|projects) registry_ls;               exit $? ;;
 esac
 
 # ---- 워크스페이스 컨텍스트 (런처 명령용) — 위치독립 -------------------------
