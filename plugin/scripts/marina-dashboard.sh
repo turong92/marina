@@ -9,7 +9,6 @@ MARINA_HOME="${MARINA_HOME:-$HOME/.marina}"
 PROJECTS_FILE="$MARINA_HOME/projects.json"
 
 # 스크립트는 형제 — 위치독립 (구 $ROOT/shared/skills/... 가정 제거)
-CONTROL_SCRIPT="$SCRIPT_DIR/marina-control.py"
 ATTACH_SCRIPT="$SCRIPT_DIR/attach-detached-subrepos.sh"
 # shellcheck source=/dev/null
 source "$SCRIPT_DIR/marina-resolve.sh"
@@ -25,8 +24,6 @@ SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/marina-dashboard.service"
 HOST="${MARINA_CONTROL_HOST:-localhost}"
 PORT="${MARINA_CONTROL_PORT:-3900}"
 CODEX_WORKTREES_ROOT="${CODEX_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
-# /usr/bin/python3 고정이면 Xcode CLT 의 3.9 에 묶인다 → 현재 셸의 python3 를 우선 사용
-PYTHON_BIN="${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}"
 
 usage() {
   cat <<'EOF'
@@ -101,8 +98,6 @@ write_plist() {
   <array>
     <string>$LAUNCHER</string>
   </array>
-  <key>WorkingDirectory</key>
-  <string>$SCRIPT_DIR</string>
   <key>EnvironmentVariables</key>
   <dict>
     <key>MARINA_CONTROL_HOST</key>
