@@ -11,12 +11,17 @@ PROJECTS_FILE="$MARINA_HOME/projects.json"
 # 스크립트는 형제 — 위치독립 (구 $ROOT/shared/skills/... 가정 제거)
 CONTROL_SCRIPT="$SCRIPT_DIR/marina-control.py"
 ATTACH_SCRIPT="$SCRIPT_DIR/attach-detached-subrepos.sh"
+# shellcheck source=/dev/null
+source "$SCRIPT_DIR/marina-resolve.sh"
 # 전역 단일 데몬 — 런타임 데이터(pid/log/plist)는 worktree 가 아니라 ~/.marina 에 둔다.
 DASHBOARD_DIR="$MARINA_HOME"
 PID_FILE="$DASHBOARD_DIR/dashboard.pid"
 LOG_FILE="$DASHBOARD_DIR/dashboard.log"
 LABEL="marina.dashboard"
 PLIST_FILE="$DASHBOARD_DIR/$LABEL.plist"
+LAUNCHER="$DASHBOARD_DIR/dashboard-launch.sh"
+SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
+SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/marina-dashboard.service"
 HOST="${MARINA_CONTROL_HOST:-localhost}"
 PORT="${MARINA_CONTROL_PORT:-3900}"
 CODEX_WORKTREES_ROOT="${CODEX_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
@@ -94,8 +99,7 @@ write_plist() {
   <string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
-    <string>$PYTHON_BIN</string>
-    <string>$CONTROL_SCRIPT</string>
+    <string>$LAUNCHER</string>
   </array>
   <key>WorkingDirectory</key>
   <string>$SCRIPT_DIR</string>
@@ -123,52 +127,119 @@ write_plist() {
 EOF
 }
 
+write_launcher() { marina_emit_launcher "$LAUNCHER" dashboard; }
+
+supervisor() {
+  if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
+    echo launchd
+  elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
+    echo systemd
+  else
+    echo nohup
+  fi
+}
+
+write_systemd_unit() {
+  mkdir -p "$SYSTEMD_UNIT_DIR"
+  cat > "$SYSTEMD_UNIT" <<EOF
+[Unit]
+Description=marina dashboard
+After=default.target
+
+[Service]
+ExecStart=$LAUNCHER
+Restart=on-failure
+Environment=MARINA_CONTROL_HOST=$HOST
+Environment=MARINA_CONTROL_PORT=$PORT
+Environment=MARINA_HOME=$MARINA_HOME
+Environment=CODEX_WORKTREES_ROOT=$CODEX_WORKTREES_ROOT
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=default.target
+EOF
+}
+
+start_nohup() {
+  CODEX_WORKTREES_ROOT="$CODEX_WORKTREES_ROOT" MARINA_HOME="$MARINA_HOME" MARINA_CONTROL_HOST="$HOST" MARINA_CONTROL_PORT="$PORT" PYTHONUNBUFFERED=1 nohup "$LAUNCHER" >> "$LOG_FILE" 2>&1 &
+  echo $! > "$PID_FILE"
+  echo "dashboard started pid=$(cat "$PID_FILE") url=http://$HOST:$PORT log=$LOG_FILE"
+}
+
 start() {
   mkdir -p "$DASHBOARD_DIR"
+  write_launcher
+  local sup listeners; sup="$(supervisor)"
+  echo "supervisor=$sup"
+
+  if [[ "${MARINA_DRY_RUN:-}" == "1" ]]; then
+    case "$sup" in
+      launchd) write_plist ;;
+      systemd) write_systemd_unit ;;
+    esac
+    echo "dry-run: wrote launcher + $sup config; not starting"
+    return 0
+  fi
+
   prepare_known_worktrees
 
   if is_running; then
     echo "dashboard already running pid=$(cat "$PID_FILE") url=http://$HOST:$PORT"
     return 0
   fi
-
-  local listeners
   listeners="$(listener_pids | paste -sd, -)"
   if [[ -n "$listeners" ]]; then
     echo "dashboard port already has listener pid=$listeners url=http://$HOST:$PORT"
     return 0
   fi
 
-  {
-    echo
-    echo "=== dashboard start $(date '+%Y-%m-%d %H:%M:%S') ==="
-  } >> "$LOG_FILE"
+  { echo; echo "=== dashboard start $(date '+%Y-%m-%d %H:%M:%S') ==="; } >> "$LOG_FILE"
 
-  if use_launchctl; then
-    write_plist
-    launchctl bootout "$(launchctl_domain)" "$PLIST_FILE" >/dev/null 2>&1 || true
-    if launchctl bootstrap "$(launchctl_domain)" "$PLIST_FILE"; then
-      launchctl kickstart -k "$(launchctl_domain)/$LABEL" >/dev/null 2>&1 || true
-      sleep 1
-      listeners="$(listener_pids | paste -sd, -)"
-      if [[ -n "$listeners" ]]; then
-        echo "$listeners" | cut -d, -f1 > "$PID_FILE"
-        echo "dashboard started pid=$(cat "$PID_FILE") url=http://$HOST:$PORT log=$LOG_FILE"
+  case "$sup" in
+    launchd)
+      write_plist
+      launchctl bootout "$(launchctl_domain)" "$PLIST_FILE" >/dev/null 2>&1 || true
+      if launchctl bootstrap "$(launchctl_domain)" "$PLIST_FILE"; then
+        launchctl kickstart -k "$(launchctl_domain)/$LABEL" >/dev/null 2>&1 || true
+        sleep 1
+        listeners="$(listener_pids | paste -sd, -)"
+        if [[ -n "$listeners" ]]; then
+          echo "$listeners" | cut -d, -f1 > "$PID_FILE"
+          echo "dashboard started pid=$(cat "$PID_FILE") url=http://$HOST:$PORT log=$LOG_FILE"
+          return 0
+        fi
+      fi
+      echo "launchctl failed; falling back to nohup" >> "$LOG_FILE"
+      start_nohup
+      ;;
+    systemd)
+      write_systemd_unit
+      loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+      systemctl --user daemon-reload >/dev/null 2>&1 || true
+      if systemctl --user enable --now marina-dashboard >/dev/null 2>&1; then
+        sleep 1
+        listeners="$(listener_pids | paste -sd, -)"
+        [[ -n "$listeners" ]] && { echo "$listeners" | cut -d, -f1 > "$PID_FILE"; }
+        echo "dashboard started (systemd user) url=http://$HOST:$PORT log=$LOG_FILE"
         return 0
       fi
-    fi
-    echo "launchctl failed; falling back to nohup" >> "$LOG_FILE"
-  fi
-
-  CODEX_WORKTREES_ROOT="$CODEX_WORKTREES_ROOT" MARINA_HOME="$MARINA_HOME" MARINA_CONTROL_HOST="$HOST" MARINA_CONTROL_PORT="$PORT" PYTHONUNBUFFERED=1 nohup "$PYTHON_BIN" "$CONTROL_SCRIPT" >> "$LOG_FILE" 2>&1 &
-  echo $! > "$PID_FILE"
-  echo "dashboard started pid=$(cat "$PID_FILE") url=http://$HOST:$PORT log=$LOG_FILE"
+      echo "systemctl failed; falling back to nohup" >> "$LOG_FILE"
+      start_nohup
+      ;;
+    nohup)
+      echo "warn: no launchd/systemd available — auto-restart NOT configured" >&2
+      start_nohup
+      ;;
+  esac
 }
 
 stop() {
   local pid
   if use_launchctl; then
     [[ -f "$PLIST_FILE" ]] && launchctl bootout "$(launchctl_domain)" "$PLIST_FILE" >/dev/null 2>&1 || true
+  fi
+  if command -v systemctl >/dev/null 2>&1 && [[ -f "$SYSTEMD_UNIT" ]]; then
+    systemctl --user disable --now marina-dashboard >/dev/null 2>&1 || true
   fi
   if is_running; then
     pid="$(cat "$PID_FILE")"
