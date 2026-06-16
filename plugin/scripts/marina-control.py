@@ -180,10 +180,16 @@ def project_for(root: Path) -> dict[str, Any] | None:
         rroot = root.resolve()
     except OSError:
         rroot = root
+    best = None
+    best_len = -1
     for project in projects:
         proot = project["root"].resolve()
-        if rroot == proot or str(rroot).startswith(str(proot) + os.sep):
-            return project
+        sproot = str(proot)
+        if rroot == proot or str(rroot).startswith(sproot + os.sep):
+            if len(sproot) > best_len:
+                best, best_len = project, len(sproot)
+    if best is not None:
+        return best
     # codex 레이아웃(<worktrees>/<id>/<basename>) 한정 basename 매치 — 동일 basename 다중 프로젝트 충돌 방지
     try:
         in_codex_layout = rroot.parent.parent == WORKTREES_ROOT.resolve()
@@ -652,6 +658,25 @@ def run_marina(root: Path, *args: str, ignore_overrides: bool = False) -> str:
     )
 
 
+def run_marina_registry(*args: str) -> str:
+    # 레지스트리 CLI(add/infer/rm)는 위치 무관 — worktree ROOT/MARINA_SUBREPOS env 없이 전역 런처 호출.
+    return subprocess.check_output(
+        [str(MARINA_SCRIPT), *args],
+        text=True,
+        stderr=subprocess.STDOUT,
+    )
+
+
+def invalidate_registry_caches() -> None:
+    # 레지스트리 변경(add/rm) 후 파생 캐시 무효화 — 다음 폴링/요청이 projects.json 을 재로드.
+    _projects_cache.clear()
+    _roots_cache.clear()
+    _root_sources.clear()
+    _source_root_cache.clear()
+    _session_id_cache.clear()
+    _worktree_info_cache.clear()
+
+
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(["git", *args], cwd=str(cwd), text=True, stderr=subprocess.STDOUT)
 
@@ -1034,6 +1059,23 @@ def worktree_status_cached(root: Path, ttl: float = 15.0) -> dict[str, Any]:
     return status
 
 
+def services_for(root: Path) -> tuple[str, ...]:
+    # root 가 속한 프로젝트의 marina-services.json 서비스명 (per-project).
+    # 전역 EXTRA_SERVICES("첫 프로젝트" 하나만)가 모든 프로젝트에 누수되던 것을 root 기준으로 해석
+    # — marina-services.json 없는 프로젝트(예: homeserver)는 서비스 0개가 정상.
+    project = project_for(root)
+    proot = Path(project["root"]) if project else root
+    try:
+        data = json.loads((proot / "marina-services.json").read_text(encoding="utf-8"))
+    except Exception:
+        return _BUILTIN_SERVICES
+    extra = tuple(
+        n for n in (str(s.get("name", "")).strip() for s in data.get("services", []))
+        if n and n.isidentifier() and n not in _BUILTIN_SERVICES
+    )
+    return _BUILTIN_SERVICES + extra
+
+
 def session_payload(
     root: Path,
     snapshot: list[dict[str, Any]] | None = None,
@@ -1048,7 +1090,7 @@ def session_payload(
         "ports": ports,
         "config": read_config(root),
         "worktreeStatus": worktree_status_cached(root),
-        "services": [service_status(root, svc, ports.get(svc), snapshot, listeners_by_port) for svc in SERVICES],
+        "services": [service_status(root, svc, ports.get(svc), snapshot, listeners_by_port) for svc in services_for(root)],
         "consoleLogRuns": log_run_payload(root, "console"),
     }
 
@@ -1402,6 +1444,8 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
         "projectId": project["id"] if project else project_label(root),
         "projectLabel": project_label(root),
         "projectRoot": str(project["root"]) if project else str(root),
+        # 레지스트리에 등록된 subrepos(큐레이션된 집합) — switcher "subrepos 편집" 프리필용. fs 의 universe(infer)와 구분.
+        "subrepos": list(project["subrepos"]) if project else [],
         "isMain": is_main,
         "clean": status["clean"],
         # main 체크아웃 전체 du 는 수백 GB 라 비싸고 UI 에서도 안 씀 → 스킵
@@ -1655,8 +1699,58 @@ INDEX_HTML = r"""<!doctype html>
     main.aside-collapsed { grid-template-columns: 0 16px minmax(0, 1fr); }
     /* display:none 은 grid 자리를 한 칸씩 밀어 섹션이 16px 트랙에 끼는 사고 — 자리 유지한 채 숨김 */
     main.aside-collapsed aside { visibility: hidden; overflow: hidden; min-width: 0; border-right: 0; }
-    .sessions-bar { display: flex; justify-content: flex-end; padding: 12px 14px 0; }
-    .sessions-bar button { height: 26px; padding: 0 8px; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .sessions-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px 0; }
+    .sessions-bar > button { height: 26px; padding: 0 8px; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .switcher { position: relative; min-width: 0; flex: 1; }
+    .switcher-toggle { display: flex; align-items: center; gap: 6px; width: 100%; height: 28px; padding: 0 8px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); }
+    .switcher-toggle:hover { background: var(--sys-bg-surface-hover); }
+    .switcher-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; }
+    .switcher-chev { margin-left: auto; font-size: 10px; color: var(--sys-cont-neutral-light); }
+    .switcher-menu { position: absolute; z-index: 50; top: 32px; left: 0; right: 0; max-height: 60vh; overflow-y: auto; padding: 4px; border: 1px solid var(--sys-style-neutral-default); border-radius: 10px; background: var(--sys-bg-surface); box-shadow: 0 6px 24px rgba(0,0,0,0.18); }
+    .switcher-row { display: flex; align-items: center; gap: 6px; padding: 8px; border-radius: 8px; cursor: pointer; }
+    .switcher-row:hover { background: var(--sys-bg-surface-hover); }
+    .switcher-row.active { background: var(--sys-bg-surface-hover); }
+    .switcher-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--sys-cont-neutral-default); }
+    .switcher-row-actions { display: none; gap: 2px; }
+    .switcher-row:hover .switcher-row-actions { display: flex; }
+    .switcher-row-actions button { width: 22px; height: 22px; padding: 0; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .switcher-chip { font-size: 11px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
+    .switcher-chip.on { color: var(--sys-cont-primary-default); border: 1px solid var(--sys-cont-primary-default); }
+    .switcher-chip.conflict { color: #c0392b; border: 1px solid #c0392b; }
+    .switcher-chip.idle { color: var(--sys-cont-neutral-light); border: 1px solid var(--sys-style-neutral-default); }
+    .switcher-register { width: 100%; margin-top: 4px; padding: 8px; border-top: 1px solid var(--sys-style-neutral-light); border-radius: 0 0 8px 8px; text-align: left; font-size: 13px; color: var(--sys-cont-primary-default); }
+    .switcher-register:hover { background: var(--sys-bg-surface-hover); }
+    /* display 를 명시한 요소는 UA 의 [hidden]→display:none 을 덮어쓴다 — hidden 속성이 항상 이기도록 강제 */
+    [hidden] { display: none !important; }
+    .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.45); }
+    .register-panel { width: 680px; max-width: calc(100vw - 32px); max-height: calc(100vh - 48px); overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--sys-style-neutral-default); border-radius: 12px; background: var(--sys-bg-surface); box-shadow: 0 12px 40px rgba(0,0,0,0.3); }
+    .register-head { display: flex; align-items: center; justify-content: space-between; }
+    .register-title { font-size: 14px; font-weight: 700; color: var(--sys-cont-neutral-default); }
+    .register-label { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .register-path-row { display: flex; gap: 6px; }
+    .register-input { flex: 1; height: 30px; padding: 0 8px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); }
+    .register-path-row button, .register-confirm { height: 30px; padding: 0 12px; border: 1px solid var(--sys-cont-primary-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); }
+    .register-error { font-size: 12px; color: #c0392b; }
+    .register-preview { display: flex; flex-direction: column; gap: 8px; }
+    .register-meta { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .register-checklist-head { font-size: 13px; font-weight: 600; color: var(--sys-cont-neutral-default); }
+    .register-hint { font-weight: 400; color: var(--sys-cont-neutral-light); }
+    .register-checklist { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow-y: auto; }
+    .register-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--sys-cont-neutral-default); }
+    .check-remove { margin-left: auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--sys-cont-neutral-light); font-size: 12px; cursor: pointer; }
+    .check-remove:hover { color: #c0392b; background: var(--sys-bg-surface-hover); }
+    .register-empty { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .register-confirm { align-self: flex-start; }
+    .browse-panel { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; padding: 8px; }
+    .browse-bar { display: flex; align-items: center; gap: 6px; }
+    .browse-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .browse-bar button { height: 26px; padding: 0 10px; border: 1px solid var(--sys-cont-primary-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); }
+    .browse-list { overflow-y: auto; display: flex; flex-direction: column; }
+    .browse-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--sys-cont-neutral-default); }
+    .browse-row:hover { background: var(--sys-bg-surface-hover); }
+    .browse-row .repo-badge { margin-left: auto; font-size: 11px; color: var(--sys-cont-primary-default); }
+    .register-manual { display: flex; gap: 6px; }
+    .register-manual button { height: 30px; padding: 0 12px; border: 1px solid var(--sys-cont-primary-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); }
     aside { border-right: 1px solid var(--sys-style-neutral-light); overflow-y: auto; min-height: 0; }
     section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
     .toolbar { display: flex; gap: 8px; align-items: center; }
@@ -1698,10 +1792,6 @@ INDEX_HTML = r"""<!doctype html>
     .svc-list { display: grid; }
     .session.collapsed .svc-list, .session.collapsed [data-config-details], .session.collapsed .root { display: none; }
     .session.collapsed .session-head { border-bottom: 0; }
-    .project-group { display: flex; align-items: baseline; gap: 8px; padding: 12px 12px 4px; border-top: 1px solid var(--sys-style-neutral-light); }
-    .project-group:first-child { border-top: 0; }
-    .project-group-name { font-size: 13px; font-weight: 700; color: var(--sys-cont-primary-default); }
-    .project-group-meta { font-size: 12px; color: var(--sys-cont-neutral-light); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .svc { display: grid; grid-template-columns: 86px 72px minmax(0, 1fr); gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--sys-style-neutral-light); cursor: pointer; }
     .svc:hover, .svc.selected { background: var(--sys-bg-surface-hover); }
     .svc-name { font-size: 13px; font-weight: 700; line-height: 1; }
@@ -1825,7 +1915,16 @@ INDEX_HTML = r"""<!doctype html>
   <div class="orphan-pop" id="orphanPanel" hidden></div>
   <main>
     <aside>
-      <div class="sessions-bar"><button id="collapseAll" title="세션 카드 전체 접기/펼치기">⇈</button></div>
+      <div class="sessions-bar">
+        <div class="switcher" id="switcher">
+          <button id="switcherToggle" class="switcher-toggle" title="프로젝트 전환">
+            <span id="switcherCurrent" class="switcher-current">프로젝트</span>
+            <span class="switcher-chev">▾</span>
+          </button>
+          <div id="switcherMenu" class="switcher-menu" hidden></div>
+        </div>
+        <button id="collapseAll" title="세션 카드 전체 접기/펼치기">⇈</button>
+      </div>
       <div class="sessions" id="sessions"></div>
     </aside>
     <div class="rail"><button id="asideToggle" title="세션 패널 좌우 접기/펼치기 (로그 전체 화면)">◀</button></div>
@@ -1867,6 +1966,36 @@ INDEX_HTML = r"""<!doctype html>
       <div class="log-body" id="log"><div class="empty">Select a service row.</div></div>
     </section>
   </main>
+  <div class="modal-backdrop" id="registerBackdrop" hidden>
+    <div class="register-panel" id="registerPanel">
+      <div class="register-head">
+        <span class="register-title" id="registerTitle">프로젝트 등록</span>
+        <button id="registerClose" title="닫기">✕</button>
+      </div>
+      <label class="register-label">프로젝트 경로</label>
+      <div class="register-path-row">
+        <input id="registerPath" class="register-input" placeholder="~/path/to/project" />
+        <button id="registerBrowse" title="폴더 탐색">찾아보기</button>
+        <button id="registerInfer">분석</button>
+      </div>
+      <div class="register-error" id="registerError" hidden></div>
+      <div class="browse-panel" id="browsePanel" hidden>
+        <div class="browse-bar"><span class="browse-path" id="browsePath"></span><button id="browseSelect" title="이 폴더 선택">이 폴더 선택</button></div>
+        <div class="browse-list" id="browseList"></div>
+      </div>
+      <div class="register-preview" id="registerPreview" hidden>
+        <div class="register-meta" id="registerMeta"></div>
+        <div class="register-checklist-head">서브레포 <span class="register-hint">(체크된 것만 등록)</span></div>
+        <div class="register-checklist" id="registerChecklist"></div>
+        <div class="register-manual">
+          <input id="registerManualPath" class="register-input" placeholder="추가 subrepo 상대경로 (예: projects/react-skeleton)" />
+          <button id="registerManualBrowse" title="프로젝트 안에서 폴더 선택">찾아보기</button>
+          <button id="registerManualAdd">+ 추가</button>
+        </div>
+        <button id="registerConfirm" class="register-confirm">등록</button>
+      </div>
+    </div>
+  </div>
   <script>
     let sessions = [];
     let selected = null;
@@ -1884,6 +2013,302 @@ INDEX_HTML = r"""<!doctype html>
     let sessionSignature = '';
     const openConfigRoots = new Set();
     const expandedRoots = new Set();
+    let selectedProjectId = localStorage.getItem('marinaSelectedProject') || null;
+    let switcherOpen = false;
+
+    function projectSummaries() {
+      // worktreeData 가 모든 등록 프로젝트의 main 엔트리를 포함 → projectId 로 그룹.
+      const byId = new Map();
+      for (const wt of worktreeData) {
+        if (!byId.has(wt.projectId)) {
+          byId.set(wt.projectId, { id: wt.projectId, label: wt.projectLabel || wt.projectId, root: wt.projectRoot, on: 0, conflict: 0 });
+        }
+      }
+      for (const s of sessions) {
+        const wt = worktreeData.find(w => w.root === s.root);
+        if (!wt) continue;
+        const sum = byId.get(wt.projectId);
+        if (!sum) continue;
+        if ((s.services || []).some(svc => svc.running)) sum.on += 1;
+        if ((s.webPortConflictWith || []).length) sum.conflict += 1;
+      }
+      return [...byId.values()];
+    }
+
+    function setSelectedProject(id) {
+      selectedProjectId = id;
+      if (id) localStorage.setItem('marinaSelectedProject', id);
+      else localStorage.removeItem('marinaSelectedProject');
+      switcherOpen = false;
+      render();
+    }
+
+    function chipHtml(sum) {
+      if (sum.conflict) return `<span class="switcher-chip conflict">${sum.conflict} 충돌</span>`;
+      if (sum.on) return `<span class="switcher-chip on">${sum.on} ON</span>`;
+      return '<span class="switcher-chip idle">idle</span>';
+    }
+
+    function renderSwitcher() {
+      const summaries = projectSummaries();
+      const current = summaries.find(s => s.id === selectedProjectId);
+      document.getElementById('switcherCurrent').textContent = current ? current.label : (summaries.length ? '프로젝트 선택' : '등록된 프로젝트 없음');
+      const menu = document.getElementById('switcherMenu');
+      menu.hidden = !switcherOpen;
+      if (!switcherOpen) return;
+      menu.innerHTML = '';
+      for (const sum of summaries) {
+        const row = document.createElement('div');
+        row.className = `switcher-row${sum.id === selectedProjectId ? ' active' : ''}`;
+        row.innerHTML = `
+          <span class="switcher-row-name" title="${escapeHtml(sum.root)}">${escapeHtml(sum.label)}</span>
+          ${chipHtml(sum)}
+          <span class="switcher-row-actions">
+            <button data-edit-subrepos title="subrepos 편집">⚙</button>
+            <button data-remove-project class="danger" title="프로젝트 등록 해제">✕</button>
+          </span>`;
+        row.querySelector('.switcher-row-name').onclick = () => setSelectedProject(sum.id);
+        row.querySelector('[data-edit-subrepos]').onclick = (e) => { e.stopPropagation(); openSubrepoEdit(sum); };
+        row.querySelector('[data-remove-project]').onclick = (e) => { e.stopPropagation(); removeProject(sum); };
+        menu.appendChild(row);
+      }
+      const reg = document.createElement('button');
+      reg.className = 'switcher-register';
+      reg.textContent = '+ 프로젝트 등록';
+      reg.onclick = () => openRegisterPanel();
+      menu.appendChild(reg);
+    }
+
+    document.getElementById('switcherToggle').onclick = () => { switcherOpen = !switcherOpen; renderSwitcher(); };
+    document.addEventListener('click', (e) => {
+      if (switcherOpen && !e.target.closest('#switcher')) { switcherOpen = false; renderSwitcher(); }
+    });
+
+    function showRegisterPanel(show) {
+      document.getElementById('registerBackdrop').hidden = !show;
+    }
+
+    function openRegisterPanel() {
+      switcherOpen = false;
+      document.getElementById('registerTitle').textContent = '프로젝트 등록';
+      document.getElementById('registerPath').value = '';
+      document.getElementById('registerPath').disabled = false;
+      document.getElementById('registerBrowse').hidden = false;  // 등록: 경로 탐색·분석 노출
+      document.getElementById('registerInfer').hidden = false;
+      document.getElementById('registerPreview').hidden = true;
+      document.getElementById('registerError').hidden = true;
+      document.getElementById('browsePanel').hidden = true;
+      // 이전 infer 잔재 제거 — 새 등록은 빈 상태에서 시작
+      document.getElementById('registerChecklist').innerHTML = '';
+      document.getElementById('registerMeta').textContent = '';
+      showRegisterPanel(true);
+      renderSwitcher();
+    }
+
+    function addChecklistRow(name, checked, removable) {
+      const box = document.getElementById('registerChecklist');
+      if ([...box.querySelectorAll('input')].some(c => c.value === name)) return; // 중복 방지
+      const empty = box.querySelector('.register-empty'); if (empty) empty.remove();
+      const row = document.createElement('label');
+      row.className = 'register-check';
+      const cb = document.createElement('input');
+      cb.type = 'checkbox'; cb.value = name; cb.checked = checked;
+      row.appendChild(cb);
+      row.appendChild(document.createTextNode(name));
+      if (removable) {
+        // 수동 추가분만 ✕ 로 목록에서 제거 가능. infer 가 잡은 기본 subrepo 는 디스크에 실재 → 체크해제만(재분석 시 부활)
+        const rm = document.createElement('button');
+        rm.type = 'button'; rm.className = 'check-remove'; rm.textContent = '✕'; rm.title = '목록에서 제거';
+        rm.onclick = (e) => { e.preventDefault(); e.stopPropagation(); row.remove(); };
+        row.appendChild(rm);
+      }
+      box.appendChild(row);
+    }
+    function renderChecklist(universe, checked, inferred) {
+      const box = document.getElementById('registerChecklist');
+      box.innerHTML = '';
+      if (!universe.length && !checked.length) {
+        box.innerHTML = '<div class="register-empty">monorepo (subrepos 없음) — 필요하면 아래에 직접 추가</div>';
+        return;
+      }
+      // inferred(코드로 잡힌 기본)는 ✕ 없음, universe 중 inferred 아닌 것(수동/깊은)만 removable
+      for (const name of universe) addChecklistRow(name, checked.includes(name), !inferred.includes(name));
+    }
+    document.getElementById('registerManualAdd').onclick = () => {
+      const input = document.getElementById('registerManualPath');
+      const name = input.value.trim().replace(/^\/+|\/+$/g, '');
+      const err = document.getElementById('registerError');
+      if (!name) return;
+      if (name.startsWith('/') || name.split('/').includes('..')) {
+        err.textContent = '프로젝트 root 상대경로만 (선행 / 또는 .. 불가)'; err.hidden = false; return;
+      }
+      err.hidden = true;
+      addChecklistRow(name, true, true);
+      input.value = '';
+    };
+
+    async function inferAndPreview(path, checkedDefault) {
+      const err = document.getElementById('registerError');
+      err.hidden = true;
+      try {
+        const info = await api('/api/infer-project', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({ path }),
+        });
+        document.getElementById('registerMeta').textContent =
+          `id: ${info.id} · ${info.worktreeGlobs.join(', ')}`;
+        const inferred = info.subrepos || [];
+        const checked = checkedDefault === null ? inferred : checkedDefault;
+        // edit: 등록돼 있지만 infer 가 못 잡은(깊은/수동) subrepo 도 universe 에 포함 → 체크된 채 보이게
+        const universe = [...inferred, ...checked.filter(n => !inferred.includes(n))];
+        renderChecklist(universe, checked, inferred);
+        document.getElementById('registerPreview').hidden = false;
+        return info;
+      } catch (e) {
+        err.textContent = String(e.message || e); err.hidden = false;
+        document.getElementById('registerPreview').hidden = true;
+        return null;
+      }
+    }
+
+    document.getElementById('registerClose').onclick = () => showRegisterPanel(false);
+    // 모달: 배경 클릭·Esc 로 닫기 (등록 중이 아닐 때만 — 빈 레지스트리 기본 뷰면 닫아도 render 가 다시 염)
+    document.getElementById('registerBackdrop').onclick = (e) => { if (e.target.id === 'registerBackdrop') showRegisterPanel(false); };
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && !document.getElementById('registerBackdrop').hidden) showRegisterPanel(false);
+    });
+
+    let browseCurrent = '';
+    let browseMode = 'project';  // 'project' = registerPath 채움 / 'subrepo' = 상대경로로 체크리스트 추가
+    let browseRoot = '';         // subrepo 모드의 resolved 프로젝트 root (상대경로 계산 기준)
+    function relPath(root, target) {
+      // root 기준 target 의 상대경로 — root 밖이면 ../ 포함 (자유 등록 허용)
+      const r = root.replace(/\/+$/, '').split('/');
+      const t = target.replace(/\/+$/, '').split('/');
+      let i = 0; while (i < r.length && i < t.length && r[i] === t[i]) i++;
+      return [...r.slice(i).map(() => '..'), ...t.slice(i)].join('/') || '.';
+    }
+    async function openBrowse(path) {
+      const panel = document.getElementById('browsePanel');
+      try {
+        const data = await api('/api/browse' + (path ? ('?path=' + enc(path)) : ''));
+        browseCurrent = data.path;
+        document.getElementById('browsePath').textContent = data.path;
+        const list = document.getElementById('browseList');
+        list.innerHTML = '';
+        if (data.parent) {
+          const up = document.createElement('div');
+          up.className = 'browse-row'; up.innerHTML = '<span>📁 ..</span>';
+          up.onclick = () => openBrowse(data.parent);
+          list.appendChild(up);
+        }
+        for (const e of data.entries) {
+          const row = document.createElement('div');
+          row.className = 'browse-row';
+          row.innerHTML = `<span>📁 ${escapeHtml(e.name)}</span>${e.isGitRepo ? '<span class="repo-badge">git</span>' : ''}`;
+          row.onclick = () => openBrowse(data.path.replace(/\/$/, '') + '/' + e.name);
+          list.appendChild(row);
+        }
+        panel.hidden = false;
+      } catch (err) {
+        const el = document.getElementById('registerError');
+        el.textContent = String(err.message || err); el.hidden = false;
+      }
+    }
+    document.getElementById('registerBrowse').onclick = () => {
+      browseMode = 'project';
+      document.getElementById('registerError').after(document.getElementById('browsePanel')); // 경로줄 아래로
+      const cur = document.getElementById('registerPath').value.trim();
+      openBrowse(cur || '');
+    };
+    document.getElementById('registerManualBrowse').onclick = async () => {
+      const root = document.getElementById('registerPath').value.trim();
+      const err = document.getElementById('registerError');
+      if (!root) { err.textContent = '프로젝트 경로 먼저 입력'; err.hidden = false; return; }
+      err.hidden = true;
+      browseMode = 'subrepo';
+      document.querySelector('.register-manual').after(document.getElementById('browsePanel')); // 수동 입력줄 바로 아래로
+      try {
+        const data = await api('/api/browse?path=' + enc(root));
+        browseRoot = data.path;                 // resolved 프로젝트 root — 이 위로는 못 올라감
+        openBrowse(data.path);
+      } catch (e) { err.textContent = String(e.message || e); err.hidden = false; }
+    };
+    document.getElementById('browseSelect').onclick = () => {
+      if (browseMode === 'subrepo') {
+        const rel = relPath(browseRoot, browseCurrent);
+        if (rel !== '.') addChecklistRow(rel, true, true);  // root 자신만 제외, 그 외(../ 상위 포함)는 자유 등록
+      } else {
+        document.getElementById('registerPath').value = browseCurrent;
+      }
+      document.getElementById('browsePanel').hidden = true;
+    };
+    document.getElementById('registerInfer').onclick = () => {
+      const path = document.getElementById('registerPath').value.trim();
+      if (path) inferAndPreview(path, null); // 신규 = 전체 체크 기본
+    };
+    document.getElementById('registerConfirm').onclick = async () => {
+      const path = document.getElementById('registerPath').value.trim();
+      const subrepos = [...document.querySelectorAll('#registerChecklist input:checked')].map(c => c.value);
+      const err = document.getElementById('registerError');
+      const btn = document.getElementById('registerConfirm');
+      const label = btn.textContent;
+      err.hidden = true;
+      btn.disabled = true; btn.textContent = '등록 중…';
+      let res;
+      try {
+        res = await api('/api/add-project', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({ path, subrepos }),
+        });
+      } catch (e) {
+        err.textContent = String(e.message || e); err.hidden = false;
+        btn.disabled = false; btn.textContent = label;
+        return; // 패널 유지 — 사용자가 경로 고쳐 재시도
+      }
+      showRegisterPanel(false);
+      await loadWorktrees(true);
+      await load({ force: true });
+      btn.disabled = false; btn.textContent = label;
+      // 서버가 돌려준 resolved id 로 선택 (타이핑 경로 문자열 매칭의 basename 충돌·trailing slash 함정 회피)
+      if (res && res.id && [...new Set(worktreeData.map(w => w.projectId))].includes(res.id)) setSelectedProject(res.id);
+      else render();
+    };
+
+    async function openSubrepoEdit(sum) {
+      switcherOpen = false;
+      document.getElementById('registerTitle').textContent = `subrepos 편집 — ${sum.label}`;
+      document.getElementById('registerPath').value = sum.root;
+      document.getElementById('registerPath').disabled = true;
+      document.getElementById('registerBrowse').hidden = true;   // 편집: 경로 고정이라 탐색·분석 숨김(분석은 누르면 리셋 위험)
+      document.getElementById('registerInfer').hidden = true;
+      document.getElementById('registerError').hidden = true;
+      document.getElementById('registerPreview').hidden = true;
+      document.getElementById('browsePanel').hidden = true;
+      showRegisterPanel(true);
+      renderSwitcher();
+      // universe = infer(현재 nested-git 전수), checked = 레지스트리에 등록된 큐레이션 집합(main 엔트리 payload).
+      const mainEntry = worktreeData.find(w => w.projectId === sum.id && w.isMain);
+      const current = mainEntry ? (mainEntry.subrepos || []) : [];
+      await inferAndPreview(sum.root, current);
+    }
+
+    async function removeProject(sum) {
+      if (!confirm(`'${sum.label}' 등록을 해제할까요? (코드·worktree 는 그대로, 레지스트리에서만 제거)`)) return;
+      try {
+        await api('/api/remove-project', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({ id: sum.id }),
+        });
+      } catch (e) {
+        alert(`등록 해제 실패: ${e.message || e}`);
+        return;
+      }
+      if (selectedProjectId === sum.id) setSelectedProject(null);
+      await loadWorktrees(true);
+      await load({ force: true });
+      render();
+    }
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -2013,6 +2438,7 @@ INDEX_HTML = r"""<!doctype html>
 
     let worktreeData = [];
     let worktreeSignature = '';
+    let worktreesLoaded = false;  // 첫 /api/worktrees 응답 전엔 "빈 레지스트리" 판정 보류 (cold load 스퓨리어스 등록 모달 방지)
     async function loadWorktrees(refresh = false) {
       const data = await api(`/api/worktrees${refresh ? '?refresh=1' : ''}`);
       const nextSignature = JSON.stringify(data.worktrees ?? []);
@@ -2020,6 +2446,7 @@ INDEX_HTML = r"""<!doctype html>
       if (!refresh && nextSignature === worktreeSignature) return;
       worktreeSignature = nextSignature;
       worktreeData = data.worktrees ?? [];
+      worktreesLoaded = true;
       if (!configDirty) render(); // 카드의 디스크·캐시·배지 라인 갱신
     }
 
@@ -2682,21 +3109,19 @@ INDEX_HTML = r"""<!doctype html>
       sessionsEl.innerHTML = '';
 
       const wtByRoot = new Map(worktreeData.map(w => [w.root, w]));
-      // 멀티프로젝트면 프로젝트 그룹 헤더 (단일이면 생략 — 현 UX 동일)
-      const multiProject = new Set(worktreeData.map(w => w.projectId)).size > 1;
-      const seenProjects = new Set();
-      for (const session of sessions) {
+      // 등록 프로젝트 목록 — 선택 보정(선택이 사라졌으면 첫 프로젝트로 폴백)
+      const projectIds = [...new Set(worktreeData.map(w => w.projectId))];
+      if (selectedProjectId && !projectIds.includes(selectedProjectId)) selectedProjectId = null;
+      if (!selectedProjectId && projectIds.length) selectedProjectId = projectIds[0];
+      renderSwitcher();
+      // 빈 레지스트리 → 등록 패널이 기본 뷰 (spec C). 단 첫 worktree 로드 완료 후에만 — 로딩 중 스퓨리어스 방지
+      if (worktreesLoaded && !projectIds.length) { showRegisterPanel(true); return; }
+      // 선택 프로젝트로 스코프 — project-group 스태킹 대체 (세로 카드 목록 그대로)
+      const scopedSessions = sessions.filter(s => wtByRoot.get(s.root)?.projectId === selectedProjectId);
+      for (const session of scopedSessions) {
         const card = document.createElement('div');
         const isExpanded = expandedRoots.has(session.root);
         const wt = wtByRoot.get(session.root);
-        if (multiProject && wt && !seenProjects.has(wt.projectId)) {
-          seenProjects.add(wt.projectId);
-          const groupCount = sessions.filter(s => wtByRoot.get(s.root)?.projectId === wt.projectId).length;
-          const groupHead = document.createElement('div');
-          groupHead.className = 'project-group';
-          groupHead.innerHTML = `<span class="project-group-name">${escapeHtml(wt.projectLabel || wt.projectId)}</span><span class="project-group-meta" title="${escapeHtml(wt.projectRoot)}">${escapeHtml(shortPath(wt.projectRoot))} · ${groupCount} worktree</span>`;
-          sessionsEl.appendChild(groupHead);
-        }
         // 상태를 원자적 칩으로 — 칩 내부는 개행 금지, 칩 사이에서만 줄바꿈
         const pills = [];
         const changeCount = (session.worktreeStatus?.repos ?? []).reduce((sum, repo) => sum + (repo.changeCount || 0), 0);
@@ -3272,6 +3697,33 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"worktrees": [worktree_info(root, refresh) for root in discover_all_roots(refresh)]})
             return
 
+        if parsed.path == "/api/browse":
+            query = urllib.parse.parse_qs(parsed.query)
+            raw = query.get("path", [""])[0]
+            try:
+                base = (Path(raw).expanduser() if raw else Path.home()).resolve()
+                if not base.is_dir():
+                    raise ValueError(f"디렉토리 아님: {raw or '~'}")
+                entries = []
+                for child in sorted(base.iterdir(), key=lambda p: p.name.lower()):
+                    if child.name.startswith("."):
+                        continue
+                    try:
+                        if not child.is_dir():
+                            continue
+                    except OSError:
+                        continue
+                    entries.append({
+                        "name": child.name,
+                        "isDir": True,
+                        "isGitRepo": (child / ".git").exists(),
+                    })
+                parent = str(base.parent) if base.parent != base else None
+                self.send_json({"path": str(base), "parent": parent, "entries": entries})
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+
         if parsed.path == "/api/worktree-changes":
             query = urllib.parse.parse_qs(parsed.query)
             try:
@@ -3347,6 +3799,45 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(pids, list) or not all(isinstance(p, int) for p in pids):
                     raise ValueError("pids must be a list of integers")
                 self.send_json(kill_orphans(pids))
+                return
+
+            if self.path == "/api/infer-project":
+                target = Path(str(body.get("path", "")).strip()).expanduser()
+                if not str(body.get("path", "")).strip() or not target.is_dir():
+                    raise ValueError(f"디렉토리 없음: {body.get('path', '')}")
+                try:
+                    out = run_marina_registry("infer", str(target))
+                except subprocess.CalledProcessError as exc:
+                    raise ValueError((exc.output or "").strip() or str(exc))
+                self.send_json(json.loads(out.strip().splitlines()[-1]))
+                return
+
+            if self.path == "/api/add-project":
+                target = Path(str(body.get("path", "")).strip()).expanduser()
+                if not str(body.get("path", "")).strip() or not target.is_dir():
+                    raise ValueError(f"디렉토리 없음: {body.get('path', '')}")
+                subrepos = body.get("subrepos", [])
+                if not isinstance(subrepos, list) or not all(isinstance(s, str) for s in subrepos):
+                    raise ValueError("subrepos must be a list of strings")
+                try:
+                    out = run_marina_registry("add", str(target), "--subrepos", ",".join(subrepos))
+                except subprocess.CalledProcessError as exc:
+                    raise ValueError((exc.output or "").strip() or str(exc))
+                invalidate_registry_caches()
+                # id = realpath basename (registry_infer 와 동일) — 클라이언트가 새 프로젝트 선택에 사용
+                self.send_json({"ok": True, "id": target.resolve().name, "output": out.strip()})
+                return
+
+            if self.path == "/api/remove-project":
+                pid = str(body.get("id", "")).strip()
+                if not pid:
+                    raise ValueError("id required")
+                try:
+                    out = run_marina_registry("rm", pid)
+                except subprocess.CalledProcessError as exc:
+                    raise ValueError((exc.output or "").strip() or str(exc))
+                invalidate_registry_caches()
+                self.send_json({"ok": True, "output": out.strip()})
                 return
 
             root = safe_root(str(body.get("root", "")))

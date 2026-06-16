@@ -47,11 +47,29 @@ PY
 }
 
 registry_add() {
-  local entry; entry="$(registry_infer "${1:-}")" || exit $?
+  local path="" subrepos_csv="" have_subrepos=0
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --subrepos)
+        have_subrepos=1
+        if [[ $# -ge 2 ]]; then subrepos_csv="$2"; shift 2; else subrepos_csv=""; shift; fi
+        ;;
+      --subrepos=*)
+        have_subrepos=1; subrepos_csv="${1#--subrepos=}"; shift ;;
+      *)
+        [[ -z "$path" ]] || die "add: 인자 과다 ('$1')"
+        path="$1"; shift ;;
+    esac
+  done
+  local entry; entry="$(registry_infer "$path")" || exit $?
   mkdir -p "$MARINA_HOME"
-  python3 - "$PROJECTS_FILE" "$entry" <<'PY'
+  python3 - "$PROJECTS_FILE" "$entry" "$have_subrepos" "$subrepos_csv" <<'PY'
 import json, os, sys
 projects_file, entry = sys.argv[1], json.loads(sys.argv[2])
+have_subrepos, subrepos_csv = sys.argv[3] == "1", sys.argv[4]
+# 플래그 존재 시 추론 대신 명시 집합(빈 값이면 []=모노레포). 부재 시 추론 그대로.
+if have_subrepos:
+    entry["subrepos"] = [s for s in (x.strip() for x in subrepos_csv.split(",")) if s]
 try:
     data = json.load(open(projects_file, encoding="utf-8"))
     if not isinstance(data, dict): data = {}
@@ -147,10 +165,12 @@ codex_wt = os.path.realpath(os.path.expanduser(os.environ.get("CODEX_WORKTREES_R
 projects = data.get("projects", [])
 norm = lambda p: os.path.realpath(os.path.expanduser(p.get("root", "")))
 match = None
+best_len = -1
 for p in projects:
     pr = norm(p)
     if root == pr or root.startswith(pr + os.sep):
-        match = p; break
+        if len(pr) > best_len:
+            match = p; best_len = len(pr)
 # basename 패스는 codex 레이아웃(<worktrees>/<id>/<basename>) 한정 — 동일 basename 다중 프로젝트 오매핑 방지
 if match is None and os.path.dirname(os.path.dirname(root)) == codex_wt:
     base = os.path.basename(root)
@@ -297,7 +317,7 @@ usage:
     marina.sh status | status-all | ports
     marina.sh logs [service]
   registry (~/.marina/projects.json, 위치 무관):
-    marina.sh add <project-path>     # 서브레포·worktreeGlobs 자동 추론 후 등록
+    marina.sh add <project-path> [--subrepos a,b,c]   # 등록. --subrepos 생략=자동 추론, 명시=정확히 그 집합(빈 값=모노레포)
     marina.sh infer <project-path>   # 추론만 — JSON 출력, 미기록
     marina.sh rm <id>
     marina.sh ls

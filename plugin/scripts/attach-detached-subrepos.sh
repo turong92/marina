@@ -38,10 +38,12 @@ codex_wt = os.path.realpath(os.path.expanduser(os.environ.get("CODEX_WORKTREES_R
 projects = data.get("projects", [])
 norm = lambda p: os.path.realpath(os.path.expanduser(p.get("root", "")))
 match = None
+best_len = -1
 for p in projects:
     pr = norm(p)
     if root == pr or root.startswith(pr + os.sep):
-        match = p; break
+        if len(pr) > best_len:
+            match = p; best_len = len(pr)
 # basename 패스는 codex 레이아웃(<worktrees>/<id>/<basename>) 한정 — 동일 basename 다중 프로젝트 오매핑 방지
 if match is None and os.path.dirname(os.path.dirname(root)) == codex_wt:
     base = os.path.basename(root)
@@ -70,10 +72,12 @@ codex_wt = os.path.realpath(os.path.expanduser(os.environ.get("CODEX_WORKTREES_R
 projects = data.get("projects", [])
 norm = lambda p: os.path.realpath(os.path.expanduser(p.get("root", "")))
 match = None
+best_len = -1
 for p in projects:
     pr = norm(p)
     if root == pr or root.startswith(pr + os.sep):
-        match = p; break
+        if len(pr) > best_len:
+            match = p; best_len = len(pr)
 if match is None and os.path.dirname(os.path.dirname(root)) == codex_wt:
     base = os.path.basename(root)
     for p in projects:
