@@ -58,6 +58,42 @@ print(" ".join(str(s) for s in match.get("subrepos", [])))
 PY
 }
 
+# 새 worktree 자동 attach 집합 = 레지스트리 defaultAttach(명시) → subrepos(부재 시 전체) → 미등록이면 실패(3)
+registry_default_for() {
+  command -v python3 >/dev/null 2>&1 || return 3
+  [[ -f "$PROJECTS_FILE" ]] || return 3
+  python3 - "$PROJECTS_FILE" "$1" <<'PY'
+import json, os, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(3)
+root = os.path.realpath(os.path.expanduser(sys.argv[2]))
+codex_wt = os.path.realpath(os.path.expanduser(os.environ.get("CODEX_WORKTREES_ROOT") or "~/.codex/worktrees"))
+projects = data.get("projects", [])
+norm = lambda p: os.path.realpath(os.path.expanduser(p.get("root", "")))
+match = None
+best_len = -1
+for p in projects:
+    pr = norm(p)
+    if root == pr or root.startswith(pr + os.sep):
+        if len(pr) > best_len:
+            match = p; best_len = len(pr)
+if match is None and os.path.dirname(os.path.dirname(root)) == codex_wt:
+    base = os.path.basename(root)
+    for p in projects:
+        if os.path.basename(norm(p)) == base:
+            match = p; break
+if match is None and len(projects) == 1:
+    match = projects[0]
+if match is None:
+    sys.exit(3)
+da = match.get("defaultAttach")
+subs = da if isinstance(da, list) else match.get("subrepos", [])
+print(" ".join(str(s) for s in subs))
+PY
+}
+
 registry_source_root_for() {
   command -v python3 >/dev/null 2>&1 || return 3
   [[ -f "$PROJECTS_FILE" ]] || return 3
@@ -97,7 +133,8 @@ resolve_subrepos() {
     read -r -a SUBREPOS <<< "$MARINA_SUBREPOS"
     return
   fi
-  if from_registry="$(registry_subrepos_for "$DEST_ROOT")"; then
+  # 자동 attach(env 미지정) = defaultAttach 집합 (부재 시 전체 universe). 대시보드 단일 attach 는 위 env 경로.
+  if from_registry="$(registry_default_for "$DEST_ROOT")"; then
     read -r -a SUBREPOS <<< "$from_registry"
     return
   fi
@@ -327,6 +364,20 @@ main() {
   if [[ "$SOURCE_ROOT" == "$DEST_ROOT" ]]; then
     echo "skip: source==dest ($SOURCE_ROOT) — main 체크아웃/단일레포라 attach 대상 없음"
     exit 0
+  fi
+
+  # 자동 attach(MARINA_SUBREPOS 미지정 = defaultAttach 경로)는 "첫 실행(fresh worktree)"에만.
+  # universe 중 하나라도 이미 attach 돼 있으면 사용자가 커스터마이즈한 상태로 보고 건드리지 않는다
+  # — detach 한 default 를 세션 시작마다 되살리지 않기 위함 (design open item 1 결정). 대시보드 단일 attach 는 env 로 우회.
+  if [[ -z "${MARINA_SUBREPOS:-}" ]]; then
+    local universe_str repo
+    universe_str="$(registry_subrepos_for "$DEST_ROOT" || true)"
+    for repo in $universe_str; do
+      if [[ -e "$DEST_ROOT/$repo/.git" ]]; then
+        echo "skip auto-attach: worktree already initialized ($repo attached) — 수동 attach 는 대시보드"
+        return 0
+      fi
+    done
   fi
 
   id="$(worktree_id)"

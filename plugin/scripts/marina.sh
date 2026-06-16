@@ -108,6 +108,32 @@ print(f"removed: {target}")
 PY
 }
 
+registry_default() {
+  local id="${1:-}" csv="${2-}"
+  [[ -n "$id" ]] || die "usage: marina.sh default <id> <a,b,c>  (빈 값=전부 비움)"
+  command -v python3 >/dev/null 2>&1 || die "python3 필요"
+  [[ -f "$PROJECTS_FILE" ]] || die "레지스트리 없음: $PROJECTS_FILE"
+  python3 - "$PROJECTS_FILE" "$id" "$csv" <<'PY'
+import json, sys
+projects_file, target, csv = sys.argv[1], sys.argv[2], sys.argv[3]
+data = json.load(open(projects_file, encoding="utf-8"))
+projects = data.get("projects", [])
+match = next((p for p in projects if p.get("id") == target), None)
+if match is None:
+    print(f"not found: {target}", file=sys.stderr); sys.exit(1)
+universe = [str(s) for s in match.get("subrepos", [])]
+want = [s for s in (x.strip() for x in csv.split(",")) if s]
+bad = [s for s in want if s not in universe]
+if bad:
+    print(f"not in subrepos ({', '.join(universe) or 'none'}): {', '.join(bad)}", file=sys.stderr)
+    sys.exit(1)
+match["defaultAttach"] = want
+with open(projects_file, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=False, indent=2)
+print(f"defaultAttach[{target}]: {', '.join(want) or '(none — 새 worktree 자동 attach 없음)'}")
+PY
+}
+
 registry_ls() {
   command -v python3 >/dev/null 2>&1 || die "python3 필요"
   if [[ ! -f "$PROJECTS_FILE" ]]; then
@@ -137,6 +163,7 @@ case "${1:-}" in
   add)         shift; registry_add "$@";   exit $? ;;
   infer)       shift; registry_infer "$@"; exit $? ;;
   rm)          shift; registry_rm "$@";    exit $? ;;
+  default)     shift; registry_default "$@"; exit $? ;;
   ls|projects) registry_ls;               exit $? ;;
 esac
 

@@ -158,10 +158,12 @@ def load_projects() -> list[dict[str, Any]]:
         for entry in data.get("projects", []):
             # resolve — 발견 경로와 매칭 일관성 (심볼릭링크·~)
             root = Path(str(entry["root"])).expanduser().resolve()
+            _da = entry.get("defaultAttach")
             items.append({
                 "id": str(entry.get("id") or root.name),
                 "root": root,
                 "subrepos": [str(s) for s in entry.get("subrepos", [])],
+                "defaultAttach": [str(s) for s in _da] if isinstance(_da, list) else None,
                 "worktreeGlobs": [str(g) for g in entry.get("worktreeGlobs", [])],
             })
     except Exception:
@@ -205,6 +207,15 @@ def project_for(root: Path) -> dict[str, Any] | None:
 def subrepos_of(root: Path) -> list[str]:
     project = project_for(root)
     return list(project["subrepos"]) if project else list(_DEFAULT_SUBREPOS)
+
+
+def default_attach_of(root: Path) -> list[str] | None:
+    # 전체 기본 attach 집합 (명시값). 부재 시 None → 호출부가 "전체 universe" 로 해석 (backward compatible).
+    project = project_for(root)
+    if not project:
+        return None
+    da = project.get("defaultAttach")
+    return [str(s) for s in da] if isinstance(da, list) else None
 
 
 def project_label(root: Path) -> str:
@@ -1076,6 +1087,52 @@ def services_for(root: Path) -> tuple[str, ...]:
     return _BUILTIN_SERVICES + extra
 
 
+def service_subrepo(cwd: str, subrepos: list[str]) -> str:
+    # 서비스 cwd → 소속 subrepo. 등록 subrepo 중 cwd 의 longest-prefix 매치
+    #   (projects/react-skeleton 같은 슬래시 subrepo 대응 — '첫 세그먼트' 룰의 한계 보완).
+    # 매치 없음: root('.'/빈값) → "" (ungrouped, 카드 상단). 그 외 → 첫 세그먼트(미등록 그룹, 토글 없이 노출).
+    norm = cwd.strip().strip("/")
+    if not norm or norm == ".":
+        return ""
+    best = ""
+    for s in subrepos:
+        if (norm == s or norm.startswith(s + "/")) and len(s) > len(best):
+            best = s
+    return best or norm.split("/", 1)[0]
+
+
+def service_subrepo_map(root: Path) -> dict[str, str]:
+    # {서비스명: 소속 subrepo} — 프로젝트 marina-services.json 의 cwd 기준.
+    project = project_for(root)
+    proot = Path(project["root"]) if project else root
+    subs = subrepos_of(root)
+    try:
+        data = json.loads((proot / "marina-services.json").read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    out: dict[str, str] = {}
+    for item in data.get("services", []):
+        name = str(item.get("name", "")).strip()
+        if name and name.isidentifier():
+            out[name] = service_subrepo(str(item.get("cwd", "")), subs)
+    return out
+
+
+def _tagged_services(
+    root: Path,
+    ports: dict[str, str],
+    snapshot: list[dict[str, Any]] | None,
+    listeners_by_port: dict[str, list[int]] | None,
+) -> list[dict[str, Any]]:
+    smap = service_subrepo_map(root)
+    out: list[dict[str, Any]] = []
+    for svc in services_for(root):
+        st = service_status(root, svc, ports.get(svc), snapshot, listeners_by_port)
+        st["subrepo"] = smap.get(svc, "")
+        out.append(st)
+    return out
+
+
 def session_payload(
     root: Path,
     snapshot: list[dict[str, Any]] | None = None,
@@ -1090,7 +1147,7 @@ def session_payload(
         "ports": ports,
         "config": read_config(root),
         "worktreeStatus": worktree_status_cached(root),
-        "services": [service_status(root, svc, ports.get(svc), snapshot, listeners_by_port) for svc in services_for(root)],
+        "services": _tagged_services(root, ports, snapshot, listeners_by_port),
         "consoleLogRuns": log_run_payload(root, "console"),
     }
 
@@ -1282,6 +1339,63 @@ def remove_worktree(root: Path, force: bool = False) -> dict[str, Any]:
     return results
 
 
+def attach_subrepo_action(root: Path, subrepo: str) -> dict[str, Any]:
+    # 단일 subrepo 물리 attach — 기존 attach 스크립트 재사용(MARINA_SUBREPOS=<하나>). idempotent + yml/env/venv 동기화.
+    source = source_root_for(root)
+    if source.resolve() == root.resolve():
+        raise ValueError("원본 체크아웃에는 attach 대상이 없습니다")
+    env = {
+        **os.environ,
+        "DEST_ROOT": str(root),
+        "SOURCE_ROOT": str(source),
+        "MARINA_SUBREPOS": subrepo,
+        "SYNC_IDEA": os.environ.get("SYNC_IDEA", "false"),
+    }
+    try:
+        out = subprocess.check_output([str(MARINA_ATTACH)], text=True, stderr=subprocess.STDOUT, env=env)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError((exc.output or "").strip() or str(exc))
+    _worktree_info_cache.pop(str(root), None)
+    _status_cache.pop(str(root), None)
+    return {"ok": True, "attached": subrepo, "output": out.strip()}
+
+
+def detach_subrepo_action(root: Path, subrepo: str, force: bool = False, stop_services: bool = False) -> dict[str, Any]:
+    target = root / subrepo
+    if not (target / ".git").exists():
+        return {"ok": True, "detached": subrepo, "note": "already detached"}
+    # 1) 이 subrepo 의 구동 중 서비스 — 살아있는 프로세스가 디렉토리를 점유하므로 먼저 정지.
+    smap = service_subrepo_map(root)
+    ports = ports_for(root)
+    running = [
+        svc for svc in services_for(root)
+        if smap.get(svc) == subrepo and service_status(root, svc, ports.get(svc))["running"]
+    ]
+    if running and not stop_services:
+        return {"needsStop": running}
+    for svc in running:
+        stop_service(root, svc)
+    # 정지 실패(고착 프로세스)면 git worktree remove 가 디렉토리 점유로 모호하게 실패 — 선제로 명확한 에러 반환.
+    still_running = [svc for svc in running if service_status(root, svc, ports.get(svc))["running"]]
+    if still_running:
+        return {"error": f"서비스 정지 실패로 detach 중단: {', '.join(still_running)} (수동 정지 후 재시도)"}
+    # 2) dirty working tree — clean 이면 지금 제거, 미커밋 변경 있으면 confirm 후 --force.
+    status = worktree_status(root)
+    entry = next((r for r in status["repos"] if r["name"] == subrepo), None)
+    if entry and entry.get("dirty") and not force:
+        return {"needsConfirm": True, "changes": entry.get("changes", [])}
+    source_repo = source_root_for(root) / subrepo
+    if not source_repo.exists():
+        return {"error": f"source repo not found: {source_repo}"}
+    # 브랜치는 보존(worktree remove 만) — 미머지 커밋 안전, 재attach 시 재사용.
+    res = remove_git_worktree(source_repo, target, force=force)
+    _worktree_info_cache.pop(str(root), None)
+    _status_cache.pop(str(root), None)
+    if "error" in res:
+        return res
+    return {"ok": True, "detached": subrepo, **res}
+
+
 def memory_block(force: bool) -> dict[str, Any] | None:
     # 가용 메모리가 기준 미만이면 시작을 막는다 (UI confirm 후 force=true 로 재시도 가능)
     if force:
@@ -1396,6 +1510,10 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
         return cached[1]
 
     is_main = is_source_checkout(root)
+    subs = subrepos_of(root)
+    # 물리 attach 상태(fs 판정). main 체크아웃은 원본 클론이라 전부 attach 로 본다.
+    attached_subrepos = list(subs) if is_main else [s for s in subs if (root / s / ".git").exists()]
+    default_explicit = default_attach_of(root)
     status = worktree_status(root)
     last_ts = 0
     ahead: dict[str, int] = {}
@@ -1446,6 +1564,10 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
         "projectRoot": str(project["root"]) if project else str(root),
         # 레지스트리에 등록된 subrepos(큐레이션된 집합) — switcher "subrepos 편집" 프리필용. fs 의 universe(infer)와 구분.
         "subrepos": list(project["subrepos"]) if project else [],
+        # 이 worktree 에 물리 attach 된 subrepo (fs 판정; main 은 전부). 클라이언트 트리 attach 상태원.
+        "attachedSubrepos": attached_subrepos,
+        # 전체 기본 attach 집합 — 명시값 없으면 universe(=전부). main 카드 "기본" 토글 프리필.
+        "defaultAttach": default_explicit if default_explicit is not None else list(subs),
         "isMain": is_main,
         "clean": status["clean"],
         # main 체크아웃 전체 du 는 수백 GB 라 비싸고 UI 에서도 안 씀 → 스킵
@@ -1794,6 +1916,25 @@ INDEX_HTML = r"""<!doctype html>
     .session.collapsed .session-head { border-bottom: 0; }
     .svc { display: grid; grid-template-columns: 86px 72px minmax(0, 1fr); gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--sys-style-neutral-light); cursor: pointer; }
     .svc:hover, .svc.selected { background: var(--sys-bg-surface-hover); }
+    /* subrepo ⊃ service 트리 */
+    .subrepo-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-base); }
+    .subrepo-row.detached { opacity: 0.72; }
+    .subrepo-main { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; flex: 1; }
+    .subrepo-name { font-size: 13px; font-weight: 700; line-height: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .subrepo-count { color: var(--sys-cont-neutral-lightest); font-size: 11px; white-space: nowrap; }
+    .subrepo-count.muted { font-style: italic; }
+    .subrepo-ctl { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .subrepo-chip { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 6px; font-size: 11px; font-weight: 700; background: var(--sys-style-neutral-light); color: var(--sys-cont-neutral-light); }
+    .subrepo-chip.on { background: hsl(148, 55%, 94%); color: var(--sys-cont-positive-default); }
+    .subrepo-chip.warn { background: hsl(36, 90%, 94%); color: hsl(30, 80%, 38%); }
+    .subrepo-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: var(--sys-cont-neutral-light); cursor: pointer; }
+    .subrepo-toggle input { margin: 0; cursor: pointer; }
+    .subrepo-act { height: 24px; padding: 0 10px; font-size: 11px; font-weight: 700; }
+    .subrepo-body { display: grid; }
+    .subrepo-body .svc { padding-left: 30px; }   /* nested 들여쓰기 */
+    .svc.disabled { cursor: default; opacity: 0.5; }
+    .svc.disabled:hover { background: transparent; }
+    .svc.disabled .actions { display: none; }
     .svc-name { font-size: 13px; font-weight: 700; line-height: 1; }
     .svc-port { color: var(--sys-cont-neutral-lightest); font-size: 12px; line-height: 1.6; margin-top: 3px; }
     .pill { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 24px; border-radius: 6px; font-size: 12px; font-weight: 700; }
@@ -2013,6 +2154,7 @@ INDEX_HTML = r"""<!doctype html>
     let sessionSignature = '';
     const openConfigRoots = new Set();
     const expandedRoots = new Set();
+    const subrepoOpen = new Map();   // `${root}::${subrepo}` → bool (펼침). 미설정이면 attached=펼침 기본.
     let selectedProjectId = localStorage.getItem('marinaSelectedProject') || null;
     let switcherOpen = false;
 
@@ -2490,6 +2632,49 @@ INDEX_HTML = r"""<!doctype html>
         headers: {'content-type': 'application/json'},
         body: JSON.stringify({root: session.root})
       });
+      await load({force: true});
+    }
+
+    async function setDefaultAttach(session, wt, name, want) {
+      const cur = new Set(wt?.defaultAttach ?? wt?.subrepos ?? []);
+      if (want) cur.add(name); else cur.delete(name);
+      const r = await api('/api/set-default-attach', {
+        method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({root: session.root, subrepos: [...cur]}),
+      });
+      if (r?.error) { alert(`기본 attach 변경 실패: ${r.error}`); }
+      await loadWorktrees(true);
+      render();
+    }
+
+    async function attachSubrepo(session, name) {
+      const r = await api('/api/attach-subrepo', {
+        method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({root: session.root, subrepo: name}),
+      });
+      if (r?.error) { alert(`attach 실패: ${r.error}`); return; }
+      await loadWorktrees(true);
+      await load({force: true});
+    }
+
+    async function detachSubrepo(session, name) {
+      const body = {root: session.root, subrepo: name};
+      const send = () => api('/api/detach-subrepo', {
+        method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify(body),
+      });
+      let r = await send();
+      if (r?.needsStop) {
+        if (!confirm(`${name} 에서 구동 중인 서비스(${r.needsStop.join('·')})를 정지하고 detach 할까?`)) return;
+        body.stopServices = true;
+        r = await send();
+      }
+      if (r?.needsConfirm) {
+        if (!confirm(`${name} 에 미커밋 변경분이 있어. detach 하면 변경·untracked 가 폐기돼 (브랜치·커밋은 보존). 폐기하고 detach 할까?`)) return;
+        body.force = true;
+        r = await send();
+      }
+      if (r?.error) { alert(`detach 실패: ${r.error}`); return; }
+      await loadWorktrees(true);
       await load({force: true});
     }
 
@@ -3083,6 +3268,7 @@ INDEX_HTML = r"""<!doctype html>
         for (const svc of session.services) {
           const row = document.querySelector(`[data-service-key="${CSS.escape(`${session.root}::${svc.service}`)}"]`);
           if (!row) continue;
+          if (row.classList.contains('disabled')) continue;   // 미attach subrepo 의 서비스 — 라이브 상태로 덮지 않음
           const port = row.querySelector('[data-port]');
           const rss = row.querySelector('[data-rss]');
           const pill = row.querySelector('[data-state]');
@@ -3329,49 +3515,134 @@ INDEX_HTML = r"""<!doctype html>
             }, toolButtons);
           };
         }
-        const list = card.querySelector('.svc-list');
-
-        for (const svc of session.services) {
-          const row = document.createElement('div');
-          row.className = 'svc';
-          row.title = '클릭하면 이 서비스의 로그를 우측에 표시';
-          row.dataset.serviceKey = `${session.root}::${svc.service}`;
-          const state = pillState(svc);
-          row.innerHTML = `
-            <div><div class="svc-name">${svc.service}</div><div class="svc-port"><span data-port>${svc.port ?? '-'}</span><span data-rss>${svc.running && svc.rssMb ? ` · ${svc.rssMb}MB` : ''}</span></div></div>
-            <div class="pill ${state.cls}" data-state title="${escapeHtml(state.title)}">${state.text}</div>
-            <div class="actions"></div>
-          `;
-          row.onclick = () => selectLog(session.root, svc.service, 'current', 'service');
-          const actions = row.querySelector('.actions');
-          const busyLabels = {start: '…', stop: '…', restart: '…'};
-          const actionTitles = {
-            start: 'Start — 기동. 포트 점유 시 빈 포트로 자동 이동, 가용 메모리 부족 시 차단',
-            stop: 'Stop — 프로세스 그룹 정지 (TERM→KILL)',
-            restart: 'Restart — 정지 후 재기동',
-          };
-          // 상태 적응형: 정지 상태엔 ▶ 만, 구동 중엔 ■·↻ 만 — updateServiceStates 가 토글
-          for (const [label, type, cls] of [['▶', 'start', 'primary'], ['■', 'stop', 'danger'], ['↻', 'restart', '']]) {
-            const btn = document.createElement('button');
-            btn.textContent = label;
-            btn.title = actionTitles[type];
-            btn.dataset.act = type;
-            if (cls) btn.className = cls;
-            btn.hidden = type === 'start' ? svc.running : !svc.running;
-            btn.onclick = (event) => {
-              event.stopPropagation();
-              withBusy(btn, busyLabels[type], () => action(type, session.root, svc.service), actions.querySelectorAll('button'));
-            };
-            actions.appendChild(btn);
-          }
-          list.appendChild(row);
-        }
+        renderServiceTree(card.querySelector('.svc-list'), session, wt);
         sessionsEl.appendChild(card);
       }
       const collapseBtn = document.getElementById('collapseAll');
       collapseBtn.textContent = expandedRoots.size ? '⇈' : '⇊';
       collapseBtn.dataset.tip = expandedRoots.size ? '세션 카드 모두 접기' : '세션 카드 모두 펼치기';
       renderSelection();
+    }
+
+    function makeSvcRow(session, svc, disabled) {
+      const row = document.createElement('div');
+      row.className = 'svc nested' + (disabled ? ' disabled' : '');
+      row.dataset.serviceKey = `${session.root}::${svc.service}`;
+      const state = pillState(svc);
+      row.title = disabled ? 'subrepo 미attach — attach 후 사용 가능' : '클릭하면 이 서비스의 로그를 우측에 표시';
+      row.innerHTML = `
+        <div><div class="svc-name">${svc.service}</div><div class="svc-port"><span data-port>${svc.port ?? '-'}</span><span data-rss>${svc.running && svc.rssMb ? ` · ${svc.rssMb}MB` : ''}</span></div></div>
+        <div class="pill ${disabled ? 'stop' : state.cls}" data-state title="${escapeHtml(disabled ? 'subrepo 미attach' : state.title)}">${disabled ? '—' : state.text}</div>
+        <div class="actions"></div>
+      `;
+      if (disabled) return row;
+      row.onclick = () => selectLog(session.root, svc.service, 'current', 'service');
+      const actions = row.querySelector('.actions');
+      const busyLabels = {start: '…', stop: '…', restart: '…'};
+      const actionTitles = {
+        start: 'Start — 기동. 포트 점유 시 빈 포트로 자동 이동, 가용 메모리 부족 시 차단',
+        stop: 'Stop — 프로세스 그룹 정지 (TERM→KILL)',
+        restart: 'Restart — 정지 후 재기동',
+      };
+      for (const [label, type, cls] of [['▶', 'start', 'primary'], ['■', 'stop', 'danger'], ['↻', 'restart', '']]) {
+        const btn = document.createElement('button');
+        btn.textContent = label;
+        btn.title = actionTitles[type];
+        btn.dataset.act = type;
+        if (cls) btn.className = cls;
+        btn.hidden = type === 'start' ? svc.running : !svc.running;
+        btn.onclick = (event) => {
+          event.stopPropagation();
+          withBusy(btn, busyLabels[type], () => action(type, session.root, svc.service), actions.querySelectorAll('button'));
+        };
+        actions.appendChild(btn);
+      }
+      return row;
+    }
+
+    function renderSubrepoHead(name, o) {
+      const chev = o.count ? `<span class="chev">${o.open ? '▾' : '▸'}</span>` : '<span class="chev"></span>';
+      let control = '';
+      if (!o.inUniverse) {
+        control = '<span class="subrepo-chip warn" title="서비스 cwd 가 가리키는 subrepo 가 레지스트리에 없음 — ⚙ 에서 등록하면 attach 가능">미등록</span>';
+      } else if (o.isMain) {
+        control = `<label class="subrepo-toggle" title="새 worktree 자동 attach 대상(전체 기본). 체크 해제해도 main 의 클론은 보존돼"><input type="checkbox" data-default-toggle ${o.isDefault ? 'checked' : ''}/> 기본</label>`;
+      } else if (o.isAttached) {
+        control = '<button class="subrepo-act" data-detach title="이 worktree 에서 detach (git worktree remove) — 브랜치·미머지 커밋은 보존">detach</button>';
+      } else {
+        control = '<button class="subrepo-act primary" data-attach title="이 worktree 에 attach (git worktree add) — 같은 이름 브랜치 있으면 재사용">attach</button>';
+      }
+      const stateChip = o.isMain ? '' : `<span class="subrepo-chip ${o.isAttached ? 'on' : ''}">${o.isAttached ? 'attached' : 'detached'}</span>`;
+      return `
+        <div class="subrepo-main">
+          ${chev}
+          <span class="subrepo-name">${escapeHtml(name)}</span>
+          ${o.count ? `<span class="subrepo-count">${o.count} svc</span>` : '<span class="subrepo-count muted">no svc</span>'}
+        </div>
+        <div class="subrepo-ctl">${stateChip}${control}</div>
+      `;
+    }
+
+    function renderServiceTree(list, session, wt) {
+      list.innerHTML = '';
+      const universe = wt?.subrepos ?? [];
+      const isMain = !!wt?.isMain;
+      const attached = new Set(wt?.attachedSubrepos ?? universe);
+      const defaults = new Set(wt?.defaultAttach ?? universe);
+
+      // 서비스 → subrepo 그룹핑 (svc.subrepo 태그). 빈 태그 = root cwd → ungrouped.
+      const byGroup = new Map();
+      const rootSvcs = [];
+      for (const svc of session.services) {
+        const g = svc.subrepo || '';
+        if (!g) { rootSvcs.push(svc); continue; }
+        if (!byGroup.has(g)) byGroup.set(g, []);
+        byGroup.get(g).push(svc);
+      }
+      // 그룹 순서: universe 순서 + 서비스만 참조하는 미등록 그룹은 뒤에.
+      const groups = [...universe];
+      for (const g of byGroup.keys()) if (!groups.includes(g)) groups.push(g);
+
+      // 1) 루트(cwd '.') 서비스 — 카드 상단 ungrouped.
+      for (const svc of rootSvcs) list.appendChild(makeSvcRow(session, svc, false));
+
+      // 2) subrepo ⊃ service.
+      for (const name of groups) {
+        const inUniverse = universe.includes(name);
+        const isAttached = isMain || attached.has(name);
+        const isDefault = defaults.has(name);
+        const svcs = byGroup.get(name) ?? [];
+        const key = `${session.root}::${name}`;
+        const open = subrepoOpen.has(key) ? subrepoOpen.get(key) : isAttached;
+
+        const head = document.createElement('div');
+        head.className = 'subrepo-row' + (isAttached ? '' : ' detached');
+        head.innerHTML = renderSubrepoHead(name, {isMain, isAttached, isDefault, inUniverse, open, count: svcs.length});
+        list.appendChild(head);
+
+        const body = document.createElement('div');
+        body.className = 'subrepo-body';
+        body.hidden = !open;
+        for (const svc of svcs) body.appendChild(makeSvcRow(session, svc, !isAttached));
+        list.appendChild(body);
+
+        head.querySelector('.subrepo-main').onclick = () => {
+          subrepoOpen.set(key, !open);
+          render();
+        };
+        wireSubrepoToggle(head, session, wt, name, {isMain, isAttached, isDefault, inUniverse});
+      }
+    }
+
+    function wireSubrepoToggle(head, session, wt, name, o) {
+      if (o.isMain && o.inUniverse) {
+        const cb = head.querySelector('[data-default-toggle]');
+        if (cb) cb.onchange = () => withBusy(cb, '…', () => setDefaultAttach(session, wt, name, cb.checked));
+      }
+      const attachBtn = head.querySelector('[data-attach]');
+      if (attachBtn) attachBtn.onclick = (e) => { e.stopPropagation(); withBusy(attachBtn, '등록 중…', () => attachSubrepo(session, name)); };
+      const detachBtn = head.querySelector('[data-detach]');
+      if (detachBtn) detachBtn.onclick = (e) => { e.stopPropagation(); withBusy(detachBtn, '…', () => detachSubrepo(session, name)); };
     }
 
     function configInput(session, key, fallback = '') {
@@ -3875,6 +4146,46 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/fix-port-conflict":
                 self.send_json(fix_port_conflict(root))
+                return
+
+            if self.path == "/api/set-default-attach":
+                project = project_for(root)
+                if not project:
+                    raise ValueError("미등록 프로젝트")
+                # main/project 카드 전용 — worktree 에서 호출 거부.
+                if not (project["root"].resolve() == root.resolve() or is_source_checkout(root)):
+                    raise ValueError("기본 attach 편집은 main 카드에서만 가능합니다")
+                subs = body.get("subrepos")
+                if not isinstance(subs, list) or not all(isinstance(s, str) for s in subs):
+                    raise ValueError("subrepos must be a list of strings")
+                universe = set(subrepos_of(root))
+                bad = [s for s in subs if s not in universe]
+                if bad:
+                    raise ValueError(f"등록되지 않은 subrepo: {', '.join(bad)}")
+                try:
+                    out = run_marina_registry("default", project["id"], ",".join(subs))
+                except subprocess.CalledProcessError as exc:
+                    raise ValueError((exc.output or "").strip() or str(exc))
+                invalidate_registry_caches()
+                self.send_json({"ok": True, "output": out.strip()})
+                return
+
+            if self.path in ("/api/attach-subrepo", "/api/detach-subrepo"):
+                subrepo = str(body.get("subrepo", "")).strip()
+                if subrepo not in subrepos_of(root):
+                    raise ValueError("등록되지 않은 subrepo")
+                project = project_for(root)
+                is_main_card = (project and project["root"].resolve() == root.resolve()) or is_source_checkout(root)
+                if is_main_card:
+                    raise ValueError("main 체크아웃은 물리 attach/detach 하지 않습니다 (기본 attach 편집만)")
+                if self.path == "/api/attach-subrepo":
+                    self.send_json(attach_subrepo_action(root, subrepo))
+                else:
+                    self.send_json(detach_subrepo_action(
+                        root, subrepo,
+                        force=bool(body.get("force")),
+                        stop_services=bool(body.get("stopServices")),
+                    ))
                 return
 
             service = safe_service(str(body.get("service", "")))

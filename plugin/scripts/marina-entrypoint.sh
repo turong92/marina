@@ -25,6 +25,7 @@ usage:
     marina add <project-path>     # 서브레포·worktreeGlobs 자동 추론 후 등록
     marina infer <project-path>   # 추론만 — JSON 출력, 미기록
     marina rm <id>
+    marina default <id> a,b,c     # 새 worktree 가 자동 attach 할 기본 집합(전체 기본). 빈 값=없음
     marina ls
     marina install-cli            # 안정적 marina 셰임을 PATH 에 설치 (자동 업데이트 생존)
     marina uninstall-cli          # 설치된 marina 셰임 제거
@@ -53,7 +54,7 @@ command="${1:-dashboard}"
 shift || true
 
 case "$command" in
-  add|infer|rm|ls|projects)
+  add|infer|rm|default|ls|projects)
     "$SESSION" "$command" "$@"
     ;;
   dashboard|dash|up|start)

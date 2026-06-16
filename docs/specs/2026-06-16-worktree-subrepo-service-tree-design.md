@@ -23,7 +23,7 @@ Two linked changes to the worktree card:
 - **default attach set (전체 기본)** = a per-project subset of the universe that **new worktrees auto-attach**. New optional registry field `defaultAttach`; absent ⇒ the whole universe (backward compatible). Edited on the **main** card.
 - **per-worktree attach state** = which subrepos are physically attached in a given worktree. Filesystem-derived (`<worktree>/<subrepo>/.git` exists). Initialized from the default at creation; freely overridden (attach any universe subrepo, detach any) on that worktree's card.
 
-**service** = a process from `marina-services.json`, located by `cwd` whose first segment is its subrepo (or `.` = root). A subrepo holds 0..N services. subrepo and service are different axes (code vs process) and are **not merged** — the UI nests services under their subrepo.
+**service** = a process from `marina-services.json`, located by `cwd`; its owning subrepo is the **longest registered subrepo that is a path-prefix of `cwd`** (so `projects/react-skeleton/app` maps to `projects/react-skeleton`, not `projects`), or `.`/empty = root (ungrouped). A subrepo holds 0..N services. subrepo and service are different axes (code vs process) and are **not merged** — the UI nests services under their subrepo.
 
 **main is never physically detached.** Its toggles edit the *default set*, not its clones — the source always stays whole (chosen over destructive source removal: that would cascade-break every worktree using the subrepo and risk unpushed branches).
 
@@ -68,7 +68,7 @@ The attach path (session-start hook → `attach-detached-subrepos.sh`) attaches 
 
 - **registry**: new optional `defaultAttach: [..]` per project (subset of `subrepos`); `marina.sh` gains a writer (e.g. `marina.sh default <id> a,b,c` / `--default` on `add`) — `registry_*` stays the write SoT.
 - **`worktree_info(root)` += `attachedSubrepos`** = `[s for s in subrepos_of(root) if (root/s/'.git').exists()]`. `isMain` ⇒ all subrepos attached. Universe stays `subrepos` (phase 3); main also exposes `defaultAttach`.
-- **service payload += `subrepo`** = first segment of that service's `cwd` (via a `service_subrepo_map(root)` helper reading the project `marina-services.json`).
+- **service payload += `subrepo`** = longest-prefix registered subrepo of that service's `cwd` (via a `service_subrepo_map(root)` helper reading the project `marina-services.json`); no registered match and non-root cwd ⇒ first segment (surfaced as an un-toggleable group), `.`/empty ⇒ ungrouped.
 - Client builds the tree from `session.services` (now `subrepo`-tagged) + `wt.subrepos` (universe) + `wt.attachedSubrepos` (worktree) / `wt.defaultAttach` (main).
 
 ## Components / files
@@ -84,7 +84,7 @@ The attach path (session-start hook → `attach-detached-subrepos.sh`) attaches 
 - Detach + running services → `needsStop`; + dirty → `needsConfirm`→`--force` (branch preserved); not-attached → no-op success.
 - `subrepo`/`subrepos` not ⊆ `subrepos_of(root)` → 400.
 - main-card physical attach/detach attempt → rejected (main toggles only write `defaultAttach`).
-- Service whose cwd-subrepo isn't registered → grouped under that name without an attach toggle (surfaces inconsistency, no crash).
+- Service whose cwd has no registered longest-prefix match → grouped under its first cwd segment without an attach toggle (surfaces inconsistency, no crash).
 
 ## Decisions log
 
@@ -108,6 +108,8 @@ The attach path (session-start hook → `attach-detached-subrepos.sh`) attaches 
 ## Open items (decide during plan / spec review)
 
 1. **Re-attach idempotency vs user detach:** the session-start hook must not re-attach a subrepo the user deliberately detached from a worktree, nor auto-detach one they added. Lean: hook only attaches *missing* subrepos that are in `defaultAttach` **and** were never explicitly detached — track "explicitly detached" via a per-worktree marker, or simpler v1: the hook attaches `defaultAttach` only on **first** run (no marina state dir yet) and never touches attach state after. Decide in plan.
+
+   **Decided (v1):** the attach script auto-attaches the `defaultAttach` set only on a **fresh** worktree — defined as "no registered subrepo currently attached". If any universe subrepo is already attached, the worktree is considered user-initialized and auto-attach is skipped entirely (it never re-attaches a user-detached default, nor auto-detaches a user-added subrepo). Dashboard single-subrepo attach/detach always passes `MARINA_SUBREPOS` explicitly and bypasses the gate.
 2. Root-level services (`cwd="."`): ungrouped at top vs a "(root)" node — lean: ungrouped at top.
 3. Attach progress: per-subrepo spinner (`등록 중…` pattern) for the few-second `worktree add` + syncs.
 4. Detached subrepo's service rows: shown-disabled (lean) vs hidden.
