@@ -18,6 +18,46 @@ die() {
   exit 1
 }
 
+# ---- 서비스 기동 PATH 정상화 -------------------------------------------------
+# marina 가 띄우는 서비스는 런처(데몬 launchd / CLI / 하네스)의 PATH 를 상속한다.
+# 데몬(launchd)은 빈약한 PATH(시스템 dir 뿐)라 `bash -lc` 로도 homebrew·node 등이
+# 안 잡힌다 — login bash 는 사용자의 zsh `~/.zshrc` PATH 를 읽지 않기 때문(zsh PATH
+# 가 거기 있어도). 그래서 search 의 npx(hyperframes)·ffprobe(TTS) 가 FileNotFoundError
+# 로 터지고, 그동안 서비스 run 에 머신 고유 PATH 핀으로 우회해 왔다(whack-a-mole).
+#
+# 근본 해결: 사용자의 로그인+인터랙티브 셸을 한 번 띄워 실제 PATH 를 결정적으로 얻는다.
+# 인터랙티브 셸은 rc(zprofile·zshrc / bash_profile·bashrc)를 source 해 PATH 를 *빌드*
+# 하므로, 호출 컨텍스트(데몬이든 세션이든)의 빈약한 PATH 와 무관하게 항상 같은 결과다.
+marina_login_shell() {
+  local s="${SHELL:-}"
+  if [[ -n "$s" && -x "$s" ]]; then printf '%s' "$s"; return; fi
+  s="$(dscl . -read "/Users/$(id -un)" UserShell 2>/dev/null | awk -F': ' '{print $2}')"   # macOS
+  if [[ -n "$s" && -x "$s" ]]; then printf '%s' "$s"; return; fi
+  s="$(getent passwd "$(id -un)" 2>/dev/null | cut -d: -f7)"                          # Linux
+  if [[ -n "$s" && -x "$s" ]]; then printf '%s' "$s"; return; fi
+  printf '/bin/zsh'
+}
+
+_MARINA_LOGIN_PATH=""
+marina_login_path() {
+  # 1) 명시 override (escape hatch / 테스트). 2) 프로세스 1회 메모(start --all 루프에서
+  # 셸 반복 기동 방지). 3) 로그인+인터랙티브 셸로 캡처. 4) 실패 시 현재 PATH 폴백(기존 동작).
+  if [[ -n "${MARINA_PATH:-}" ]]; then printf '%s' "$MARINA_PATH"; return; fi
+  if [[ -n "$_MARINA_LOGIN_PATH" ]]; then printf '%s' "$_MARINA_LOGIN_PATH"; return; fi
+  local sh captured
+  sh="$(marina_login_shell)"
+  # -i 라야 ~/.zshrc(또는 ~/.bashrc) 의 PATH 도 반영된다. </dev/null 로 tty 대기 방지·stderr 무시.
+  # perl alarm 으로 8s 타임아웃 — 느리거나 부작용 있는 rc 가 데몬의 marina start 를 막지 않게. perl 없으면 그대로.
+  if command -v perl >/dev/null 2>&1; then
+    captured="$(perl -e 'alarm shift @ARGV; exec @ARGV' 8 "$sh" -ilc 'printf %s "$PATH"' </dev/null 2>/dev/null)" || captured=""
+  else
+    captured="$("$sh" -ilc 'printf %s "$PATH"' </dev/null 2>/dev/null)" || captured=""
+  fi
+  [[ -n "$captured" ]] || captured="$PATH"
+  _MARINA_LOGIN_PATH="$captured"
+  printf '%s' "$captured"
+}
+
 # ---- 프로젝트 레지스트리 CLI (~/.marina/projects.json) — 위치 무관 ----------
 # 추론은 여기(registry_infer)가 단일 SoT — JSON 으로 출력만 하고 쓰지 않는다.
 # registry_add 는 이걸 소비해서 ~/.marina/projects.json 에 upsert 하고, 대시보드 API(phase 3)도 이걸 shell.
@@ -845,9 +885,11 @@ start_service() {
     echo "---"
   } > "$log_path"
 
+  local launch_path
+  launch_path="$(marina_login_path)"   # 사용자 로그인 PATH 주입(데몬 빈약 PATH 보정) — 메모라 루프서 1회 캡처
   (
     set -m # 백그라운드 잡을 새 프로세스 그룹으로 분리 — stop 시 kill_tree 가 그룹 단위로 정리
-    nohup bash -lc "$command" >> "$log_path" 2>&1 &
+    nohup env PATH="$launch_path" bash -lc "$command" >> "$log_path" 2>&1 &
     echo $! > "$pid_path"
   )
   echo "started: $service port=$(port_for "$service" "$offset") pid=$(cat "$pid_path") log=$log_path"
@@ -980,7 +1022,8 @@ run_foreground() {
     echo "command=$command"
     echo "---"
   } >> "$log_path"
-  bash -lc "$command" 2>&1 | redact_stream | tee -a "$log_path"
+  local launch_path; launch_path="$(marina_login_path)"   # 사용자 로그인 PATH 주입 (start_service 와 동일)
+  env PATH="$launch_path" bash -lc "$command" 2>&1 | redact_stream | tee -a "$log_path"
   exit "${PIPESTATUS[0]}"
 }
 
@@ -1024,6 +1067,10 @@ main() {
       [[ -n "$svc" ]] || die "print-command: service name required"
       offset="$(port_offset)"
       command_for "$svc" "$offset"
+      ;;
+    print-launch-path)
+      # 서비스 기동에 쓰일 로그인 PATH 를 출력하고 종료 (디버그·테스트용).
+      marina_login_path; echo
       ;;
     -h|--help|help)
       usage
