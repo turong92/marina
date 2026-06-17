@@ -325,6 +325,21 @@ def _harness_status() -> dict[str, Any]:
     return out
 
 
+def _bin(name: str) -> str:
+    # launchd 데몬의 최소 PATH(/usr/bin:/bin)엔 ~/.local/bin·/opt/homebrew/bin 등이 없어 CLI 를 못 찾음
+    # (Errno 2 No such file or directory). PATH 우선 조회 후, 없으면 흔한 설치 위치를 보강해 절대경로로 해석.
+    found = shutil.which(name)
+    if found:
+        return found
+    home = Path.home()
+    for d in (home / ".local/bin", Path("/opt/homebrew/bin"), Path("/usr/local/bin"),
+              home / ".claude/local", home / ".bun/bin", home / ".volta/bin"):
+        cand = d / name
+        if cand.exists():
+            return str(cand)
+    return name
+
+
 def update_codex() -> dict[str, Any]:
     # codex 는 마켓 스냅샷 디렉토리를 라이브로 읽으므로, 그 git repo 를 origin/main 으로 ff-pull = codex 갱신
     mk = _codex_marketplace()
@@ -350,7 +365,7 @@ def update_claude() -> dict[str, Any]:
         return {"ok": True, "harness": "claude", "output": "(dry-run)", "installed": _installed_sha()}
     try:
         out1 = subprocess.check_output(
-            ["claude", "plugin", "marketplace", "update", "marina-dev"],
+            [_bin("claude"), "plugin", "marketplace", "update", "marina-dev"],
             text=True, timeout=60, stderr=subprocess.STDOUT,
         )
     except subprocess.CalledProcessError as exc:
@@ -359,7 +374,7 @@ def update_claude() -> dict[str, Any]:
         raise ValueError(f"claude 마켓플레이스 갱신 실패: {exc}")
     try:
         out2 = subprocess.check_output(
-            ["claude", "plugin", "update", "marina@marina-dev"],
+            [_bin("claude"), "plugin", "update", "marina@marina-dev"],
             text=True, timeout=60, stderr=subprocess.STDOUT,
         )
     except subprocess.CalledProcessError as exc:
