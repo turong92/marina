@@ -414,7 +414,7 @@ export COREPACK_ENABLE_PROJECT_SPEC="${COREPACK_ENABLE_PROJECT_SPEC:-0}"
 
 # 서비스 정의: root ∪ 중앙 서비스 머지 (내장 서비스 없음 — 전부 marina-services.json 에서).
 #   {"services": [{"name":"echo","portBase":8200,"cwd":".","run":"{python} -m http.server {port}"}]}
-# run 치환자: {port}{python}{root}{profile} + 세션 경로 {env_file}{tmp}{session}.
+# run 치환자: {port}{<name>_port}{python}{root}{profile} + 세션 경로 {env_file}{tmp}{session}.
 # 우선순위: root(SOURCE_ROOT) ∪ 중앙(~/.marina/services/<id>.json), name 충돌 시 중앙 우선.
 # merged_services_json 정의는 service ls(early dispatch)에서도 쓰므로 위쪽에 둔다.
 
@@ -787,13 +787,18 @@ prepare() {
 
 command_for() {
   # 모든 서비스는 프로젝트 root 의 marina-services.json 에서 정의 (내장 서비스 없음 — 완전 generic).
-  #   {name, portBase, cwd, run}  run 치환자: {port}{python}{root}{profile} + 세션 경로 {env_file}{tmp}{session}
+  #   {name, portBase, cwd, run}  run 치환자: {port}{<name>_port}{python}{root}{profile} + 세션 경로 {env_file}{tmp}{session}
   #   복잡한 기동(env 준비·의존성 링크 등)은 run 이 프로젝트 쪽 헬퍼 스크립트를 호출한다.
-  local service="$1" offset="$2" cwd run
+  local service="$1" offset="$2" cwd run sib
   cwd="$(service_json_field "$service" cwd)"
   run="$(service_json_field "$service" run)"
   [[ -n "$run" ]] || die "unknown service: $service (marina-services.json 에 run 필요)"
   run="${run//\{port\}/$(port_for "$service" "$offset")}"
+  # 형제 서비스 포트 치환자 {<name>_port} — 자동 이동(override) 반영된 각 서비스의 실제 포트.
+  # 서비스 간 호출에서 형제의 실제 포트를 주입한다 (uniform offset 추정 금지).
+  for sib in ${SERVICES[@]+"${SERVICES[@]}"}; do
+    run="${run//\{${sib}_port\}/$(port_for "$sib" "$offset")}"
+  done
   run="${run//\{python\}/$(python_bin)}"
   run="${run//\{root\}/$ROOT}"
   run="${run//\{profile\}/$(service_profile "$service")}"

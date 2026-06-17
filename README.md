@@ -147,8 +147,8 @@ plugin/scripts/marina-entrypoint.sh uninstall-cli    # 제거
 }
 ```
 
-- `run` 치환자: `{port}` `{python}` `{root}` `{profile}` + 세션 경로 `{env_file}` `{tmp}` `{session}`.
-- 포트 = `portBase + 세션오프셋` (main 0 / worktree 는 id 해시로 안정적 대역).
+- `run` 치환자: `{port}` `{<name>_port}` `{python}` `{root}` `{profile}` + 세션 경로 `{env_file}` `{tmp}` `{session}`.
+- 포트 = `portBase + 세션오프셋` (main 0 / worktree 는 id 해시로 안정적 대역). `{<name>_port}` 는 같은 세션 다른 서비스의 실제 포트(자동 이동 반영) — 서비스 간 호출 URL 주입용.
 - `cachePaths`(선택): Clear cache 대상. `orphanPattern`(선택): 유령 프로세스 탐지 정규식.
 
 ### 저장 위치 2곳 + 머지
@@ -239,7 +239,7 @@ exec npm run dev -- --port "$port"
 
 marina 가 헬퍼에 넘기는 것:
 
-- `run` 치환자 — `{port}` `{root}` `{python}` `{profile}` `{env_file}` `{tmp}` `{session}`.
+- `run` 치환자 — `{port}` `{<name>_port}` `{root}` `{python}` `{profile}` `{env_file}` `{tmp}` `{session}`.
 - 환경 변수 — `MARINA_SOURCE_ROOT`(원본 main 체크아웃), `MARINA_ROOT`(현재 worktree).
 
 ### `web` 서비스 컨벤션
