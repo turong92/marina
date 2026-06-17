@@ -11,6 +11,7 @@ import signal
 import shlex
 import shutil
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.parse
@@ -865,6 +866,337 @@ def invalidate_registry_caches() -> None:
     _source_root_cache.clear()
     _session_id_cache.clear()
     _worktree_info_cache.clear()
+
+
+# ── LLM service registration ────────────────────────────────────────────────
+# 데몬이 LLM 을 "읽기 전용 config 함수"로만 호출한다: 레포 파일/에러 로그 → services.json JSON.
+# 기동·등록·롤백 등 부수효과는 전부 데몬이 소유한다. (form 이 always single source)
+
+def _extract_service_json(text: str) -> dict[str, Any]:
+    s = (text or "").strip()
+    if "```" in s:
+        parts = s.split("```")
+        if len(parts) >= 3:
+            body = parts[1]
+            if body.lstrip()[:4].lower() == "json":
+                body = body.lstrip()[4:]
+            s = body.strip()
+    # 각 '{' 를 후보 시작점으로 시도 — 균형 잡힌 구간을 파싱해 dict 면 채택.
+    # (프로즈 속 장식용 중괄호 {nope} 같은 디코이를 건너뛴다)
+    for start in range(len(s)):
+        if s[start] != "{":
+            continue
+        depth = 0
+        in_str = False
+        esc = False
+        for i in range(start, len(s)):
+            c = s[i]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+                continue
+            if c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        obj = json.loads(s[start:i + 1])
+                    except json.JSONDecodeError:
+                        obj = None
+                    if isinstance(obj, dict):
+                        return obj
+                    break  # 이 시작점은 파싱 실패 — 다음 '{' 로
+    raise ValueError("LLM 출력에서 JSON 객체를 찾지 못함")
+
+
+def _validate_service_def(d: Any) -> dict[str, Any]:
+    if not isinstance(d, dict):
+        raise ValueError("서비스 정의는 객체여야 함")
+    name = d.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise ValueError("name(비어있지 않은 문자열) 필수")
+    pb = d.get("portBase")
+    if isinstance(pb, bool) or not isinstance(pb, int):
+        raise ValueError("portBase(정수) 필수")
+    run = d.get("run")
+    if not isinstance(run, str) or not run.strip():
+        raise ValueError("run(비어있지 않은 문자열) 필수")
+    out: dict[str, Any] = {"name": name.strip(), "portBase": pb, "run": run.strip()}
+    cwd = d.get("cwd", "")
+    if cwd and not isinstance(cwd, str):
+        raise ValueError("cwd 는 문자열이어야 함")
+    out["cwd"] = cwd.strip() if isinstance(cwd, str) and cwd.strip() else "."
+    cp = d.get("cachePaths")
+    if cp is not None:
+        if not isinstance(cp, list) or not all(isinstance(x, str) for x in cp):
+            raise ValueError("cachePaths 는 문자열 배열이어야 함")
+        if cp:
+            out["cachePaths"] = cp
+    op = d.get("orphanPattern")
+    if op:
+        if not isinstance(op, str):
+            raise ValueError("orphanPattern 은 문자열이어야 함")
+        out["orphanPattern"] = op
+    return out
+
+
+def _normalize_candidates(obj: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = obj.get("services") if isinstance(obj.get("services"), list) else [obj]
+    return [_validate_service_def(x) for x in raw]
+
+
+LLM_TIMEOUT = float(_env("LLM_TIMEOUT", "120"))
+
+
+def _has_bin(name: str) -> bool:
+    return _bin(name) != name
+
+
+def _llm_pinned() -> str | None:
+    v = os.environ.get("MARINA_LLM")
+    if v in ("claude", "codex"):
+        return v
+    try:
+        d = json.loads((MARINA_HOME / "config.json").read_text(encoding="utf-8"))
+        p = d.get("llmProvider")
+        if p in ("claude", "codex"):
+            return p
+    except Exception:
+        pass
+    return None
+
+
+def _llm_available() -> list[str]:
+    return [name for name in ("claude", "codex") if _has_bin(name)]
+
+
+def _llm_provider() -> str | None:
+    if os.environ.get("MARINA_LLM_FAKE"):
+        return "fake"
+    pinned = _llm_pinned()
+    if pinned and _has_bin(pinned):
+        return pinned
+    for name in ("claude", "codex"):
+        if _has_bin(name):
+            return name
+    return None
+
+
+def _llm_argv(provider: str, prompt: str, out_path: str | None = None) -> list[str]:
+    if provider == "claude":
+        return [_bin("claude"), "-p", prompt, "--allowedTools", "Read,Glob,Grep"]
+    if provider == "codex":
+        # codex exec 는 에이전트 러너 — git-repo 체크/색상을 끄고, 최종 메시지는 파일로 받는다
+        # (stdout 엔 트랜스크립트가 섞여 나온다).
+        argv = [_bin("codex"), "exec", "--sandbox", "read-only",
+                "--skip-git-repo-check", "--color", "never"]
+        if out_path:
+            argv += ["--output-last-message", out_path]
+        argv.append(prompt)
+        return argv
+    raise ValueError(f"알 수 없는 LLM provider: {provider}")
+
+
+def _llm_run(provider: str, prompt: str, cwd: Path) -> str:
+    fake = os.environ.get("MARINA_LLM_FAKE")
+    if fake:
+        return subprocess.check_output([fake], input=prompt, text=True, cwd=str(cwd), timeout=LLM_TIMEOUT)
+    if provider == "codex":
+        # codex 는 stdin 을 닫지 않으면 입력을 기다려 멈춘다 → DEVNULL + 최종 메시지 파일 회수.
+        fd, out_path = tempfile.mkstemp(suffix=".json")
+        os.close(fd)
+        try:
+            subprocess.run(
+                _llm_argv(provider, prompt, out_path), cwd=str(cwd),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=LLM_TIMEOUT, check=True,
+            )
+            return Path(out_path).read_text(encoding="utf-8")
+        finally:
+            Path(out_path).unlink(missing_ok=True)
+    return subprocess.check_output(
+        _llm_argv(provider, prompt), text=True, cwd=str(cwd),
+        stdin=subprocess.DEVNULL, stderr=subprocess.STDOUT, timeout=LLM_TIMEOUT,
+    )
+
+
+def _analyze_prompt(root: Path, cwd: str, instruction: str,
+                    current_def: dict[str, Any] | None, fix_log: str | None,
+                    siblings: list[str] | None = None) -> str:
+    target = (root / cwd) if cwd else root
+    lines = [
+        "You are configuring a marina dev service. Output ONLY one JSON object — no prose, no markdown fences.",
+        f"Project root: {root}",
+        f"Service working dir (cwd, root-relative): {cwd or '.'} (absolute: {target})",
+        "",
+        "Inspect that dir for the runnable dev service: package.json (scripts.dev/start), "
+        "build.gradle*/settings.gradle* (Spring bootRun), Dockerfile/docker-compose.yml, "
+        "pyproject.toml/requirements.txt (uvicorn/flask).",
+        "Emit a JSON object with keys: name (identifier), portBase (integer default port), "
+        'cwd (root-relative, "." for root), run (single shell command). '
+        "Optional: cachePaths (array of root-relative paths), orphanPattern (regex).",
+        "In run, use marina substitution tokens: {port} (this service's own port) {profile} "
+        "{python} {root} {session}. Prefix long-running commands with exec. "
+        "Example: exec npm run dev -- --port {port}",
+    ]
+    if siblings:
+        lines += [
+            "",
+            "Other marina services already registered in this worktree: " + ", ".join(siblings) + ".",
+            "marina assigns every service a per-worktree port, so NEVER hardcode a sibling's port. "
+            "If this service calls one of the above, inject the sibling's real port with the "
+            "{<name>_port} token via a run-command env var or flag (it only substitutes inside run, "
+            "not in app config files) — e.g. for a sibling named api: "
+            "exec env VITE_API_URL=http://localhost:{api_port} npm run dev -- --port {port}",
+        ]
+    if current_def:
+        lines += ["", "Current definition (edit this):", json.dumps(current_def, ensure_ascii=False)]
+    if instruction:
+        lines += ["", f"User instruction: {instruction}"]
+    if fix_log:
+        lines += ["", "The previous definition FAILED to start. Fix it. Error log tail:", fix_log[-2000:]]
+    lines += ["", "Output the JSON object now:"]
+    return "\n".join(lines)
+
+
+def llm_analyze(root: Path, cwd: str = "", instruction: str = "",
+                current_def: dict[str, Any] | None = None,
+                fix_log: str | None = None) -> list[dict[str, Any]]:
+    provider = _llm_provider()
+    if not provider:
+        raise ValueError("LLM 미설치 (claude/codex 없음)")
+    target = (root / cwd) if cwd else root
+    self_name = (current_def or {}).get("name")
+    siblings = [s for s in services_for(root) if s != self_name]
+    prompt = _analyze_prompt(root, cwd, instruction, current_def, fix_log, siblings)
+    last_err = ""
+    for attempt in range(2):
+        p = prompt if attempt == 0 else (
+            prompt + f"\n\nYour previous output could not be parsed ({last_err}). Output ONLY the JSON object.")
+        raw = _llm_run(provider, p, target)
+        try:
+            return _normalize_candidates(_extract_service_json(raw))
+        except ValueError as exc:
+            last_err = str(exc)
+    raise ValueError(f"LLM 출력 파싱 실패: {last_err}")
+
+
+VERIFY_TIMEOUT = float(_env("VERIFY_TIMEOUT", "60"))
+LLM_REGISTER_MAX_ATTEMPTS = int(_env("LLM_REGISTER_ATTEMPTS", "2"))
+
+
+def _await_service_ok(root: Path, service: str, port: str | None, timeout: float) -> tuple[bool, str]:
+    deadline = time.time() + timeout
+    started = False
+    while time.time() < deadline:
+        cur_port = port or ports_for(root).get(service)
+        st = service_status(root, service, cur_port)
+        if st.get("running"):
+            started = True
+            if cur_port and probe_http(cur_port):
+                return True, ""
+        elif started:
+            return False, "프로세스가 종료됨"
+        time.sleep(0.5)
+    return False, f"{int(timeout)}초 내 미기동"
+
+
+def _service_log_tail(root: Path, service: str, n: int = 2000) -> str:
+    try:
+        return selected_log(root, service, None).read_text(encoding="utf-8", errors="replace")[-n:]
+    except Exception:
+        return ""
+
+
+def _central_file(proj: dict[str, Any]) -> Path:
+    return MARINA_HOME / "services" / f"{proj['id']}.json"
+
+
+def _central_def(proj: dict[str, Any], name: str | None) -> dict[str, Any] | None:
+    if not name:
+        return None
+    try:
+        for s in json.loads(_central_file(proj).read_text(encoding="utf-8")).get("services", []):
+            if s.get("name") == name:
+                return s
+    except Exception:
+        pass
+    return None
+
+
+def _service_add_central(proj: dict[str, Any], svc: dict[str, Any]) -> None:
+    run_marina_registry("service", "add", proj["id"], json.dumps(svc, ensure_ascii=False))
+
+
+def _service_rm_central(proj: dict[str, Any], name: str) -> None:
+    try:
+        run_marina_registry("service", "rm", proj["id"], name)
+    except subprocess.CalledProcessError:
+        pass
+
+
+def _launch_and_verify(root: Path, service: str, timeout: float, attempt: int) -> tuple[bool, str]:
+    fake = os.environ.get("MARINA_FAKE_VERIFY")
+    if fake is not None:
+        outcomes = [o.strip() for o in fake.split(",")]
+        o = outcomes[min(attempt - 1, len(outcomes) - 1)]
+        return (o == "ok", "" if o == "ok" else "fake fail log")
+    try:
+        stop_service(root, service)
+    except Exception:
+        pass
+    try:
+        start_service(root, service)
+    except ValueError as exc:
+        return False, str(exc)
+    ok, reason = _await_service_ok(root, service, ports_for(root).get(service), timeout)
+    if ok:
+        return True, ""  # 성공 시 정지하지 않음 — 띄운 채로 둔다
+    log = _service_log_tail(root, service) or reason
+    try:
+        stop_service(root, service)
+    except Exception:
+        pass
+    return False, log
+
+
+def llm_register_loop(root: Path, cwd: str = "", instruction: str = "",
+                      edit_name: str | None = None) -> dict[str, Any]:
+    proj = project_for(root)
+    if not proj:
+        raise ValueError("미등록 프로젝트")
+    prior = _central_def(proj, edit_name)  # 롤백 기준 (편집 시 현재 central 정의)
+    context_def = prior                    # LLM 편집 컨텍스트
+    fix_log: str | None = None
+    cand: dict[str, Any] | None = None
+    reason = ""
+    for attempt in range(1, LLM_REGISTER_MAX_ATTEMPTS + 1):
+        cand = llm_analyze(root, cwd, instruction, context_def, fix_log)[0]
+        name = cand["name"]
+        _service_add_central(proj, cand)
+        invalidate_registry_caches()
+        ok, reason = _launch_and_verify(root, name, VERIFY_TIMEOUT, attempt)
+        if ok:
+            return {"ok": True, "service": cand, "name": name,
+                    "port": ports_for(root).get(name), "attempts": attempt}
+        fix_log = reason
+        context_def = cand
+    # 소진 → 롤백
+    name = cand["name"] if cand else (edit_name or "")
+    if prior:
+        _service_add_central(proj, prior)
+    elif name:
+        _service_rm_central(proj, name)
+    invalidate_registry_caches()
+    return {"ok": False, "candidate": cand, "attempts": LLM_REGISTER_MAX_ATTEMPTS,
+            "error": reason, "log": fix_log}
 
 
 def git_output(args: list[str], cwd: Path) -> str:
@@ -2265,6 +2597,20 @@ INDEX_HTML = r"""<!doctype html>
     .svc-modal-llm-btn { align-self: flex-start; height: 32px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--sys-cont-primary-default); background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
     .svc-modal-llm-btn:hover { background: var(--sys-bg-surface-hover); }
     .svc-modal-llm-hint { font-size: 11px; color: var(--sys-cont-neutral-lightest); line-height: 1.5; }
+    .svc-llm-input { display: flex; gap: 8px; align-items: center; }
+    .svc-llm-spark { font-size: 15px; }
+    .svc-llm-input input { flex: 1; height: 32px; padding: 0 8px; font-size: 13px; }
+    .svc-llm-go { height: 32px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--sys-cont-primary-default); background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+    .svc-llm-go:hover { background: var(--sys-bg-surface-hover); }
+    .svc-llm-go:disabled { opacity: 0.6; cursor: default; }
+    .svc-llm-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-left: 23px; }
+    .svc-llm-picker { font-size: 12px; color: var(--sys-cont-neutral-light); cursor: pointer; }
+    .svc-llm-direct { font-size: 12px; color: var(--sys-cont-neutral-light); display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .svc-llm-progress { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 8px 10px; border-radius: 8px; }
+    .svc-llm-progress.run { background: hsl(210, 90%, 96%); color: hsl(210, 70%, 38%); }
+    .svc-llm-progress.ok { background: hsl(145, 55%, 94%); color: hsl(150, 65%, 28%); }
+    .svc-llm-progress.err { background: hsl(358, 70%, 96%); color: var(--sys-cont-negative-default); }
+    .svc-llm-progress .svc-llm-log { margin-left: auto; font-size: 12px; text-decoration: underline; cursor: pointer; }
     .svc-edit-btn, .svc-del-btn { height: 22px; min-width: 22px; padding: 0 5px; font-size: 12px; border-radius: 5px; }
     aside { border-right: 1px solid var(--sys-style-neutral-light); overflow-y: auto; min-height: 0; }
     section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -2567,8 +2913,16 @@ INDEX_HTML = r"""<!doctype html>
       </div>
       <div class="register-error" id="serviceModalError" hidden></div>
       <div class="svc-modal-llm" id="svcLlmRow">
-        <button class="svc-modal-llm-btn" id="svcLlmRegister" type="button">✨ 이 subrepo 를 LLM 으로 등록</button>
-        <div class="svc-modal-llm-hint">구조를 분석해 자동 등록합니다. 클릭 시 명령을 복사 → Claude/Codex 세션에 붙여넣어 실행하세요. 아래는 수동 등록.</div>
+        <div class="svc-llm-input">
+          <span class="svc-llm-spark" aria-hidden="true">✨</span>
+          <input id="svcLlmInstruction" placeholder="예: vite 앱 포트 5173 — 비우면 자동 분석" />
+          <button class="svc-llm-go" id="svcLlmAnalyze" type="button">분석</button>
+        </div>
+        <div class="svc-llm-meta">
+          <span class="svc-llm-picker" id="svcLlmPicker" hidden></span>
+          <label class="svc-llm-direct"><input type="checkbox" id="svcLlmDirect" /> 직접 등록 (분석→기동검증→등록)</label>
+        </div>
+        <div class="svc-llm-progress" id="svcLlmProgress" hidden></div>
       </div>
       <div class="svc-modal-field">
         <label for="svcName">서비스 이름 *</label>
@@ -2961,8 +3315,7 @@ INDEX_HTML = r"""<!doctype html>
       svcModalTarget = {root, subrepo, editName: svc ? svc.service : null};
       document.getElementById('serviceModalTitle').textContent = svc ? ('서비스 편집 — ' + svc.service) : '서비스 추가';
       document.getElementById('serviceModalError').hidden = true;
-      // LLM 등록 버튼: 신규 추가(svc=null)일 때만 노출. 편집은 수동 폼.
-      document.getElementById('svcLlmRow').hidden = !!svc;
+      document.getElementById('svcLlmRow').hidden = false;  // assist bar: 추가·편집 공통
       document.getElementById('svcName').value = svc ? svc.service : '';
       document.getElementById('svcName').disabled = !!svc; // 편집 시 이름 고정
       document.getElementById('svcTeamShare').disabled = !!svc; // 편집 시 저장 위치 고정
@@ -2990,6 +3343,15 @@ INDEX_HTML = r"""<!doctype html>
         opt.value = sub;
         dl.appendChild(opt);
       }
+      // assist bar 초기화 (열 때마다 깨끗하게)
+      document.getElementById('svcLlmInstruction').value = '';
+      document.getElementById('svcLlmInstruction').placeholder = svc
+        ? '예: 포트 3027로, env에 FOO 추가'
+        : '예: vite 앱 포트 5173 — 비우면 자동 분석';
+      document.getElementById('svcLlmDirect').checked = svcLlmDirectPref;
+      const llmProg = document.getElementById('svcLlmProgress');
+      llmProg.hidden = true; llmProg.className = 'svc-llm-progress';
+      renderLlmPicker();
       showServiceModal(true);
     }
 
@@ -3004,13 +3366,112 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById('svcAdvToggle').textContent = adv.hidden ? '▸ 고급' : '▾ 고급';
     };
     document.getElementById('svcModalCancel').onclick = () => showServiceModal(false);
-    document.getElementById('svcLlmRegister').onclick = async () => {
-      // 대시보드는 LLM 세션을 직접 호출 못함 → subrepo 컨텍스트 포함 명령을 클립보드에 넣고 세션에 붙여넣도록 안내. 클립보드 실패해도 alert 로 명령 노출(복사 폴백)
-      const {root, subrepo} = svcModalTarget || {};
-      const cmd = subrepo ? `/marina:service add ${root} ${subrepo}` : `/marina:service add ${root}`;
-      try { await navigator.clipboard.writeText(cmd); } catch {}
-      alert(`복사됨:\n${cmd}\n\nClaude/Codex 세션에 붙여넣어 실행하세요. (구조를 분석해 서비스를 등록합니다)`);
+    // ── LLM assist bar (분석 채우기 / 직접 등록) ───────────────────────────────
+    let svcLlmStatus = null;          // {providers:[], pinned}
+    let svcLlmDirectPref = false;     // 직접 등록 토글 기억 (세션 내)
+    let svcLlmBusy = false;
+
+    async function renderLlmPicker() {
+      const picker = document.getElementById('svcLlmPicker');
+      const analyzeBtn = document.getElementById('svcLlmAnalyze');
+      const directBox = document.getElementById('svcLlmDirect');
+      if (!svcLlmStatus) {
+        try { svcLlmStatus = await api('/api/llm-status'); } catch { svcLlmStatus = {providers: [], pinned: null}; }
+      }
+      const provs = svcLlmStatus.providers || [];
+      if (!provs.length) {
+        picker.hidden = true;
+        analyzeBtn.disabled = true; analyzeBtn.title = 'claude/codex 미설치 — 수동 입력만 가능';
+        directBox.disabled = true; directBox.checked = false;
+        return;
+      }
+      analyzeBtn.disabled = false; analyzeBtn.title = '';
+      directBox.disabled = false;
+      const active = svcLlmStatus.pinned || provs[0];
+      picker.hidden = false;
+      picker.textContent = active;
+      picker.title = svcLlmStatus.pinned
+        ? ('LLM 고정: ' + active + ' (~/.marina/config.json)')
+        : (provs.length > 1 ? ('감지: ' + provs.join(', ') + ' — ' + active + ' 사용 (config 로 변경)') : (active + ' 사용'));
+    }
+
+    function setLlmProgress(kind, text, logText) {
+      const prog = document.getElementById('svcLlmProgress');
+      prog.hidden = false;
+      prog.className = 'svc-llm-progress ' + kind;
+      prog.innerHTML = '<span>' + escapeHtml(text) + '</span>';
+      if (logText) {
+        const a = document.createElement('span');
+        a.className = 'svc-llm-log'; a.textContent = '로그 보기';
+        a.onclick = () => alert(logText);
+        prog.appendChild(a);
+      }
+    }
+
+    function fillServiceForm(def) {
+      document.getElementById('svcName').value = def.name || '';
+      document.getElementById('svcPortBase').value = def.portBase ?? '';
+      if (def.cwd && def.cwd !== '.') document.getElementById('svcCwd').value = def.cwd;
+      document.getElementById('svcRun').value = def.run || '';
+      document.getElementById('svcCachePaths').value = (def.cachePaths || []).join(', ');
+      document.getElementById('svcOrphanPattern').value = def.orphanPattern || '';
+    }
+
+    function currentDefForEdit(editName) {
+      if (!editName || !svcModalTarget) return null;
+      const m = serviceMeta(svcModalTarget.root, editName);
+      return m && m.service && m.service.def ? m.service.def : null;
+    }
+
+    document.getElementById('svcLlmDirect').onchange = (e) => { svcLlmDirectPref = e.target.checked; };
+
+    document.getElementById('svcLlmAnalyze').onclick = async () => {
+      if (svcLlmBusy || !svcModalTarget) return;
+      const {root, subrepo, editName} = svcModalTarget;
+      const instruction = document.getElementById('svcLlmInstruction').value.trim();
+      const direct = document.getElementById('svcLlmDirect').checked;
+      const provs = (svcLlmStatus && svcLlmStatus.providers) || [];
+      const provider = (svcLlmStatus && svcLlmStatus.pinned) || provs[0] || '';
+      svcLlmBusy = true;
+      document.getElementById('svcLlmAnalyze').disabled = true;
+      try {
+        if (direct) {
+          await runDirectRegister(root, subrepo, editName, instruction);
+        } else {
+          setLlmProgress('run', '레포 분석 중… (' + provider + ', 수십 초 소요)');
+          const r = await api('/api/llm-analyze', {
+            method: 'POST', headers: {'content-type': 'application/json'},
+            body: JSON.stringify({root, cwd: subrepo || '', instruction, currentDef: currentDefForEdit(editName)}),
+          });
+          const cands = r.candidates || [];
+          if (cands.length) fillServiceForm(cands[0]);
+          setLlmProgress('ok', cands.length > 1
+            ? (cands.length + '개 감지 — 첫 번째를 채웠어요 (필요하면 수정)')
+            : '폼을 채웠어요 — 확인하고 저장하세요');
+        }
+      } catch (e) {
+        setLlmProgress('err', String((e && e.message) || e).slice(0, 200));
+      } finally {
+        svcLlmBusy = false;
+        document.getElementById('svcLlmAnalyze').disabled = false;
+      }
     };
+
+    async function runDirectRegister(root, subrepo, editName, instruction) {
+      setLlmProgress('run', '분석 → 기동 검증 중… (수십 초~1분 소요)');
+      const r = await api('/api/llm-register', {
+        method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({root, cwd: subrepo || '', instruction, editName: editName || ''}),
+      });
+      if (r.ok) {
+        setLlmProgress('ok', '등록·기동 검증 통과 — ' + r.name + (r.port ? (' :' + r.port) : '') + ' 실행 중');
+        await load({force: true});
+        setTimeout(() => showServiceModal(false), 1200);
+      } else {
+        if (r.candidate) fillServiceForm(r.candidate);
+        setLlmProgress('err', (r.attempts || 0) + '회 시도 실패 — 폼으로 강등했어요', r.log || r.error || '');
+      }
+    }
 
     document.getElementById('svcModalSave').onclick = async () => {
       const errEl = document.getElementById('serviceModalError');
@@ -4729,6 +5190,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(update_status())
             return
 
+        if parsed.path == "/api/llm-status":
+            self.send_json({"providers": _llm_available(), "pinned": _llm_pinned()})
+            return
+
         if parsed.path == "/api/browse":
             query = urllib.parse.parse_qs(parsed.query)
             raw = query.get("path", [""])[0]
@@ -4982,6 +5447,31 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError((exc.output or "").strip() or str(exc))
                 invalidate_registry_caches()
                 self.send_json({"ok": True, "output": out.strip()})
+                return
+
+            if self.path == "/api/llm-analyze":
+                if not project_for(root):
+                    raise ValueError("미등록 프로젝트")
+                current = body.get("currentDef")
+                cands = llm_analyze(
+                    root,
+                    str(body.get("cwd", "")).strip(),
+                    str(body.get("instruction", "")).strip(),
+                    current if isinstance(current, dict) else None,
+                )
+                self.send_json({"ok": True, "candidates": cands})
+                return
+
+            if self.path == "/api/llm-register":
+                edit_name = str(body.get("editName", "")).strip() or None
+                result = llm_register_loop(
+                    root,
+                    str(body.get("cwd", "")).strip(),
+                    str(body.get("instruction", "")).strip(),
+                    edit_name,
+                )
+                invalidate_registry_caches()
+                self.send_json(result)
                 return
 
             if self.path in ("/api/attach-subrepo", "/api/detach-subrepo"):

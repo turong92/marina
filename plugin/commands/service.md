@@ -26,4 +26,6 @@ Target: the path token after `add` in `$ARGUMENTS`; if absent, use the current g
    `"${CLAUDE_PLUGIN_ROOT}/scripts/marina-entrypoint.sh" service add <id> '<service-json>'`
 5. Confirm with `"${CLAUDE_PLUGIN_ROOT}/scripts/marina-entrypoint.sh" project ls` and tell the user to refresh the dashboard.
 
+> The dashboard's ✨ assist bar runs this same analysis directly (the daemon spawns the LLM read-only and fills/registers the form — no copy-paste). This slash command is the terminal/CLI equivalent for when you're already in a session.
+
 Keep `run` a single shell command; complex startup should call a project-side helper script. Default to central storage so the project repo stays untouched unless the user asks for team sharing.
