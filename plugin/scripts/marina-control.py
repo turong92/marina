@@ -890,12 +890,16 @@ def worktree_status(root: Path) -> dict[str, Any]:
     repos: list[dict[str, Any]] = []
     subrepos = subrepos_of(root)
     root_lines = status_lines(root, {*subrepos, ".workspace"})
+    root_untracked = sum(1 for ln in root_lines if ln.startswith("??"))
     repos.append({
         "name": project_label(root),
         "path": str(root),
         "dirty": bool(root_lines),
         "changes": root_lines[:80],
         "changeCount": len(root_lines),
+        # tracked(실제 수정) 와 untracked(주로 .venv·빌드산출물 등 툴링 찌꺼기) 분리 — 칩이 신호/노이즈를 섞지 않게
+        "trackedCount": len(root_lines) - root_untracked,
+        "untrackedCount": root_untracked,
     })
     for repo in subrepos:
         path = root / repo
@@ -907,15 +911,20 @@ def worktree_status(root: Path) -> dict[str, Any]:
                 "dirty": False,
                 "changes": [],
                 "changeCount": 0,
+                "trackedCount": 0,
+                "untrackedCount": 0,
             })
             continue
         lines = status_lines(path)
+        untracked = sum(1 for ln in lines if ln.startswith("??"))
         repos.append({
             "name": repo,
             "path": str(path),
             "dirty": bool(lines),
             "changes": lines[:80],
             "changeCount": len(lines),
+            "trackedCount": len(lines) - untracked,
+            "untrackedCount": untracked,
         })
     dirty = [item for item in repos if item.get("dirty")]
     return {"clean": not dirty, "repos": repos}
@@ -1705,6 +1714,111 @@ def restart_service(root: Path, service: str, force: bool = False) -> dict[str, 
 _worktree_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 WORKTREE_INFO_TTL = 600.0
 
+# Claude 데스크톱 앱의 세션 타이틀 — worktree 정체성으로 사용 (LLM 자동생성, 유저 수정 가능).
+# CLI(터미널 claude)는 이 파일을 안 만들므로 비어 있으면 headSubject→해시 폴백.
+CLAUDE_SESSIONS_DIR = Path(os.environ.get(
+    "CLAUDE_DESKTOP_SESSIONS_DIR",
+    str(Path.home() / "Library" / "Application Support" / "Claude" / "claude-code-sessions"),
+))
+SESSION_TITLES_TTL = 20.0
+_session_titles_cache: tuple[float, dict[str, dict[str, str]]] = (0.0, {})
+
+
+def claude_session_titles(refresh: bool = False) -> dict[str, dict[str, str]]:
+    # worktreePath → {"title", "titleSource"}. 데스크톱 앱 세션 메타(local_*.json)에서.
+    # 폴링 핫패스 보호: TTL 캐시. 같은 worktree 다중 세션이면 lastActivityAt 최신 채택.
+    global _session_titles_cache
+    now = time.time()
+    if not refresh and now - _session_titles_cache[0] < SESSION_TITLES_TTL:
+        return _session_titles_cache[1]
+    titles: dict[str, dict[str, str]] = {}
+    best_ts: dict[str, float] = {}
+    if CLAUDE_SESSIONS_DIR.is_dir():
+        for path in glob.iglob(str(CLAUDE_SESSIONS_DIR / "**" / "local_*.json"), recursive=True):
+            try:
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            wt = data.get("worktreePath")
+            title = (data.get("title") or "").strip()
+            if not wt or not title:
+                continue
+            ts = float(data.get("lastActivityAt") or data.get("createdAt") or 0)
+            if wt in best_ts and best_ts[wt] >= ts:
+                continue
+            best_ts[wt] = ts
+            titles[wt] = {"title": title, "titleSource": data.get("titleSource") or ""}
+    _session_titles_cache = (now, titles)
+    return titles
+
+
+# Codex 세션 타이틀 — codex worktree(detached HEAD)는 브랜치명이 없어 정체성이 특히 약하다.
+# 체인: worktree cwd → rollout session_meta(line0 의 cwd+id) → session_index.jsonl 의 thread_name.
+CODEX_SESSION_INDEX = CODEX_HOME / "session_index.jsonl"
+CODEX_ROLLOUT_DIRS = (CODEX_HOME / "sessions", CODEX_HOME / "archived_sessions")
+CODEX_TITLES_TTL = 60.0
+CODEX_ROLLOUT_MAX_AGE = 45 * 86400  # 오래된 세션은 스캔 제외 — 히스토리 누적돼도 비용 상한
+_codex_titles_cache: tuple[float, dict[str, str]] = (0.0, {})
+
+
+def codex_session_titles(refresh: bool = False) -> dict[str, str]:
+    # worktree cwd(=marina root) → thread_name. rollout 헤더 스캔이 무거워 TTL 60s 캐시 + mtime 필터.
+    global _codex_titles_cache
+    now = time.time()
+    if not refresh and now - _codex_titles_cache[0] < CODEX_TITLES_TTL:
+        return _codex_titles_cache[1]
+    names: dict[str, str] = {}  # session id → thread_name
+    try:
+        with CODEX_SESSION_INDEX.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                # codex thread_name 은 깔끔한 요약일 때도, raw 첫 메시지(길거나 잡스러움)일 때도 있어 상한만 둔다.
+                tid, tn = o.get("id"), (o.get("thread_name") or "").strip()
+                if tid and tn:
+                    names[tid] = tn[:120]
+    except Exception:
+        pass
+    best: dict[str, tuple[str, str]] = {}  # cwd → (timestamp, session id) 최신
+    cutoff = now - CODEX_ROLLOUT_MAX_AGE
+    for base in CODEX_ROLLOUT_DIRS:
+        if not base.is_dir():
+            continue
+        for path in glob.iglob(str(base / "**" / "rollout-*.jsonl"), recursive=True):
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    continue
+                with open(path, encoding="utf-8") as fh:
+                    o = json.loads(fh.readline())
+            except Exception:
+                continue
+            if o.get("type") != "session_meta":
+                continue
+            p = o.get("payload") or {}
+            cwd, sid, ts = p.get("cwd"), p.get("id"), str(p.get("timestamp") or "")
+            if not cwd or not sid:
+                continue
+            cur = best.get(cwd)
+            if cur is None or ts > cur[0]:
+                best[cwd] = (ts, sid)
+    titles = {cwd: names[sid] for cwd, (ts, sid) in best.items() if sid in names}
+    _codex_titles_cache = (now, titles)
+    return titles
+
+
+def repo_head_subject(repo: Path) -> str:
+    # 최신 커밋 제목 — 세션 타이틀 없을 때(CLI/codex) 카드 식별 폴백.
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(repo), "log", "-1", "--format=%s"],
+            text=True, stderr=subprocess.DEVNULL,
+        )
+        return out.strip()
+    except Exception:
+        return ""
+
 
 def repo_last_commit_ts(repo: Path) -> int:
     try:
@@ -1730,14 +1844,31 @@ def repo_branch(repo: Path) -> str:
 
 
 def repo_ahead_of_main(repo: Path) -> int | None:
-    # 로컬 main 대비 이 worktree 브랜치에만 있는 커밋 수 (main 없으면 None)
+    # 이 worktree 가 "생성된 이후" 쌓은 커밋 수 (= 이 세션의 미머지 작업). main 없으면 None.
+    # main..HEAD 는 worktree 생성 시 물려받은 공유 base 까지 세어 모든 카드에 같은 유령이 깔린다 →
+    # reflog 기반 fork-point 를 생성 시점 기준으로 삼아 이 세션 커밋만 센다 (실패 시 main..HEAD 폴백).
     try:
         subprocess.check_output(
             ["git", "-C", str(repo), "rev-parse", "--verify", "main"],
             stderr=subprocess.DEVNULL,
         )
+    except Exception:
+        return None
+    base = "main"
+    branch = repo_branch(repo)
+    if branch and branch != "main":
+        try:
+            fp = subprocess.check_output(
+                ["git", "-C", str(repo), "merge-base", "--fork-point", "main", branch],
+                text=True, stderr=subprocess.DEVNULL,
+            ).strip()
+            if fp:
+                base = fp
+        except Exception:
+            pass
+    try:
         out = subprocess.check_output(
-            ["git", "-C", str(repo), "rev-list", "--count", "main..HEAD"],
+            ["git", "-C", str(repo), "rev-list", "--count", f"{base}..HEAD"],
             text=True, stderr=subprocess.DEVNULL,
         )
         return int(out.strip())
@@ -1808,6 +1939,8 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
     info = {
         "id": session_id(root),
         "alias": read_meta(root).get("alias", ""),
+        # 카드 제목 폴백 — 세션 타이틀(앱) 없을 때 "무슨 작업인지" 식별용 최신 커밋 제목
+        "headSubject": repo_head_subject(root),
         "source": root_source(root),
         "root": str(root),
         # 프로젝트 식별 — 대시보드 좌측 패널 그룹핑 키 (멀티프로젝트)
@@ -2147,7 +2280,7 @@ INDEX_HTML = r"""<!doctype html>
     .alias-input { height: 28px; min-width: 0; width: 160px; font-size: 14px; font-weight: 700; padding: 0 8px; }
     .alias-display { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 700; line-height: 1.3; cursor: text; border-bottom: 1px dashed transparent; }
     .alias-display:hover { border-bottom-color: var(--sys-style-neutral-default); }
-    .sid-sub { margin: 3px 0 0 14px; color: var(--sys-cont-neutral-lightest); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+    .sid-sub { margin: 3px 0 0 14px; color: var(--sys-cont-neutral-lightest); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     .root { color: var(--sys-cont-neutral-lightest); font-size: 12px; line-height: 1.6; margin-top: 4px; overflow-wrap: anywhere; }
     .root .root-meta { white-space: nowrap; }
     .session-tools { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
@@ -2165,6 +2298,12 @@ INDEX_HTML = r"""<!doctype html>
     /* 긴 브랜치명이 카드 폭을 넘으면 말줄임 — 전체 매핑은 title 로 */
     .pill-stat.pill-branch { display: inline-block; max-width: 100%; height: 22px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; }
     .pill-stat.danger { background: hsl(358, 70%, 96%); border-color: transparent; color: var(--sys-cont-negative-default); font-weight: 700; }
+    /* ✎ 미커밋 수정(tracked) — 진짜 신호, 차분한 중립 강조(경보색 아님) */
+    .pill-stat.edit { color: var(--sys-cont-neutral-default); font-weight: 700; }
+    /* +N untracked — .venv·빌드산출물 노이즈, 거슬리지 않게 흐릿하게 */
+    .pill-stat.ghost { background: transparent; border-color: transparent; color: var(--sys-cont-neutral-lightest); font-weight: 500; padding: 0 5px; }
+    /* ↑N 미머지(이 세션 커밋) — 약한 강조 아웃라인(잊기 쉬운 쪽이라 살짝 눈에) */
+    .pill-stat.ahead { background: transparent; border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); font-weight: 700; }
     details { margin-top: 10px; }
     summary { color: var(--sys-cont-neutral-light); cursor: pointer; font-size: 12px; font-weight: 500; line-height: 1.6; }
     .summary-sub { color: var(--sys-cont-neutral-lightest); font-weight: 400; margin-left: 4px; }
@@ -3763,9 +3902,21 @@ INDEX_HTML = r"""<!doctype html>
         const wt = wtByRoot.get(session.root);
         // 상태를 원자적 칩으로 — 칩 내부는 개행 금지, 칩 사이에서만 줄바꿈
         const pills = [];
-        const changeCount = (session.worktreeStatus?.repos ?? []).reduce((sum, repo) => sum + (repo.changeCount || 0), 0);
-        if (!session.worktreeStatus?.clean) {
-          pills.push(`<button class="pill-stat danger" data-changes-toggle title="미커밋 변경 파일 보기/접기">변경분 ${changeCount} ▾</button>`);
+        // 카드 제목 = alias → Claude 세션 타이틀 → 최신 커밋 제목 → 해시. 해시는 제목과 다를 때만 보조줄로.
+        // main 체크아웃은 "작업 세션"이 아니라 통합본 → 커밋제목 폴백 없이 'main'(id) 유지.
+        const isMainCard = session.source === 'main' || wt?.isMain;
+        const displayTitle = session.alias || (isMainCard ? '' : (wt?.sessionTitle || wt?.headSubject)) || session.id;
+        const showSub = displayTitle !== session.id;
+        const stRepos = session.worktreeStatus?.repos ?? [];
+        const trackedCount = stRepos.reduce((sum, r) => sum + (r.trackedCount || 0), 0);
+        const untrackedCount = stRepos.reduce((sum, r) => sum + (r.untrackedCount || 0), 0);
+        // ✎ = 실제 수정(tracked) — 진짜 신호. 클릭하면 레포별 분해(합산 출처)
+        if (trackedCount > 0) {
+          pills.push(`<button class="pill-stat edit" data-changes-toggle title="미커밋 수정 — 클릭해 레포별 보기">✎ ${trackedCount} ▾</button>`);
+        }
+        // untracked = 주로 .venv·빌드산출물 노이즈 — 약하게, 0이면 사라짐. 같은 패널로 펼침
+        if (untrackedCount > 0) {
+          pills.push(`<button class="pill-stat ghost" data-changes-toggle title="untracked ${untrackedCount}개 (.venv·빌드산출물 등 — gitignore 권장). 클릭해 보기">+${untrackedCount}</button>`);
         }
         if (wt && wt.cacheMb > 50) {
           pills.push(`<button class="pill-stat" data-cache-toggle title="재생성 가능한 빌드 캐시 (marina-services.json cachePaths) — 클릭해 카테고리별 보기·개별 회수">캐시 ${(wt.cacheMb / 1024).toFixed(1)}GB ▾</button>`);
@@ -3773,24 +3924,32 @@ INDEX_HTML = r"""<!doctype html>
         if (wt && !wt.isMain) {
           // 디스크·미활동은 정보성 — 칩이 아니라 root 메타 줄에 합산 (칩은 액션·경고만)
           if (wt.verdict === 'stale') pills.push('<span class="pill-stat danger" title="clean · 미머지 0 · 7일↑ 미활동 — 지워도 안전">삭제 권장</span>');
-          if (wt.aheadTotal > 0) pills.push(`<span class="pill-stat warn" title="main 에 없는 커밋 — Remove 해도 브랜치는 보존">미머지 ${wt.aheadTotal}</span>`);
+          if (wt.aheadTotal > 0) {
+            // ↑ = 이 세션이 생성 이후 쌓은 미머지 커밋(fork-point 기준). 출처 레포가 하나면 칩에 표기, 여럿이면 호버.
+            const aheadRepos = Object.entries(wt.ahead || {}).filter(([, n]) => n > 0).map(([r]) => r);
+            const src = aheadRepos.length === 1 ? ` ${aheadRepos[0]}` : '';
+            const srcTitle = aheadRepos.length ? ` (${aheadRepos.map(r => `${r} ${wt.ahead[r]}`).join(' · ')})` : '';
+            pills.push(`<span class="pill-stat ahead" title="main 에 없는 이 세션 커밋${srcTitle} — Remove 해도 브랜치는 보존">↑ ${wt.aheadTotal}${escapeHtml(src)}</span>`);
+          }
         }
         if (wt?.branches && Object.keys(wt.branches).length) {
-          // 체크아웃 브랜치 — main 카드에 비-main 브랜치가 섞여 있으면 커밋이 거기로 들어가는 함정 신호.
-          // 같은 브랜치는 그룹핑, main 카드의 main(기본 상태) 레포는 생략 — 전부 main 이면 칩 자체 생략 (무소음).
-          // worktree 카드는 main 포함 전부 표시 (일부만 main 인 혼합 상태도 알아야 할 정보)
-          const shortRepo = (name) => name;
-          const fullMap = Object.entries(wt.branches).map(([repo, branch]) => `${shortRepo(repo)}=${branch}`).join(' · ');
-          const offMain = session.source === 'main' && Object.values(wt.branches).some(branch => branch !== 'main');
-          const grouped = {};
-          for (const [repo, branch] of Object.entries(wt.branches)) {
-            if (session.source === 'main' && branch === 'main') continue;
-            (grouped[branch] ??= []).push(shortRepo(repo));
-          }
-          const parts = Object.entries(grouped).map(([branch, repos]) =>
-            repos.length === Object.keys(wt.branches).length ? branch : `${branch} (${repos.join('·')})`);
-          if (parts.length) {
-            pills.push(`<span class="pill-stat pill-branch${offMain ? ' warn' : ''}" title="체크아웃 브랜치 — ${escapeHtml(fullMap)}${offMain ? ' · main 체크아웃에 비-main 브랜치가 섞여 있음: 여기서 커밋하면 그 브랜치로 들어간다' : ''}">⎇ ${escapeHtml(parts.join(' · '))}</span>`);
+          // 브랜치 칩은 "함정 신호"일 때만 — 기본(전 레포 단일 브랜치 = claude/<id>)이면 생략(보조줄과 중복).
+          // main 카드에 비-main 이 섞이거나(offMain), 레포마다 브랜치가 다르면(mixed) 커밋이 엉뚱한 곳으로 가는 함정.
+          const fullMap = Object.entries(wt.branches).map(([repo, branch]) => `${repo}=${branch}`).join(' · ');
+          const uniqueBranches = [...new Set(Object.values(wt.branches))];
+          const offMain = session.source === 'main' && uniqueBranches.some(branch => branch !== 'main');
+          const mixed = uniqueBranches.length > 1;
+          if (offMain || mixed) {
+            const grouped = {};
+            for (const [repo, branch] of Object.entries(wt.branches)) {
+              if (session.source === 'main' && branch === 'main') continue;
+              (grouped[branch] ??= []).push(repo);
+            }
+            const parts = Object.entries(grouped).map(([branch, repos]) =>
+              repos.length === Object.keys(wt.branches).length ? branch : `${branch} (${repos.join('·')})`);
+            if (parts.length) {
+              pills.push(`<span class="pill-stat pill-branch warn" title="체크아웃 브랜치 — ${escapeHtml(fullMap)} · 레포마다 브랜치가 달라 커밋이 의도와 다른 곳으로 갈 수 있음">⎇ ${escapeHtml(parts.join(' · '))}</span>`);
+            }
           }
         }
         if (session.webPortConflictWith?.length) {
@@ -3809,11 +3968,11 @@ INDEX_HTML = r"""<!doctype html>
               <div class="session-main">
                 <div class="alias-row">
                   <span class="chev">${isExpanded ? '▾' : '▸'}</span>
-                  <span class="alias-display" data-alias-display title="클릭해서 별칭 수정">${escapeHtml(session.alias || session.id)}</span>
+                  <span class="alias-display" data-alias-display title="클릭해서 별칭 수정 (세션 타이틀 위에 덮어씀)">${escapeHtml(displayTitle)}</span>
                   <input class="alias-input" data-alias value="${escapeHtml(session.alias || '')}" placeholder="별칭" aria-label="session alias" title="별칭 — Enter 로 저장" hidden />
                   <span class="run-summary" data-run-summary>${runSummaryText(session)}</span>
                 </div>
-                ${session.alias ? `<div class="sid-sub">${escapeHtml(session.id)}</div>` : ''}
+                ${showSub ? `<div class="sid-sub">${escapeHtml(session.id)}</div>` : ''}
               </div>
               <div class="session-tools">
                 ${wt && wt.cacheMb > 50 ? '<button data-clear-cache title="Clear cache — 빌드 캐시 전체 회수 (marina-services.json cachePaths). 카테고리별 회수는 캐시 칩 클릭">♻</button>' : ''}
@@ -3876,26 +4035,30 @@ INDEX_HTML = r"""<!doctype html>
         stopAllBtn.onclick = () => withBusy(stopAllBtn, '…', () => sessionAction('stop-all', session), toolButtons);
         const cleanupBtn = card.querySelector('[data-cleanup]');
         cleanupBtn.onclick = () => withBusy(cleanupBtn, '…', () => sessionAction('cleanup', session), toolButtons);
-        const changesToggle = card.querySelector('[data-changes-toggle]');
-        if (!session.worktreeStatus?.clean) {
-          changesToggle.onclick = () => {
+        const changesToggles = card.querySelectorAll('[data-changes-toggle]');
+        const editToggle = card.querySelector('.pill-stat.edit[data-changes-toggle]');
+        if (changesToggles.length) {
+          const onToggle = () => {
             (async () => {
               const area = card.querySelector('[data-session-changes]');
               if (!area.hidden) {
                 area.hidden = true;
-                changesToggle.textContent = `변경분 ${changeCount} ▾`;
+                if (editToggle) editToggle.textContent = `✎ ${trackedCount} ▾`;
                 return;
               }
               const data = await api(`/api/worktree-changes?root=${enc(session.root)}`);
-              area.textContent = (data.repos ?? []).filter(r => r.dirty).map(r => {
+              // 레포별로 tracked(✎)/untracked(+) 분해 — "합산이 어디서 왔는지" 출처를 드러냄
+              area.textContent = (data.repos ?? []).filter(r => (r.changeCount || 0) > 0).map(r => {
+                const head = `■ ${r.name}  ✎${r.trackedCount || 0}${(r.untrackedCount || 0) ? ` · +${r.untrackedCount} untracked` : ''}`;
                 const lines = (r.changes ?? []).join('\n');
                 const more = r.changeCount > (r.changes ?? []).length ? `\n... +${r.changeCount - r.changes.length} more` : '';
-                return `■ ${r.name} (${r.changeCount})\n${lines}${more}`;
-              }).join('\n\n') || '(변경분 없음 — Refresh 해봐)';
+                return `${head}\n${lines}${more}`;
+              }).join('\n\n') || '(변경 없음 — Refresh 해봐)';
               area.hidden = false;
-              changesToggle.textContent = `변경분 ${changeCount} ▴`;
+              if (editToggle) editToggle.textContent = `✎ ${trackedCount} ▴`;
             })().catch(alert);
           };
+          changesToggles.forEach(btn => { btn.onclick = onToggle; });
         }
         const cacheToggle = card.querySelector('[data-cache-toggle]');
         if (cacheToggle) {
@@ -4545,7 +4708,21 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/worktrees":
             query = urllib.parse.parse_qs(parsed.query)
             refresh = query.get("refresh", ["0"])[0] == "1"
-            self.send_json({"worktrees": [worktree_info(root, refresh) for root in discover_all_roots(refresh)]})
+            # 세션 타이틀은 앱에서 수정 시 빨리 반영돼야 해 캐시된 worktree_info 밖에서 신선하게 덧씌운다.
+            titles = claude_session_titles(refresh)       # Claude 데스크톱 (20s 캐시)
+            codex_titles = codex_session_titles(refresh)  # Codex (60s 캐시)
+            worktrees = []
+            for root in discover_all_roots(refresh):
+                info = dict(worktree_info(root, refresh))  # 캐시 객체 오염 방지 위해 복사 후 오버레이
+                entry = titles.get(str(root))
+                if entry:
+                    info["sessionTitle"] = entry["title"]
+                    info["titleSource"] = entry["titleSource"]
+                elif str(root) in codex_titles:
+                    info["sessionTitle"] = codex_titles[str(root)]
+                    info["titleSource"] = "codex"
+                worktrees.append(info)
+            self.send_json({"worktrees": worktrees})
             return
 
         if parsed.path == "/api/update-status":
