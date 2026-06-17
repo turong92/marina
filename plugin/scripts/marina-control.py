@@ -4180,14 +4180,24 @@ INDEX_HTML = r"""<!doctype html>
 
     async function doRestartDashboard(btn) {
       if (updateBusy) return;
-      if (!confirm('대시보드를 재시작해 새 코드로 띄울까요?\n(dev 서버는 그대로 유지됩니다 · 약 1초)')) return;
+      if (!confirm('대시보드를 재시작해 새 코드로 띄울까요?\n(dev 서버는 유지 · 브라우저 자동 새로고침 · 수 초)')) return;
       updateBusy = true;
       btn.disabled = true; btn.innerHTML = BUSY_DOTS;
       try {
         await api('/api/restart-dashboard', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
       } catch {}
-      // 데몬이 ~1초 내 돌아옴 — 폴링이 자동 재연결, 배너는 다음 update-status 에서 사라짐.
-      setTimeout(() => { updateBusy = false; loadUpdateStatus().catch(() => {}); }, 3000);
+      // 서버만 재시작하면 브라우저는 옛 INDEX_HTML(HTML/JS/CSS) 그대로라 UI 변경이 안 보임 →
+      // 데몬이 죽었다 다시 살아나는 걸 감지하면 페이지를 새로고침해 새 코드 전체 반영
+      let down = false;
+      for (let i = 0; i < 20; i++) {                 // 최대 ~8초
+        await new Promise(r => setTimeout(r, 400));
+        try {
+          const ok = (await fetch('/api/update-status', {cache: 'no-store'})).ok;
+          if (!ok) { down = true; continue; }        // 데몬 내려감 감지
+          if (down) { location.reload(); return; }   // 죽었다 다시 살아남 → 새로고침
+        } catch { down = true; }
+      }
+      location.reload();                             // fallback — transition 못 봐도 새로고침
     }
 
     async function doUpdateNow(btn) {
