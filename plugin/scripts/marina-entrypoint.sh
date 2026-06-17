@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # marina — 전역 dev 런처 + 관제 대시보드 진입점.
 #
-#   marina add <path> | rm <id> | ls        # 프로젝트 레지스트리 (~/.marina/projects.json)
-#   marina dashboard                         # 전역 대시보드(:3900) 기동 (기본)
-#   marina stop | dashboard-stop | open      # 대시보드 제어
-#   marina status | ports | all              # 현재 worktree(cwd) 의 서비스
+#   marina start|stop|restart <svc..>        # 현재 worktree(cwd) 의 서비스 (전체는 --all)
+#   marina status | ports | logs [svc]       # 현재 worktree 상태/포트/로그
+#   marina service {add|rm|ls} …             # 서비스 정의 (marina-services.json)
+#   marina project {add|rm|ls|default|infer} # 프로젝트 레지스트리 (~/.marina/projects.json)
+#   marina dashboard [start|stop|status|open]# 전역 대시보드(:3900). 무인자 marina = dashboard start
 #
 # 스크립트는 모두 이 파일의 형제(scripts/) — 어디서 실행하든 위치독립.
 
@@ -21,26 +22,16 @@ source "$RESOLVE"
 usage() {
   cat <<'EOF'
 usage:
-  registry (~/.marina/projects.json):
-    marina add <project-path>     # 서브레포·worktreeGlobs 자동 추론 후 등록
-    marina infer <project-path>   # 추론만 — JSON 출력, 미기록
-    marina rm <id>
-    marina default <id> a,b,c     # 새 worktree 가 자동 attach 할 기본 집합(전체 기본). 빈 값=없음
-    marina ls
-    marina install-cli            # 안정적 marina 셰임을 PATH 에 설치 (자동 업데이트 생존)
-    marina uninstall-cli          # 설치된 marina 셰임 제거
-  dashboard (전역 :3900):
-    marina dashboard            # 기동 (기본)
-    marina dashboard-stop       # 대시보드만 정지
-    marina dashboard-status
-    marina open                 # 브라우저로 열기
-    marina logs [service]       # 로그 tail
-  current worktree (cwd):
-    marina status | ports
-    marina all                  # 정의된 전 서비스 기동 (개별 서비스는 restart <svc> 또는 대시보드)
-    marina restart <svc..>
-    marina attach               # 서브레포 attach 만
-    marina stop [svc..]         # 서비스 정지 (인자 없으면 대시보드까지)
+  services (current worktree):
+    marina start|stop|restart <svc..>     # 무인자=안내, 전체는 --all
+    marina status | ports | logs [svc]
+  service definitions:
+    marina service add <id> '<json>' [--root] | rm <id> <name> | ls <id>
+  projects (~/.marina/projects.json):
+    marina project add <path> | rm <id> | ls | default <id> a,b,c | infer <path>
+  dashboard (:3900):
+    marina dashboard [start|stop|status|open]    # 무인자 marina = dashboard start
+  setup: marina attach | install-cli | uninstall-cli
 EOF
 }
 
@@ -54,52 +45,34 @@ command="${1:-dashboard}"
 shift || true
 
 case "$command" in
-  add|infer|rm|default|ls|projects|add-service|rm-service)
+  service|project)
+    # 그룹 → marina.sh 그룹 dispatch 로 위임 (project {add|rm|ls|default|infer}, service {add|rm|ls})
     "$SESSION" "$command" "$@"
     ;;
-  dashboard|dash|up|start)
-    # attach 트리거는 marina 플러그인(.claude-plugin/.codex-plugin + hooks/hooks.json)이 담당한다 —
-    # 하네스마다 /plugin install 1회로 설치=신뢰(이름 달린 SessionStart 훅). 발견+lazy attach 가 안전망.
-    "$DASHBOARD" start
-    print_dashboard_url
+  start|stop|restart)
+    # bare 서비스명(web)을 marina.sh 가 받는 --flag 로 변환. 이미 --(--all 등)는 그대로 패스.
+    # 무인자는 변환 결과도 빈 인자 → marina.sh 무인자 가드(usage·exit 2)에 위임.
+    lifecycle_args=()
+    for arg in "$@"; do
+      case "$arg" in
+        --*) lifecycle_args+=("$arg") ;;
+        *)   lifecycle_args+=("--$arg") ;;
+      esac
+    done
+    "$SESSION" "$command" ${lifecycle_args[@]+"${lifecycle_args[@]}"}
     ;;
-  attach|prepare)
-    "$ATTACH"
+  status|ports|logs)
+    # 변환 불요(단일/무인자)
+    "$SESSION" "$command" "$@"
     ;;
-  status|ports)
-    "$SESSION" "$command"
-    ;;
-  dashboard-status)
-    "$DASHBOARD" status
-    ;;
-  all)
-    "$SESSION" start --all
-    ;;
-  stop)
-    if [[ $# -eq 0 ]]; then
-      "$SESSION" stop
-      "$DASHBOARD" stop
-    else
-      "$SESSION" stop "$@"
-    fi
-    ;;
-  down|off|quit)
-    "$SESSION" stop
-    "$DASHBOARD" stop
-    ;;
-  dashboard-stop)
-    "$DASHBOARD" stop
-    ;;
-  restart)
-    if [[ $# -eq 0 ]]; then
-      echo "error: restart needs a service name, e.g. marina restart <service..>" >&2
-      exit 1
-    fi
-    "$SESSION" stop "$@"
-    # 구버전 버그: stop 은 전부 받고 start 는 첫 서비스만 올렸다 → 전 인자를 --flag 로 변환
-    restart_flags=()
-    for svc in "$@"; do restart_flags+=("--$svc"); done
-    "$SESSION" start "${restart_flags[@]}"
+  dashboard)
+    case "${1:-start}" in
+      start|"") "$DASHBOARD" start; print_dashboard_url ;;
+      stop)     "$DASHBOARD" stop ;;
+      status)   "$DASHBOARD" status ;;
+      open)     shift; exec "$0" open ;;
+      *) echo "usage: marina dashboard {start|stop|status|open}" >&2; exit 2 ;;
+    esac
     ;;
   open)
     url="http://${MARINA_CONTROL_HOST:-localhost}:${MARINA_CONTROL_PORT:-3900}"
@@ -108,8 +81,8 @@ case "$command" in
     else echo "$url"
     fi
     ;;
-  logs)
-    "$SESSION" logs "$@"
+  attach|prepare)
+    "$ATTACH"
     ;;
   -h|--help|help)
     usage

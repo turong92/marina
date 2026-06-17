@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# marina.sh — worktree 세션별 포트/로그/프로세스 런처 + 프로젝트 레지스트리 CLI.
+# marina.sh — worktree 세션별 포트/로그/프로세스 런처 + 프로젝트/서비스 CLI.
 #
 # 런처 (대시보드가 ROOT 를 주입해 호출, 또는 worktree 안에서 직접):
-#   marina.sh start --web | status | logs web | stop | ports
-# 레지스트리 CLI (위치 무관 — ~/.marina/projects.json 편집):
-#   marina.sh add <project-path> | infer <project-path> | rm <id> | ls
+#   marina.sh start <svc..>|--all | stop <svc..>|--all | restart <svc..>|--all | status | logs [svc] | ports
+# 프로젝트/서비스 CLI (위치 무관 — ~/.marina/projects.json·marina-services.json 편집):
+#   marina.sh project add <path> | project infer <path> | project rm <id> | project ls | project default <id> <a,b,c>
+#   marina.sh service add <id> '<json>' [--root] | service rm <id> <name> [--root] | service ls <id>
 
 set -euo pipefail
 
@@ -22,7 +23,7 @@ die() {
 # registry_add 는 이걸 소비해서 ~/.marina/projects.json 에 upsert 하고, 대시보드 API(phase 3)도 이걸 shell.
 registry_infer() {
   local path="${1:-}"
-  [[ -n "$path" ]] || die "usage: marina.sh infer <project-path>"
+  [[ -n "$path" ]] || die "usage: marina project infer <project-path>"
   [[ -d "$path" ]] || die "디렉토리 없음: $path"
   command -v python3 >/dev/null 2>&1 || die "python3 필요"
   local abs; abs="$(cd "$path" && pwd -P)" || die "경로 해석 실패: $path"
@@ -89,7 +90,7 @@ PY
 
 registry_rm() {
   local id="${1:-}"
-  [[ -n "$id" ]] || die "usage: marina.sh rm <id>"
+  [[ -n "$id" ]] || die "usage: marina project rm <id>"
   command -v python3 >/dev/null 2>&1 || die "python3 필요"
   [[ -f "$PROJECTS_FILE" ]] || die "레지스트리 없음: $PROJECTS_FILE"
   python3 - "$PROJECTS_FILE" "$id" <<'PY'
@@ -110,7 +111,7 @@ PY
 
 registry_default() {
   local id="${1:-}" csv="${2-}"
-  [[ -n "$id" ]] || die "usage: marina.sh default <id> <a,b,c>  (빈 값=전부 비움)"
+  [[ -n "$id" ]] || die "usage: marina project default <id> <a,b,c>  (빈 값=전부 비움)"
   command -v python3 >/dev/null 2>&1 || die "python3 필요"
   [[ -f "$PROJECTS_FILE" ]] || die "레지스트리 없음: $PROJECTS_FILE"
   python3 - "$PROJECTS_FILE" "$id" "$csv" <<'PY'
@@ -134,22 +135,31 @@ print(f"defaultAttach[{target}]: {', '.join(want) or '(none — 새 worktree 자
 PY
 }
 
-service_target_file() {  # <id> [--root] → 쓸 파일 경로
-  local id="$1" use_root="${2:-}"
-  if [[ "$use_root" == "--root" ]]; then
-    local root; root="$(python3 - "$PROJECTS_FILE" "$id" <<'PY'
+# id → 레지스트리 root 경로 (없으면 die). id→root 해석의 canonical resolver — service ls·service_target_file 가 공유.
+registry_root_for() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "registry_root_for: id 필요"
+  command -v python3 >/dev/null 2>&1 || die "python3 필요"
+  local root; root="$(python3 - "$PROJECTS_FILE" "$id" <<'PY'
 import json,sys
 try: d=json.load(open(sys.argv[1],encoding="utf-8"))
 except Exception: sys.exit(1)
 m=next((p for p in d.get("projects",[]) if p.get("id")==sys.argv[2]),None)
 print(m["root"] if m else "", end="")
 PY
-)"; [[ -n "$root" ]] || die "unknown id: $id"; echo "$root/marina-services.json"
-  else echo "$MARINA_HOME/services/$id.json"; fi
+)"; [[ -n "$root" ]] || die "unknown id: $id"; printf '%s\n' "$root"
+}
+
+service_target_file() {  # <id> [--root] → 쓸 파일 경로
+  local id="$1" use_root="${2:-}"
+  if [[ "$use_root" == "--root" ]]; then
+    local root; root="$(registry_root_for "$id")" || exit $?
+    printf '%s\n' "$root/marina-services.json"
+  else printf '%s\n' "$MARINA_HOME/services/$id.json"; fi
 }
 service_add() {
   local id="${1:-}" svc_json="${2:-}" root_flag="${3:-}"
-  [[ -n "$id" && -n "$svc_json" ]] || die "usage: marina add-service <id> '<json>' [--root]"
+  [[ -n "$id" && -n "$svc_json" ]] || die "usage: marina service add <id> '<json>' [--root]"
   local file; file="$(service_target_file "$id" "$root_flag")" || exit $?
   mkdir -p "$(dirname "$file")"
   python3 - "$file" "$svc_json" <<'PY'
@@ -172,7 +182,7 @@ PY
 }
 service_rm() {
   local id="${1:-}" name="${2:-}" root_flag="${3:-}"
-  [[ -n "$id" && -n "$name" ]] || die "usage: marina rm-service <id> <name> [--root]"
+  [[ -n "$id" && -n "$name" ]] || die "usage: marina service rm <id> <name> [--root]"
   local file; file="$(service_target_file "$id" "$root_flag")" || exit $?
   [[ -f "$file" ]] || { echo "no services file: $file"; return 0; }
   python3 - "$file" "$name" <<'PY'
@@ -187,10 +197,20 @@ print(f"removed {name} from {file}")
 PY
 }
 
+# 머지된 서비스 정의(root ∪ 중앙) json 출력. status(런타임)와 구분되는 정의 조회.
+# 워크스페이스 컨텍스트 해석 전에 호출되므로 ROOT/SOURCE_ROOT 를 id 의 root 로 직접 세팅한다
+# (merged_services_json 이 둘로 레지스트리를 매칭해 중앙 서비스 pid 를 해석).
+service_ls() {
+  local id="${1:-}"
+  [[ -n "$id" ]] || die "usage: marina service ls <id>"
+  local root; root="$(registry_root_for "$id")" || exit $?
+  ROOT="$root" SOURCE_ROOT="$root" merged_services_json
+}
+
 registry_ls() {
   command -v python3 >/dev/null 2>&1 || die "python3 필요"
   if [[ ! -f "$PROJECTS_FILE" ]]; then
-    echo "(레지스트리 비어 있음: $PROJECTS_FILE — marina.sh add <path> 로 등록)"
+    echo "(레지스트리 비어 있음: $PROJECTS_FILE — marina project add <path> 로 등록)"
     return 0
   fi
   python3 - "$PROJECTS_FILE" <<'PY'
@@ -211,15 +231,65 @@ for p in projects:
 PY
 }
 
-# 레지스트리 CLI 는 워크스페이스 컨텍스트(ROOT/SOURCE_ROOT) 해석 전에 처리하고 종료.
+# root ∪ 중앙 서비스 머지 JSON 을 stdout 으로 (name 중앙 우선). 서비스 조회가 이걸 파싱한다.
+# early dispatch(service ls)에서도 호출되므로 워크스페이스 컨텍스트 해석 위에 정의한다 —
+# ROOT/SOURCE_ROOT/PROJECTS_FILE/MARINA_HOME 을 positional 로만 받아 그 시점 의존이 없다.
+merged_services_json() {
+  python3 - "$ROOT" "$SOURCE_ROOT" "$PROJECTS_FILE" "$MARINA_HOME" <<'PY'
+import json, os, sys
+root, source_root, projects_file, home = sys.argv[1:5]
+def read(p):
+    try:
+        d = json.load(open(p, encoding="utf-8"))
+        return d.get("services", []) if isinstance(d, dict) else []
+    except Exception:
+        return []
+def norm(p): return os.path.realpath(os.path.expanduser(p))
+pid = ""; proot = source_root
+try:
+    data = json.load(open(projects_file, encoding="utf-8"))
+    tgt = {norm(source_root), norm(root)}
+    for p in data.get("projects", []):
+        pr = norm(p.get("root", ""))
+        if pr in tgt or any(t == pr or t.startswith(pr + os.sep) for t in tgt):
+            pid = p.get("id", ""); proot = p.get("root", ""); break
+except Exception:
+    pass
+merged = {}
+root_file = os.path.join(norm(proot), "marina-services.json")
+for s in read(root_file):
+    n = s.get("name")
+    if n: merged[n] = {**s, "source": "root"}
+if pid:
+    for s in read(os.path.join(norm(home), "services", pid + ".json")):
+        n = s.get("name")
+        if n: merged[n] = {**s, "source": "central"}
+print(json.dumps({"services": list(merged.values())}, ensure_ascii=False))
+PY
+}
+
+# 레지스트리/서비스 CLI 는 워크스페이스 컨텍스트(ROOT/SOURCE_ROOT) 해석 전에 처리하고 종료.
 case "${1:-}" in
-  add)         shift; registry_add "$@";   exit $? ;;
-  infer)       shift; registry_infer "$@"; exit $? ;;
-  rm)          shift; registry_rm "$@";    exit $? ;;
-  default)     shift; registry_default "$@"; exit $? ;;
-  ls|projects) registry_ls;               exit $? ;;
-  add-service) shift; service_add "$@";   exit $? ;;
-  rm-service)  shift; service_rm "$@";    exit $? ;;
+  project)
+    shift
+    case "${1:-}" in
+      add)     shift; registry_add "$@";     exit $? ;;
+      infer)   shift; registry_infer "$@";   exit $? ;;
+      rm)      shift; registry_rm "$@";      exit $? ;;
+      default) shift; registry_default "$@"; exit $? ;;
+      ls)      shift; registry_ls "$@";      exit $? ;;
+      *) die "usage: marina project {add|rm|ls|default|infer} …" ;;
+    esac
+    ;;
+  service)
+    shift
+    case "${1:-}" in
+      add) shift; service_add "$@"; exit $? ;;
+      rm)  shift; service_rm "$@";  exit $? ;;
+      ls)  shift; service_ls "$@";  exit $? ;;
+      *) die "usage: marina service {add|rm|ls} …" ;;
+    esac
+    ;;
 esac
 
 # ---- 워크스페이스 컨텍스트 (런처 명령용) — 위치독립 -------------------------
@@ -346,41 +416,7 @@ export COREPACK_ENABLE_PROJECT_SPEC="${COREPACK_ENABLE_PROJECT_SPEC:-0}"
 #   {"services": [{"name":"echo","portBase":8200,"cwd":".","run":"{python} -m http.server {port}"}]}
 # run 치환자: {port}{python}{root}{profile} + 세션 경로 {env_file}{tmp}{session}.
 # 우선순위: root(SOURCE_ROOT) ∪ 중앙(~/.marina/services/<id>.json), name 충돌 시 중앙 우선.
-
-# root ∪ 중앙 서비스 머지 JSON 을 stdout 으로 (name 중앙 우선). 서비스 조회가 이걸 파싱한다.
-merged_services_json() {
-  python3 - "$ROOT" "$SOURCE_ROOT" "$PROJECTS_FILE" "$MARINA_HOME" <<'PY'
-import json, os, sys
-root, source_root, projects_file, home = sys.argv[1:5]
-def read(p):
-    try:
-        d = json.load(open(p, encoding="utf-8"))
-        return d.get("services", []) if isinstance(d, dict) else []
-    except Exception:
-        return []
-def norm(p): return os.path.realpath(os.path.expanduser(p))
-pid = ""; proot = source_root
-try:
-    data = json.load(open(projects_file, encoding="utf-8"))
-    tgt = {norm(source_root), norm(root)}
-    for p in data.get("projects", []):
-        pr = norm(p.get("root", ""))
-        if pr in tgt or any(t == pr or t.startswith(pr + os.sep) for t in tgt):
-            pid = p.get("id", ""); proot = p.get("root", ""); break
-except Exception:
-    pass
-merged = {}
-root_file = os.path.join(norm(proot), "marina-services.json")
-for s in read(root_file):
-    n = s.get("name")
-    if n: merged[n] = s
-if pid:
-    for s in read(os.path.join(norm(home), "services", pid + ".json")):
-        n = s.get("name")
-        if n: merged[n] = s
-print(json.dumps({"services": list(merged.values())}, ensure_ascii=False))
-PY
-}
+# merged_services_json 정의는 service ls(early dispatch)에서도 쓰므로 위쪽에 둔다.
 
 extra_services() {
   command -v python3 >/dev/null 2>&1 || return 0
@@ -423,19 +459,25 @@ usage() {
   cat <<'EOF'
 usage:
   launcher (worktree 단위 — 서비스는 프로젝트 root 의 marina-services.json 에서 정의):
-    marina.sh start [--<service>...] [--all] [--changed]
+    marina.sh start <service..> | --all [--changed]
+    marina.sh stop <service..> | --all
+    marina.sh restart <service..> | --all
     marina.sh foreground [service]
-    marina.sh stop [service...]
     marina.sh status | status-all | ports
     marina.sh logs [service]
-  registry (~/.marina/projects.json, 위치 무관):
-    marina.sh add <project-path> [--subrepos a,b,c]   # 등록. --subrepos 생략=자동 추론, 명시=정확히 그 집합(빈 값=모노레포)
-    marina.sh infer <project-path>   # 추론만 — JSON 출력, 미기록
-    marina.sh rm <id>
-    marina.sh ls
+  project (~/.marina/projects.json, 위치 무관):
+    marina.sh project add <project-path> [--subrepos a,b,c]   # 등록. --subrepos 생략=자동 추론, 명시=정확히 그 집합(빈 값=모노레포)
+    marina.sh project infer <project-path>   # 추론만 — JSON 출력, 미기록
+    marina.sh project rm <id>
+    marina.sh project ls
+    marina.sh project default <id> <a,b,c>   # 새 worktree 자동 attach 서브레포 집합 (빈 값=비움)
+  service (root marina-services.json ∪ ~/.marina/services/<id>.json):
+    marina.sh service add <id> '<json>' [--root]   # --root=프로젝트 root 파일, 생략=중앙
+    marina.sh service rm <id> <name> [--root]
+    marina.sh service ls <id>   # root ∪ 중앙 머지 정의 JSON
 
-defaults:
-  start without service flags starts all defined services.
+note:
+  start/stop/restart 는 인자 필수 — 전체 대상은 --all 로 명시 (무인자 = 전체 실수 방지 가드).
 EOF
 }
 
@@ -942,27 +984,22 @@ main() {
   shift || true
 
   case "$command" in
-    start)
-      prepare
+    start|stop|restart)
+      # 무인자 가드: 전체 정지/기동 실수 방지 — 명시적 --all 만 전체로 확장.
+      if [[ $# -eq 0 ]]; then
+        echo "usage: marina $command <service..>   (전체: marina $command --all)" >&2
+        echo "서비스: ${SERVICES[*]:-(없음)}" >&2
+        exit 2
+      fi
       offset="$(port_offset)"
-      while IFS= read -r service; do
-        start_service "$service" "$offset"
-      done < <(selected_services_from_args "$@")
-      print_status
+      case "$command" in
+        start)   prepare; while IFS= read -r service; do start_service "$service" "$offset"; done < <(selected_services_from_args "$@"); print_status ;;
+        stop)    while IFS= read -r service; do stop_service "$service"; done < <(selected_services_from_args "$@") ;;
+        restart) prepare; while IFS= read -r service; do stop_service "$service"; start_service "$service" "$offset"; done < <(selected_services_from_args "$@"); print_status ;;
+      esac
       ;;
     foreground)
       run_foreground "${1:-}"
-      ;;
-    stop)
-      if [[ $# -eq 0 ]]; then
-        for service in ${SERVICES[@]+"${SERVICES[@]}"}; do
-          stop_service "$service"
-        done
-      else
-        for service in "$@"; do
-          stop_service "$service"
-        done
-      fi
       ;;
     status)
       print_status

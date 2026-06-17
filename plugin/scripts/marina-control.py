@@ -120,8 +120,8 @@ def _git_main_checkout(root: Path) -> Path | None:
 
 
 def load_projects() -> list[dict[str, Any]]:
-    # ~/.marina/projects.json — 명시 등록(marina add)된 프로젝트만 읽는다.
-    # 비면 빈 목록(대시보드 빈 상태) — 현재 체크아웃을 추측하지 않는다(명시 등록 marina add 필요).
+    # ~/.marina/projects.json — 명시 등록(marina project add)된 프로젝트만 읽는다.
+    # 비면 빈 목록(대시보드 빈 상태) — 현재 체크아웃을 추측하지 않는다(명시 등록 marina project add 필요).
     if _projects_cache:
         return _projects_cache
     items: list[dict[str, Any]] = []
@@ -429,7 +429,7 @@ def discover_all_roots(refresh: bool = False) -> list[Path]:
     if not refresh and snapshot and time.time() - snapshot[0][0] < DISCOVER_TTL:
         return snapshot[0][1]
     if refresh:
-        # 명시 Refresh — 레지스트리(projects.json)와 파생 캐시도 재로드 (marina add 후 즉시 반영)
+        # 명시 Refresh — 레지스트리(projects.json)와 파생 캐시도 재로드 (marina project add 후 즉시 반영)
         _projects_cache.clear()
         _source_root_cache.clear()
         _session_id_cache.clear()
@@ -2127,8 +2127,6 @@ INDEX_HTML = r"""<!doctype html>
     .svc-modal-adv-toggle:hover { color: var(--sys-cont-neutral-default); }
     .svc-modal-actions { display: flex; gap: 8px; }
     .svc-modal-actions button { height: 30px; padding: 0 14px; border-radius: 8px; }
-    .add-svc-btn { height: 22px; padding: 0 8px; font-size: 11px; font-weight: 700; border: 1px solid var(--sys-cont-primary-default); border-radius: 6px; color: var(--sys-cont-primary-default); background: var(--sys-bg-surface); }
-    .add-svc-btn:hover { background: var(--sys-bg-surface-hover); }
     .svc-edit-btn, .svc-del-btn { height: 22px; min-width: 22px; padding: 0 5px; font-size: 12px; border-radius: 5px; }
     aside { border-right: 1px solid var(--sys-style-neutral-light); overflow-y: auto; min-height: 0; }
     section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -4032,14 +4030,18 @@ INDEX_HTML = r"""<!doctype html>
       } else {
         control = `<button class="subrepo-act icon primary" data-attach aria-label="attach" title="이 worktree 에 attach (git worktree add) — 같은 이름 브랜치 있으면 재사용">${LINK_ICON}</button>`;
       }
-      const addSvcBtn = o.inUniverse ? '<button class="add-svc-btn" data-add-svc title="이 subrepo 에 서비스 추가">+ 서비스 추가</button>' : '';
+      // 서비스 추가 — 수동 폼(+) + LLM 위임(✨, 명령 복사). 아이콘은 link/unlink/pin 과 같은 subrepo-act icon 박스. Tabler plus / sparkles (MIT)
+      const PLUS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14"/><path d="M5 12l14 0"/></svg>';
+      const SPARKLE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6z"/></svg>';
+      const addSvcBtn = o.inUniverse ? `<button class="subrepo-act icon" data-add-svc title="이 subrepo 에 서비스 추가 (수동 폼)" aria-label="서비스 추가">${PLUS_ICON}</button>` : '';
+      const llmSvcBtn = o.inUniverse ? `<button class="subrepo-act icon" data-llm-svc title="LLM 으로 등록 — /marina:add-service 명령 복사" aria-label="LLM 으로 서비스 등록">${SPARKLE_ICON}</button>` : '';
       return `
         <div class="subrepo-main">
           ${chev}
           <span class="subrepo-name">${escapeHtml(name)}</span>
           ${o.count ? `<span class="subrepo-count">${o.count} svc</span>` : '<span class="subrepo-count muted">no svc</span>'}
         </div>
-        <div class="subrepo-ctl">${control}${addSvcBtn}</div>
+        <div class="subrepo-ctl">${control}${addSvcBtn}${llmSvcBtn}</div>
       `;
     }
 
@@ -4105,6 +4107,14 @@ INDEX_HTML = r"""<!doctype html>
       if (detachBtn) detachBtn.onclick = (e) => { e.stopPropagation(); withBusy(detachBtn, '…', () => detachSubrepo(session, name)); };
       const addSvcBtn = head.querySelector('[data-add-svc]');
       if (addSvcBtn) addSvcBtn.onclick = (e) => { e.stopPropagation(); openServiceModal(session.root, name, null); };
+      const llmSvcBtn = head.querySelector('[data-llm-svc]');
+      if (llmSvcBtn) llmSvcBtn.onclick = async (e) => {
+        e.stopPropagation();
+        // 대시보드는 LLM 세션을 직접 호출 못함 → 명령을 클립보드에 넣고 세션에 붙여넣도록 안내. 클립보드 실패해도 alert 로 명령 노출(복사 폴백)
+        const cmd = `/marina:add-service ${session.root}`;
+        try { await navigator.clipboard.writeText(cmd); } catch {}
+        alert(`복사됨:\n${cmd}\n\nClaude/Codex 세션에 붙여넣어 실행하세요. (구조를 분석해 서비스를 등록합니다)`);
+      };
     }
 
     function configInput(session, key, fallback = '') {
@@ -4638,7 +4648,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not str(body.get("path", "")).strip() or not target.is_dir():
                     raise ValueError(f"디렉토리 없음: {body.get('path', '')}")
                 try:
-                    out = run_marina_registry("infer", str(target))
+                    out = run_marina_registry("project", "infer", str(target))
                 except subprocess.CalledProcessError as exc:
                     raise ValueError((exc.output or "").strip() or str(exc))
                 self.send_json(json.loads(out.strip().splitlines()[-1]))
@@ -4652,7 +4662,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not isinstance(subrepos, list) or not all(isinstance(s, str) for s in subrepos):
                     raise ValueError("subrepos must be a list of strings")
                 try:
-                    out = run_marina_registry("add", str(target), "--subrepos", ",".join(subrepos))
+                    out = run_marina_registry("project", "add", str(target), "--subrepos", ",".join(subrepos))
                 except subprocess.CalledProcessError as exc:
                     raise ValueError((exc.output or "").strip() or str(exc))
                 invalidate_registry_caches()
@@ -4665,7 +4675,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not pid:
                     raise ValueError("id required")
                 try:
-                    out = run_marina_registry("rm", pid)
+                    out = run_marina_registry("project", "rm", pid)
                 except subprocess.CalledProcessError as exc:
                     raise ValueError((exc.output or "").strip() or str(exc))
                 invalidate_registry_caches()
@@ -4751,7 +4761,7 @@ class Handler(BaseHTTPRequestHandler):
                 if bad:
                     raise ValueError(f"등록되지 않은 subrepo: {', '.join(bad)}")
                 try:
-                    out = run_marina_registry("default", project["id"], ",".join(subs))
+                    out = run_marina_registry("project", "default", project["id"], ",".join(subs))
                 except subprocess.CalledProcessError as exc:
                     raise ValueError((exc.output or "").strip() or str(exc))
                 invalidate_registry_caches()
@@ -4769,7 +4779,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not isinstance(svc, dict):
                         raise ValueError("service must be an object")
                     try:
-                        out = run_marina_registry("add-service", project["id"], json.dumps(svc, ensure_ascii=False), *args)
+                        out = run_marina_registry("service", "add", project["id"], json.dumps(svc, ensure_ascii=False), *args)
                     except subprocess.CalledProcessError as exc:
                         raise ValueError((exc.output or "").strip() or str(exc))
                 else:
@@ -4777,7 +4787,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not name:
                         raise ValueError("name required")
                     try:
-                        out = run_marina_registry("rm-service", project["id"], name, *args)
+                        out = run_marina_registry("service", "rm", project["id"], name, *args)
                     except subprocess.CalledProcessError as exc:
                         raise ValueError((exc.output or "").strip() or str(exc))
                 invalidate_registry_caches()

@@ -15,8 +15,8 @@ base="http://127.0.0.1:$PORT"; hdr=(-H "Origin: http://127.0.0.1:$PORT")
 PARENT="$TMP/parent"; SUB="$PARENT/sub"
 mkdir -p "$SUB"
 git -C "$PARENT" init -q; git -C "$SUB" init -q
-bash "$SH" add "$PARENT" >/dev/null
-bash "$SH" add "$SUB" >/dev/null
+bash "$SH" project add "$PARENT" >/dev/null
+bash "$SH" project add "$SUB" >/dev/null
 
 MARINA_CONTROL_PORT=$PORT MARINA_CONTROL_HOST=127.0.0.1 python3 "$CTRL" >/dev/null 2>&1 &
 SRV=$!

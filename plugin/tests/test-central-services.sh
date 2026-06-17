@@ -7,7 +7,7 @@ SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export MARINA_HOME="$TMP/home"
 P="$TMP/proj"; mkdir -p "$P"           # NO marina-services.json in the project root
-bash "$SH" add "$P" >/dev/null
+bash "$SH" project add "$P" >/dev/null
 id="$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('$MARINA_HOME/projects.json')))['projects'][0]['id'])")"
 mkdir -p "$MARINA_HOME/services"
 cat > "$MARINA_HOME/services/$id.json" <<'JSON'

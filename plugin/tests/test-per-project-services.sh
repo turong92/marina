@@ -21,8 +21,8 @@ JSON
 # 서비스 없는 프로젝트 (homeserver 류)
 PB="$TMP/nosvc"; mkdir -p "$PB"
 
-bash "$SH" add "$PA" >/dev/null
-bash "$SH" add "$PB" >/dev/null
+bash "$SH" project add "$PA" >/dev/null
+bash "$SH" project add "$PB" >/dev/null
 
 MARINA_CONTROL_PORT=$PORT MARINA_CONTROL_HOST=127.0.0.1 python3 "$CTRL" >/dev/null 2>&1 &
 SRV=$!

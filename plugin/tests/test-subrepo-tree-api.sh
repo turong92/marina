@@ -32,9 +32,9 @@ cat > "$P/marina-services.json" <<'JSON'
   {"name":"rootsvc","portBase":4300,"cwd":"."}
 ]}
 JSON
-bash "$HERE/../scripts/marina.sh" add "$P" --subrepos a,b,c >/dev/null
+bash "$HERE/../scripts/marina.sh" project add "$P" --subrepos a,b,c >/dev/null
 id="$(python3 -c "import json,os; print(json.load(open(os.path.expanduser('$MARINA_HOME/projects.json')))['projects'][0]['id'])")"
-bash "$HERE/../scripts/marina.sh" default "$id" a,b >/dev/null
+bash "$HERE/../scripts/marina.sh" project default "$id" a,b >/dev/null
 
 MARINA_CONTROL_PORT=$PORT MARINA_CONTROL_HOST=127.0.0.1 python3 "$CTRL" >/dev/null 2>&1 &
 SRV=$!

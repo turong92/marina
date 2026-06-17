@@ -17,8 +17,8 @@ PB="$TMP/beta"; mkdir -p "$PB"
 cat > "$PB/marina-services.json" <<'JSON'
 {"services":[{"name":"bar","portBase":4200},{"name":"baz","portBase":4300}]}
 JSON
-bash "$SH" add "$PA" >/dev/null
-bash "$SH" add "$PB" >/dev/null
+bash "$SH" project add "$PA" >/dev/null
+bash "$SH" project add "$PB" >/dev/null
 
 # --- unit: per-project lookups (no server) ---
 python3 - "$CTRL" "$PA" "$PB" <<'PY' || { echo "FAIL: per-project lookup unit"; exit 1; }

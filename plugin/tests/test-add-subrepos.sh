@@ -8,22 +8,22 @@ P="$TMP/proj"; mkdir -p "$P/frontend/.git" "$P/backend/.git" "$P/extra/.git" "$P
 reg="$MARINA_HOME/projects.json"
 
 # no flag → infer all (sorted)
-bash "$SH" add "$P" >/dev/null
+bash "$SH" project add "$P" >/dev/null
 python3 -c "import json; p=json.load(open('$reg'))['projects'][0]; assert p['subrepos']==['backend','extra','frontend'],p" \
   || { echo "FAIL: add without flag should infer all"; exit 1; }
 
 # --subrepos curated subset + upsert (still one project)
-bash "$SH" add "$P" --subrepos backend,frontend >/dev/null
+bash "$SH" project add "$P" --subrepos backend,frontend >/dev/null
 python3 -c "import json; d=json.load(open('$reg')); assert len(d['projects'])==1,d; assert d['projects'][0]['subrepos']==['backend','frontend'],d['projects'][0]" \
   || { echo "FAIL: --subrepos curated set / upsert"; exit 1; }
 
 # --subrepos "" explicit empty (monorepo)
-bash "$SH" add "$P" --subrepos "" >/dev/null
+bash "$SH" project add "$P" --subrepos "" >/dev/null
 python3 -c "import json; assert json.load(open('$reg'))['projects'][0]['subrepos']==[]" \
   || { echo "FAIL: --subrepos empty should record []"; exit 1; }
 
 # whitespace + stray names tolerated (trimmed, blanks dropped)
-bash "$SH" add "$P" --subrepos " backend , frontend ," >/dev/null
+bash "$SH" project add "$P" --subrepos " backend , frontend ," >/dev/null
 python3 -c "import json; assert json.load(open('$reg'))['projects'][0]['subrepos']==['backend','frontend']" \
   || { echo "FAIL: --subrepos should trim and drop blanks"; exit 1; }
 

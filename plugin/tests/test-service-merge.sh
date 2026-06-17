@@ -9,7 +9,7 @@ P="$TMP/proj"; mkdir -p "$P"
 cat > "$P/marina-services.json" <<'JSON'
 {"services":[{"name":"web","portBase":3000,"cwd":"fe","run":"team-web"},{"name":"api","portBase":8080,"cwd":"be","run":"team-api"}]}
 JSON
-bash "$SH" add "$P" >/dev/null
+bash "$SH" project add "$P" >/dev/null
 id="$(python3 -c "import json,os;print(json.load(open(os.path.expanduser('$MARINA_HOME/projects.json')))['projects'][0]['id'])")"
 mkdir -p "$MARINA_HOME/services"
 cat > "$MARINA_HOME/services/$id.json" <<'JSON'

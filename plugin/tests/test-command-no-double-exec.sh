@@ -10,7 +10,7 @@ P="$TMP/proj"; mkdir -p "$P"
 cat > "$P/marina-services.json" <<'JSON'
 {"services":[{"name":"smoke","portBase":9988,"cwd":".","run":"FOO=bar exec echo MARKER_OK"}]}
 JSON
-bash "$SH" add "$P" >/dev/null
+bash "$SH" project add "$P" >/dev/null
 cmd="$(cd "$P" && MARINA_HOME="$MARINA_HOME" bash "$SH" print-command smoke 2>/dev/null)" \
   || { echo "FAIL: print-command failed"; exit 1; }
 out="$(bash -c "$cmd" 2>&1 || true)"

@@ -10,7 +10,7 @@ cat > "$P/marina-services.json" <<'JSON'
 {"services":[{"name":"api","portBase":18080,"cwd":".",
   "run":"exec env HOST_PORT={port} COMPOSE_PROJECT_NAME=hs-api-{session} docker compose up"}]}
 JSON
-bash "$SH" add "$P" >/dev/null
+bash "$SH" project add "$P" >/dev/null
 # command_for is an internal function; invoke marina.sh's dry-run/print path for the service command.
 cmd="$(cd "$P" && MARINA_HOME="$MARINA_HOME" bash "$SH" print-command api 2>/dev/null)" \
   || { echo "SKIP: marina.sh has no print-command (add it or assert via start log)"; exit 0; }

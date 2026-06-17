@@ -22,7 +22,7 @@ JSON
 # worktree = real git worktree of the root repo (루트에 .git → discover 됨). 서브레포는 아래 API 로 attach.
 WT="$TMP/wt/feature-x"; mkdir -p "$TMP/wt"
 git -C "$SRC" worktree add -q --detach "$WT" HEAD
-bash "$SH" add "$SRC" --subrepos a,b >/dev/null
+bash "$SH" project add "$SRC" --subrepos a,b >/dev/null
 # point worktreeGlobs at our wt dir so it's discovered
 python3 - "$MARINA_HOME/projects.json" "$TMP/wt/*" <<'PY'
 import json, sys

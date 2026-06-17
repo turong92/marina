@@ -32,13 +32,16 @@ for p in data.get("projects", []):
         continue
     # 프로젝트 root 자신/하위(claude) 또는 codex 레이아웃 한정 basename 일치 (project_for 와 정합)
     if root == pr or root.startswith(pr + os.sep):
+        print(p.get("id", ""))
         sys.exit(0)
     if in_codex and os.path.basename(root) == os.path.basename(pr):
+        print(p.get("id", ""))
         sys.exit(0)
 sys.exit(1)
 PY
 }
-is_registered || exit 0
+# 매칭 시 project id 를 stdout 으로 받는다 (없으면 비-marina → 종료). service ls <id> 에 사용.
+PROJECT_ID="$(is_registered)" || exit 0
 
 LOG_DIR="$ROOT/.workspace/marina/hooks"
 mkdir -p "$LOG_DIR"
@@ -52,4 +55,50 @@ LOG_FILE="$LOG_DIR/session-start.log"
 # attach 는 레지스트리에서 subrepos·source 를 스스로 해석 (DEST_ROOT 만 넘김)
 if [[ -x "$SCRIPT_DIR/attach-detached-subrepos.sh" ]]; then
   DEST_ROOT="$ROOT" SYNC_IDEA=false "$SCRIPT_DIR/attach-detached-subrepos.sh" >> "$LOG_FILE" 2>&1 || true
+fi
+
+# --- 규칙 주입 (pull 모델): LLM 이 marina 로 서버를 다루게 한다. stdout=순수 JSON 한 줄. ---
+# attach 출력은 위에서 모두 파일로 갔으므로 여기서부터의 stdout 만 호출자(하네스)가 본다.
+
+# 명령 호출자 resolve: PATH 의 marina 셰임 우선, 없으면 entrypoint 절대경로.
+caller="marina"; command -v marina >/dev/null 2>&1 || caller="$SCRIPT_DIR/marina-entrypoint.sh"
+
+# 서비스명(머지 정의) — id 못 얻거나 실패/빈값이면 줄 생략 (규칙 본문은 그대로).
+svc_line=""
+if [[ -n "$PROJECT_ID" ]]; then
+  svcs="$("$SCRIPT_DIR/marina.sh" service ls "$PROJECT_ID" 2>/dev/null | python3 -c "import json,sys
+try: d=json.load(sys.stdin); print(', '.join(s['name'] for s in d.get('services',[])))
+except Exception: pass" 2>/dev/null || true)"
+  [[ -n "$svcs" ]] && svc_line="이 worktree 서비스: $svcs"
+fi
+
+read -r -d '' rules <<EOF || true
+[marina] 이 worktree 는 marina 가 관리합니다. dev 서버는 직접(npm/gradlew 등) 띄우지 말고 $caller 로 — worktree 별 포트가 자동 격리됩니다.
+· 기동:   $caller start <서비스>     (전체는 --all)
+· 정지:   $caller stop <서비스>      (전체는 --all)
+· 재시작: $caller restart <서비스>   (전체는 --all)
+· 상태·포트: $caller status      · 로그: $caller logs <서비스>
+문제 해결:
+· 포트 충돌은 자동으로 빈 포트로 이동 — 실제 포트는 $caller status 로 확인
+· 정의(포트·실행방식·환경변수) 변경: $caller service ls <id> 로 확인 → $caller service add <id> '<json>' 로 수정
+$svc_line
+EOF
+
+# JSON escape (bash 파라미터 치환 — superpowers session-start 훅 방식).
+escape_for_json() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  printf '%s' "$s"
+}
+esc="$(escape_for_json "$rules")"
+
+# 플랫폼 분기: Claude=hookSpecificOutput.additionalContext / 기타 SDK(Codex 등)=top-level additionalContext.
+if [[ -n "${CLAUDE_PLUGIN_ROOT:-}" && -z "${COPILOT_CLI:-}" ]]; then
+  printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"%s"}}\n' "$esc"
+else
+  printf '{"additionalContext":"%s"}\n' "$esc"
 fi
