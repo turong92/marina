@@ -2018,6 +2018,7 @@ INDEX_HTML = r"""<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Marina</title>
+  <meta name="marina-build" content="{{MARINA_BUILD}}" />
   <style>
     :root {
       color-scheme: light;
@@ -4505,7 +4506,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/":
-            data = INDEX_HTML.encode("utf-8")
+            # 떠있는 빌드 SHA 를 페이지에 주입 — 브라우저가 어느 버전을 로드했는지 검증·디버깅용
+            data = INDEX_HTML.replace("{{MARINA_BUILD}}", _serving_sha() or "dev").encode("utf-8")
             self.send_response(200)
             self.send_header("content-type", "text/html; charset=utf-8")
             # no-store — 라이브 대시보드 HTML 은 캐시 금지. 없으면 브라우저가 옛 INDEX_HTML 을 캐시로
