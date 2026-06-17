@@ -2127,6 +2127,10 @@ INDEX_HTML = r"""<!doctype html>
     .svc-modal-adv-toggle:hover { color: var(--sys-cont-neutral-default); }
     .svc-modal-actions { display: flex; gap: 8px; }
     .svc-modal-actions button { height: 30px; padding: 0 14px; border-radius: 8px; }
+    .svc-modal-llm { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; margin-bottom: 4px; border-bottom: 1px solid var(--sys-style-neutral-light); }
+    .svc-modal-llm-btn { align-self: flex-start; height: 32px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--sys-cont-primary-default); background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+    .svc-modal-llm-btn:hover { background: var(--sys-bg-surface-hover); }
+    .svc-modal-llm-hint { font-size: 11px; color: var(--sys-cont-neutral-lightest); line-height: 1.5; }
     .svc-edit-btn, .svc-del-btn { height: 22px; min-width: 22px; padding: 0 5px; font-size: 12px; border-radius: 5px; }
     aside { border-right: 1px solid var(--sys-style-neutral-light); overflow-y: auto; min-height: 0; }
     section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
@@ -2172,7 +2176,7 @@ INDEX_HTML = r"""<!doctype html>
     .svc-list { display: grid; }
     .session.collapsed .svc-list, .session.collapsed [data-config-details], .session.collapsed .root { display: none; }
     .session.collapsed .session-head { border-bottom: 0; }
-    .svc { display: grid; grid-template-columns: 86px 72px minmax(0, 1fr); gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--sys-style-neutral-light); cursor: pointer; }
+    .svc { display: grid; grid-template-columns: minmax(110px, max-content) 72px minmax(0, 1fr); gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--sys-style-neutral-light); cursor: pointer; }
     .svc:hover, .svc.selected { background: var(--sys-bg-surface-hover); }
     /* subrepo ⊃ service 트리 */
     .subrepo-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-base); }
@@ -2197,8 +2201,9 @@ INDEX_HTML = r"""<!doctype html>
     .svc.disabled { cursor: default; opacity: 0.5; }
     .svc.disabled:hover { background: transparent; }
     .svc.disabled .actions { display: none; }
-    .svc-name { font-size: 13px; font-weight: 700; line-height: 1; }
-    .svc-src { font-size: 10px; padding: 1px 6px; border-radius: 6px; margin-left: 6px; }
+    .svc-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; font-weight: 700; line-height: 1; }
+    .svc-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .svc-src { flex-shrink: 0; white-space: nowrap; font-size: 10px; padding: 1px 6px; border-radius: 6px; }
     .svc-src.central { background: hsl(36,90%,94%); color: hsl(30,80%,38%); }
     .svc-src.root { background: var(--sys-style-neutral-light); color: var(--sys-cont-neutral-light); }
     .svc-port { color: var(--sys-cont-neutral-lightest); font-size: 12px; line-height: 1.6; margin-top: 3px; }
@@ -2421,6 +2426,10 @@ INDEX_HTML = r"""<!doctype html>
         <button id="serviceModalClose" title="닫기">✕</button>
       </div>
       <div class="register-error" id="serviceModalError" hidden></div>
+      <div class="svc-modal-llm" id="svcLlmRow">
+        <button class="svc-modal-llm-btn" id="svcLlmRegister" type="button">✨ 이 subrepo 를 LLM 으로 등록</button>
+        <div class="svc-modal-llm-hint">구조를 분석해 자동 등록합니다. 클릭 시 명령을 복사 → Claude/Codex 세션에 붙여넣어 실행하세요. 아래는 수동 등록.</div>
+      </div>
       <div class="svc-modal-field">
         <label for="svcName">서비스 이름 *</label>
         <input id="svcName" placeholder="예: web, be, index" />
@@ -2812,6 +2821,8 @@ INDEX_HTML = r"""<!doctype html>
       svcModalTarget = {root, subrepo, editName: svc ? svc.service : null};
       document.getElementById('serviceModalTitle').textContent = svc ? ('서비스 편집 — ' + svc.service) : '서비스 추가';
       document.getElementById('serviceModalError').hidden = true;
+      // LLM 등록 버튼: 신규 추가(svc=null)일 때만 노출. 편집은 수동 폼.
+      document.getElementById('svcLlmRow').hidden = !!svc;
       document.getElementById('svcName').value = svc ? svc.service : '';
       document.getElementById('svcName').disabled = !!svc; // 편집 시 이름 고정
       document.getElementById('svcTeamShare').disabled = !!svc; // 편집 시 저장 위치 고정
@@ -2853,6 +2864,13 @@ INDEX_HTML = r"""<!doctype html>
       document.getElementById('svcAdvToggle').textContent = adv.hidden ? '▸ 고급' : '▾ 고급';
     };
     document.getElementById('svcModalCancel').onclick = () => showServiceModal(false);
+    document.getElementById('svcLlmRegister').onclick = async () => {
+      // 대시보드는 LLM 세션을 직접 호출 못함 → subrepo 컨텍스트 포함 명령을 클립보드에 넣고 세션에 붙여넣도록 안내. 클립보드 실패해도 alert 로 명령 노출(복사 폴백)
+      const {root, subrepo} = svcModalTarget || {};
+      const cmd = subrepo ? `/marina:service add ${root} ${subrepo}` : `/marina:service add ${root}`;
+      try { await navigator.clipboard.writeText(cmd); } catch {}
+      alert(`복사됨:\n${cmd}\n\nClaude/Codex 세션에 붙여넣어 실행하세요. (구조를 분석해 서비스를 등록합니다)`);
+    };
 
     document.getElementById('svcModalSave').onclick = async () => {
       const errEl = document.getElementById('serviceModalError');
@@ -3966,10 +3984,10 @@ INDEX_HTML = r"""<!doctype html>
       const state = pillState(svc);
       row.title = disabled ? 'subrepo 미attach — attach 후 사용 가능' : '클릭하면 이 서비스의 로그를 우측에 표시';
       const src = svc.source === 'central'
-        ? '<span class="svc-src central" title="내 로컬 override (~/.marina/services)">내 override</span>'
-        : '<span class="svc-src root" title="팀 공유 (marina-services.json, repo)">팀</span>';
+        ? '<span class="svc-src central" title="Local override (~/.marina/services) — wins over Team">Local</span>'
+        : '<span class="svc-src root" title="Team — shared via marina-services.json in repo">Team</span>';
       row.innerHTML = `
-        <div><div class="svc-name">${svc.service}${src}</div><div class="svc-port"><span data-port>${svc.port ?? '-'}</span><span data-rss>${svc.running && svc.rssMb ? ` · ${svc.rssMb}MB` : ''}</span></div></div>
+        <div><div class="svc-name"><span>${svc.service}</span>${src}</div><div class="svc-port"><span data-port>${svc.port ?? '-'}</span><span data-rss>${svc.running && svc.rssMb ? ` · ${svc.rssMb}MB` : ''}</span></div></div>
         <div class="pill ${disabled ? 'stop' : state.cls}" data-state title="${escapeHtml(disabled ? 'subrepo 미attach' : state.title)}">${disabled ? '—' : state.text}</div>
         <div class="actions"></div>
       `;
@@ -4030,18 +4048,16 @@ INDEX_HTML = r"""<!doctype html>
       } else {
         control = `<button class="subrepo-act icon primary" data-attach aria-label="attach" title="이 worktree 에 attach (git worktree add) — 같은 이름 브랜치 있으면 재사용">${LINK_ICON}</button>`;
       }
-      // 서비스 추가 — 수동 폼(+) + LLM 위임(✨, 명령 복사). 아이콘은 link/unlink/pin 과 같은 subrepo-act icon 박스. Tabler plus / sparkles (MIT)
+      // 서비스 추가 — 수동 폼(+). LLM 위임은 모달 안의 [✨ LLM 으로 등록] 버튼으로 통합(subrepo 컨텍스트 포함). 아이콘은 link/unlink/pin 과 같은 subrepo-act icon 박스. Tabler plus (MIT)
       const PLUS_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5l0 14"/><path d="M5 12l14 0"/></svg>';
-      const SPARKLE_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 18a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm0 -12a2 2 0 0 1 2 2a2 2 0 0 1 2 -2a2 2 0 0 1 -2 -2a2 2 0 0 1 -2 2zm-7 12a6 6 0 0 1 6 -6a6 6 0 0 1 -6 -6a6 6 0 0 1 -6 6a6 6 0 0 1 6 6z"/></svg>';
-      const addSvcBtn = o.inUniverse ? `<button class="subrepo-act icon" data-add-svc title="이 subrepo 에 서비스 추가 (수동 폼)" aria-label="서비스 추가">${PLUS_ICON}</button>` : '';
-      const llmSvcBtn = o.inUniverse ? `<button class="subrepo-act icon" data-llm-svc title="LLM 으로 등록 — /marina:add-service 명령 복사" aria-label="LLM 으로 서비스 등록">${SPARKLE_ICON}</button>` : '';
+      const addSvcBtn = o.inUniverse ? `<button class="subrepo-act icon" data-add-svc title="이 subrepo 에 서비스 추가 (모달에서 ✨ LLM 등록 또는 수동 폼)" aria-label="서비스 추가">${PLUS_ICON}</button>` : '';
       return `
         <div class="subrepo-main">
           ${chev}
           <span class="subrepo-name">${escapeHtml(name)}</span>
           ${o.count ? `<span class="subrepo-count">${o.count} svc</span>` : '<span class="subrepo-count muted">no svc</span>'}
         </div>
-        <div class="subrepo-ctl">${control}${addSvcBtn}${llmSvcBtn}</div>
+        <div class="subrepo-ctl">${control}${addSvcBtn}</div>
       `;
     }
 
@@ -4107,14 +4123,6 @@ INDEX_HTML = r"""<!doctype html>
       if (detachBtn) detachBtn.onclick = (e) => { e.stopPropagation(); withBusy(detachBtn, '…', () => detachSubrepo(session, name)); };
       const addSvcBtn = head.querySelector('[data-add-svc]');
       if (addSvcBtn) addSvcBtn.onclick = (e) => { e.stopPropagation(); openServiceModal(session.root, name, null); };
-      const llmSvcBtn = head.querySelector('[data-llm-svc]');
-      if (llmSvcBtn) llmSvcBtn.onclick = async (e) => {
-        e.stopPropagation();
-        // 대시보드는 LLM 세션을 직접 호출 못함 → 명령을 클립보드에 넣고 세션에 붙여넣도록 안내. 클립보드 실패해도 alert 로 명령 노출(복사 폴백)
-        const cmd = `/marina:add-service ${session.root}`;
-        try { await navigator.clipboard.writeText(cmd); } catch {}
-        alert(`복사됨:\n${cmd}\n\nClaude/Codex 세션에 붙여넣어 실행하세요. (구조를 분석해 서비스를 등록합니다)`);
-      };
     }
 
     function configInput(session, key, fallback = '') {

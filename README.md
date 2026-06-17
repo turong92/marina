@@ -56,8 +56,8 @@ plugin/scripts/marina-entrypoint.sh dashboard                       # 전역 대
 
 ```bash
 # 1) Claude 세션 안에서 — 현재 git 프로젝트를 바로 등록 (worktree 안에서 실행해도 main 체크아웃을 찾아 등록)
-/marina:register
-/marina:ls                  # 등록 목록 확인
+/marina:project add
+/marina:project ls          # 등록 목록 확인
 
 # 2) 터미널에서 — marina CLI 설치 후 (아래 "marina CLI" 참조)
 marina project add /path/to/project
@@ -173,7 +173,7 @@ plugin/scripts/marina-entrypoint.sh uninstall-cli    # 제거
 **2. LLM 슬래시** — Claude 세션 안에서:
 
 ```
-/marina:add-service [path]
+/marina:service add [path]
 ```
 
 에이전트가 프로젝트 구조를 분석해 서비스 목록을 제안하고, 확인 후 등록한다.
