@@ -4508,6 +4508,9 @@ class Handler(BaseHTTPRequestHandler):
             data = INDEX_HTML.encode("utf-8")
             self.send_response(200)
             self.send_header("content-type", "text/html; charset=utf-8")
+            # no-store — 라이브 대시보드 HTML 은 캐시 금지. 없으면 브라우저가 옛 INDEX_HTML 을 캐시로
+            # 서빙해서, 재시작 후 location.reload()·수동 새로고침이 옛 UI/JS 를 받는다 (새 코드 안 보임).
+            self.send_header("cache-control", "no-store, no-cache, must-revalidate")
             self.send_header("content-length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
