@@ -79,6 +79,8 @@ marina project ls
 ```bash
 marina start|stop|restart <svc..>     # 무인자 = 안내, 전체는 --all
 marina status | ports | logs [svc]
+marina config <svc>                   # 이 worktree 의 effective env·port + 출처 보기
+marina override set|unset|disable <svc> <env|port> [KEY] [VALUE]   # 이 worktree 만 값 override
 ```
 
 무인자 `marina start` 는 전체를 띄우지 않고 **안내만** 출력한다 — worktree 마다 모든 서비스를
@@ -140,6 +142,7 @@ plugin/scripts/marina-entrypoint.sh uninstall-cli    # 제거
       "portBase": 3000,
       "cwd": "frontend",
       "run": "exec npm run dev -- --port {port}",
+      "env": { "API_URL": "http://localhost:{api_port}" },
       "cachePaths": ["frontend/.next"],
       "orphanPattern": "next dev"
     }
@@ -149,6 +152,7 @@ plugin/scripts/marina-entrypoint.sh uninstall-cli    # 제거
 
 - `run` 치환자: `{port}` `{<name>_port}` `{python}` `{root}` `{profile}` + 세션 경로 `{env_file}` `{tmp}` `{session}`.
 - 포트 = `portBase + 세션오프셋` (main 0 / worktree 는 id 해시로 안정적 대역). `{<name>_port}` 는 같은 세션 다른 서비스의 실제 포트(자동 이동 반영) — 서비스 간 호출 URL 주입용.
+- `env`(선택): 서비스 프로세스에 주입할 환경변수 `{ "KEY": "값" }`. 값에 `run` 과 동일한 토큰을 쓸 수 있어 **worktree 마다 형제 서비스의 실제 포트**가 들어간다 (예: `"API_URL": "http://localhost:{api_port}"`). 앱이 `os.getenv`/`process.env` 로 읽으면 자기 worktree 의 포트·URL 을 본다. worktree 별로 `marina override` 로 덮어쓸 수 있다(아래 "워크트리별 override").
 - `cachePaths`(선택): Clear cache 대상. `orphanPattern`(선택): 유령 프로세스 탐지 정규식.
 
 ### 저장 위치 2곳 + 머지
@@ -254,6 +258,51 @@ marina 가 헬퍼에 넘기는 것:
 브라우저로 프리뷰할 dev 서버의 이름을 `web` 으로 두면 위 기능이 켜진다. 다른
 서비스(api·worker 등)는 일반 서버 로그만 본다.
 
+## 워크트리별 override + 관측 — `marina config` / `marina override`
+
+서비스 정의의 `env`·포트는 **기본값**이고, 각 worktree 는 그 위에 자기만의 값을 덮어쓸 수
+있다 — 같은 정의를 공유하면서 이 worktree 만 다른 BE 포트·로그레벨·시크릿을 쓰는 식이다.
+
+- **우선순위**: 서비스 정의(root ∪ 중앙) ＜ 자동 포트이동 박제(`overrides.env`) ＜ **worktree override(`overrides.json`)**.
+- **per-key 머지** — 지정한 키만 덮고 나머지 기본값은 그대로 둔다. `disable`(`null`)이면 그 키를 **해제**한다.
+- override 는 그 worktree 의 세션 폴더(`overrides.json`)에만 있고 repo 에 커밋되지 않는다 (이 worktree 전용).
+
+### 보기 — `marina config <svc>`
+
+현재 worktree 에서 그 서비스가 실제로 쓰는 effective `env`·포트를, **각 값의 출처와 무엇을
+덮었는지**까지 한눈에 보여준다:
+
+```
+$ marina config search
+service: search   worktree: feature-x
+env
+  BE_API_URL = http://localhost:8412   [override · overrides.json]
+      ↑ 덮음  http://localhost:8081  ·  서비스 def(root)
+  LOG_LEVEL = (unset)   [해제 · overrides.json]
+      ↑ 덮음  info  ·  서비스 def(root)
+ports
+  be = 8412   [override · overrides.json]
+      ↑ 덮음  8081  ·  portBase
+  search = 8533   [auto-pin · overrides.env]
+      ↑ 덮음  8500  ·  portBase
+```
+
+`[…]` 가 그 값의 **이긴 출처**, `↑ 덮음` 이 **덮인 기본값과 그 출처**다. env 값 중 시크릿류
+키(`*KEY*`·`*TOKEN*`·`*SECRET*` 등)는 출력에서 자동 마스킹된다.
+
+### 편집 — `marina override`
+
+```bash
+marina override set     <svc> env  <KEY> <VALUE>   # env 키 override
+marina override set     <svc> port <VALUE>         # 포트 override
+marina override disable <svc> env  <KEY>           # 기본값 키 해제 (null)
+marina override unset    <svc> env  <KEY>          # 내 override 제거 → 기본값 복귀
+marina override unset    <svc> port                # 포트 override 제거
+```
+
+override 는 다음 `start`/`restart` 부터 서비스에 반영된다 (포트는 `status`·`ports`·`config`
+에 즉시 반영). 손으로 세션 폴더의 `overrides.json` 을 직접 편집해도 된다.
+
 ## 구조
 
 ```
@@ -265,7 +314,7 @@ marina/
     ├── .codex-plugin/plugin.json
     ├── hooks/hooks.json              SessionStart 훅 선언
     └── scripts/
-        ├── marina.sh                       세션별 런처 + 레지스트리 CLI (start/stop/restart · service · project)
+        ├── marina.sh                       세션별 런처 + 레지스트리 CLI (start/stop/restart · service · project · config · override)
         ├── marina-control.py               :3900 관제 대시보드 (단일 파일 서버+UI)
         ├── marina-dashboard.sh             대시보드 데몬 (launchd / nohup 폴백)
         ├── attach-detached-subrepos.sh     worktree 에 서브레포 git worktree attach
@@ -276,6 +325,7 @@ marina/
 ## 핵심 기능
 
 - 세션별 포트 스킴 — main 0 / worktree 는 id 해시 오프셋 → `portBase + offset`
+- 서비스 `env` 주입(토큰 치환, worktree 별) + 워크트리 override(`overrides.json`) — `marina config` 로 effective·출처 관측
 - 헬스 3단계 pill: BOOT / ON / ERR
 - 카드 칩: 변경분·디스크·미머지·브랜치·포트충돌·캐시
 - 로그 뷰어: 양방향 무한 스크롤, 위치 게이지, 필터/에러만 매치 전용 뷰, 다운로드

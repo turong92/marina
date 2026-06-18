@@ -211,6 +211,9 @@ name=str(svc.get("name","")).strip()
 if not name or not name.isidentifier(): print("name must be an identifier",file=sys.stderr); sys.exit(1)
 if not isinstance(svc.get("portBase"),int): print("portBase must be int",file=sys.stderr); sys.exit(1)
 if not str(svc.get("run","")).strip(): print("run must be non-empty",file=sys.stderr); sys.exit(1)
+_ev=svc.get("env")
+if _ev is not None and (not isinstance(_ev,dict) or not all(isinstance(k,str) and k.isidentifier() and k.isascii() and isinstance(v,str) and "\n" not in v for k,v in _ev.items())):
+    print("env keys must be ASCII identifiers and values newline-free strings",file=sys.stderr); sys.exit(1)
 try: data=json.load(open(file,encoding="utf-8"))
 except Exception: data={"services":[]}
 if not isinstance(data,dict): data={"services":[]}
@@ -587,6 +590,9 @@ port_for() {
     default_port_for "$service" "$offset"
     return 0
   fi
+  # 워크트리 override(overrides.json) 최우선 → 자동이동 박제(overrides.env) → default.
+  local ovr; ovr="$(overrides_json_port "$service")"
+  if [[ -n "$ovr" ]]; then echo "$ovr"; return 0; fi
   config_value "SERVICE_PORT_$(upper_service "$service")" "$(default_port_for "$service" "$offset")"
 }
 
@@ -604,6 +610,142 @@ log_file() {
 
 config_file() {
   echo "$(session_dir)/overrides.env"
+}
+
+# 워크트리별 구조적 override (env·ports). 이 워크트리만. base ＜ overrides.json (per-key).
+overrides_json_file() {
+  echo "$(session_dir)/overrides.json"
+}
+
+# overrides.json 의 ports[service] (정수) — 없으면 빈 문자열 (port_for 최우선 레이어).
+# 파일 없으면 python 안 띄움(핫패스 — port_for 가 매우 자주 호출됨).
+overrides_json_port() {
+  local service="$1" _ovr; _ovr="$(overrides_json_file)"
+  [[ -f "$_ovr" ]] || return 0
+  python3 - "$_ovr" "$service" <<'PY'
+import json, sys
+try:
+    ov = json.load(open(sys.argv[1], encoding="utf-8"))
+    p = (ov.get("ports") or {}).get(sys.argv[2])
+    if isinstance(p, int) and not isinstance(p, bool):
+        print(p, end="")
+except Exception:
+    pass
+PY
+}
+
+# marina config 용 env provenance — TSV: kind  key  winSrc  winRaw  shadowSrc  shadowRaw
+# winRaw/shadowRaw 는 치환 전 (호출부가 subst_tokens 적용). port 는 호출부에서 별도 처리.
+config_observe_raw() {
+  local service="$1" _merged _ovr
+  _merged="$(merged_services_json)"
+  _ovr="$(overrides_json_file)"
+  python3 - "$_merged" "$service" "$_ovr" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1]); service = sys.argv[2]; ovr_path = sys.argv[3]
+svc = next((s for s in data.get("services", []) if s.get("name") == service), None) or {}
+base_src = "서비스 def(%s)" % (svc.get("source") or "root")
+try:
+    ov = json.load(open(ovr_path, encoding="utf-8"))
+except Exception:
+    ov = {}
+def emit(kind, key, ws, wv, ss="", sv=""):
+    sys.stdout.write("\t".join([kind, key, ws, str(wv), ss, str(sv)]) + "\n")
+base_env = dict((svc.get("env") or {}))
+oenv = (ov.get("env") or {}).get(service) or {}
+keys = list(base_env.keys()) + [k for k in oenv if k not in base_env]
+for k in keys:
+    if not isinstance(k, str):
+        continue
+    if k in oenv:
+        v = oenv[k]
+        if v is None:
+            emit("env", k, "해제 · overrides.json", "(unset)", base_src, base_env.get(k, ""))
+        else:
+            emit("env", k, "override · overrides.json", v, base_src, base_env.get(k, ""))
+    else:
+        emit("env", k, "base · " + base_src, base_env[k])
+def linkdisp(rule):
+    if not isinstance(rule, dict):
+        return str(rule)
+    if rule.get("glob"):
+        return "glob " + str(rule["glob"])
+    to, frm = rule.get("to", ""), rule.get("from", "")
+    if to and frm:
+        return "%s → %s" % (to, frm)
+    if frm:
+        return "→ " + str(frm)
+    if to:
+        return str(to)
+    return json.dumps(rule, ensure_ascii=False)
+base_links = dict((svc.get("links") or {}))
+olinks = (ov.get("links") or {}).get(service) or {}
+for k in list(base_links.keys()) + [k for k in olinks if k not in base_links]:
+    if not isinstance(k, str):
+        continue
+    if k in olinks:
+        v = olinks[k]
+        shadow = linkdisp(base_links[k]) if k in base_links else ""
+        if v is None:
+            emit("links", k, "해제 · overrides.json", "(link 안 함)", base_src, shadow)
+        else:
+            emit("links", k, "override · overrides.json", linkdisp(v), base_src, shadow)
+    else:
+        emit("links", k, "base · " + base_src, linkdisp(base_links[k]))
+PY
+}
+
+# overrides.json read-modify-write. op=set|unset|disable, kind=env|port. (없으면 생성, 빈 섹션 정리)
+set_override() {
+  local op="$1" svc="$2" kind="$3" key="$4" value="$5" _ovr
+  _ovr="$(overrides_json_file)"
+  mkdir -p "$(dirname "$_ovr")"
+  python3 - "$_ovr" "$op" "$svc" "$kind" "$key" "$value" <<'PY'
+import json, sys, os
+path, op, svc, kind, key, value = sys.argv[1:7]
+try:
+    ov = json.load(open(path, encoding="utf-8"))
+    if not isinstance(ov, dict):
+        ov = {}
+except Exception:
+    ov = {}
+if kind == "env":
+    if op in ("set", "disable") and not (key.isidentifier() and key.isascii()):
+        sys.exit("env KEY 는 ASCII 식별자여야 함: %r" % key)
+    if op == "set" and "\n" in value:
+        sys.exit("env 값에 개행 불가")
+    env = ov.setdefault("env", {})
+    senv = env.setdefault(svc, {})
+    if op == "set":
+        senv[key] = value
+    elif op == "disable":
+        senv[key] = None
+    elif op == "unset":
+        senv.pop(key, None)
+    if not senv:
+        env.pop(svc, None)
+    if not env:
+        ov.pop("env", None)
+elif kind == "port":
+    ports = ov.setdefault("ports", {})
+    if op == "set":
+        try:
+            ports[svc] = int(value)
+        except ValueError:
+            sys.exit("port 는 정수여야 함: %r" % value)
+    else:
+        ports.pop(svc, None)
+    if not ports:
+        ov.pop("ports", None)
+else:
+    sys.exit("kind 는 env 또는 port: %r" % kind)
+ov.setdefault("version", 1)
+tmp = path + ".tmp"
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(ov, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+os.replace(tmp, path)
+PY
 }
 
 config_value() {
@@ -825,27 +967,62 @@ prepare() {
   fi
 }
 
+# run·env 공용 토큰 치환 — port_for 기반(offset·충돌이동 반영). 호출 시점에 resolve.
+# 형제 포트 {<name>_port} 는 자동 이동(override) 반영된 실제 포트 (uniform offset 추정 금지).
+subst_tokens() {
+  local s="$1" service="$2" offset="$3" sib
+  s="${s//\{port\}/$(port_for "$service" "$offset")}"
+  for sib in ${SERVICES[@]+"${SERVICES[@]}"}; do
+    s="${s//\{${sib}_port\}/$(port_for "$sib" "$offset")}"
+  done
+  s="${s//\{python\}/$(python_bin)}"
+  s="${s//\{root\}/$ROOT}"
+  s="${s//\{profile\}/$(service_profile "$service")}"
+  s="${s//\{env_file\}/$(env_file "$service")}"
+  s="${s//\{tmp\}/$(session_tmp)}"
+  s="${s//\{session\}/$(session_id)}"
+  printf '%s' "$s"
+}
+
 command_for() {
   # 모든 서비스는 프로젝트 root 의 marina-services.json 에서 정의 (내장 서비스 없음 — 완전 generic).
-  #   {name, portBase, cwd, run}  run 치환자: {port}{<name>_port}{python}{root}{profile} + 세션 경로 {env_file}{tmp}{session}
+  #   {name, portBase, cwd, run, env}  치환자: {port}{<name>_port}{python}{root}{profile}{env_file}{tmp}{session}
   #   복잡한 기동(env 준비·의존성 링크 등)은 run 이 프로젝트 쪽 헬퍼 스크립트를 호출한다.
-  local service="$1" offset="$2" cwd run sib
+  local service="$1" offset="$2" cwd run
   cwd="$(service_json_field "$service" cwd)"
   run="$(service_json_field "$service" run)"
   [[ -n "$run" ]] || die "unknown service: $service (marina-services.json 에 run 필요)"
-  run="${run//\{port\}/$(port_for "$service" "$offset")}"
-  # 형제 서비스 포트 치환자 {<name>_port} — 자동 이동(override) 반영된 각 서비스의 실제 포트.
-  # 서비스 간 호출에서 형제의 실제 포트를 주입한다 (uniform offset 추정 금지).
-  for sib in ${SERVICES[@]+"${SERVICES[@]}"}; do
-    run="${run//\{${sib}_port\}/$(port_for "$sib" "$offset")}"
-  done
-  run="${run//\{python\}/$(python_bin)}"
-  run="${run//\{root\}/$ROOT}"
-  run="${run//\{profile\}/$(service_profile "$service")}"
-  run="${run//\{env_file\}/$(env_file "$service")}"
-  run="${run//\{tmp\}/$(session_tmp)}"
-  run="${run//\{session\}/$(session_id)}"
+  run="$(subst_tokens "$run" "$service" "$offset")"
   printf 'cd %q && %s' "$ROOT/${cwd:-.}" "$run"
+}
+
+# 서비스 env 정의를 KEY<TAB>RAW 줄로 emit (str→str 만; 치환 전). 호출부가 subst_tokens 적용.
+service_env_raw() {
+  local service="$1" _merged _ovr
+  _merged="$(merged_services_json)"
+  _ovr="$(overrides_json_file)"
+  python3 - "$_merged" "$service" "$_ovr" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1]); service = sys.argv[2]; ovr_path = sys.argv[3]
+svc = next((s for s in data.get("services", []) if s.get("name") == service), None)
+env = dict(((svc or {}).get("env") or {}))
+try:
+    ov = json.load(open(ovr_path, encoding="utf-8"))
+    oenv = (ov.get("env") or {}).get(service) or {}
+except Exception:
+    oenv = {}
+if isinstance(oenv, dict):
+    for k, v in oenv.items():
+        if not isinstance(k, str):
+            continue
+        if v is None:
+            env.pop(k, None)          # null = 해제
+        elif isinstance(v, str):
+            env[k] = v                # per-key override
+for k, v in env.items():
+    if isinstance(k, str) and isinstance(v, str):
+        sys.stdout.write(k + "\t" + v + "\n")
+PY
 }
 
 start_service() {
@@ -874,6 +1051,12 @@ start_service() {
   if ! command="$(command_for "$service" "$offset")"; then
     die "$service command 생성 실패"
   fi
+  # 서비스 env 주입값 — 포트 shift 박제 후 resolve (A 가 {be_port} 잡은 뒤 BE 이동 시 stale 방지).
+  local -a svc_env_arr=(); local _ek _ev
+  while IFS=$'\t' read -r _ek _ev; do
+    [[ -n "$_ek" ]] || continue
+    svc_env_arr+=("$_ek=$(subst_tokens "$_ev" "$service" "$offset")")
+  done < <(service_env_raw "$service")
   log_path="$(next_run_log "$service")"
   [[ "$service" == "web" ]] && reset_console_log_for_web_run
   {
@@ -881,6 +1064,7 @@ start_service() {
     echo "service=$service"
     echo "port=$(port_for "$service" "$offset")"
     echo "cwd=$ROOT"
+    [[ ${#svc_env_arr[@]} -gt 0 ]] && printf 'env-keys=%s\n' "${svc_env_arr[*]%%=*}"
     echo "command=$command"
     echo "---"
   } > "$log_path"
@@ -889,7 +1073,7 @@ start_service() {
   launch_path="$(marina_login_path)"   # 사용자 로그인 PATH 주입(데몬 빈약 PATH 보정) — 메모라 루프서 1회 캡처
   (
     set -m # 백그라운드 잡을 새 프로세스 그룹으로 분리 — stop 시 kill_tree 가 그룹 단위로 정리
-    nohup env PATH="$launch_path" bash -lc "$command" >> "$log_path" 2>&1 &
+    nohup env PATH="$launch_path" ${svc_env_arr[@]+"${svc_env_arr[@]}"} bash -lc "$command" >> "$log_path" 2>&1 &
     echo $! > "$pid_path"
   )
   echo "started: $service port=$(port_for "$service" "$offset") pid=$(cat "$pid_path") log=$log_path"
@@ -1022,8 +1206,13 @@ run_foreground() {
     echo "command=$command"
     echo "---"
   } >> "$log_path"
+  local -a svc_env_arr=(); local _ek _ev
+  while IFS=$'\t' read -r _ek _ev; do
+    [[ -n "$_ek" ]] || continue
+    svc_env_arr+=("$_ek=$(subst_tokens "$_ev" "$service" "$offset")")
+  done < <(service_env_raw "$service")
   local launch_path; launch_path="$(marina_login_path)"   # 사용자 로그인 PATH 주입 (start_service 와 동일)
-  env PATH="$launch_path" bash -lc "$command" 2>&1 | redact_stream | tee -a "$log_path"
+  env PATH="$launch_path" ${svc_env_arr[@]+"${svc_env_arr[@]}"} bash -lc "$command" 2>&1 | redact_stream | tee -a "$log_path"
   exit "${PIPESTATUS[0]}"
 }
 
@@ -1071,6 +1260,73 @@ main() {
     print-launch-path)
       # 서비스 기동에 쓰일 로그인 PATH 를 출력하고 종료 (디버그·테스트용).
       marina_login_path; echo
+      ;;
+    print-env)
+      # 서비스에 주입될 env(토큰 치환 후)를 KEY=val 로 출력 (디버그·테스트용).
+      local svc="${1:-${SERVICES[0]:-}}" _ek _ev
+      [[ -n "$svc" ]] || die "print-env: service name required"
+      offset="$(port_offset)"
+      while IFS=$'\t' read -r _ek _ev; do
+        [[ -n "$_ek" ]] || continue
+        printf '%s=%s\n' "$_ek" "$(subst_tokens "$_ev" "$svc" "$offset")"
+      done < <(service_env_raw "$svc")
+      ;;
+    print-session-dir)
+      # 이 워크트리의 세션 폴더 경로 출력 (디버그·테스트용 — overrides.json 위치).
+      session_dir
+      ;;
+    config)
+      # 서비스의 effective env·ports 를 출처(provenance) + 덮인 체인과 함께 출력.
+      local svc="${1:-${SERVICES[0]:-}}"
+      [[ -n "$svc" ]] || die "config: service name required"
+      offset="$(port_offset)"
+      local kind key ws wv ss sv s cur p_default p_auto p_ovr p_win p_src p_sh_v p_sh_s
+      {
+        echo "service: $svc   worktree: $(session_id)"
+        cur=""
+        while IFS=$'\t' read -r kind key ws wv ss sv; do
+          [[ "$kind" == "$cur" ]] || { echo "$kind"; cur="$kind"; }
+          if [[ "$kind" == "env" ]]; then
+            [[ "$wv" == "(unset)" ]] || wv="$(subst_tokens "$wv" "$svc" "$offset")"
+            [[ -z "$sv" ]] || sv="$(subst_tokens "$sv" "$svc" "$offset")"
+          fi
+          printf '  %s = %s   [%s]\n' "$key" "$wv" "$ws"
+          [[ -z "$sv" ]] || printf '      ↑ 덮음  %s  ·  %s\n' "$sv" "$ss"
+        done < <(config_observe_raw "$svc")
+        echo "ports"
+        for s in ${SERVICES[@]+"${SERVICES[@]}"}; do
+          p_default="$(default_port_for "$s" "$offset")"
+          p_auto="$(config_value "SERVICE_PORT_$(upper_service "$s")" "")"
+          p_ovr="$(overrides_json_port "$s")"
+          if [[ -n "$p_ovr" ]]; then
+            p_win="$p_ovr"; p_src="override · overrides.json"
+            if [[ -n "$p_auto" ]]; then p_sh_v="$p_auto"; p_sh_s="auto-pin · overrides.env"; else p_sh_v="$p_default"; p_sh_s="portBase"; fi
+          elif [[ -n "$p_auto" ]]; then
+            p_win="$p_auto"; p_src="auto-pin · overrides.env"; p_sh_v="$p_default"; p_sh_s="portBase"
+          else
+            p_win="$p_default"; p_src="base · portBase"; p_sh_v=""; p_sh_s=""
+          fi
+          printf '  %s = %s   [%s]\n' "$s" "$p_win" "$p_src"
+          [[ -z "$p_sh_v" ]] || printf '      ↑ 덮음  %s  ·  %s\n' "$p_sh_v" "$p_sh_s"
+        done
+      } | redact_stream
+      ;;
+    override)
+      # 워크트리 override(overrides.json) 편집: set/unset/disable <svc> <env|port> [KEY] [VALUE]
+      local op="${1:-}" svc="${2:-}" kind="${3:-}"
+      case "$op" in set|unset|disable) ;; *) die "usage: marina override set|unset|disable <svc> <env|port> [KEY] [VALUE]";; esac
+      [[ -n "$svc" && -n "$kind" ]] || die "usage: marina override $op <svc> <env|port> [KEY] [VALUE]"
+      if [[ "$kind" == "env" ]]; then
+        local key="${4:-}"
+        [[ -n "$key" ]] || die "override $op env: KEY 필요"
+        set_override "$op" "$svc" env "$key" "${5:-}" || exit 1
+        echo "override ok: $op $svc env $key"
+      elif [[ "$kind" == "port" ]]; then
+        set_override "$op" "$svc" port "" "${4:-}" || exit 1
+        echo "override ok: $op $svc port${4:+ $4}"
+      else
+        die "override: kind 는 env 또는 port (받음: $kind)"
+      fi
       ;;
     -h|--help|help)
       usage

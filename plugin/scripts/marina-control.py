@@ -944,6 +944,24 @@ def _validate_service_def(d: Any) -> dict[str, Any]:
         if not isinstance(op, str):
             raise ValueError("orphanPattern 은 문자열이어야 함")
         out["orphanPattern"] = op
+    ev = d.get("env")
+    if ev is not None:
+        if not isinstance(ev, dict) or not all(
+            isinstance(k, str) and k.isidentifier() and k.isascii()
+            and isinstance(v, str) and "\n" not in v
+            for k, v in ev.items()
+        ):
+            raise ValueError("env 는 {ASCII 식별자 키: 개행없는 문자열 값} 객체여야 함 (값에 {be_port} 등 토큰 가능)")
+        if ev:
+            out["env"] = ev
+    lk = d.get("links")
+    if lk is not None:
+        if not isinstance(lk, dict) or not all(
+            isinstance(k, str) and k and isinstance(v, dict) for k, v in lk.items()
+        ):
+            raise ValueError("links 는 {rule이름: {to?,from?,glob?}} 객체여야 함")
+        if lk:
+            out["links"] = lk
     return out
 
 
@@ -1604,11 +1622,15 @@ def _read_services_file(path: Path) -> list[dict[str, Any]]:
         base = item.get("portBase")
         if name and name.isidentifier() and isinstance(base, int) and name not in _BUILTIN_SERVICES:
             orphan = item.get("orphanPattern")
+            env_val = item.get("env")
+            links_val = item.get("links")
             out.append({
                 "name": name, "portBase": base,
                 "cwd": str(item.get("cwd", "")), "run": str(item.get("run", "")),
                 "cachePaths": [str(c) for c in item.get("cachePaths", []) if isinstance(c, str)],
                 "orphanPattern": orphan if isinstance(orphan, str) else None,
+                "env": env_val if isinstance(env_val, dict) and env_val else None,
+                "links": links_val if isinstance(links_val, dict) and links_val else None,
             })
     return out
 
