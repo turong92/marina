@@ -748,6 +748,58 @@ os.replace(tmp, path)
 PY
 }
 
+# 선언된 links 의 effective to/from (override·null 반영) 를 TAB 으로 emit (glob·null 제외).
+service_links_raw() {
+  local service="$1" _merged _ovr
+  _merged="$(merged_services_json)"
+  _ovr="$(overrides_json_file)"
+  python3 - "$_merged" "$service" "$_ovr" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1]); service = sys.argv[2]; ovr_path = sys.argv[3]
+svc = next((s for s in data.get("services", []) if s.get("name") == service), None) or {}
+links = dict((svc.get("links") or {}))
+try:
+    ov = json.load(open(ovr_path, encoding="utf-8"))
+    ol = (ov.get("links") or {}).get(service) or {}
+except Exception:
+    ol = {}
+for k, v in ol.items():
+    if v is None:
+        links.pop(k, None)
+    else:
+        links[k] = v
+for rule in links.values():
+    if isinstance(rule, dict) and isinstance(rule.get("to"), str) and isinstance(rule.get("from"), str) and rule["to"] and rule["from"]:
+        sys.stdout.write(rule["to"] + "\t" + rule["from"] + "\n")
+PY
+}
+
+# 선언된 단일 {to,from} 링크를 worktree 에 symlink (start 시, idempotent, best-effort).
+# glob 규칙은 기존 attach 의 sync_* 가 처리 (여기선 to/from 만).
+apply_links() {
+  local service="$1" offset="$2" cwd to from dst
+  cwd="$(service_json_field "$service" cwd)"
+  while IFS=$'\t' read -r to from; do
+    [[ -n "$to" && -n "$from" ]] || continue
+    to="$(subst_tokens "$to" "$service" "$offset")"
+    from="$(subst_tokens "$from" "$service" "$offset")"
+    if [[ "$to" = /* ]]; then dst="$to"; else dst="$ROOT/${cwd:-.}/$to"; fi
+    if [[ ! -e "$from" && ! -L "$from" ]]; then
+      echo "link skip(소스 없음): $service $from"
+      continue
+    fi
+    if [[ "$from" -ef "$dst" ]]; then continue; fi
+    mkdir -p "$(dirname "$dst")"
+    if [[ -L "$dst" ]]; then
+      ln -sfn "$from" "$dst" || echo "link fail: $dst"
+    elif [[ -e "$dst" ]]; then
+      echo "link skip(존재·실파일): $dst"
+    else
+      ln -s "$from" "$dst" || echo "link fail: $dst"
+    fi
+  done < <(service_links_raw "$service")
+}
+
 config_value() {
   local key="$1" default_value="$2" config_path
   local value=""
@@ -977,6 +1029,7 @@ subst_tokens() {
   done
   s="${s//\{python\}/$(python_bin)}"
   s="${s//\{root\}/$ROOT}"
+  s="${s//\{source\}/$SOURCE_ROOT}"
   s="${s//\{profile\}/$(service_profile "$service")}"
   s="${s//\{env_file\}/$(env_file "$service")}"
   s="${s//\{tmp\}/$(session_tmp)}"
@@ -1057,6 +1110,8 @@ start_service() {
     [[ -n "$_ek" ]] || continue
     svc_env_arr+=("$_ek=$(subst_tokens "$_ev" "$service" "$offset")")
   done < <(service_env_raw "$service")
+  # 선언된 links(to/from, override·null·토큰 반영) 적용 — 소스→worktree symlink (idempotent, best-effort)
+  apply_links "$service" "$offset"
   log_path="$(next_run_log "$service")"
   [[ "$service" == "web" ]] && reset_console_log_for_web_run
   {
