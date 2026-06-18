@@ -150,9 +150,10 @@ plugin/scripts/marina-entrypoint.sh uninstall-cli    # 제거
 }
 ```
 
-- `run` 치환자: `{port}` `{<name>_port}` `{python}` `{root}` `{profile}` + 세션 경로 `{env_file}` `{tmp}` `{session}`.
+- `run`·`env`·`links` 치환자: `{port}` `{<name>_port}` `{python}` `{root}` `{source}` `{profile}` + 세션 경로 `{env_file}` `{tmp}` `{session}`. (`{source}` = 원본 main 체크아웃, `{root}` = 현재 worktree)
 - 포트 = `portBase + 세션오프셋` (main 0 / worktree 는 id 해시로 안정적 대역). `{<name>_port}` 는 같은 세션 다른 서비스의 실제 포트(자동 이동 반영) — 서비스 간 호출 URL 주입용.
 - `env`(선택): 서비스 프로세스에 주입할 환경변수 `{ "KEY": "값" }`. 값에 `run` 과 동일한 토큰을 쓸 수 있어 **worktree 마다 형제 서비스의 실제 포트**가 들어간다 (예: `"API_URL": "http://localhost:{api_port}"`). 앱이 `os.getenv`/`process.env` 로 읽으면 자기 worktree 의 포트·URL 을 본다. worktree 별로 `marina override` 로 덮어쓸 수 있다(아래 "워크트리별 override").
+- `links`(선택): 원본(`{source}`)에서 worktree 로 심볼릭링크할 경로 `{ "이름": { "to": "워크트리경로", "from": "원본경로" } }`. 서비스 **start 때 생성**(idempotent, 소스 없으면 skip). `marina config` 로 확인하고 worktree 별로 `overrides.json` 으로 redirect·해제(`null`)한다. (glob 패턴 미러는 현재 attach 단계의 기존 메커니즘이 처리 — 단일 `to`/`from` 만 선언 적용.)
 - `cachePaths`(선택): Clear cache 대상. `orphanPattern`(선택): 유령 프로세스 탐지 정규식.
 
 ### 저장 위치 2곳 + 머지
@@ -243,7 +244,7 @@ exec npm run dev -- --port "$port"
 
 marina 가 헬퍼에 넘기는 것:
 
-- `run` 치환자 — `{port}` `{<name>_port}` `{root}` `{python}` `{profile}` `{env_file}` `{tmp}` `{session}`.
+- `run` 치환자 — `{port}` `{<name>_port}` `{root}` `{source}` `{python}` `{profile}` `{env_file}` `{tmp}` `{session}`.
 - 환경 변수 — `MARINA_SOURCE_ROOT`(원본 main 체크아웃), `MARINA_ROOT`(현재 worktree).
 
 ### `web` 서비스 컨벤션
@@ -303,6 +304,8 @@ marina override unset    <svc> port                # 포트 override 제거
 override 는 다음 `start`/`restart` 부터 서비스에 반영된다 (포트는 `status`·`ports`·`config`
 에 즉시 반영). 손으로 세션 폴더의 `overrides.json` 을 직접 편집해도 된다.
 
+`links` 도 `overrides.json` 의 `links` 섹션으로 worktree 별 redirect·해제(`null`)할 수 있다 (현재 전용 CLI 는 `env`·`port`; `links` 는 파일 편집으로). 적용은 서비스 start 때.
+
 ## 구조
 
 ```
@@ -325,7 +328,7 @@ marina/
 ## 핵심 기능
 
 - 세션별 포트 스킴 — main 0 / worktree 는 id 해시 오프셋 → `portBase + offset`
-- 서비스 `env` 주입(토큰 치환, worktree 별) + 워크트리 override(`overrides.json`) — `marina config` 로 effective·출처 관측
+- 서비스 `env` 주입 · `links` symlink 적용(토큰 치환, worktree 별) + 워크트리 override(`overrides.json`) — `marina config` 로 effective·출처 관측
 - 헬스 3단계 pill: BOOT / ON / ERR
 - 카드 칩: 변경분·디스크·미머지·브랜치·포트충돌·캐시
 - 로그 뷰어: 양방향 무한 스크롤, 위치 게이지, 필터/에러만 매치 전용 뷰, 다운로드
