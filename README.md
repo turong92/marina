@@ -1,16 +1,70 @@
 # marina
 
-worktree 멀티세션 dev 서버 런처 + 관제 대시보드. 한 머신에서 여러 git worktree 의
-dev 서버를 포트 충돌 없이 띄우고, `:3900` 웹 대시보드에서 상태·로그·캐시·포트를 관리한다.
-의존성 0 — `/usr/bin/python3`(표준 라이브러리만) + bash (macOS·Linux).
+**워크트리마다 격리된 Docker Compose dev 스택** — Claude Code · Codex 플러그인.
 
-서비스(무엇을 어떻게 띄울지)는 전적으로 프로젝트별 `marina-services.json` 에서 정의한다 —
-marina 코어는 특정 스택에 묶이지 않는다.
+한 머신에서 여러 git worktree 의 풀스택 dev 환경을 **포트 충돌 없이** 컨테이너로 띄우고,
+`:3900` 웹 대시보드에서 등록·기동·로그·포트를 관리한다. **앱 레포는 건드리지 않는다** —
+compose 와 설정은 전부 `~/.marina` 에 보관된다.
+
+의존성 0 — `python3`(표준 라이브러리만) + bash. **compose 프로젝트** 실행에는 Docker
+(compose v2.24.4+)가 필요하다.
+
+> 잘 모르겠으면 한 줄만 기억하세요: 대시보드(`marina`)를 열고 **`+ 프로젝트 등록 → 🆕 새로 설정 (위저드)`**.
+> 위저드가 Dockerfile 을 스캔해 서비스·파일·연결을 단계별로 채우고, 등록 직전 compose 미리보기까지 가져다 줍니다.
+
+---
+
+## 무엇이 격리되나
+
+- **워크트리마다 compose 프로젝트명**(`-p <id>-<세션>`)이 달라 네트워크·컨테이너·볼륨이 분리된다.
+  여러 워크트리를 동시에 띄워도 안 겹친다.
+- **호스트 포트는 Docker 가 자동 할당**한다. marina 가 published 포트를 `127.0.0.1::<컨테이너포트>`
+  (localhost 전용 + 호스트포트 자동)로 덮어 띄우므로 충돌이 없다. 실제 포트는 `marina ports`(=
+  `docker compose ps`)와 대시보드 `↗` 로 그때그때 확인한다 — 외울 필요 없다.
+- **서비스 간 통신은 컨테이너 DNS**(`http://api:8081` 처럼 서비스명) — 워크트리별 URL 주입이 0.
+- **앱 레포 불변** — compose·build args·mounts 는 `~/.marina/<id>/` 에만 저장된다. 앱 레포엔
+  Dockerfile 만 있으면 되고, marina 파일·머신 종속 경로는 레포에 남지 않는다.
+
+---
+
+## 멘탈 모델
+
+- **compose = 런타임 오케스트레이션**. marina 는 워크트리별 compose 프로젝트명으로 스택을 띄우고,
+  published 포트는 Docker 가 자동 할당한다. 실제 호스트 포트는 저장하지 않고 `docker compose ps` 로
+  라이브 조회한다. compose 서비스끼리는 호스트 포트가 아니라 compose service DNS 로 부른다.
+- **프로필과 실행 모드는 별개 축이다** (섞지 말 것):
+  - *프로필(환경)* = 프로젝트가 정하는 값(예: `local`/`dev`/`prod`). marina 격리개발은 **`local`**(`MODE=local`). 로컬은 로컬.
+    marina 는 프로필 *이름* 을 강제하지 않는다 — `composeEnvVar`/`MODE` 로 넘기는 값일 뿐이라 `staging` 등 추가도 값 하나 더일 뿐(구조 변경 0).
+  - *실행 모드* = **개발 서버**(`next dev` / `uvicorn --reload` / `gradle bootRun`) ↔ 프로덕션 빌드(`next build` 등).
+    marina 격리개발은 **개발 서버**(가볍고 hot reload).
+
+  둘은 독립이라 **"로컬" ≠ "개발 서버"** — 개발 서버를 local 프로필로 띄우는 것뿐(`MODE=local next dev`).
+  compose `build` 를 **dev용 Dockerfile**(예: `Dockerfile.local`)로 가리켜 개발 서버 + **소스 마운트**(hot reload).
+  프로덕션 빌드는 무겁고(메모리·시간) CI/배포용이라 로컬 격리개발엔 부적합하다.
+  CI 이미지가 다른 아키텍처(예: x86 전용 `+cpu` wheel)에 맞춰져 있으면 로컬(arm64 등)에선 에뮬레이션으로
+  느려지므로, **로컬용 Dockerfile 은 네이티브 아키텍처**로 둔다(arch 는 이미지 빌드 시 결정 — 재빌드 필요,
+  런타임 변환 불가). 코드 변경은 마운트로 즉시, **의존성·Dockerfile 변경은 `marina restart <svc>`**(증분 재빌드).
+- **워크트리 브랜치 = 서브레포 브랜치 (미러)**. SessionStart attach 는 워크트리의 브랜치명을 **전체 미러**해
+  서브레포에 건다. 그래서 **`marina worktree create feature/{task}`**(= 작업 시작)로 워크트리를 만들면
+  서브레포도 모두 `feature/{task}` 로 정렬된다(브랜치명은 마리나 안 쓰던 때와 동일, 격리만 추가). Claude 자동
+  워크트리는 `claude/<id>` 로 명명되므로, feature 브랜치 라이프사이클(`feature/{task}` → main → …)을 쓰면
+  `marina worktree create` 로 시작한다. detached/codex 루트는 `<prefix>/<id>` 폴백. 프로젝트 밖에서 만들려면
+  `--project <id>`(레지스트리로 root 조회). attach 대상은 `marina project default <id> a,b,c` 의 defaultAttach
+  로 좁힌다(예: compose 서브레포 be/ai/web 만 — 등록 서브레포가 그보다 많을 때).
+- **compose 환경변수 = `composeEnvVar`/`composeEnvDefault`**. compose 의 `${APP_ENV:-local}` 같은 보간에
+  넣는 값 하나다. 시작할 때 `MARINA_COMPOSE_ENV` 로 덮을 수 있다.
+- **links/symlink = 호스트 worktree 편의 기능**. `node_modules`, `.venv`, 빌드 산출물, local 설정 파일을
+  main checkout 에서 worktree 로 심링크해 재설치·재빌드를 줄인다. 컨테이너에 파일을 넣는 기능이 아니다.
+  컨테이너 주입은 `mounts.json` 기반 overlay volume 과 service redirect 가 맡는다.
+- **links 우선순위**는 `기본(default) < 프로젝트 공유(~/.marina/<id>/links.json) < service.links < 워크트리 override`
+  이다. 워크트리 override 에서 끄면 그 worktree 에만 적용된다.
+
+---
 
 ## 설치
 
-marina 레포 자체가 플러그인 marketplace 다. 설치하면 SessionStart 훅이 worktree 가
-열릴 때 등록된 프로젝트의 서브레포를 자동 attach 한다.
+marina 레포 자체가 플러그인 marketplace 다. 설치하면 SessionStart 훅이 worktree 가 열릴 때
+등록된 프로젝트의 서브레포를 attach 한다. (외부 git 레포는 compose `start` 때 `ensure_external_worktrees` 가 워크트리에 마운트한다.)
 
 ```bash
 # Claude Code
@@ -22,289 +76,239 @@ codex plugin marketplace add turong92/marina
 codex plugin add marina@marina-dev
 ```
 
-**훅 신뢰**: Claude Code 는 설치 시 플러그인 훅을 자동 신뢰한다. **Codex 는 플러그인 훅을
-non-managed 로 취급하므로 최초 1회 수동 신뢰가 필요하다** — 플러그인 화면의 "신뢰" 버튼
-또는 `/hooks` 에서 한 번 trust 하면 `~/.codex/config.toml` 에 기록되어 이후 세션부터
-0클릭으로 실행된다 (자동 업데이트돼도 훅 정의가 그대로면 신뢰 유지). 이는 Codex 보안
-모델이며 marina 고유 동작이 아니다.
+**훅 신뢰**: Claude Code 는 설치 시 플러그인 훅을 자동 신뢰한다. **Codex 는 최초 1회 수동
+신뢰가 필요하다** — 플러그인 화면의 "신뢰" 또는 `/hooks` 에서 한 번 trust 하면
+`~/.codex/config.toml` 에 기록되어 이후 0클릭으로 실행된다. (Codex 보안 모델이며 marina 고유
+동작이 아니다.)
 
-대시보드·CLI 는 클론한 레포에서 직접:
+대시보드 데몬은 OS supervisor 로 등록되어 로그인·부팅 후 자동 기동된다:
 
-```bash
-plugin/scripts/marina-entrypoint.sh project add /path/to/project   # 프로젝트 등록 (서브레포·worktree 자동 추론)
-plugin/scripts/marina-entrypoint.sh project ls                      # 등록 목록
-plugin/scripts/marina-entrypoint.sh dashboard                       # 전역 대시보드(:3900) 기동
-```
+- **macOS** — launchd (`~/.marina/marina.dashboard.plist`).
+- **Linux** — systemd user 유닛 + `loginctl enable-linger`(로그아웃 후에도 생존).
+- **폴백** — 둘 다 없으면 `nohup` 백그라운드 + `auto-restart NOT configured` 경고(재부팅 시 수동 재기동).
 
-대시보드 데몬은 OS 에 맞는 supervisor 로 등록되어 로그인·부팅 후 자동 기동된다:
+PID 는 `~/.marina/dashboard.pid`, 로그는 `~/.marina/dashboard.log`.
 
-- **macOS** — launchd (`~/.marina/marina.dashboard.plist`), 로그인 시 자동 기동.
-- **Linux** — systemd user 유닛(`marina-dashboard.service`) + `loginctl enable-linger`
-  로 등록되어 로그아웃 후에도 살아남는다.
-- **폴백** — launchd·systemd 가 없거나 실패하면 `nohup` 백그라운드로 띄우고
-  `auto-restart NOT configured` 경고를 낸다 (재부팅 시 수동 재기동 필요).
+### `marina` 명령 (PATH shim) — `install-cli`
 
-어느 쪽이든 PID 는 `~/.marina/dashboard.pid`, 로그는 `~/.marina/dashboard.log`.
-
-## 처음 실행 — 프로젝트를 한 번 등록
-
-플러그인을 설치하면 SessionStart 훅이 등록되지만, **프로젝트를 한 번 등록하기 전까지는
-아무것도 attach 하지 않는다**. 훅은 "이 worktree 가 등록된 프로젝트에 속하는가" 를 보고
-맞을 때만 서브레포를 붙이기 때문이다. 즉 설치 직후 첫 단계는 **프로젝트 1회 등록**이다.
-
-등록은 세 가지 중 아무 방법이나:
+어디서나 `marina` 한 단어로 부르려면 shim 을 설치한다:
 
 ```bash
-# 1) Claude 세션 안에서 — 현재 git 프로젝트를 바로 등록 (worktree 안에서 실행해도 main 체크아웃을 찾아 등록)
-/marina:project add
-/marina:project ls          # 등록 목록 확인
-
-# 2) 터미널에서 — marina CLI 설치 후 (아래 "marina CLI" 참조)
-marina project add /path/to/project
-marina project ls
-
-# 3) 대시보드 UI — 스위처의 + 프로젝트 등록 / subrepo 헤더의 + 서비스 추가
+plugin/scripts/marina-entrypoint.sh install-cli       # ~/.local/bin/marina (user-scope, 기본·권장)
+MARINA_BIN_DIR=/usr/local/bin marina install-cli      # 다른 위치(전역/커스텀) — uninstall 도 같은 MARINA_BIN_DIR 따라감
+plugin/scripts/marina-entrypoint.sh uninstall-cli     # 제거
 ```
 
-`project add`/`register` 는 경로에서 서브레포(중첩 git 레포)와 worktree 글롭을 추론해 초안을
-만든다. 출력된 `id`·`subrepos` 가 맞는지 확인하고, 빠지거나 남는 게 있으면 다시 등록하거나
-`~/.marina/projects.json` 을 직접 고친다. 쓰지 않고 추론 결과만 보려면
-`marina project infer /path/to/project` (JSON 출력, 레지스트리 미수정).
+`install-cli` 는 그 위치에 **자가-해석 launcher** 한 개를 쓴다(기존 파일이 marina shim 이 아니면 `--force`
+전엔 안 덮음). 설치 위치가 PATH 에 없으면 안내가 나온다.
 
-## 서비스 기동 — start / stop / restart
+**스코프 — 세 축을 나눠서 본다** (동료가 "유저스코프 vs 전역" 으로 겪던 혼선이 여기서 갈린다):
 
-프로젝트를 등록하고 서비스를 정의(아래 "서비스 정의")했다면, 현재 worktree 의 서비스를
-이 명령으로 띄우고 내린다 (대시보드 UI 로도 동일하게 가능):
+1. **`marina` 명령(shim)을 어디 두나** — 기본 `~/.local/bin/marina`(user-scope). 전역·시스템 위치는
+   `MARINA_BIN_DIR=/usr/local/bin marina install-cli`. shim 내용은 위치와 무관하게 같다(자가-해석이라).
+2. **플러그인(marina-dev)이 어디 깔렸나** — shim 이 **매 실행마다 런타임에 다시 찾는다**:
+   Claude `installed_plugins.json` → Codex `installed_plugins.json` → Codex `config.toml` 의 marketplace
+   `source`/`<source>/plugin` → **설치 시점 경로(baked fallback)** 순으로, `scripts/marina-entrypoint.sh` 가
+   실제 있는 걸 고른다. 그래서 user-scope·전역·자동업데이트(새 SHA)·커스텀 `CLAUDE_CONFIG_DIR`/`CODEX_HOME`·
+   Claude/Codex 어느 레이아웃이든 따라가고, 매니페스트가 다 없어도 baked fallback 으로 동작한다.
+3. **어느 프로젝트에서 실행하나** — `marina` 는 **cwd 무관**하게 동작한다. 어느 디렉터리·워크트리에서
+   실행하든 그 위치의 git root 로 프로젝트를 식별하고, 등록·설정은 `~/.marina/`(user 홈) 중앙에 보관한다.
+   즉 "프로젝트 스코프" 는 실행 위치(worktree)로 자동 결정되고, 명령은 한 번만 설치하면 된다.
+
+> 한계: 전역 위치에 깔아 **여러 사용자가 한 shim 을 공유**하면 baked fallback 이 설치한 사람의 플러그인
+> 경로를 가리킬 수 있어 권장하지 않는다(각자 user-scope 설치 권장). 경로 해석 단계는 `python3` 가 PATH 필요.
+
+---
+
+## 프로젝트 등록
+
+플러그인을 설치해도 **프로젝트를 한 번 등록하기 전까지는 아무것도 하지 않는다**. 첫 단계는
+프로젝트 1회 등록이다. 등록 정보는 `~/.marina/projects.json` 과 `~/.marina/<id>/` 에 저장되며
+앱 레포는 건드리지 않는다.
+
+### ① 추천 — 새 프로젝트 위저드 (비-LLM)
+
+대시보드 `+ 프로젝트 등록` → **`🆕 새로 설정 (위저드)`**. 4스텝으로 정규 설정(compose + `x-marina`)을 채운다:
+
+1. **스캔** — 프로젝트 경로를 스캔해 서브레포의 Dockerfile 을 찾고(EXPOSE·ARG·필수ARG 표시), 서비스로 포함할지 + build-args 입력. 자체 compose 만 있는 서브레포는 `include` 로.
+2. **파일** — gitignore 대상을 분류해 opt-in: 의존성(node_modules·.venv)=심링크, config(`*local.yml`·`.env*`)=심링크/복제 택, 빌드 출력=제외(워크트리별 독립 빌드).
+3. **연결** — 흔한 호스트 백킹(redis·mysql·postgres)을 엮기(`forward`)로, 서비스를 게이트웨이로 노출.
+4. **검토** — 합쳐진 compose YAML 미리보기(편집 가능) → `등록`.
+
+LLM 없이 Dockerfile·구조만 보고 구성한다. `고급 (YAML)` 토글로 같은 설정을 raw compose 로 직접 편집할 수도 있다.
+
+### ② 기존 compose 가 있으면
 
 ```bash
-marina start|stop|restart <svc..>     # 무인자 = 안내, 전체는 --all
-marina status | ports | logs [svc]
-marina config <svc>                   # 이 worktree 의 effective env·port + 출처 보기
-marina override set|unset|disable <svc> <env|port> [KEY] [VALUE]   # 이 worktree 만 값 override
+marina project add /path/to/project --compose docker-compose.yml \
+  --env-var APP_ENV --env-default local       # (선택) compose 가 읽는 환경변수 1개 + 기본값
 ```
 
-무인자 `marina start` 는 전체를 띄우지 않고 **안내만** 출력한다 — worktree 마다 모든 서비스를
-무심코 올려 메모리를 잡아먹는 사고를 막기 위함이다. 전체를 띄우려면 `marina start --all`.
+대시보드에선 `📁 레포에서 찾기` 로 기존 compose 를 가져온 뒤 `등록`.
 
-### marina CLI — `install-cli`
+### ③ 외부 git 레포를 서비스로
 
-레포 안에서 `plugin/scripts/marina-entrypoint.sh ...` 로 바로 쓸 수도 있지만, 어디서나
-`marina` 한 단어로 부르려면 PATH 셰임을 설치한다 (선택):
+프로젝트 밖의 다른 git 레포를 서비스로 묶으면, 워크트리마다 그 레포를 **독립 git worktree** 로
+체크아웃해 격리한다(`.workspace/external/<name>`).
 
 ```bash
-plugin/scripts/marina-entrypoint.sh install-cli      # ~/.local/bin/marina 셰임 설치
-marina project add /path/to/project                  # 이제 어디서나 marina
-plugin/scripts/marina-entrypoint.sh uninstall-cli    # 제거
+marina project add /path/to/project --external be-api=/path/to/be-api --compose docker-compose.yml
 ```
 
-셰임은 호출 때마다 현재 설치된 플러그인 경로를 스스로 해석한다 — 그래서 플러그인이 자동
-업데이트(새 SHA)돼도 셰임을 다시 깔 필요가 없다. `~/.local/bin` 이 PATH 에 없으면 설치
-시 안내가 나온다.
+`--external` 는 단독 등록 모드가 아니라 **add-on** 이다 — 실행되려면 `--compose`(또는 대시보드 위저드)로 compose 정의가
+함께 있어야 한다(`--external` 만 주면 외부 레포 목록만 기록된다).
+
+### 그 밖의 등록·관리
+
+```bash
+marina project ls                       # 등록 목록
+marina project infer /path/to/project   # 추론만 — JSON 출력, 레지스트리 미수정
+marina project rm <id>
+marina project default <id> a,b,c       # 새 worktree 가 자동 attach 할 외부 서브레포 집합
+```
+
+Claude 세션 안에서는 슬래시 명령도 된다: `/marina:project add`, `/marina:project ls`.
+
+### 팀에 공유
+
+**공유 단위 = compose 파일 하나**(`services:` + `x-marina:`). **시크릿이 안 들어가므로**(예: `buildArgsFrom` 은
+경로만 담고 값은 각자 로컬) 그대로 복붙·커밋해도 안전하다. 나머지 코드 자산(`Dockerfile.local`·`requirements_local`
+등)은 앱 레포에 있으니 `git pull` 로 따라온다.
+
+받는 팀원:
+1. `git pull` — 코드 자산(Dockerfile 등)
+2. `marina project add <path> --compose <compose파일>` — 등록
+3. 본인 로컬 시크릿(`.env.ssm.local` 등) + 호스트 백킹(redis 등) 준비 — **각자 환경, 공유 안 함**
+4. `marina start --all`
+
+> overlay·호스트 포트·게이트웨이는 받는 쪽에서 **워크트리별로 자동 생성**된다(공유 대상 아님).
+
+---
+
+## 실행
+
+등록 후, 현재 worktree 의 스택을 띄우고 내린다(대시보드 카드의 ▶/■/↻ 로도 동일):
+
+```bash
+marina start  <svc> | --all      # 한 서비스(+의존) | 스택 전체 (docker compose up -d --build)
+marina stop   <svc> | --all      # 한 서비스 정지 | --all = down(teardown)
+marina restart <svc> | --all     # 정의 변경분 재적용 (selected = up --build 재적용)
+marina status | ports            # 상태 · 라이브 호스트 포트
+marina logs [svc]                # docker 로그 follow (대시보드 로그 뷰어로도 봄)
+```
+
+`marina start web` 처럼 서비스명을 그대로 쓴다(전역 `marina` 래퍼). 무인자 `marina start` 는
+전체를 안 띄우고 안내만 한다 — 워크트리마다 모든 서비스를 무심코 올려 메모리를 잡아먹는 사고 방지.
+전체는 `--all`.
+
+---
+
+## compose 구성 — 자동 주입 (ⓘ 구성뷰)
+
+같은 Dockerfile 이라도 dev 로 띄우려면 빌드 인자·아티팩트·런타임 설정이 더 필요할 때가 많다.
+marina 는 이걸 **자동 감지하고 제안**한다(대시보드 서비스 ⓘ 모달). 저장은 모두 `~/.marina/<id>/` 에
+상대경로/값으로만 — 머신 종속 절대경로는 저장하지 않는다.
+
+| 주입 | 무엇 | marina 가 하는 일 |
+|---|---|---|
+| **연결 (service redirect)** | 설정이 가리키는 같은 compose 안 다른 서비스(`localhost:6379`, `${REDIS_HOST}:6379` 등) | 엔드포인트마다 **같은 compose 서비스로 redirect** 를 선택한다. 리터럴 `localhost` 는 시작 때 서비스명으로 치환한 복사본을 마운트하고, 호스트가 env 변수면 `via=env` 로 그 변수에 서비스명을 주입한다. 원본 불변, 매 start 재생성. |
+| **build args** | Dockerfile `ARG`(가드 있으면 필수) | 필요한 ARG 를 찾아 값 입력 칸 제시 → `build-args.json` |
+| **build args (로컬 env 파일)** | x-marina `buildArgsFrom: {svc: env파일}` | 그 env 파일을 호스트에서 읽어 `--build-arg` 로 주입. **값은 공유 compose 에 안 들어가고(경로만 공유)**, 파일은 worktree(links copy)/원본에 로컬 존재 → **시크릿 build-arg 를 안전하게**(예: `apps/web/.env.ssm.local` 의 AWS creds). `${...}` 미해석 플레이스홀더는 자동 스킵(compose 보간 깨짐 방지). multi-stage 면 최종 이미지엔 안 남음. |
+| **pre-build** | `COPY *.jar` 같은 빌드 산출물 | `./gradlew assemble` 등 선빌드 명령 제안 → `prebuild.json`(up 전 실행) |
+| **마운트** | localhost 없는 개인 설정 파일을 컨테이너에 그대로 | 파일 찾기 + dest(WORKDIR/config) 제안 → `mounts.json` |
+| **compose 환경변수** | compose 의 `${VAR}` 보간 | `composeEnvVar`/`composeEnvDefault` 하나를 시작 시 주입(`MARINA_COMPOSE_ENV` 로 값 덮어쓰기). |
+
+ⓘ 모달의 **📁 설정 파일** 한 섹션에서 다 한다 — 파일마다 `localhost` 또는 env 호스트 의존성이 있으면
+같은 compose 서비스로 redirect 하고, 없으면 [그대로 마운트]한다. 저장 하나로 service redirect 와 마운트를
+함께 저장한다.
+
+### 엮기 (서버측 localhost 자동 라우팅)
+
+워크트리마다 compose 로 격리하면 앱이 코드에 박은 `localhost:<port>` 가 컨테이너 자기 자신을 가리켜 깨진다(fe(SSR)→be, be→redis 등). marina 는 compose 가 **선언한 포트→서비스 매핑을 자동으로 읽어**, 앱(build) 서비스마다 `alpine/socat` 사이드카 1개(`<svc>-bind`)를 붙여 그 컨테이너의 모든 `localhost:<port>` 를 대상으로 중계한다. **앱 0수정·언어무관**(JAR 내장 설정도 무관).
+
+- **서비스↔서비스는 자동**: compose 가 서빙하는 포트(`ports`/`expose`)를 보고 `localhost:8081→be:8081`(컨테이너 DNS)를 자동 생성. 사람이 선언할 것 없음.
+- **호스트 인프라(redis/db 등)만 선언**: 대시보드 "호스트 백킹 포트" 또는 `~/.marina/<id>/backing.json` 의 `hostForward: ["6379"]` → `localhost:6379→host.docker.internal`(리눅스는 default gateway 폴백).
+- 사이드카는 `network_mode: service:<svc>` 로 그 컨테이너 localhost 를 가로챈다. 자기 서빙 포트는 건너뛴다(socat↔앱 listener 충돌 회피). UDP·미선언 포트는 비대상.
+- 헤드리스 브라우저(E2E·에이전트)→be 도 컨테이너 안이라 엮기로 해결(동시 무제한). **호스트 브라우저**→be 만 게이트웨이(아래).
+- `<svc>-bind` 사이드카는 `docker compose ps` 에 `<프로젝트>-<svc>-bind-1` 로 보인다.
+
+### 게이트웨이 (호스트 브라우저 진입)
+
+호스트 브라우저로 여러 워크트리를 동시에 열 때, marina 가 **Caddy** 를 띄워 `<워크트리>.<프로젝트>.localhost` 도메인으로 각 워크트리의 서비스에 보낸다. 워크트리 포트가 docker 자동할당이라 재기동마다 바뀌어도 marina 가 **동적으로 반영**한다(추가/삭제/정지/포트변경).
+
+- **자동 기동(기본 on)**: 서비스를 `start`/`restart` 하면 게이트웨이가 안 떠 있을 때 **자동으로 뜨고** 라우트를 반영한다(수동 `marina gateway start` 불필요). 끄려면 `MARINA_GATEWAY=off`. caddy 필요 — 없으면 안내(`brew install caddy` / `apt install caddy`)만 하고 게이트웨이만 비활성·나머지 marina 정상.
+- **포트**: 기본 **3902**(비특권 — 권한·:80 충돌 없이 자동 기동된다). 대시보드 3900·프리뷰 3901 바로 위이며, 사용 중이면 위로 빈 포트 fallback. `MARINA_GATEWAY_PORT=<n>` 로 고정 가능. URL 은 `http://<wt>.<proj>.localhost:3902`.
+- **:80**(포트 없는 깔끔한 URL)을 원하면 1회 시스템 데몬 설치: `marina gateway install`(macOS LaunchDaemon / Linux setcap·systemd), 끄기 `marina gateway uninstall`.
+- **라우팅**: 대표 web(fe/web/frontend) → `<wt>.<proj>.localhost`, 그 외 서비스 → `<wt>-<svc>.<proj>.localhost`. 경로 가정 안 함(범용), WS/HMR 기본. `*.localhost` 는 브라우저가 127.0.0.1 로 자동 해석(/etc/hosts 불요).
+- **동적 반영**: 데몬이 라이브 상태를 폴링(빠짐없음, 변할 때만 reload)하고 start/stop/restart 시 즉시 갱신. 현재 라우트는 `GET /api/gateway-status`.
+- **잔여(물리 한계)**: fe 가 브라우저에서 절대주소 `http://localhost:8081` 을 박으면 게이트웨이가 워크트리를 못 갈라줌 → fe 를 상대경로 `/api` 로(1줄). 같은 내부 포트 여러 서비스는 compose 에서 포트 분리.
+
+---
+
+## 동작 원리
+
+- **격리** — 워크트리별 compose 프로젝트명으로 네트워크·컨테이너·볼륨 분리.
+- **포트** — marina 가 `marina-overlay.yml`(ephemeral `!override`)로 published 포트를
+  `127.0.0.1::<컨테이너포트>` 로 덮는다. 호스트 포트는 Docker 가 정하므로 **`down`/`up`(전체 정지·기동)
+  으로 컨테이너가 재생성되면 바뀔 수 있다** — 대시보드 `↗` 가 그때 포트로 열어주므로 외울 필요 없다.
+- **서비스 간 호출** — 같은 compose 안에서는 `http://service:port` 형태의 compose service DNS 를 쓴다.
+  호스트 포트는 사람이 브라우저·CLI 로 접근할 때만 필요하다.
+- **container_name·dockerfile 케이싱·build args·volume** 도 overlay 가 런타임에 보정한다 —
+  저장된 compose(앱 레포 기준)는 그대로 두고 비침투적으로 머지한다.
+- **links/symlink** — 호스트 checkout 사이의 편의 링크다. 컨테이너 파일 주입과 무관하며, 컨테이너에는
+  `mounts.json` overlay volume 또는 service redirect 로 들어간다.
+- **외부 서브레포** — start 때 `.workspace/external/<name>` 에 git worktree 로 체크아웃 후 compose `include`.
+- **해석된 전체 설정은 파일로 저장하지 않는다** — marina 는 포트·격리 보정 overlay(`marina-overlay.yml`)만
+  쓴다. 단, 입력한 build args 값은 `build-args.json` 에 저장되므로 **시크릿 build-arg 는 `buildArgsFrom`**(로컬 env 파일에서 주입 — 값은 공유 compose 에 안 들어가고 경로만) **또는 `env_file`/런타임**으로 넣는다.
+
+---
+
+## 대시보드 (:3900)
+
+- 좌측 패널에 프로젝트→서브레포→서비스 그룹. compose 카드는 서비스 목록을 `docker compose ps`
+  라이브로 보여준다(한 번도 안 띄운 스택은 `start --all` 후 나타남).
+- 카드 헤더 `▶ Start all` / `■ Stop all`, 서비스별 ▶/■/↻, web 열기 `↗`.
+- 서비스 ⓘ — 빌드 컨텍스트·Dockerfile·포트·env + 위 자동 주입(build args·pre-build·mounts) 편집.
+- 로그 뷰어 — run 히스토리·검색·실시간 스트리밍(start 때 `docker compose logs -f` 를 `run-NNN.log` 로 캡처).
+
+---
 
 ## 업데이트
 
-플러그인 매니페스트에 `version` 을 두지 않는다 — 마켓플레이스 repo 의 매 커밋이 곧 새
-버전이다 (git commit SHA 기준). 따라서 **레포에 push 하면 그게 새 릴리스**이며 버전을
-수동으로 올릴 필요가 없다.
+플러그인 매니페스트에 `version` 을 두지 않는다 — 마켓플레이스 repo 의 매 커밋이 곧 새 버전(commit SHA).
+**레포에 push 하면 그게 새 릴리스**다.
 
-- **Claude Code**: 세션 시작 시 background auto-update 로 자동 반영된다 (공개 repo 는
-  인증 토큰 불요). 즉시 갱신은 `/plugin marketplace update`.
-- **Codex**: `codex plugin marketplace upgrade` 로 갱신한다 (세션 시작 시 자동 적용
-  여부는 Codex 버전에 따라 다를 수 있다).
+- **Claude Code** — 세션 시작 시 background auto-update. 즉시 갱신은 `/plugin marketplace update`.
+- **Codex** — `codex plugin marketplace upgrade`.
 
-## 프로젝트 등록 — `~/.marina/projects.json`
+---
 
-한 데몬이 등록된 모든 프로젝트의 worktree 를 관리한다. `project add <path>` 가 경로에서
-서브레포(중첩 git 레포)와 worktree 글롭을 추론해 초안을 만든다 (확인/정정).
+## 명령어 레퍼런스
 
-```json
-{
-  "projects": [
-    {
-      "id": "myapp",
-      "root": "/path/to/myapp",
-      "subrepos": ["frontend", "backend"],
-      "worktreeGlobs": [".claude/worktrees/*", "~/.codex/worktrees/*/myapp"]
-    }
-  ]
-}
-```
+| 그룹 | 명령 |
+|---|---|
+| 대시보드 | `marina`(무인자=대시보드 start) · `marina dashboard start\|stop\|status\|open` · `marina open` |
+| 셋업 | `marina install-cli` · `marina uninstall-cli` · `marina attach` |
+| 등록 | `marina project add <path> --compose <file> [--env-var N --env-default V]` + 선택 `--external name=path` (또는 대시보드 위저드) |
+| 등록 관리 | `marina project ls \| infer <path> \| rm <id> \| default <id> a,b,c` |
+| 실행 | `marina start\|stop\|restart <svc>\|--all` · `marina status \| ports \| logs [svc]` |
+| 게이트웨이 | `marina gateway start\|stop\|status\|install\|uninstall` (보통 서비스 start 시 자동 기동이라 수동 불필요) |
+| 워크트리(작업 시작) | `marina worktree create <branch> [base] [--project <id>]` — git worktree(-b) + 서브레포를 같은 브랜치로 미러 (Claude 자동 `claude/<id>` 대신 `feature/{task}` 등으로). `--project`=cwd 무관(프로젝트 밖에서도). attach 범위는 `marina project default <id> a,b,c` 로 좁힘(예: compose 서브레포만) |
 
-중첩 레포(root 아래 독립 git 레포들)와 모노레포(`subrepos: []`) 둘 다 받는다.
+내부 호출은 `marina.sh`(launcher)와 `marina-control.py`(데몬·CLI 브리지)지만, 평소엔 위 `marina` 래퍼만
+쓰면 된다. `marina.sh` 를 직접 부를 땐 서비스를 `--<svc>` 플래그로 지정한다(래퍼가 `web → --web` 변환).
 
-## 서비스 정의 — 프로젝트 root 의 `marina-services.json`
+---
 
-```json
-{
-  "services": [
-    {
-      "name": "web",
-      "portBase": 3000,
-      "cwd": "frontend",
-      "run": "exec npm run dev -- --port {port}",
-      "env": { "API_URL": "http://localhost:{api_port}" },
-      "cachePaths": ["frontend/.next"],
-      "orphanPattern": "next dev"
-    }
-  ]
-}
-```
+## 요구사항·제약
 
-- `run`·`env`·`links` 치환자: `{port}` `{<name>_port}` `{python}` `{root}` `{source}` `{profile}` + 세션 경로 `{env_file}` `{tmp}` `{session}`. (`{source}` = 원본 main 체크아웃, `{root}` = 현재 worktree)
-- 포트 = `portBase + 세션오프셋` (main 0 / worktree 는 id 해시로 안정적 대역). `{<name>_port}` 는 같은 세션 다른 서비스의 실제 포트(자동 이동 반영) — 서비스 간 호출 URL 주입용.
-- `env`(선택): 서비스 프로세스에 주입할 환경변수 `{ "KEY": "값" }`. 값에 `run` 과 동일한 토큰을 쓸 수 있어 **worktree 마다 형제 서비스의 실제 포트**가 들어간다 (예: `"API_URL": "http://localhost:{api_port}"`). 앱이 `os.getenv`/`process.env` 로 읽으면 자기 worktree 의 포트·URL 을 본다. worktree 별로 `marina override` 로 덮어쓸 수 있다(아래 "워크트리별 override").
-- `links`(선택): 원본(`{source}`)에서 worktree 로 심볼릭링크할 경로 `{ "이름": { "to": "워크트리경로", "from": "원본경로" } }`. 서비스 **start 때 생성**(idempotent, 소스 없으면 skip). `marina config` 로 확인하고 worktree 별로 `overrides.json` 으로 redirect·해제(`null`)한다. (glob 패턴 미러는 현재 attach 단계의 기존 메커니즘이 처리 — 단일 `to`/`from` 만 선언 적용.)
-- `cachePaths`(선택): Clear cache 대상. `orphanPattern`(선택): 유령 프로세스 탐지 정규식.
+- **Docker (compose v2.24.4+)** — `!override` 머지 태그 사용.
+- 단일 포트만 지원(포트 **범위**는 거부). `network_mode: host` 는 격리를 깨므로 **거부**된다(명확한 에러).
+  `container_name` 은 격리를 위해 overlay 에서 **자동 제거**된다(`!reset`, 경고). `external` 네트워크·볼륨은 경고만.
+- `restart --<svc>` 는 `up --build` 재적용(변경 반영). 컨테이너 단순 재시작이 아니다.
+- 등록 검증(위저드 검토·`--compose`)은 `docker compose config` + 격리 검사까지다(이미지 빌드 실행까지는 아님).
 
-### 저장 위치 2곳 + 머지
-
-서비스 목록은 두 곳에 둘 수 있고, 둘 다 있으면 `name` 단위로 머지된다(중앙 우선).
-
-| 위치 | 파일 | source 태그 | 특징 |
-|------|------|-------------|------|
-| 프로젝트 root | `<프로젝트>/marina-services.json` | `팀` | repo 에 커밋해 팀이 공유 |
-| 중앙 개인 | `~/.marina/services/<프로젝트id>.json` | `내 override` | repo 무관, 개인 로컬 전용 |
-
-두 위치에 같은 `name` 이 있으면 **중앙(개인) 정의가 우선** 적용된다. `.env.local` 패턴과
-동일한 구조 — 팀 정의를 공유하기 전에 개인이 override·테스트하고, 테스트가 끝나면
-중앙에서 그 `name` 을 지우면 팀 정의로 자동 복귀한다.
-
-### 서비스 추가 방법 3가지
-
-**1. 대시보드 UI** — subrepo 헤더의 `+ 서비스 추가` 버튼으로 추가 (이름·포트·cwd·run 입력).
-"팀 공유" 체크 시 프로젝트 root `marina-services.json` 에 저장(commit 권장); 기본은 중앙
-개인 파일(`~/.marina/services/<id>.json`)에 저장.
-
-**2. LLM 슬래시** — Claude 세션 안에서:
-
-```
-/marina:service add [path]
-```
-
-에이전트가 프로젝트 구조를 분석해 서비스 목록을 제안하고, 확인 후 등록한다.
-
-**3. CLI** — 터미널에서 직접:
-
-```bash
-# 서비스 추가 (기본: 중앙 개인 / --root: 프로젝트 root)
-marina service add <프로젝트id> '<service-json>' [--root]
-
-# 서비스 제거
-marina service rm <프로젝트id> <name> [--root]
-```
-
-#### Running a service under docker
-
-`run` is any shell command, so docker compose works with **zero special support** — pass marina's
-tokens into the container so each worktree stays isolated:
-
-```jsonc
-{ "name": "api", "portBase": 18080, "cwd": "projects/kotlin-skeleton",
-  "run": "exec env HOST_PORT={port} COMPOSE_PROJECT_NAME=svc-{session} docker compose up --abort-on-container-exit" }
-```
-
-```yaml
-# the service's compose.yml must take the host port + project name from the env:
-services:
-  api:
-    ports: ["${HOST_PORT}:8080"]
-```
-
-`{port}` = `portBase` + per-worktree offset, `{session}` = per-worktree id → concurrent worktrees get
-distinct host ports and compose project names, exactly like a native service. Stop sends `SIGTERM`
-first, which makes `compose up` stop its containers. (Limit: a container that needs >5s to stop is
-force-killed and may linger; orphan detection matches the process, not the container.)
-
-### 복잡한 기동 — 헬퍼 스크립트 패턴
-
-`run` 한 줄로 부족한 서비스(env 준비, 의존성 링크, 빌드 캐시 워밍 등)는 `run` 이
-프로젝트 쪽 헬퍼 스크립트를 호출하게 한다. marina 코어는 단순하게 두고 복잡성은
-프로젝트가 소유한다.
-
-```json
-{
-  "name": "web",
-  "portBase": 3000,
-  "cwd": "frontend",
-  "run": "exec {root}/scripts/dev-web.sh {port}"
-}
-```
-
-```bash
-# scripts/dev-web.sh — 프로젝트 소유. marina 가 넘긴 값으로 환경을 준비하고 exec.
-#!/usr/bin/env bash
-set -euo pipefail
-port="$1"
-# worktree 마다 새로 설치하는 대신 원본(main) 체크아웃의 node_modules 를 링크
-[ -e node_modules ] || ln -s "$MARINA_SOURCE_ROOT/frontend/node_modules" node_modules
-# 시크릿·환경 변수 준비 (예: 시크릿 매니저에서 .env 채우기)
-[ -f .env.local ] || ./scripts/pull-env.sh > .env.local
-exec npm run dev -- --port "$port"
-```
-
-marina 가 헬퍼에 넘기는 것:
-
-- `run` 치환자 — `{port}` `{<name>_port}` `{root}` `{source}` `{python}` `{profile}` `{env_file}` `{tmp}` `{session}`.
-- 환경 변수 — `MARINA_SOURCE_ROOT`(원본 main 체크아웃), `MARINA_ROOT`(현재 worktree).
-
-### `web` 서비스 컨벤션
-
-대시보드는 `web` 이라는 이름의 서비스를 브라우저 프리뷰 대상으로 특별 취급한다:
-
-- 로그 뷰어에 Console/Server 탭 — 브라우저 콘솔 로그를 대시보드로 포워딩해 함께 본다.
-- 로그 툴바 ↗ 버튼 — 그 세션의 web 을 브라우저로 연다 (`http://localhost:{port}/`).
-- 대시보드 첫 진입 시 기본 선택 대상.
-- 세션 간 포트 충돌 칩을 web 포트 기준으로 표시.
-
-브라우저로 프리뷰할 dev 서버의 이름을 `web` 으로 두면 위 기능이 켜진다. 다른
-서비스(api·worker 등)는 일반 서버 로그만 본다.
-
-## 워크트리별 override + 관측 — `marina config` / `marina override`
-
-서비스 정의의 `env`·포트는 **기본값**이고, 각 worktree 는 그 위에 자기만의 값을 덮어쓸 수
-있다 — 같은 정의를 공유하면서 이 worktree 만 다른 BE 포트·로그레벨·시크릿을 쓰는 식이다.
-
-- **우선순위**: 서비스 정의(root ∪ 중앙) ＜ 자동 포트이동 박제(`overrides.env`) ＜ **worktree override(`overrides.json`)**.
-- **per-key 머지** — 지정한 키만 덮고 나머지 기본값은 그대로 둔다. `disable`(`null`)이면 그 키를 **해제**한다.
-- override 는 그 worktree 의 세션 폴더(`overrides.json`)에만 있고 repo 에 커밋되지 않는다 (이 worktree 전용).
-
-### 보기 — `marina config <svc>`
-
-현재 worktree 에서 그 서비스가 실제로 쓰는 effective `env`·포트를, **각 값의 출처와 무엇을
-덮었는지**까지 한눈에 보여준다:
-
-```
-$ marina config search
-service: search   worktree: feature-x
-env
-  BE_API_URL = http://localhost:8412   [override · overrides.json]
-      ↑ 덮음  http://localhost:8081  ·  서비스 def(root)
-  LOG_LEVEL = (unset)   [해제 · overrides.json]
-      ↑ 덮음  info  ·  서비스 def(root)
-ports
-  be = 8412   [override · overrides.json]
-      ↑ 덮음  8081  ·  portBase
-  search = 8533   [auto-pin · overrides.env]
-      ↑ 덮음  8500  ·  portBase
-```
-
-`[…]` 가 그 값의 **이긴 출처**, `↑ 덮음` 이 **덮인 기본값과 그 출처**다. env 값 중 시크릿류
-키(`*KEY*`·`*TOKEN*`·`*SECRET*` 등)는 출력에서 자동 마스킹된다.
-
-### 편집 — `marina override`
-
-```bash
-marina override set     <svc> env  <KEY> <VALUE>   # env 키 override
-marina override set     <svc> port <VALUE>         # 포트 override
-marina override disable <svc> env  <KEY>           # 기본값 키 해제 (null)
-marina override unset    <svc> env  <KEY>          # 내 override 제거 → 기본값 복귀
-marina override unset    <svc> port                # 포트 override 제거
-```
-
-override 는 다음 `start`/`restart` 부터 서비스에 반영된다 (포트는 `status`·`ports`·`config`
-에 즉시 반영). 손으로 세션 폴더의 `overrides.json` 을 직접 편집해도 된다.
-
-`links` 도 `overrides.json` 의 `links` 섹션으로 worktree 별 redirect·해제(`null`)할 수 있다 (현재 전용 CLI 는 `env`·`port`; `links` 는 파일 편집으로). 적용은 서비스 start 때.
+---
 
 ## 구조
 
@@ -313,31 +317,23 @@ marina/
 ├── .claude-plugin/marketplace.json   레포 = 마켓플레이스 (플러그인은 ./plugin)
 ├── README.md · LICENSE
 └── plugin/                           설치되는 플러그인 (Claude·Codex 공용)
-    ├── .claude-plugin/plugin.json
-    ├── .codex-plugin/plugin.json
+    ├── .claude-plugin/plugin.json · .codex-plugin/plugin.json
     ├── hooks/hooks.json              SessionStart 훅 선언
+    ├── commands/                     슬래시 명령(/marina:project 등)
     └── scripts/
-        ├── marina.sh                       세션별 런처 + 레지스트리 CLI (start/stop/restart · service · project · config · override)
-        ├── marina-control.py               :3900 관제 대시보드 (단일 파일 서버+UI)
-        ├── marina-dashboard.sh             대시보드 데몬 (launchd / nohup 폴백)
-        ├── attach-detached-subrepos.sh     worktree 에 서브레포 git worktree attach
-        ├── marina-session-start-hook.sh    세션 시작 attach 훅 (플러그인이 호출)
-        └── marina-entrypoint.sh            전역 진입점 (dashboard · service · project · start/stop/restart)
+        ├── marina.sh                    세션별 launcher + 레지스트리 CLI (start/stop/restart · project)
+        ├── marina-compose.py            compose 라우팅 — overlay 생성 · build/up/down · 라이브 포트
+        ├── marina-control.py            :3900 대시보드 (단일 파일 서버+UI) + compose_assist · CLI 브리지
+        ├── marina-resolve.sh            설치 경로 해석 + shim(launcher) 생성 (Claude·Codex·baked fallback)
+        ├── marina-dashboard.sh          대시보드 데몬 (launchd · systemd · nohup 폴백)
+        ├── attach-detached-subrepos.sh  worktree 에 서브레포·외부레포 git worktree attach
+        ├── marina-session-start-hook.sh 세션 시작 attach 훅
+        └── marina-entrypoint.sh         전역 진입점 (dashboard · project · start/stop/restart · install-cli)
 ```
 
-## 핵심 기능
+테스트: `plugin/tests/*.sh` (docker 는 `docker info` 게이트로 미가동 시 스킵).
 
-- 세션별 포트 스킴 — main 0 / worktree 는 id 해시 오프셋 → `portBase + offset`
-- 서비스 `env` 주입 · `links` symlink 적용(토큰 치환, worktree 별) + 워크트리 override(`overrides.json`) — `marina config` 로 effective·출처 관측
-- 헬스 3단계 pill: BOOT / ON / ERR
-- 카드 칩: 변경분·디스크·미머지·브랜치·포트충돌·캐시
-- 로그 뷰어: 양방향 무한 스크롤, 위치 게이지, 필터/에러만 매치 전용 뷰, 다운로드
-- Clear cache (서비스별 `cachePaths`), 유령 프로세스 정리, 메모리 가드
-- 멀티 프로젝트: 대시보드 좌측 패널 프로젝트 그룹 (단일 프로젝트면 헤더 생략)
-
-## 의존성 0
-
-`/usr/bin/python3`(표준 라이브러리) + bash. 외부 패키지·런타임 없음.
+---
 
 ## 라이선스
 

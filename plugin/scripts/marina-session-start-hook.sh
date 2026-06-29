@@ -63,15 +63,6 @@ fi
 # 명령 호출자 resolve: PATH 의 marina 셰임 우선, 없으면 entrypoint 절대경로.
 caller="marina"; command -v marina >/dev/null 2>&1 || caller="$SCRIPT_DIR/marina-entrypoint.sh"
 
-# 서비스명(머지 정의) — id 못 얻거나 실패/빈값이면 줄 생략 (규칙 본문은 그대로).
-svc_line=""
-if [[ -n "$PROJECT_ID" ]]; then
-  svcs="$("$SCRIPT_DIR/marina.sh" service ls "$PROJECT_ID" 2>/dev/null | python3 -c "import json,sys
-try: d=json.load(sys.stdin); print(', '.join(s['name'] for s in d.get('services',[])))
-except Exception: pass" 2>/dev/null || true)"
-  [[ -n "$svcs" ]] && svc_line="이 worktree 서비스: $svcs"
-fi
-
 read -r -d '' rules <<EOF || true
 [marina] 이 worktree 는 marina 가 관리합니다. dev 서버는 직접(npm/gradlew 등) 띄우지 말고 $caller 로 — worktree 별 포트가 자동 격리됩니다.
 · 기동:   $caller start <서비스>     (전체는 --all)
@@ -80,8 +71,7 @@ read -r -d '' rules <<EOF || true
 · 상태·포트: $caller status      · 로그: $caller logs <서비스>
 문제 해결:
 · 포트 충돌은 자동으로 빈 포트로 이동 — 실제 포트는 $caller status 로 확인
-· 정의(포트·실행방식·환경변수) 변경: $caller service ls <id> 로 확인 → $caller service add <id> '<json>' 로 수정
-$svc_line
+· compose 정의(서비스·env·마운트) 변경: 대시보드 ✎ compose 편집·위저드 또는 $caller project add <path> --compose
 EOF
 
 # JSON escape (bash 파라미터 치환 — superpowers session-start 훅 방식).

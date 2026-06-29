@@ -8,9 +8,7 @@
 #   MARINA_SUBREPOS="repo-a repo-b"     # 붙일 서브레포 (없으면 레지스트리)
 #   BRANCH_PREFIX=codex
 #   SYNC_IDEA=true
-#   SYNC_LOCAL_YML=true
-#   SYNC_LOCAL_ENV=true
-#   SYNC_VENV=true
+# (heavy/gitignored 디렉토리·설정 symlink 은 marina.sh 의 선언형 links 로 이동 — 여기선 안 함)
 
 set -euo pipefail
 
@@ -205,9 +203,6 @@ if [[ -z "${BRANCH_PREFIX:-}" ]]; then
   esac
 fi
 SYNC_IDEA="${SYNC_IDEA:-true}"
-SYNC_LOCAL_YML="${SYNC_LOCAL_YML:-true}"
-SYNC_LOCAL_ENV="${SYNC_LOCAL_ENV:-true}"
-SYNC_VENV="${SYNC_VENV:-true}"
 # SUBREPOS 는 위에서 resolve_subrepos 로 채움 (MARINA_SUBREPOS env → 레지스트리 → 기본값)
 
 worktree_id() {
@@ -258,6 +253,30 @@ attach_subrepo() {
   fi
 }
 
+attach_external() {
+  # 외부(프로젝트 밖) git 레포를 워크트리의 .workspace/external/<name> 에 worktree+브랜치로 — per-worktree 격리.
+  local name="$1" src="$2" branch="$3"
+  local dst="$DEST_ROOT/.workspace/external/$name"
+  { [[ -d "$src" ]] && git -C "$src" rev-parse --is-inside-work-tree >/dev/null 2>&1; } || {
+    echo "skip external (source git 아님): $name ($src)"; return 0; }
+  git -C "$src" worktree prune 2>/dev/null || true   # 제거된 워크트리의 stale 항목 정리 → 재생성 가능
+  if [[ ! -e "$dst" ]]; then
+    mkdir -p "$DEST_ROOT/.workspace/external"
+    echo "attach external: $name -> $dst"
+    git -C "$src" worktree add --detach "$dst" HEAD
+  else
+    echo "skip external (exists): $name"
+  fi
+  git -C "$dst" rev-parse --is-inside-work-tree >/dev/null
+  if [[ "$(git -C "$dst" branch --show-current)" == "$branch" ]]; then
+    echo "skip branch (current): $name [$branch]"
+  elif git -C "$dst" show-ref --verify --quiet "refs/heads/$branch"; then
+    git -C "$dst" switch "$branch"
+  else
+    git -C "$dst" switch -c "$branch"
+  fi
+}
+
 sync_idea_dir() {
   local src="$SOURCE_ROOT/.idea" dst="$DEST_ROOT/.idea"
   [[ "$SYNC_IDEA" == "true" ]] || return 0
@@ -276,84 +295,6 @@ sync_idea_dir() {
   done < <(find "$dst" -type f \( -name '*.xml' -o -name '*.iml' \) -print0)
 }
 
-sync_local_yml_files() {
-  local repo="$1" src_repo="$SOURCE_ROOT/$repo" dst_repo="$DEST_ROOT/$repo"
-  local src rel dst
-  [[ "$SYNC_LOCAL_YML" == "true" ]] || return 0
-  [[ -d "$src_repo" && -d "$dst_repo" ]] || return 0
-  [[ "$(cd "$src_repo" && pwd -P)" != "$(cd "$dst_repo" && pwd -P)" ]] || return 0
-
-  while IFS= read -r -d '' src; do
-    rel="${src#"$src_repo"/}"
-    dst="$dst_repo/$rel"
-    mkdir -p "$(dirname "$dst")"
-
-    if [[ -L "$dst" ]]; then
-      ln -sfn "$src" "$dst"
-      echo "link local yml: $repo/$rel"
-    elif [[ -e "$dst" ]]; then
-      if cmp -s "$src" "$dst"; then
-        rm -f "$dst"
-        ln -s "$src" "$dst"
-        echo "replace copy with link: $repo/$rel"
-      else
-        echo "warn local yml exists and differs, skip: $repo/$rel"
-      fi
-    else
-      ln -s "$src" "$dst"
-      echo "link local yml: $repo/$rel"
-    fi
-  done < <(find "$src_repo" \( -name node_modules -o -name .git -o -name .venv -o -name .next -o -name build \) -prune -o -path '*/src/main/resources/*local.yml' -type f -print0)
-}
-
-sync_local_env_files() {
-  local repo="$1" src_repo="$SOURCE_ROOT/$repo" dst_repo="$DEST_ROOT/$repo"
-  local src rel dst
-  [[ "$SYNC_LOCAL_ENV" == "true" ]] || return 0
-  [[ -d "$src_repo" && -d "$dst_repo" ]] || return 0
-  [[ "$(cd "$src_repo" && pwd -P)" != "$(cd "$dst_repo" && pwd -P)" ]] || return 0
-
-  while IFS= read -r -d '' src; do
-    rel="${src#"$src_repo"/}"
-    dst="$dst_repo/$rel"
-    mkdir -p "$(dirname "$dst")"
-
-    if [[ -L "$dst" ]]; then
-      ln -sfn "$src" "$dst"
-      echo "link local env: $repo/$rel"
-    elif [[ -e "$dst" ]]; then
-      if cmp -s "$src" "$dst"; then
-        rm -f "$dst"
-        ln -s "$src" "$dst"
-        echo "replace copy with link: $repo/$rel"
-      else
-        echo "warn local env exists and differs, skip: $repo/$rel"
-      fi
-    else
-      ln -s "$src" "$dst"
-      echo "link local env: $repo/$rel"
-    fi
-  done < <(find "$src_repo" \( -name node_modules -o -name .git -o -name .venv -o -name .next -o -name build \) -prune -o -name '.env*.local' -type f -print0)
-}
-
-sync_venv_dir() {
-  # 서브레포에 .venv 가 있으면 worktree 로 심볼릭링크 (python 서브레포 공통). MARINA_VENV_PATH 로 경로 지정 가능.
-  local repo="$1" src="${MARINA_VENV_PATH:-$SOURCE_ROOT/$repo/.venv}" dst="$DEST_ROOT/$repo/.venv"
-  [[ "$SYNC_VENV" == "true" ]] || return 0
-  [[ -d "$src" && -d "$DEST_ROOT/$repo" ]] || return 0
-  [[ "$(cd "$SOURCE_ROOT/$repo" && pwd -P)" != "$(cd "$DEST_ROOT/$repo" && pwd -P)" ]] || return 0
-
-  if [[ -L "$dst" ]]; then
-    ln -sfn "$src" "$dst"
-    echo "link venv: $repo/.venv"
-  elif [[ -e "$dst" ]]; then
-    echo "warn venv exists, skip: $repo/.venv"
-  else
-    ln -s "$src" "$dst"
-    echo "link venv: $repo/.venv"
-  fi
-}
-
 main() {
   local id branch repo
   [[ -d "$SOURCE_ROOT" ]] || die "SOURCE_ROOT 없음: $SOURCE_ROOT"
@@ -366,11 +307,34 @@ main() {
     exit 0
   fi
 
+  id="$(worktree_id)"
+  # 워크트리에 명시 브랜치가 있으면 그 *전체 이름* 을 서브레포에 미러 → 워크트리를 feature/{task} 로 만들면
+  # 서브레포도 feature/{task} (crabs 등 feature 브랜치 라이프사이클과 정합 — "워크트리 생성=작업 시작").
+  # detached/빈 브랜치(codex 루트·테스트 plain dir)면 <prefix>/<id> 폴백. claude/<id> 워크트리는 미러==폴백이라 무회귀.
+  local _wtbr; _wtbr="$(git -C "$DEST_ROOT" branch --show-current 2>/dev/null || true)"
+  if [[ -n "$_wtbr" ]]; then
+    branch="$_wtbr"
+  else
+    branch="$BRANCH_PREFIX/$id"
+  fi
+
+  echo "source: $SOURCE_ROOT"
+  echo "dest:   $DEST_ROOT"
+  echo "branch: $branch"
+
+  # 외부 레포 attach — 워크트리마다 git worktree 로 끌어와 격리(멱등). 서브레포 커스터마이즈 skip 과 무관하게 항상.
+  # 목록 = MARINA_EXTERNAL_REPOS env(name=source 줄, marina 가 레지스트리에서 주입). main(SOURCE==DEST)은 위에서 exit.
+  local _extln _enm _esrc
+  while IFS= read -r _extln; do
+    [[ -n "$_extln" && "$_extln" == *=* ]] || continue
+    _enm="${_extln%%=*}"; _esrc="${_extln#*=}"
+    attach_external "$_enm" "$_esrc" "$branch"
+  done <<< "${MARINA_EXTERNAL_REPOS:-}"
+
   # 자동 attach(MARINA_SUBREPOS 미지정 = defaultAttach 경로)는 "첫 실행(fresh worktree)"에만.
-  # universe 중 하나라도 이미 attach 돼 있으면 사용자가 커스터마이즈한 상태로 보고 건드리지 않는다
-  # — detach 한 default 를 세션 시작마다 되살리지 않기 위함 (design open item 1 결정). 대시보드 단일 attach 는 env 로 우회.
+  # universe 중 하나라도 이미 attach 돼 있으면 사용자가 커스터마이즈한 상태로 보고 건드리지 않는다.
   if [[ -z "${MARINA_SUBREPOS:-}" ]]; then
-    local universe_str repo
+    local universe_str
     universe_str="$(registry_subrepos_for "$DEST_ROOT" || true)"
     for repo in $universe_str; do
       if [[ -e "$DEST_ROOT/$repo/.git" ]]; then
@@ -380,18 +344,11 @@ main() {
     done
   fi
 
-  id="$(worktree_id)"
-  branch="$BRANCH_PREFIX/$id"
-
-  echo "source: $SOURCE_ROOT"
-  echo "dest:   $DEST_ROOT"
-  echo "branch: $branch"
-
   for repo in ${SUBREPOS[@]+"${SUBREPOS[@]}"}; do
     attach_subrepo "$repo" "$branch"
-    sync_local_yml_files "$repo"
-    sync_local_env_files "$repo"
-    sync_venv_dir "$repo"
+    # heavy/gitignored 디렉토리·설정(.venv·*local.yml·.env*.local·node_modules) symlink 은
+    # 더 이상 여기서 숨어서 안 함 — marina.sh 의 선언형 links(apply_glob_links, 기본 룰 _DEFAULT_LINKS_JSON)가
+    # start 때 적용(보임·override 가능). 'marina link' 로 수동 적용도 가능.
   done
 
   sync_idea_dir

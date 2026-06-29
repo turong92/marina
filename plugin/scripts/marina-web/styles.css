@@ -1,0 +1,409 @@
+    :root {
+      color-scheme: light;
+      --sys-bg-base: hsl(220, 20%, 96%);
+      --sys-bg-surface: hsl(0, 0%, 100%);
+      --sys-bg-surface-hover: hsl(220, 22%, 97%);
+      --sys-cont-neutral-default: hsl(228, 10%, 12%);
+      --sys-cont-neutral-light: hsl(225, 8%, 38%);
+      --sys-cont-neutral-lightest: hsl(225, 7%, 56%);
+      --sys-cont-primary-default: hsl(215, 95%, 48%);
+      --sys-cont-positive-default: hsl(148, 64%, 35%);
+      --sys-cont-negative-default: hsl(358, 68%, 50%);
+      --sys-style-neutral-light: hsl(220, 14%, 90%);
+      --sys-style-neutral-default: hsl(220, 12%, 82%);
+      --sys-code-bg: hsl(225, 16%, 10%);
+      --sys-code-fg: hsl(210, 18%, 92%);
+      font-family: Pretendard, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--sys-bg-base); color: var(--sys-cont-neutral-default); }
+    header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; border-bottom: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); }
+    h1 { margin: 0; font-size: 16px; font-weight: 700; line-height: 1; letter-spacing: 0; }
+    .brand-sub { color: var(--sys-cont-neutral-lightest); font-size: 12px; font-weight: 500; }
+    button, select, input { font: inherit; font-size: 13px; line-height: 1; }
+    button { height: 32px; border: 1px solid var(--sys-style-neutral-default); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); padding: 0 10px; cursor: pointer; }
+    button:hover { background: var(--sys-bg-surface-hover); }
+    button.primary { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
+    button.danger { color: var(--sys-cont-negative-default); }
+    button.active { background: var(--sys-cont-neutral-default); border-color: var(--sys-cont-neutral-default); color: white; }
+    /* busy 표시 — 모든 진행중 버튼이 공통으로 쓰는 떠다니는 점 (currentColor 라 버튼 색 따라감) */
+    .busy-dots { display: inline-flex; align-items: center; gap: 3px; line-height: 1; }
+    .busy-dots i { width: 4px; height: 4px; border-radius: 50%; background: currentColor; animation: busyfloat 0.9s ease-in-out infinite; }
+    .busy-dots i:nth-child(2) { animation-delay: 0.15s; }
+    .busy-dots i:nth-child(3) { animation-delay: 0.3s; }
+    @keyframes busyfloat { 0%, 70%, 100% { transform: translateY(0); opacity: 0.45; } 35% { transform: translateY(-3px); opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .busy-dots i { animation: none; opacity: 0.6; } }
+    input, select { height: 32px; min-width: 0; border: 1px solid var(--sys-style-neutral-default); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); padding: 0 10px; }
+    main { display: grid; grid-template-columns: minmax(420px, 520px) 16px minmax(0, 1fr); height: calc(100vh - 56px); }
+    .rail { display: flex; align-items: center; justify-content: center; background: var(--sys-bg-base); cursor: pointer; }
+    .rail:hover { background: var(--sys-bg-surface-hover); }
+    .rail button { display: flex; align-items: center; justify-content: center; width: 16px; height: 72px; padding: 0; border-radius: 8px; border: 1px solid var(--sys-style-neutral-default); background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); font-size: 10px; line-height: 1; pointer-events: none; }
+    .rail:hover button { color: var(--sys-cont-neutral-default); }
+    /* 접힌 상태: 동일한 필 디자인을 화면 좌측에 fixed 고정 — 어떤 레이아웃 상태에서도 가려질 수 없게 */
+    main.aside-collapsed .rail button { position: fixed; left: 3px; top: 50%; transform: translateY(-50%); z-index: 40; color: var(--sys-cont-primary-default); border-color: var(--sys-cont-primary-default); }
+    main.aside-collapsed { grid-template-columns: 0 16px minmax(0, 1fr); }
+    /* display:none 은 grid 자리를 한 칸씩 밀어 섹션이 16px 트랙에 끼는 사고 — 자리 유지한 채 숨김 */
+    main.aside-collapsed aside { visibility: hidden; overflow: hidden; min-width: 0; border-right: 0; }
+    .sessions-bar { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 12px 14px 0; }
+    .sessions-bar > button { height: 26px; padding: 0 8px; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .switcher { position: relative; min-width: 0; flex: 1; }
+    .switcher-toggle { display: flex; align-items: center; gap: 6px; width: 100%; height: 28px; padding: 0 8px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); }
+    .switcher-toggle:hover { background: var(--sys-bg-surface-hover); }
+    .switcher-current { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 700; }
+    .switcher-chev { margin-left: auto; font-size: 10px; color: var(--sys-cont-neutral-light); }
+    .switcher-menu { position: absolute; z-index: 50; top: 32px; left: 0; right: 0; max-height: 60vh; overflow-y: auto; padding: 4px; border: 1px solid var(--sys-style-neutral-default); border-radius: 10px; background: var(--sys-bg-surface); box-shadow: 0 6px 24px rgba(0,0,0,0.18); }
+    .switcher-row { display: flex; align-items: center; gap: 6px; padding: 8px; border-radius: 8px; cursor: pointer; }
+    .switcher-row:hover { background: var(--sys-bg-surface-hover); }
+    .switcher-row.active { background: var(--sys-bg-surface-hover); }
+    .switcher-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--sys-cont-neutral-default); }
+    .switcher-row-actions { display: none; gap: 2px; }
+    .switcher-row:hover .switcher-row-actions { display: flex; }
+    .switcher-row-actions button { width: 22px; height: 22px; padding: 0; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .switcher-chip { font-size: 11px; padding: 1px 6px; border-radius: 999px; white-space: nowrap; }
+    .switcher-chip.on { color: var(--sys-cont-primary-default); border: 1px solid var(--sys-cont-primary-default); }
+    .switcher-chip.conflict { color: #c0392b; border: 1px solid #c0392b; }
+    .switcher-chip.idle { color: var(--sys-cont-neutral-light); border: 1px solid var(--sys-style-neutral-default); }
+    .switcher-register { width: 100%; margin-top: 4px; padding: 8px; border-top: 1px solid var(--sys-style-neutral-light); border-radius: 0 0 8px 8px; text-align: left; font-size: 13px; color: var(--sys-cont-primary-default); }
+    .switcher-register:hover { background: var(--sys-bg-surface-hover); }
+    /* display 를 명시한 요소는 UA 의 [hidden]→display:none 을 덮어쓴다 — hidden 속성이 항상 이기도록 강제 */
+    [hidden] { display: none !important; }
+    .modal-backdrop { position: fixed; inset: 0; z-index: 100; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.45); }
+    .register-panel { width: 680px; max-width: calc(100vw - 32px); max-height: calc(100vh - 48px); overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--sys-style-neutral-default); border-radius: 12px; background: var(--sys-bg-surface); box-shadow: 0 12px 40px rgba(0,0,0,0.3); }
+    /* compose 등록/편집 = 작업공간 모드: 넓고 높이 고정, 패널은 스크롤 안 함(내부 rail·에디터만) */
+    .register-panel.workspace { width: min(1320px, calc(100vw - 32px)); height: min(90vh, 920px); max-height: none; overflow: hidden; }
+    .register-panel.workspace .compose-section { flex: 1 1 auto; min-height: 0; }
+    .compose-section { display: flex; flex-direction: row; gap: 16px; margin-top: 8px; align-items: stretch; }
+    .compose-rail { flex: 0 0 300px; min-width: 0; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+    .compose-rail-scroll { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+    .compose-footer-btn { flex-shrink: 0; align-self: stretch; margin: 4px 0 0; }   /* sticky footer — rail 하단 고정 */
+    .compose-hint { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .compose-fill-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .compose-editor { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .compose-editor-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+    .compose-editor-head label { margin: 0; }
+    .compose-editor-head #composeViewConfig { height: 24px; padding: 0 8px; font-size: 11px; }
+    /* YAML 에디터 = textarea(투명 글자·캐럿만) 위에 하이라이트 pre 오버레이 + line# gutter (dep0) */
+    .yaml-wrap { position: relative; flex: 1; min-height: 200px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; overflow: hidden; background: var(--sys-bg-surface); }
+    .yaml-gutter, .yaml-hl, .compose-editor textarea {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5;
+      margin: 0; tab-size: 2; box-sizing: border-box;
+    }
+    /* gutter·hl 은 콘텐츠 높이로 두고 textarea 스크롤을 transform 으로 따라감 — scrollTop 동기화의 스크롤바-clamp 어긋남 제거. wrap(overflow:hidden)이 클립. 하단 패딩으로 마지막 줄이 가로 스크롤바 위로. */
+    .yaml-gutter { position: absolute; top: 0; left: 0; width: 44px; padding: 8px 8px 22px 0; text-align: right; white-space: pre; color: var(--sys-cont-neutral-lightest); background: var(--sys-bg-base); border-right: 1px solid var(--sys-style-neutral-light); user-select: none; pointer-events: none; will-change: transform; z-index: 1; }
+    .yaml-hl { position: absolute; top: 0; left: 44px; padding: 8px 10px 22px; white-space: pre; word-break: normal; color: var(--sys-cont-neutral-default); pointer-events: none; will-change: transform; }
+    .compose-editor textarea { position: absolute; top: 0; right: 0; bottom: 0; left: 44px; width: auto; min-height: 0; padding: 8px 10px 22px; border: 0; border-radius: 0; resize: none; white-space: pre; overflow: auto; background: transparent; color: transparent; caret-color: var(--sys-cont-neutral-default); z-index: 2; }
+    /* .svc-modal-field textarea(13px·height:64px·resize:vertical) 를 이기도록 특이도 ↑ — 오버레이 pre 와 폰트 metric 일치 + absolute(top/bottom) 가 높이를 정하도록 height:auto(안 그러면 64px 로 줄어 가로스크롤바가 3줄째에 회색바로 보임) */
+    .svc-modal-field.compose-editor textarea { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; line-height: 1.5; height: auto; resize: none;
+      /* .svc-modal-field textarea(padding:6px 10px·불투명 color/background) 를 이겨 — 패딩을 오버레이(8px top, 22px bottom)와 일치(캐럿↔글자 정렬) + 투명화(뒤 하이라이트 노출, 캐럿만) */
+      padding: 8px 10px 22px; background: transparent; color: transparent; -webkit-text-fill-color: transparent; caret-color: var(--sys-cont-neutral-default); scrollbar-gutter: stable; }
+    .compose-editor textarea::placeholder { color: var(--sys-cont-neutral-lightest); }
+    /* YAML 키 — 들여쓰기 깊이별 색(계층 가독성). 5색 순환. ${VAR}=보라/주석=회색 은 별도. */
+    .y-d0 { color: var(--sys-cont-primary-default); font-weight: 700; }   /* top-level: services/volumes/x-marina */
+    .y-d1 { color: var(--sys-cont-positive-default); }                    /* 서비스명·2단 키 */
+    .y-d2 { color: hsl(35, 92%, 45%); }                                   /* amber */
+    .y-d3 { color: hsl(190, 78%, 40%); }                                  /* teal */
+    .y-d4 { color: hsl(330, 70%, 55%); }                                  /* pink */
+    .dark .y-d2 { color: hsl(38, 92%, 60%); }
+    .dark .y-d3 { color: hsl(190, 72%, 56%); }
+    .dark .y-d4 { color: hsl(330, 78%, 70%); }
+    .y-var { color: hsl(265, 55%, 58%); font-weight: 600; }
+    .dark .y-var { color: hsl(265, 70%, 72%); }
+    .y-com { color: var(--sys-cont-neutral-lightest); font-style: italic; }
+    .register-head { display: flex; align-items: center; justify-content: space-between; }
+    .register-title { font-size: 14px; font-weight: 700; color: var(--sys-cont-neutral-default); }
+    .register-label { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .register-path-row { display: flex; gap: 6px; }
+    .register-input { flex: 1; height: 30px; padding: 0 8px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); }
+    .register-path-row button, .register-confirm { height: 30px; padding: 0 12px; border: 1px solid var(--sys-cont-primary-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); }
+    .register-error { font-size: 12px; color: #c0392b; }
+    .register-preview { display: flex; flex-direction: column; gap: 8px; }
+    .register-meta { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .register-checklist-head { font-size: 13px; font-weight: 600; color: var(--sys-cont-neutral-default); }
+    .register-hint { font-weight: 400; color: var(--sys-cont-neutral-light); }
+    .register-checklist { display: flex; flex-direction: column; gap: 4px; max-height: 40vh; overflow-y: auto; }
+    .register-check { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--sys-cont-neutral-default); }
+    .check-remove { margin-left: auto; width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--sys-cont-neutral-light); font-size: 12px; cursor: pointer; }
+    .check-remove:hover { color: #c0392b; background: var(--sys-bg-surface-hover); }
+    .register-empty { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .register-confirm { align-self: flex-start; }
+    .browse-panel { display: flex; flex-direction: column; gap: 6px; max-height: 40vh; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; padding: 8px; }
+    .browse-bar { display: flex; align-items: center; gap: 6px; }
+    .browse-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .browse-bar button { height: 26px; padding: 0 10px; border: 1px solid var(--sys-cont-primary-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); }
+    .browse-list { overflow-y: auto; display: flex; flex-direction: column; }
+    .browse-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; font-size: 13px; color: var(--sys-cont-neutral-default); }
+    .browse-row:hover { background: var(--sys-bg-surface-hover); }
+    .browse-row .repo-badge { margin-left: auto; font-size: 11px; color: var(--sys-cont-primary-default); }
+    /* 🔗 링크 패널 */
+    .links-open-btn { display: inline-flex; align-items: center; gap: 4px; height: 26px; padding: 0 10px; font-size: 12px; border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); cursor: pointer; margin-top: 4px; }
+    .links-open-btn:hover { background: var(--sys-bg-surface-hover); }
+    .links-modal { background: var(--sys-bg-surface); border: 1px solid var(--sys-style-neutral-light); border-radius: 12px; width: 600px; max-width: 92%; max-height: 82vh; overflow-y: auto; padding: 16px; }
+    .links-modal-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .links-modal-head .links-modal-x { background: none; border: none; color: var(--sys-cont-neutral-light); cursor: pointer; font-size: 16px; }
+    .links-body { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+    .lk-svc { border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; padding: 6px 8px; }
+    .lk-svc-head { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--sys-cont-neutral-light); margin-bottom: 4px; }
+    .lk-add { height: 24px; padding: 0 9px; font-size: 11px; border: 1px solid var(--sys-cont-primary-default); border-radius: 7px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); }
+    .lk-row { display: flex; align-items: center; gap: 7px; padding: 3px 2px; font-size: 12px; }
+    .lk-row.off { opacity: .45; }
+    .lk-name { font-family: ui-monospace, monospace; color: var(--sys-cont-neutral-default); }
+    .lk-rule { color: var(--sys-cont-neutral-lightest); font-size: 11px; margin-left: auto; }
+    .lk-badge { font-size: 10px; padding: 1px 6px; border-radius: 6px; }
+    .lk-cus { background: var(--sys-bg-primary-light); color: var(--sys-cont-primary-default); }
+    .lk-ovr { background: var(--sys-bg-warning-light, var(--sys-bg-surface)); color: var(--sys-cont-warning-default, var(--sys-cont-neutral-light)); }
+    .lk-def { background: var(--sys-bg-surface); color: var(--sys-cont-neutral-lightest); }
+    .lk-rm { background: none; border: none; color: var(--sys-cont-neutral-lightest); cursor: pointer; font-size: 12px; }
+    .lk-browse-modal { background: var(--sys-bg-surface); border: 1px solid var(--sys-style-neutral-light); border-radius: 12px; width: 560px; max-width: 92%; max-height: 80vh; display: flex; flex-direction: column; padding: 14px; gap: 8px; }
+    .lk-browse-head { display: flex; align-items: center; justify-content: space-between; }
+    .lk-browse-head .lk-browse-x { background: none; border: none; color: var(--sys-cont-neutral-light); cursor: pointer; font-size: 15px; }
+    .lk-browse-bar { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+    .lk-browse-path { color: var(--sys-cont-neutral-lightest); font-family: ui-monospace, monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .lk-browse-list { overflow-y: auto; flex: 1; min-height: 120px; display: flex; flex-direction: column; }
+    .fb-enter { cursor: pointer; flex: 1; }
+    .fb-pick { height: 22px; padding: 0 8px; font-size: 11px; border: 1px solid var(--sys-cont-primary-default); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); margin-left: auto; }
+    .lk-browse-foot { display: flex; align-items: center; gap: 8px; border-top: 1px solid var(--sys-style-neutral-light); padding-top: 8px; }
+    .lk-browse-name { flex: 1; height: 28px; }
+    .register-manual { display: flex; gap: 6px; }
+    .register-manual button { height: 30px; padding: 0 12px; border: 1px solid var(--sys-cont-primary-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); }
+    /* 서비스 추가/편집 모달 */
+    .svc-modal-field { display: flex; flex-direction: column; gap: 4px; }
+    .svc-modal-field label { font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .svc-modal-field input, .svc-modal-field textarea { width: 100%; box-sizing: border-box; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); padding: 6px 10px; font: inherit; font-size: 13px; }
+    .svc-modal-field textarea { height: 64px; resize: vertical; line-height: 1.5; }
+    .svc-modal-adv { display: flex; flex-direction: column; gap: 8px; }
+    .svc-modal-adv-toggle { background: none; border: none; color: var(--sys-cont-neutral-light); font-size: 12px; cursor: pointer; padding: 0; text-align: left; height: auto; }
+    .svc-modal-adv-toggle:hover { color: var(--sys-cont-neutral-default); }
+    .svc-modal-actions { display: flex; gap: 8px; }
+    .svc-modal-actions button { height: 30px; padding: 0 14px; border-radius: 8px; }
+    .svc-modal-llm { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; margin-bottom: 4px; border-bottom: 1px solid var(--sys-style-neutral-light); }
+    .svc-modal-llm-btn { align-self: flex-start; height: 32px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--sys-cont-primary-default); background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; }
+    .svc-modal-llm-btn:hover { background: var(--sys-bg-surface-hover); }
+    .svc-modal-llm-hint { font-size: 11px; color: var(--sys-cont-neutral-lightest); line-height: 1.5; }
+    .svc-llm-input { display: flex; gap: 8px; align-items: center; }
+    .svc-llm-spark { font-size: 15px; }
+    .svc-llm-input input { flex: 1; height: 32px; padding: 0 8px; font-size: 13px; }
+    .svc-llm-go { height: 32px; padding: 0 14px; border-radius: 8px; border: 1px solid var(--sys-cont-primary-default); background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); font: inherit; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap; }
+    .svc-llm-go:hover { background: var(--sys-bg-surface-hover); }
+    .svc-llm-go:disabled { opacity: 0.6; cursor: default; }
+    .svc-llm-meta { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-left: 23px; }
+    .svc-llm-picker { font-size: 12px; color: var(--sys-cont-neutral-light); cursor: pointer; }
+    .svc-llm-direct { font-size: 12px; color: var(--sys-cont-neutral-light); display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .svc-llm-progress { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 8px 10px; border-radius: 8px; }
+    .svc-llm-progress.run { background: hsl(210, 90%, 96%); color: hsl(210, 70%, 38%); }
+    .svc-llm-progress.ok { background: hsl(145, 55%, 94%); color: hsl(150, 65%, 28%); }
+    .svc-llm-progress.err { background: hsl(358, 70%, 96%); color: var(--sys-cont-negative-default); }
+    .svc-llm-progress .svc-llm-log { margin-left: auto; font-size: 12px; text-decoration: underline; cursor: pointer; }
+    .svc-edit-btn, .svc-del-btn { height: 22px; min-width: 22px; padding: 0 5px; font-size: 12px; border-radius: 5px; }
+    aside { border-right: 1px solid var(--sys-style-neutral-light); overflow-y: auto; min-height: 0; }
+    section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .toolbar { display: flex; gap: 8px; align-items: center; }
+    .sessions { padding: 14px; display: grid; gap: 12px; }
+    .session { border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); overflow: hidden; }
+    .session-head { padding: 12px; border-bottom: 1px solid var(--sys-style-neutral-light); cursor: pointer; }
+    .session-head:hover { background: var(--sys-bg-surface-hover); }
+    .session-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+    /* 툴바(프리셋+버튼들)가 max-content 로 벌어져도 제목이 짜부되지 않게 최소 폭 보장 — 초과분은 툴바가 내부 wrap */
+    .session-main { min-width: 120px; flex: 1; }
+    .alias-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+    .alias-input { height: 28px; min-width: 0; width: 160px; font-size: 14px; font-weight: 700; padding: 0 8px; }
+    .alias-display { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 14px; font-weight: 700; line-height: 1.3; cursor: text; border-bottom: 1px dashed transparent; }
+    .alias-display:hover { border-bottom-color: var(--sys-style-neutral-default); }
+    .sid-sub { margin: 3px 0 0 14px; color: var(--sys-cont-neutral-lightest); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .root { color: var(--sys-cont-neutral-lightest); font-size: 12px; line-height: 1.6; margin-top: 4px; overflow-wrap: anywhere; }
+    .root .root-meta { white-space: nowrap; }
+    .session-tools { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .session-tools button { height: 28px; min-width: 30px; padding: 0 6px; white-space: nowrap; font-size: 14px; }
+    .session-tools button.icon { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+    .session-tools button.icon svg { width: 16px; height: 16px; }
+    /* 즉시 툴팁 — 네이티브 title 의 ~1s 지연 제거 (mouseover 위임이 title→data-tip 으로 흡수) */
+    /* width:max-content — 박스 너비를 앵커 위치와 분리. 없으면 우측 끝 버튼(↗ 등)에서 shrink-to-fit 이 뷰포트 우변까지 짜부돼 한 글자씩 세로로 쏟아짐 (clamp 로직이 가로로 밀어줌) */
+    #tip { position: fixed; z-index: 200; width: max-content; max-width: min(380px, calc(100vw - 16px)); padding: 6px 10px; border-radius: 6px; background: var(--sys-cont-neutral-default); color: var(--sys-bg-surface); font-size: 12px; line-height: 1.55; pointer-events: none; opacity: 0; transform: translateX(-50%); transition: opacity .06s; white-space: pre-wrap; word-break: break-word; }
+    .help-q { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-left: 4px; border: 1px solid var(--muted); border-radius: 50%; font-size: 9px; line-height: 1; cursor: help; vertical-align: middle; opacity: .7; }
+    .help-q:hover { opacity: 1; }
+    #tip.on { opacity: 1; }
+    .stat-row { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; }
+    .pill-stat { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-base); color: var(--sys-cont-neutral-light); font-size: 11px; font-weight: 500; line-height: 1; white-space: nowrap; }
+    button.pill-stat { cursor: pointer; }
+    .pill-stat.warn { background: hsl(36, 90%, 94%); border-color: transparent; color: hsl(30, 80%, 38%); font-weight: 700; }
+    /* 긴 브랜치명이 카드 폭을 넘으면 말줄임 — 전체 매핑은 title 로 */
+    .pill-stat.pill-branch { display: inline-block; max-width: 100%; height: 22px; line-height: 20px; overflow: hidden; text-overflow: ellipsis; }
+    .pill-stat.danger { background: hsl(358, 70%, 96%); border-color: transparent; color: var(--sys-cont-negative-default); font-weight: 700; }
+    /* ✎ 미커밋 수정(tracked) — 진짜 신호, 차분한 중립 강조(경보색 아님) */
+    .pill-stat.edit { color: var(--sys-cont-neutral-default); font-weight: 700; }
+    /* +N untracked — .venv·빌드산출물 노이즈, 거슬리지 않게 흐릿하게 */
+    .pill-stat.ghost { background: transparent; border-color: transparent; color: var(--sys-cont-neutral-lightest); font-weight: 500; padding: 0 5px; }
+    /* ↑N 미머지(이 세션 커밋) — 약한 강조 아웃라인(잊기 쉬운 쪽이라 살짝 눈에) */
+    .pill-stat.ahead { background: transparent; border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); font-weight: 700; }
+    /* 위험 칩 줄 — 메타(stat-row)와 시각·공간 분리. 같은 .pill-stat 칩 언어, 별도 라인 */
+    .risk-row { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 6px; }
+    /* 서비스 상태 칩 — 카드 요약(접힘에서도) · 모달과 공유하는 칩 언어(상태점+이름+포트) */
+    .svc-chip-row { display: flex; flex-wrap: wrap; gap: 5px 6px; margin-top: 8px; }
+    .svc-chip { display: inline-flex; align-items: center; gap: 6px; height: 22px; max-width: 170px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-base); font-size: 11px; line-height: 1; }
+    .svc-chip .dot { flex-shrink: 0; width: 7px; height: 7px; border-radius: 50%; background: var(--sys-cont-neutral-lightest); }
+    .svc-chip .dot.run { background: var(--sys-cont-positive-default); }
+    .svc-chip .dot.boot { background: hsl(36, 80%, 50%); }
+    .svc-chip .dot.bad { background: var(--sys-cont-negative-default); }
+    .svc-chip .dot.stop { background: var(--sys-cont-neutral-lightest); }
+    .svc-chip .nm { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 700; color: var(--sys-cont-neutral-default); }
+    .svc-chip .pt { flex-shrink: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--sys-cont-neutral-lightest); }
+    .svc-chip-more { cursor: default; color: var(--sys-cont-neutral-light); font-weight: 700; }
+    /* profile 칩(명시 설정 시만) — 서비스 칩 안에 작게. 일탈 프로파일(예: dev) 글랜스 */
+    .svc-chip .svc-chip-prof { flex-shrink: 0; padding: 0 5px; border-radius: 4px; background: var(--sys-style-neutral-light); color: var(--sys-cont-neutral-light); font-size: 10px; font-weight: 700; }
+    /* 전체 시작/정지 액션 strip — 제목 우측 아이콘 툴바와 분리(작업 동선 명확) */
+    .session-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+    .session-actions button { height: 28px; padding: 0 12px; font-size: 12px; font-weight: 600; }
+    .session-actions button[data-start-all] { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
+    details { margin-top: 10px; }
+    summary { color: var(--sys-cont-neutral-light); cursor: pointer; font-size: 12px; font-weight: 500; line-height: 1.6; }
+    .summary-sub { color: var(--sys-cont-neutral-lightest); font-weight: 400; margin-left: 4px; }
+    .config-label { margin: 12px 0 6px; color: var(--sys-cont-neutral-lightest); font-size: 11px; font-weight: 700; letter-spacing: 0.02em; }
+    .config-services { display: grid; grid-template-columns: 64px minmax(0, 1fr) minmax(0, 1fr); gap: 6px; align-items: center; }
+    .config-head { color: var(--sys-cont-neutral-lightest); font-size: 11px; font-weight: 700; }
+    .config-name { color: var(--sys-cont-neutral-light); font-size: 12px; }
+    .config-services input { height: 30px; padding: 0 8px; font-size: 12px; width: 100%; }
+    .config-actions { display: flex; gap: 8px; margin-top: 10px; }
+    .svc-list { display: grid; }
+    .session.collapsed .svc-list, .session.collapsed [data-config-details], .session.collapsed .root { display: none; }
+    .session.collapsed .session-head { border-bottom: 0; }
+    .svc { display: grid; grid-template-columns: minmax(110px, max-content) 72px minmax(0, 1fr); gap: 8px; align-items: center; padding: 10px 12px; border-top: 1px solid var(--sys-style-neutral-light); cursor: pointer; }
+    .svc:hover, .svc.selected { background: var(--sys-bg-surface-hover); }
+    /* subrepo ⊃ service 트리 */
+    .subrepo-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 12px; border-top: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-base); }
+    .subrepo-row.detached { opacity: 0.72; }
+    .subrepo-main { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; flex: 1; }
+    .subrepo-name { font-size: 13px; font-weight: 700; line-height: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .subrepo-count { color: var(--sys-cont-neutral-lightest); font-size: 11px; white-space: nowrap; }
+    .subrepo-count.muted { font-style: italic; }
+    .subrepo-ctl { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+    .subrepo-chip { display: inline-flex; align-items: center; height: 20px; padding: 0 8px; border-radius: 6px; font-size: 11px; font-weight: 700; background: var(--sys-style-neutral-light); color: var(--sys-cont-neutral-light); }
+    .subrepo-chip.warn { background: hsl(36, 90%, 94%); color: hsl(30, 80%, 38%); }
+    .subrepo-toggle { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-weight: 700; color: var(--sys-cont-neutral-light); cursor: pointer; }
+    .subrepo-toggle input { margin: 0; cursor: pointer; }
+    .subrepo-act { height: 24px; padding: 0 10px; font-size: 11px; font-weight: 700; }
+    .subrepo-act.icon { width: 28px; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+    .subrepo-act.icon svg { width: 15px; height: 15px; display: block; }
+    .subrepo-act.default-toggle { color: var(--sys-cont-neutral-lightest); }   /* off: 흐린 윤곽 핀 */
+    .subrepo-act.default-toggle.on { color: var(--sys-cont-neutral-default); border-color: var(--sys-cont-neutral-default); background: var(--sys-style-neutral-light); }   /* on: 채워진 중립 핀 — 실행(파랑)과 구분 */
+    .subrepo-act.default-toggle.on svg { fill: currentColor; }
+    .subrepo-body { display: grid; }
+    .subrepo-body .svc { padding-left: 30px; }   /* nested 들여쓰기 */
+    .svc.disabled { cursor: default; opacity: 0.5; }
+    .svc.disabled:hover { background: transparent; }
+    .svc.disabled .actions { display: none; }
+    .svc-name { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 13px; font-weight: 700; line-height: 1; }
+    .svc-name > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .svc-src { flex-shrink: 0; white-space: nowrap; font-size: 10px; padding: 1px 6px; border-radius: 6px; }
+    .svc-src.central { background: hsl(36,90%,94%); color: hsl(30,80%,38%); }
+    .svc-src.root { background: var(--sys-style-neutral-light); color: var(--sys-cont-neutral-light); }
+    .svc-port { color: var(--sys-cont-neutral-lightest); font-size: 12px; line-height: 1.6; margin-top: 3px; }
+    .pill { display: inline-flex; align-items: center; justify-content: center; width: 52px; height: 24px; border-radius: 6px; font-size: 12px; font-weight: 700; }
+    .run { background: hsl(148, 55%, 94%); color: var(--sys-cont-positive-default); }
+    .stop { background: hsl(358, 70%, 96%); color: var(--sys-cont-negative-default); }
+    .boot { background: hsl(36, 90%, 94%); color: hsl(30, 80%, 38%); }
+    .bad { background: var(--sys-cont-negative-default); color: white; }
+    .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+    .actions button { height: 28px; min-width: 30px; padding: 0 7px; font-size: 13px; }
+    /* grid auto 컬럼은 flex-wrap 을 무시하고 max-content 로 벌어져 좁은 폭에서 제목을 뭉갠다 → flex-wrap */
+    .log-head { display: flex; flex-direction: column; border-bottom: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); }
+    .log-src { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 10px 16px 6px; }
+    .log-title { flex: 1 1 220px; min-width: 0; }
+    .log-kicker { color: var(--sys-cont-neutral-lightest); font-size: 12px; line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .log-name { font-size: 16px; font-weight: 700; line-height: 1.6; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .log-src-tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; justify-content: flex-end; }
+    .log-toolbar { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; padding: 0 16px 10px; }
+    .search-ic { color: var(--sys-cont-neutral-lightest); font-size: 16px; }
+    .match-count { color: var(--sys-cont-neutral-light); font-size: 12px; white-space: nowrap; }
+    .log-actions { display: flex; gap: 6px; margin-left: auto; }
+    .log-actions button { min-width: 34px; }
+    .segments { display: none; gap: 4px; padding: 3px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-base); }
+    .segments.visible { display: flex; }
+    .segments button { height: 26px; border: 0; background: transparent; }
+    .segments button.active { background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); border: 1px solid var(--sys-style-neutral-light); }
+    .follow-btn.active { background: var(--sys-cont-primary-default); border-color: var(--sys-cont-primary-default); color: white; }
+    #logErrOnly.active { background: hsl(358, 70%, 96%); border-color: var(--sys-cont-negative-default); color: var(--sys-cont-negative-default); font-weight: 700; }
+    .gauge-bar { display: flex; gap: 10px; align-items: center; padding: 6px 16px; border-bottom: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); }
+    .gauge-note { color: var(--sys-cont-neutral-lightest); font-size: 11px; white-space: nowrap; }
+    .gauge-track { flex: 1; position: relative; height: 10px; min-width: 80px; border-radius: 5px; background: var(--sys-bg-base); border: 1px solid var(--sys-style-neutral-light); cursor: pointer; }
+    .gauge-window { position: absolute; top: 1px; bottom: 1px; background: var(--sys-cont-primary-default); opacity: 0.75; border-radius: 4px; min-width: 3px; pointer-events: none; }
+    .gauge-tick { position: absolute; top: 1px; bottom: 1px; width: 2px; background: var(--sys-cont-negative-default); pointer-events: none; }
+    .log-body { flex: 1; min-height: 0; margin: 0; padding: 10px 0; overflow: auto; overscroll-behavior: contain; background: var(--sys-code-bg); color: var(--sys-code-fg); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.55; scrollbar-gutter: stable; }
+    .log-line { padding: 1px 16px; white-space: pre-wrap; word-break: break-word; }
+    .log-line:hover { background: hsla(0, 0%, 100%, 0.05); }
+    .log-line.err { color: hsl(358, 85%, 72%); background: hsla(358, 70%, 50%, 0.08); border-left: 2px solid hsl(358, 75%, 55%); padding-left: 14px; }
+    .log-line.warn { color: hsl(42, 90%, 65%); background: hsla(42, 90%, 50%, 0.06); border-left: 2px solid hsl(42, 85%, 50%); padding-left: 14px; }
+    .log-line.jump-hit { background: hsla(215, 95%, 48%, 0.3); transition: background 1.2s ease; }
+    .log-line.match-row { cursor: pointer; }
+    .log-line.match-row:hover { background: hsla(215, 95%, 60%, 0.12); }
+    .log-body .empty { color: hsl(220, 8%, 50%); padding: 8px 16px; }
+    #logFilter { width: 200px; }
+    .empty { color: var(--sys-cont-neutral-lightest); padding: 18px; }
+    .chev { display: inline-block; width: 14px; color: var(--sys-cont-neutral-lightest); font-size: 11px; }
+    .run-summary { color: var(--sys-cont-positive-default); font-size: 12px; font-weight: 700; white-space: nowrap; }
+    .mem { display: flex; align-items: center; gap: 8px; color: var(--sys-cont-neutral-light); font-size: 12px; line-height: 1; }
+    .mem-bar { width: 110px; height: 8px; border-radius: 4px; background: var(--sys-style-neutral-light); overflow: hidden; }
+    .mem-bar i { display: block; height: 100%; background: var(--sys-cont-primary-default); }
+    .tool-label { color: var(--sys-cont-neutral-lightest); font-size: 12px; }
+    .ghost-chip { color: var(--sys-cont-neutral-light); }
+    .ghost-chip.alert { border-color: var(--sys-cont-negative-default); color: var(--sys-cont-negative-default); font-weight: 700; }
+    .update-banner { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; padding: 8px 16px; background: hsl(36, 90%, 94%); color: hsl(30, 80%, 30%); border-bottom: 1px solid var(--sys-style-neutral-light); font-size: 13px; }
+    .update-banner.stale { background: hsl(215, 90%, 95%); color: hsl(215, 70%, 35%); }
+    .update-banner .ub-msg { font-weight: 700; }
+    .update-banner .ub-sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; opacity: 0.8; }
+    .update-banner .ub-actions { display: flex; gap: 6px; margin-left: auto; flex-wrap: wrap; align-items: center; }
+    .update-banner button { height: 26px; padding: 0 10px; font-size: 12px; font-weight: 700; }
+    .update-banner .ub-note { font-size: 12px; opacity: 0.85; }
+    .ub-hrow { display: inline-flex; align-items: center; gap: 5px; }
+    .ub-hchip { display: inline-flex; align-items: center; gap: 5px; height: 22px; padding: 0 8px; border-radius: 6px; font-size: 12px; font-weight: 700; background: rgba(125, 75, 0, 0.10); }
+    .ub-hchip.old { background: rgba(125, 75, 0, 0.20); }
+    .ub-hchip .sha { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-weight: 500; opacity: 0.8; }
+    .orphan-pop { position: fixed; top: 60px; right: 16px; z-index: 30; width: min(520px, calc(100vw - 32px)); max-height: 70vh; overflow: auto; border: 1px solid var(--sys-style-neutral-default); border-radius: 10px; background: var(--sys-bg-surface); box-shadow: 0 8px 24px hsla(0, 0%, 0%, 0.18); padding: 12px 14px; }
+    .orphan-head { color: var(--sys-cont-neutral-light); font-size: 12px; line-height: 1.6; }
+    .mem.warn { color: var(--sys-cont-negative-default); font-weight: 700; }
+    .mem.warn .mem-bar i { background: var(--sys-cont-negative-default); }
+    .orphans { padding: 14px 14px 0; }
+    .orphans > details { border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); padding: 10px 12px; margin: 0; }
+    .orphans > details > summary { font-size: 12px; font-weight: 700; line-height: 1.6; color: var(--sys-cont-neutral-default); }
+    .orphans.alert > details { border-color: var(--sys-cont-negative-default); }
+    .orphans.alert > details > summary { color: var(--sys-cont-negative-default); }
+    .orphan-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--sys-style-neutral-light); margin-top: 8px; }
+    .orphan-row button { height: 26px; padding: 0 8px; }
+    .orphan-meta { font-size: 12px; line-height: 1.6; color: var(--sys-cont-neutral-light); overflow-wrap: anywhere; }
+    .orphan-meta b { color: var(--sys-cont-neutral-default); }
+    .orphan-actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+    .session-main .wt-changes { margin-top: 8px; }
+    .wt-changes { grid-column: 1 / -1; margin-top: 6px; padding: 8px 10px; border-radius: 6px; background: var(--sys-code-bg); color: var(--sys-code-fg); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; max-height: 220px; overflow: auto; }
+    @media (max-width: 980px) {
+      main, main.aside-collapsed { grid-template-columns: 1fr; height: auto; min-height: calc(100vh - 56px); }
+      .rail { display: none; }
+      /* 좁은 화면에선 좌우 접기 비활성 — 토글(레일)이 숨어 패널을 못 되살리는 함정 방지 */
+      main.aside-collapsed aside { visibility: visible; overflow: auto; }
+      aside { border-right: 0; border-bottom: 1px solid var(--sys-style-neutral-light); max-height: 48vh; }
+      section { min-height: 60vh; }
+      #logFilter { width: 90px; }
+    }
+    /* 다크 테마 — JS 가 html.dark 클래스로 적용 (시스템/라이트/다크 드롭다운 + localStorage) */
+    :root.dark {
+      color-scheme: dark;
+      --sys-bg-base: hsl(228, 14%, 9%);
+      --sys-bg-surface: hsl(228, 13%, 12%);
+      --sys-bg-surface-hover: hsl(228, 12%, 16%);
+      --sys-cont-neutral-default: hsl(220, 16%, 90%);
+      --sys-cont-neutral-light: hsl(220, 10%, 64%);
+      --sys-cont-neutral-lightest: hsl(220, 8%, 48%);
+      --sys-cont-primary-default: hsl(215, 95%, 64%);
+      --sys-cont-positive-default: hsl(148, 55%, 52%);
+      --sys-cont-negative-default: hsl(358, 78%, 64%);
+      --sys-style-neutral-light: hsl(228, 10%, 19%);
+      --sys-style-neutral-default: hsl(228, 9%, 27%);
+      --sys-code-bg: hsl(228, 16%, 7%);
+      --sys-code-fg: hsl(210, 18%, 88%);
+    }
+    .dark button.active { color: hsl(228, 14%, 9%); }
+    .dark .segments button.active { color: var(--sys-cont-neutral-default); }
+    .dark .run { background: hsl(148, 45%, 14%); color: hsl(148, 60%, 58%); }
+    .dark .stop { background: hsl(358, 45%, 15%); color: hsl(358, 75%, 66%); }
+    .dark .boot { background: hsl(36, 50%, 14%); color: hsl(36, 85%, 60%); }
+    .dark #logErrOnly.active { background: hsl(358, 45%, 15%); color: hsl(358, 75%, 66%); }
+    /* .bad 는 negative 토큰이 다크 변형을 이미 제공 (밝은 빨강 + 흰 글자 대비 유지) — 별도 .dark .bad 불필요 */
+    .dark .pill-stat.warn { background: hsl(36, 50%, 14%); color: hsl(36, 85%, 60%); }
+    .dark .pill-stat.danger { background: hsl(358, 45%, 15%); }

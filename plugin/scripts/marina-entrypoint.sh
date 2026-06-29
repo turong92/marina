@@ -3,7 +3,6 @@
 #
 #   marina start|stop|restart <svc..>        # 현재 worktree(cwd) 의 서비스 (전체는 --all)
 #   marina status | ports | logs [svc]       # 현재 worktree 상태/포트/로그
-#   marina service {add|rm|ls} …             # 서비스 정의 (marina-services.json)
 #   marina project {add|rm|ls|default|infer} # 프로젝트 레지스트리 (~/.marina/projects.json)
 #   marina dashboard [start|stop|status|open]# 전역 대시보드(:3900). 무인자 marina = dashboard start
 #
@@ -21,14 +20,14 @@ source "$RESOLVE"
 
 usage() {
   cat <<'EOF'
-usage:
-  services (current worktree):
-    marina start|stop|restart <svc..>     # 무인자=안내, 전체는 --all
+usage (marina = 전역 CLI):
+  실행 (현재 worktree — 서비스명 그대로, 전체는 --all):
+    marina start|stop|restart <svc>     # 예: marina start web   ·   전체: marina start --all
     marina status | ports | logs [svc]
-  service definitions:
-    marina service add <id> '<json>' [--root] | rm <id> <name> | ls <id>
-  projects (~/.marina/projects.json):
-    marina project add <path> | rm <id> | ls | default <id> a,b,c | infer <path>
+  프로젝트 등록 (~/.marina/projects.json — 위치 무관):
+    marina project add <path> --compose <file>      # 기존 docker-compose 로 등록 (또는 대시보드 위저드)
+    marina project add <path> --external name=path  # 외부 git 레포를 서비스로 (워크트리마다 격리)
+    marina project ls | rm <id> | default <id> a,b,c | infer <path>
   dashboard (:3900):
     marina dashboard [start|stop|status|open]    # 무인자 marina = dashboard start
   setup: marina attach | install-cli | uninstall-cli
@@ -45,8 +44,8 @@ command="${1:-dashboard}"
 shift || true
 
 case "$command" in
-  service|project)
-    # 그룹 → marina.sh 그룹 dispatch 로 위임 (project {add|rm|ls|default|infer}, service {add|rm|ls})
+  project)
+    # 그룹 → marina.sh dispatch 로 위임 (project {add|rm|ls|default|infer})
     "$SESSION" "$command" "$@"
     ;;
   start|stop|restart)

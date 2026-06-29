@@ -18,6 +18,8 @@ Dispatch on the first token of `$ARGUMENTS`. `ENTRY="${CLAUDE_PLUGIN_ROOT}/scrip
 
   This infers subrepos (nested git repos) and worktree globs. Confirm the printed project **id** and inferred **subrepos** look right; if a subrepo is missing or extra, tell the user they can re-run after fixing, or edit `~/.marina/projects.json`.
 
+  > marina is **compose-only**: to actually run a project you need a compose file. A plain `add` only registers the entry — `start` will fail until one exists. Add one with `project add <path> --compose <file>`, or use the dashboard's **새 프로젝트 위저드** (scan → files → connect → review).
+
 - **`ls`** → `"${CLAUDE_PLUGIN_ROOT}/scripts/marina-entrypoint.sh" project ls` — list registered projects; present the output.
 
 - **`rm <id>`** → `"${CLAUDE_PLUGIN_ROOT}/scripts/marina-entrypoint.sh" project rm <id>` — unregister a project.

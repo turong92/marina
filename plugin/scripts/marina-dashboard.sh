@@ -24,6 +24,9 @@ SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/marina-dashboard.service"
 HOST="${MARINA_CONTROL_HOST:-localhost}"
 PORT="${MARINA_CONTROL_PORT:-3900}"
 CODEX_WORKTREES_ROOT="${CODEX_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
+MARINA_GATEWAY="${MARINA_GATEWAY:-}"            # 게이트웨이 옵트인(빈=off) — supervised 기동에도 전파(코덱스 P2)
+MARINA_GATEWAY_PORT="${MARINA_GATEWAY_PORT:-80}"   # 실 기본값 — 빈 문자열 export 로 데몬 int('') 크래시 방지(코덱스 P1)
+MARINA_GATEWAY_POLL="${MARINA_GATEWAY_POLL:-5}"
 
 usage() {
   cat <<'EOF'
@@ -110,6 +113,12 @@ write_plist() {
     <string>$MARINA_HOME</string>
     <key>PYTHONUNBUFFERED</key>
     <string>1</string>
+    <key>MARINA_GATEWAY</key>
+    <string>$MARINA_GATEWAY</string>
+    <key>MARINA_GATEWAY_PORT</key>
+    <string>$MARINA_GATEWAY_PORT</string>
+    <key>MARINA_GATEWAY_POLL</key>
+    <string>$MARINA_GATEWAY_POLL</string>
   </dict>
   <key>StandardOutPath</key>
   <string>$LOG_FILE</string>
@@ -149,6 +158,9 @@ Environment=MARINA_CONTROL_PORT=$PORT
 Environment=MARINA_HOME=$MARINA_HOME
 Environment=CODEX_WORKTREES_ROOT=$CODEX_WORKTREES_ROOT
 Environment=PYTHONUNBUFFERED=1
+Environment=MARINA_GATEWAY=$MARINA_GATEWAY
+Environment=MARINA_GATEWAY_PORT=$MARINA_GATEWAY_PORT
+Environment=MARINA_GATEWAY_POLL=$MARINA_GATEWAY_POLL
 
 [Install]
 WantedBy=default.target
@@ -156,7 +168,7 @@ EOF
 }
 
 start_nohup() {
-  CODEX_WORKTREES_ROOT="$CODEX_WORKTREES_ROOT" MARINA_HOME="$MARINA_HOME" MARINA_CONTROL_HOST="$HOST" MARINA_CONTROL_PORT="$PORT" PYTHONUNBUFFERED=1 nohup "$LAUNCHER" >> "$LOG_FILE" 2>&1 &
+  CODEX_WORKTREES_ROOT="$CODEX_WORKTREES_ROOT" MARINA_HOME="$MARINA_HOME" MARINA_CONTROL_HOST="$HOST" MARINA_CONTROL_PORT="$PORT" MARINA_GATEWAY="$MARINA_GATEWAY" MARINA_GATEWAY_PORT="$MARINA_GATEWAY_PORT" MARINA_GATEWAY_POLL="$MARINA_GATEWAY_POLL" PYTHONUNBUFFERED=1 nohup "$LAUNCHER" >> "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
   echo "dashboard started pid=$(cat "$PID_FILE") url=http://$HOST:$PORT log=$LOG_FILE"
 }

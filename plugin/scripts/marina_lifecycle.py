@@ -1,0 +1,370 @@
+"""marina_lifecycle.py — marina-control.py 에서 분리(레이어드). 동작 변경 0."""
+from __future__ import annotations
+import glob
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.parse
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from typing import Any
+import importlib.util as _ilu
+
+from marina_state import MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_info_cache
+from marina_cache import cache_paths_by_category, disk_usage_mb
+from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
+from marina_paths import session_dir, session_id
+from marina_cli import _marina_cli, marina_env, script
+from marina_sessions import git_output, session_payload, system_memory, worktree_status
+
+def stop_service(root: Path, service: str) -> dict[str, Any]:
+    try:
+        out = _marina_cli(root, "stop", f"--{service}")   # compose_main → docker compose stop <svc>
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"stop failed: {(exc.output or '')[-500:]}")
+    refresh_gateway()   # 이벤트 즉시반영
+    return {"stopped": True, "output": out[-1000:]}
+
+def stop_all(root: Path) -> dict[str, Any]:
+    try:
+        out = _marina_cli(root, "stop", "--all")          # compose_main → docker compose down --remove-orphans
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"stop-all failed: {(exc.output or '')[-500:]}")
+    refresh_gateway()   # 이벤트 즉시반영
+    return {"stoppedAll": True, "output": out[-1000:]}
+
+def start_all(root: Path) -> dict[str, Any]:
+    try:
+        out = _marina_cli(root, "start", "--all")          # compose_main → ensure+pre-build+ up -d --build (전체 스택)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"start-all failed: {(exc.output or '')[-1500:]}")
+    refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh start 훅의 gateway-ensure 가 단일 처리 — CLI·대시보드 공통)
+    return {"startedAll": True, "output": (out or "")[-2000:]}
+
+def cleanup_session(root: Path) -> dict[str, Any]:
+    stop_all(root)
+    path = session_dir(root)
+    if path.exists():
+        shutil.rmtree(path)
+    return {"removed": str(path)}
+
+def remove_git_worktree(source_repo: Path, target: Path, force: bool = False) -> dict[str, Any]:
+    if not target.exists():
+        return {"missing": str(target)}
+    args = ["worktree", "remove"]
+    if force:
+        args.append("--force")  # 미커밋 변경·untracked 가 있어도 폐기하고 제거
+    args.append(str(target))
+    try:
+        git_output(args, source_repo)
+        return {"removed": str(target)}
+    except subprocess.CalledProcessError as exc:
+        # 고아/깨진 워크트리는 'git worktree remove' 가 실패('not a working tree' 등) → 폴더가 남는다.
+        # force 면 폴더 직접 정리 + prune 으로 메타데이터까지 청소(깨진 워크트리도 실제로 삭제되게).
+        if force:
+            shutil.rmtree(target, ignore_errors=True)
+            try:
+                git_output(["worktree", "prune"], source_repo)
+            except Exception:
+                pass
+            if not target.exists():
+                return {"removed": str(target), "orphanCleanup": True}
+        return {"error": exc.output.strip() or str(exc), "path": str(target)}
+
+def remove_worktree(root: Path, force: bool = False) -> dict[str, Any]:
+    # 전역 대시보드는 프로젝트 worktree 밖(marina 레포)에서 돌므로 "자기 세션 삭제" 가드 불요.
+    # 원본(main) 보호 — 레지스트리 root 일치(subrepos=[] 단일레포도 커버) 또는 서브레포 .git 존재.
+    project = project_for(root)
+    if (project and project["root"].resolve() == root.resolve()) or is_source_checkout(root):
+        raise ValueError("원본 체크아웃(main)은 삭제할 수 없습니다")
+
+    status = worktree_status(root)
+    if not status["clean"] and not force:
+        raise ValueError("변경사항이 있어 삭제할 수 없습니다 (force 로 폐기+삭제 가능): " + json.dumps(status, ensure_ascii=False))
+
+    sid = session_id(root)
+    stop_all(root)
+    cleanup_session(root)
+    bootout_session_dashboard(sid)
+
+    # 브랜치/worktree 정리는 원본(main) 체크아웃에서 돌아야 한다 (삭제될 worktree 경로가 아니라).
+    main_checkout = source_root_for(root)
+    if main_checkout.resolve() == root.resolve():
+        raise ValueError("원본 체크아웃을 찾지 못해 삭제를 중단합니다")
+    branch = f"codex/{sid}"
+    try:
+        root_branch = git_output(["branch", "--show-current"], root).strip()
+    except Exception:
+        root_branch = ""
+    results: dict[str, Any] = {"subrepos": {}, "branches": {}, "root": None}
+    for repo in subrepos_of(root):
+        target = root / repo
+        source_repo = main_checkout / repo
+        if source_repo.exists():
+            removed = remove_git_worktree(source_repo, target, force=force)
+            results["subrepos"][repo] = removed
+            if "error" not in removed:
+                # worktree 가 빠졌으니 codex/<id> 브랜치도 안전 삭제 시도 (미머지면 skipped)
+                results["branches"][repo] = delete_merged_branch(source_repo, branch)
+        elif target.exists():
+            results["subrepos"][repo] = {"error": f"source repo not found: {source_repo}", "path": str(target)}
+
+    results["root"] = remove_git_worktree(main_checkout, root, force=force)
+    # 루트 레포 브랜치 정리: claude worktree 는 claude/<id> 를 물고 있음. codex 루트는 보통
+    # detached HEAD 라 root_branch 가 비어 스킵되지만, 브랜치 체크아웃이면 동일하게 -d 시도.
+    if root_branch and re.match(r"^(codex|claude)/", root_branch) and "removed" in (results["root"] or {}):
+        results["branches"][project_label(main_checkout)] = delete_merged_branch(main_checkout, root_branch)
+    # codex 레이아웃(<id>/<projectBasename>)은 제거 후 빈 부모 셸 <id>/ 가 남는다 → 정리
+    parent = root.parent
+    if "removed" in (results["root"] or {}) and root.name == main_checkout.name and parent.parent == WORKTREES_ROOT:
+        try:
+            if parent.is_dir() and not any(parent.iterdir()):
+                parent.rmdir()
+                results["parentDir"] = f"removed {parent}"
+        except OSError:
+            pass
+    _worktree_info_cache.pop(str(root), None)
+    _roots_cache.clear()  # 삭제된 root 가 60s 캐시에 남지 않게
+    return results
+
+def attach_subrepo_action(root: Path, subrepo: str) -> dict[str, Any]:
+    # 단일 subrepo 물리 attach — 기존 attach 스크립트 재사용(MARINA_SUBREPOS=<하나>). idempotent + yml/env/venv 동기화.
+    source = source_root_for(root)
+    if source.resolve() == root.resolve():
+        raise ValueError("원본 체크아웃에는 attach 대상이 없습니다")
+    env = {
+        **os.environ,
+        "DEST_ROOT": str(root),
+        "SOURCE_ROOT": str(source),
+        "MARINA_SUBREPOS": subrepo,
+        "SYNC_IDEA": os.environ.get("SYNC_IDEA", "false"),
+    }
+    try:
+        out = subprocess.check_output([str(MARINA_ATTACH)], text=True, stderr=subprocess.STDOUT, env=env)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError((exc.output or "").strip() or str(exc))
+    _worktree_info_cache.pop(str(root), None)
+    _status_cache.pop(str(root), None)
+    return {"ok": True, "attached": subrepo, "output": out.strip()}
+
+def detach_subrepo_action(root: Path, subrepo: str, force: bool = False, stop_services: bool = False) -> dict[str, Any]:
+    target = root / subrepo
+    if not (target / ".git").exists():
+        return {"ok": True, "detached": subrepo, "note": "already detached"}
+    # dirty working tree — clean 이면 지금 제거, 미커밋 변경 있으면 confirm 후 --force.
+    status = worktree_status(root)
+    entry = next((r for r in status["repos"] if r["name"] == subrepo), None)
+    if entry and entry.get("dirty") and not force:
+        return {"needsConfirm": True, "changes": entry.get("changes", [])}
+    source_repo = source_root_for(root) / subrepo
+    if not source_repo.exists():
+        return {"error": f"source repo not found: {source_repo}"}
+    # 브랜치는 보존(worktree remove 만) — 미머지 커밋 안전, 재attach 시 재사용.
+    res = remove_git_worktree(source_repo, target, force=force)
+    _worktree_info_cache.pop(str(root), None)
+    _status_cache.pop(str(root), None)
+    if "error" in res:
+        return res
+    return {"ok": True, "detached": subrepo, **res}
+
+def memory_block(force: bool) -> dict[str, Any] | None:
+    # 가용 메모리가 기준 미만이면 시작을 막는다 (UI confirm 후 force=true 로 재시도 가능)
+    if force:
+        return None
+    info = system_memory()
+    free_mb = info.get("freeMb")
+    min_free = int(_env("MIN_FREE_MB", "4096"))
+    if free_mb is not None and free_mb < min_free:
+        return {"blocked": "low-memory", "freeMb": free_mb, "minFreeMb": min_free}
+    return None
+
+def start_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
+    block = memory_block(force)
+    if block:
+        return block
+
+    # 구버전은 foreground 모드 + 자체 로그 fd 로 띄워서 (1) 시작마다 로그 run 이 2개 생기고
+    # (2) fd 가 누수됐다. CLI start 경로로 일원화 — 로그·pid 관리는 marina.sh 가 전담.
+    session_dir(root).mkdir(parents=True, exist_ok=True)
+    env = marina_env(root)
+    # codex worktree 는 dashboard 기동 시 prepare 완료 — claude worktree 는 미attach 면 start 가 attach 수행
+    env["MARINA_SKIP_PREPARE"] = "1" if has_attached_subrepos(root) else "0"
+    try:
+        output = subprocess.check_output(
+            [str(script(root)), "start", f"--{service}"],
+            cwd=str(root),
+            text=True,
+            stderr=subprocess.STDOUT,
+            env=env,
+            timeout=120,
+        )
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"start failed: {(exc.output or '')[-500:]}")
+    except subprocess.TimeoutExpired:
+        raise ValueError("start timed out (120s)")
+    refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh start 훅의 gateway-ensure 가 단일 처리)
+    return {"started": True, "output": output[-1000:]}
+
+def restart_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
+    try:
+        out = _marina_cli(root, "restart", f"--{service}")  # compose_main → docker compose restart <svc>
+    except subprocess.CalledProcessError as exc:
+        raise ValueError(f"restart failed: {(exc.output or '')[-500:]}")
+    refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh restart 훅의 gateway-ensure 가 단일 처리)
+    return {"restarted": True, "output": out[-1000:]}
+
+def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
+    by_category = cache_paths_by_category(root)
+    if category != "all" and category not in by_category:
+        raise ValueError("unknown cache category")
+    targets = [p for cat, paths in by_category.items() if category in ("all", cat) for p in paths]
+    removed: list[str] = []
+    freed = 0
+    for path in targets:
+        size = disk_usage_mb(path) or 0
+        try:
+            shutil.rmtree(path)
+            removed.append(str(path.relative_to(root)))
+            freed += size
+        except OSError as exc:
+            removed.append(f"{path.relative_to(root)} (실패: {exc})")
+    _worktree_info_cache.pop(str(root), None)
+    return {"removed": removed, "freedMb": freed}
+
+def delete_merged_branch(source_repo: Path, branch: str) -> dict[str, Any]:
+    # 안전 삭제(-d): 미머지 커밋이 있으면 git 이 거부 → skipped 로 보고
+    try:
+        git_output(["branch", "-d", branch], source_repo)
+        return {"deleted": branch}
+    except subprocess.CalledProcessError as exc:
+        return {"skipped": branch, "reason": (exc.output or "").strip()[-200:]}
+    except Exception as exc:
+        return {"skipped": branch, "reason": str(exc)[-200:]}
+
+def bootout_session_dashboard(sid: str) -> None:
+    # worktree 삭제 후 launchd 에 세션 라벨이 유령으로 남는 것 방지 (best-effort)
+    if not shutil.which("launchctl"):
+        return
+    # 신 라벨 + 리네이밍 전 설치본 라벨 둘 다 정리
+    for label in (f"marina.dashboard.{sid}", f"dev.codex.session-dashboard.{sid}"):
+        subprocess.run(
+            ["launchctl", "bootout", f"gui/{os.getuid()}/{label}"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+def _gateway_snapshot() -> list:
+    """모든 워크트리 → {id, projectId, services:[{service,port,running,routes}]} (라이브 호스트포트). 게이트웨이 config 입력.
+    routes = backing.json top-level gatewayRoutes[<service>](경로 prefix 리스트) — 브라우저 상대주소 be 호출을 대표 도메인에서 path 라우팅(limit#1)."""
+    out = []
+    for root in discover_roots():
+        try:
+            p = session_payload(root)
+            proj = project_for(root) or {}
+            pid = proj.get("id") or p.get("source") or ""
+        except Exception:
+            continue
+        groutes = {}                                        # 선언형 — 감지 안 함(SPEC 원칙)
+        try:                                                # x-marina.gateway.routes (보관 compose, 새 SoT) 우선
+            cfile = proj.get("composeFile", "docker-compose.yml")
+            xm_routes = (_mc().xmarina_for_stored(str(MARINA_HOME / str(pid) / cfile)).get("gateway") or {}).get("routes") or {}
+        except Exception:
+            xm_routes = {}
+        if xm_routes:
+            groutes = xm_routes
+        else:                                               # 레거시 backing.json gatewayRoutes fallback (전환기)
+            try:
+                _bj = json.loads((MARINA_HOME / str(pid) / "backing.json").read_text(encoding="utf-8"))
+                groutes = _bj.get("gatewayRoutes") or {}
+            except Exception:
+                groutes = {}
+        out.append({"id": p.get("id"), "projectId": pid,
+                    "services": [{"service": s.get("service"), "port": s.get("port"), "running": s.get("running"),
+                                  "routes": groutes.get(s.get("service")) or []}
+                                 for s in (p.get("services") or [])]})
+    return out
+
+_GW_DIR = MARINA_HOME / "gateway"
+_GW_PORT_FILE = _GW_DIR / "port"
+_GW_PID_FILE = _GW_DIR / "caddy.pid"
+_GW_CONTROL = Path(__file__).resolve().parent / "marina-gateway-control.sh"
+
+
+def _gw_pid_alive() -> bool:
+    try:
+        pid = int(_GW_PID_FILE.read_text().strip())
+        os.kill(pid, 0)                                   # 존재 확인
+        # PID 재사용 오판 방지 — 그 PID 가 실제 caddy 인지 검증(아니면 stale 로 간주)
+        comm = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                              capture_output=True, text=True, timeout=3).stdout
+        return "caddy" in comm
+    except Exception:
+        return False
+
+
+def _free_port_from(base: int, span: int = 50) -> int:
+    """base 부터 위로 첫 빈 포트(127.0.0.1). base=3902 위로만 가 대시보드(3900)·프리뷰(3901)와 절대 안 겹침."""
+    import socket
+    for p in range(base, base + span):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", p))
+                return p
+            except OSError:
+                continue
+    return base
+
+
+def _resolved_gateway_port() -> int:
+    if _env("GATEWAY_PORT", ""):                          # 명시 지정이면 그대로
+        return _GATEWAY_PORT
+    try:
+        return int(_GW_PORT_FILE.read_text().strip())     # 자동 기동 시 확정·기록한 포트
+    except Exception:
+        return _GATEWAY_PORT
+
+
+def ensure_gateway() -> None:
+    """서비스 start 이벤트 — 라우트 대상(실행중·호스트포트 보유 서비스)이 있고 caddy 설치돼 있으면
+    게이트웨이를 없을 때 자동 기동(비특권 포트, 권한 불요)하고 라우트를 반영한다. 절대 예외 안 던짐(서비스 흐름·데몬 안 깸)."""
+    if not _GATEWAY_ON:
+        return
+    try:
+        snap = _gateway_snapshot()
+        if not any((s or {}).get("running") and str((s or {}).get("port") or "").isdigit()
+                   for wt in (snap or []) for s in ((wt or {}).get("services") or [])):
+            return                                        # 라우팅할 게 없으면 안 띄움
+        if not _gw().caddy_bin():
+            return                                        # caddy 미설치 → 조용히(나머지 marina 정상)
+        if _gw_pid_alive():
+            port = _resolved_gateway_port()
+        else:
+            port = _GATEWAY_PORT if _env("GATEWAY_PORT", "") else _free_port_from(_GATEWAY_PORT)
+            _GW_DIR.mkdir(parents=True, exist_ok=True)
+            _GW_PORT_FILE.write_text(str(port))
+            # caddy 가 읽을 config 를 기동 전에 선기록 → caddy run 이 즉시 포트+라우트로 바인드
+            # (reload 레이스 제거: admin 미준비 상태에서 apply→reload 실패로 라우트 누락되는 문제 방지)
+            _gw().write_config(_gw().build_caddyfile(snap, port), _GATEWAY_STATE)
+            subprocess.run(["bash", str(_GW_CONTROL), "start"],
+                           env={**os.environ, "MARINA_GATEWAY_PORT": str(port), "MARINA_HOME": str(MARINA_HOME)},
+                           timeout=20, capture_output=True)
+        _gw().apply(snap, port, _GATEWAY_STATE)   # 이미 떠있던 경우/드리프트 시 무중단 reload
+    except Exception as exc:
+        sys.stderr.write(f"gateway ensure 실패(무시): {exc}\n")
+
+
+def refresh_gateway() -> None:
+    """stop 등 이벤트 — 게이트웨이가 이미 떠있을 때만 라우트 reload(자동 기동은 안 함). caddy 없거나 미기동이면 no-op. 절대 예외 안 던짐."""
+    if not _GATEWAY_ON:
+        return
+    try:
+        if _gw().caddy_bin() and _gw_pid_alive():
+            _gw().apply(_gateway_snapshot(), _resolved_gateway_port(), _GATEWAY_STATE)
+    except Exception as exc:
+        sys.stderr.write(f"gateway refresh 실패(무시): {exc}\n")

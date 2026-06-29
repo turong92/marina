@@ -11,6 +11,20 @@
       ],
       "port": 3901,
       "autoPort": false
+    },
+    {
+      "name": "marina-review",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "MARINA_CONTROL_HOST=127.0.0.1 MARINA_CONTROL_PORT=3940 MARINA_HOME=/tmp/marina-review/home MARINA_LLM_FAKE=/tmp/marina-review/fake.sh exec python3 plugin/scripts/marina-control.py"],
+      "port": 3940,
+      "autoPort": false
+    },
+    {
+      "name": "marina-links",
+      "runtimeExecutable": "bash",
+      "runtimeArgs": ["-c", "MARINA_CONTROL_HOST=127.0.0.1 MARINA_CONTROL_PORT=3960 MARINA_HOME=/tmp/marina-links-demo/home exec python3 plugin/scripts/marina-control.py"],
+      "port": 3960,
+      "autoPort": false
     }
   ]
 }

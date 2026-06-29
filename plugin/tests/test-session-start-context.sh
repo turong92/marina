@@ -7,11 +7,10 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export MARINA_HOME="$TMP/home"
 proj="$TMP/proj"; mkdir -p "$proj"; ( cd "$proj" && git init -q )
 "$HERE/../scripts/marina.sh" project add "$proj" >/dev/null
-"$HERE/../scripts/marina.sh" service add "$(basename "$proj")" '{"name":"web","portBase":3000,"run":"exec true"}' >/dev/null
 
-# Claude: hookSpecificOutput.additionalContext, 규칙 텍스트(caller-독립 ' start <서비스>') + 서비스명 포함
+# Claude: hookSpecificOutput.additionalContext, marina 규칙 텍스트(caller-독립 ' start <서비스>')
 out="$( cd "$proj" && CLAUDE_PLUGIN_ROOT=x "$HOOK" 2>/dev/null )"
-echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); a=d['hookSpecificOutput']['additionalContext']; assert ' start <서비스>' in a and 'web' in a, a" \
+echo "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); a=d['hookSpecificOutput']['additionalContext']; assert ' start <서비스>' in a, a" \
   || { echo "FAIL: Claude additionalContext"; exit 1; }
 
 # Codex/SDK: top-level additionalContext (caller-독립 ' start <서비스>')
