@@ -16,16 +16,153 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import MARINA_SCRIPT
-from marina_registry import external_repos_for, source_root_for, subrepos_of
+from marina_state import MARINA_SCRIPT, MARINA_HOME, _mc
+from marina_registry import external_repos_for, source_root_for, subrepos_of, project_for
 
 def script(root: Path) -> Path:
     # 런처는 이 레포의 전역 marina.sh — worktree 위치와 무관 (구 SCRIPT_REL = 워크스페이스 내부 사본 탐색 제거).
     return MARINA_SCRIPT
 
+_LOGIN_ENV_CACHE: dict = {}
+def _login_env() -> dict[str, str]:
+    """사용자 로그인 셸의 toolchain env(PATH + JAVA_HOME). 한 번 캡쳐 캐시 — PATH 보강 + JAVA_HOME 폴백용.
+    데몬(launchd/systemd)은 최소 env 라 그대로 두면 대시보드 start/stop/restart/prebuild 가
+    docker 못 찾거나 시스템 구버전 java(13) 로 빌드가 깨진다. sdkman 등은 .zshrc(interactive)에서
+    JAVA_HOME/PATH 를 잡으므로 interactive 로그인(-lic)으로 캡쳐한다(bash -lc 는 zsh 사용자에게 안 통함).
+    프로젝트별 java 는 x-marina.java(명시)로 잡는다 — 여기 JAVA_HOME 은 명시 없을 때의 전역 폴백."""
+    if _LOGIN_ENV_CACHE:
+        return _LOGIN_ENV_CACHE
+    out_path, java_home = "", ""
+    try:
+        shell = os.environ.get("SHELL") or "/bin/zsh"
+        # `env` 덤프 → 셸 문법 무관(fish 포함 KEY=VAL 동일). -l -i 로 사용자 설정(.zshrc 등 toolchain) 반영.
+        with open(os.devnull) as devnull:
+            out = subprocess.run([shell, "-l", "-i", "-c", "env"],
+                                 stdin=devnull, capture_output=True, text=True, timeout=10)
+        for line in (out.stdout or "").splitlines():
+            if line.startswith("PATH="):
+                out_path = line[len("PATH="):]
+            elif line.startswith("JAVA_HOME="):
+                java_home = line[len("JAVA_HOME="):]
+    except Exception:
+        pass
+    _LOGIN_ENV_CACHE.update(PATH=out_path, JAVA_HOME=java_home)
+    return _LOGIN_ENV_CACHE
+
+def _resolve_java_home(val: str, suffix: str = "") -> str:
+    """java 지정값 → JAVA_HOME 절대경로. 절대경로면 그대로. 아니면 sdkman candidates 매칭:
+    정확 일치 > (배포판 suffix 일치 & major 접두) > major 접두(배포판 무관). suffix 는 Dockerfile 배포판(tem/amzn/…)."""
+    val = (val or "").strip()
+    if not val:
+        return ""
+    if os.path.isabs(val) and os.path.isdir(val):
+        return val
+    cand = Path.home() / ".sdkman" / "candidates" / "java"
+    try:
+        names = [d.name for d in cand.iterdir() if d.is_dir() and d.name != "current"]
+    except OSError:
+        return ""
+    if val in names:
+        return str(cand / val)
+    major = val.split(".")[0].split("-")[0]
+    def _pick(ns):
+        return str(cand / sorted(ns)[-1]) if ns else ""   # 사전순 최대(대체로 최신 패치)
+    if suffix:
+        hit = _pick([n for n in names if n.startswith(major) and n.endswith("-" + suffix)])
+        if hit:
+            return hit
+    return _pick([n for n in names if n.startswith(major)])
+
+# Dockerfile base image(배포판) → sdkman java 배포판 suffix
+_JDK_DISTRO = {"eclipse-temurin": "tem", "temurin": "tem", "amazoncorretto": "amzn", "corretto": "amzn",
+               "azul": "zulu", "zulu": "zulu", "bellsoft": "librca", "liberica": "librca",
+               "sapmachine": "sapmchn", "graalvm": "graalce", "graal": "graalce", "openjdk": "open", "microsoft": "ms"}
+def _dockerfile_java_spec(path: Path):
+    """Dockerfile 의 마지막 FROM(JDK base image)에서 (java 버전, sdkman 배포판 suffix). JDK 이미지 아니면 ('','')."""
+    try:
+        frm = ""
+        for line in Path(path).read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            if s[:5].upper() == "FROM ":
+                frm = s[5:].strip()
+        if not frm:
+            return "", ""
+        img = frm.split()[0]                       # 'eclipse-temurin:21' ('AS build' 등 제거)
+        name, _, tag = img.partition(":")
+        base = name.split("/")[-1].lower()
+        if not any(k in (base + " " + tag).lower() for k in list(_JDK_DISTRO) + ["jdk", "jre", "java"]):
+            return "", ""                          # java 이미지 아님(python/node 등)
+        suffix = next((v for k, v in _JDK_DISTRO.items() if k in base), "")
+        m = re.search(r"(\d+(?:\.\d+)*)", tag)     # '21' / '21.0.5' / '21-jdk'
+        return (m.group(1) if m else ""), suffix
+    except Exception:
+        return "", ""
+
+_JAVA_HOMES_CACHE: dict[str, dict] = {}   # project id → {서브레포|default: JAVA_HOME 절대경로}
+def _subrepo_java_homes(root: Path) -> dict[str, str]:
+    """서브레포별 호스트 빌드 JAVA_HOME. 각 서비스 Dockerfile 의 FROM(JDK base)에서 유도(SoT=Dockerfile) →
+    x-marina.java(문자열=default, dict=서브레포별)로 override. {서브레포|default: 절대경로}. project id 별 캐시."""
+    proj = project_for(root)
+    if not proj:
+        return {}
+    pid = str(proj.get("id", ""))
+    if pid in _JAVA_HOMES_CACHE:
+        return _JAVA_HOMES_CACHE[pid]
+    out: dict[str, str] = {}
+    try:
+        stored = MARINA_HOME / pid / (proj.get("composeFile") or "docker-compose.yml")
+        src = source_root_for(root)                # Dockerfile 은 소스(main)에 항상 있음(워크트리는 미apply 일 수 있음)
+        mc = _mc()
+        data = mc._yaml().safe_load(Path(stored).read_text(encoding="utf-8")) or {}
+        for _name, svc in (data.get("services") or {}).items():   # 1) Dockerfile FROM → 서브레포별 JDK
+            if not isinstance(svc, dict):
+                continue
+            b = svc.get("build")
+            ctx, dfile = ((b, "Dockerfile") if isinstance(b, str)
+                          else ((b.get("context") or ".", b.get("dockerfile") or "Dockerfile") if isinstance(b, dict) else (None, None)))
+            if ctx is None:
+                continue
+            sub = (ctx or ".").lstrip("./").split("/")[0] or "."
+            if sub in out:
+                continue
+            spec, suffix = _dockerfile_java_spec(Path(src) / (ctx or ".").lstrip("./") / dfile)
+            if spec:
+                jh = _resolve_java_home(spec, suffix)
+                if jh:
+                    out[sub] = jh
+        jv = (mc.xmarina_for_stored(str(stored)) or {}).get("java")   # 2) x-marina.java override
+        if isinstance(jv, str):
+            jv = {"default": jv}
+        if isinstance(jv, dict):
+            for k, v in jv.items():
+                jh = _resolve_java_home(str(v))
+                if jh:
+                    out[str(k)] = jh
+    except Exception:
+        pass
+    _JAVA_HOMES_CACHE[pid] = out
+    return out
+
 def marina_env(root: Path, ignore_overrides: bool = False) -> dict[str, str]:
     source = source_root_for(root)
     env = {**os.environ, "ROOT": str(root)}
+    _login = _login_env()
+    # 데몬 최소 PATH 보강 — 로그인 셸 PATH(docker·node 등) 앞에 병합 + 흔한 위치 폴백. 중복 제거(순서 유지).
+    _seen: list[str] = []
+    for _d in _login.get("PATH", "").split(os.pathsep) + (env.get("PATH") or "").split(os.pathsep) \
+              + [str(Path.home() / ".local/bin"), "/opt/homebrew/bin", "/usr/local/bin"]:
+        if _d and _d not in _seen:
+            _seen.append(_d)
+    env["PATH"] = os.pathsep.join(_seen)
+    # JAVA_HOME: Dockerfile FROM(SoT) 유도 → x-marina.java override → 전역 셸 폴백. 서브레포별 맵은 prebuild 로 전달.
+    _jh = _subrepo_java_homes(root)
+    _default = _jh.get("default") or (next(iter(_jh.values())) if len(_jh) == 1 else "")
+    if _default:                                                # 단일/기본 SDK — 프로세스 JAVA_HOME
+        env["JAVA_HOME"] = _default
+    elif not env.get("JAVA_HOME") and _login.get("JAVA_HOME") and os.path.isdir(_login["JAVA_HOME"]):
+        env["JAVA_HOME"] = _login["JAVA_HOME"]                   # 폴백: 데몬 최소 env 에 없으면 로그인 셸 JAVA_HOME
+    if _jh:
+        env["MARINA_JAVA_HOMES"] = json.dumps(_jh)              # prebuild 가 서브레포별로 JAVA_HOME override
     if source != root:
         env["SOURCE_ROOT"] = str(source)
     # 전역 런처에 프로젝트 서브레포를 전달 (marina.sh 가 하드코딩 대신 받아 쓴다)

@@ -78,6 +78,13 @@
       starting: {text: '시작', cls: 'boot', title: '프로세스는 떴고 첫 HTTP 응답 대기 중 — 빌드·컴파일이 길어도 시간 제한 없이 유지'},
       bad: {text: '오류', cls: 'bad', title: '응답하던 서비스가 응답을 멈춤 — 로그 확인 필요'},
     };
+    // 상태 적응형 액션 가시성 — external(marina 컨테이너 아닌 외부 dev 가 포트 점유)은 marina 가 관리 안 함:
+    //   ▶ 시작은 보임(외부 끄고 marina 로 띄울 수 있게), ■ 정지·↻ 재시작은 숨김(외부 프로세스엔 무효).
+    function serviceActHidden(svc, type) {
+      if (type === 'start') return (svc.running && !svc.external) || svc.degraded;
+      if (type === 'restart') return !svc.running || svc.degraded || svc.external;
+      return !svc.running || svc.external;   // stop
+    }
     function pillState(svc) {
       if (svc.degraded) return {text: '비활성', cls: 'bad', title: 'Dockerfile 없음 — 이 서비스만 기동에서 건너뜁니다(나머지는 정상). compose 편집에서 Dockerfile 을 추가하거나 이 서비스를 빼세요.'};
       if (svc.external) return {text: `외부 :${svc.port}`, cls: 'run', title: `marina 컨테이너가 아닌 외부 프로세스가 포트 ${svc.port} 를 사용 중 — 직접(node·gradlew 등)으로 띄운 dev 서버로 보입니다. marina 로 관리하려면 그 프로세스를 끄고 ▶ 로 시작하세요.`};
@@ -118,9 +125,7 @@
           // 상태 적응형 액션 — 정지: ▶ / 구동: ■·↻ (busy 중엔 건드리지 않음)
           for (const btn of row.querySelectorAll('[data-act]')) {
             if (btn.disabled) continue;
-            btn.hidden = btn.dataset.act === 'start' ? (svc.running || svc.degraded)
-              : btn.dataset.act === 'restart' ? (!svc.running || svc.degraded)
-              : !svc.running;
+            btn.hidden = serviceActHidden(svc, btn.dataset.act);
           }
         }
       }
@@ -608,9 +613,7 @@
         btn.setAttribute('aria-label', actionAria[type]);   // 아이콘만이라 스크린리더·hover 전 의미 보강(코덱스 UX #11)
         btn.dataset.act = type;
         if (cls) btn.className = cls;
-        btn.hidden = type === 'start' ? (svc.running || svc.degraded)
-          : type === 'restart' ? (!svc.running || svc.degraded)   // degraded(Dockerfile 없음)는 시작·재시작 불가(빌드 실패) — 숨김(코덱스 리뷰 #4)
-          : !svc.running;   // stop: 도는 중일 때만
+        btn.hidden = serviceActHidden(svc, type);   // degraded·external 반영(헬퍼 단일화)
         btn.onclick = (event) => {
           event.stopPropagation();
           withBusy(btn, busyLabels[type], () => action(type, session.root, svc.service), actions.querySelectorAll('button'));

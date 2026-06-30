@@ -24,8 +24,9 @@ grep -q 'lk-pick-chip' "$APP" || { echo "FAIL: picked folders should show as rem
 ! grep -q "pickLabel: '가져오기'" "$APP" || { echo "FAIL: per-row 가져오기 button should be gone (multi-pick check toggle)"; exit 1; }
 ! grep -q 'close(); loadLinks(session, body, sub)' "$APP" || { echo "FAIL: link browse modal should stay open after adding"; exit 1; }
 
-# list toggle is in-place (no destructive reload that makes rows flash/disappear)
-grep -q "row.classList.toggle('off'" "$APP" || { echo "FAIL: list toggle should flip row state in place, not reload the whole list"; exit 1; }
+# 메인·워크트리 통일: on/off 토글 없음 — 연결(+폴더탐색)/해제(✕)만. 워크트리 override 체크박스·정적 점(●) 제거.
+! grep -q 'data-lk-toggle' "$APP" || { echo "FAIL: worktree on/off checkbox(data-lk-toggle) 제거 — 연결/해제로 통일"; exit 1; }
+! grep -q 'lk-shared-dot' "$APP" || { echo "FAIL: 정적 점(●) 제거 — 리드 컨트롤 없음(목록 멤버십이 곧 상태)"; exit 1; }
 
 # main(source checkout) shows configured links even when not present on disk; missing ones flagged
 grep -q "session.source === 'main'" "$APP" || { echo "FAIL: main checkout should still show configured links"; exit 1; }
@@ -34,18 +35,20 @@ grep -q 'lk-missing' "$APP" || { echo "FAIL: links absent on disk should be flag
 # trash clears BOTH base and worktree override — no orphan row left with the trash icon gone
 grep -q "scope: 'override', op: 'clear'" "$APP" || { echo "FAIL: deleting a shared link must also clear the worktree override (orphan prevention)"; exit 1; }
 
+# discovered(파생물: build/*.jar 등)는 기본 미선택(unchecked) — 체크는 실제 적용된 링크만. 켜야 등록.
+grep -q "l.source === 'discovered'" "$APP" || { echo "FAIL: discovered links must be handled distinctly"; exit 1; }
+grep -q 'data-lk-disc' "$APP" || { echo "FAIL: discovered should render an unchecked opt-in toggle, not a default-checked one"; exit 1; }
+! grep -qE "data-lk-toggle \\\$\{l.disabled \? '' : 'checked'\}.*discovered" "$APP" || true
+
 # dangling override (shared def deleted, only the worktree 'off' remains) is flagged and removable from the UI
 grep -q '"dangling"' "$HERE/../scripts/marina-lib-links.sh" || { echo "FAIL: links API should flag dangling overrides"; exit 1; }
 grep -q 'l.dangling' "$APP" || { echo "FAIL: dangling override should render distinctly (끄기 잔재)"; exit 1; }
 grep -q 'data-lk-rm-ovr' "$APP" || { echo "FAIL: dangling remnant needs an explicit remove (✕) control"; exit 1; }
 
-# main(source checkout) link modal: distinct action semantics — static shared dot (toggle is a no-op on main), clarified copy
-grep -q "session.source === 'main'" "$APP" || { echo "FAIL: main link modal should clarify it manages shared config (not per-worktree toggle)"; exit 1; }
-grep -q 'lk-shared-dot' "$APP" || { echo "FAIL: main rows should show a static shared indicator, not a meaningless toggle"; exit 1; }
-# main can disable default links project-wide (base toggle), not just per-worktree
-grep -q 'data-lk-base' "$APP" || { echo "FAIL: main should let you toggle default links project-wide (base disable)"; exit 1; }
-grep -q "scope: 'base', op: on ? 'clear' : 'disable'" "$APP" || { echo "FAIL: base toggle should disable/clear at base scope"; exit 1; }
-grep -q 'l.baseOff' "$APP" || { echo "FAIL: project-wide disabled default should render distinctly (프로젝트 꺼짐)"; exit 1; }
+# main·worktree 동일: 목록=x-marina 적용목록. 연결(+폴더탐색)/해제(✕)만, 켜짐/꺼짐 별도 상태 없음.
+grep -q "session.source === 'main'" "$APP" || { echo "FAIL: main link modal should clarify it manages shared config"; exit 1; }
+! grep -q 'data-lk-xm' "$APP" || { echo "FAIL: 항목별 on/off 없음 — 목록 멤버십이 곧 상태"; exit 1; }
+grep -q "op: 'clear', subrepo: sub" "$APP" || { echo "FAIL: ✕(해제) should clear at base scope with active subrepo"; exit 1; }
 
 # renderBrowseEntries multiPick support
 grep -q 'multiPick' "$CORE" || { echo "FAIL: renderBrowseEntries should support multiPick"; exit 1; }

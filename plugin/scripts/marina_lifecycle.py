@@ -285,10 +285,12 @@ def _gateway_snapshot() -> list:
             pid = proj.get("id") or p.get("source") or ""
         except Exception:
             continue
-        groutes = {}                                        # 선언형 — 감지 안 함(SPEC 원칙)
-        try:                                                # x-marina.gateway.routes (보관 compose, 새 SoT) 우선
+        groutes = {}; gprimary = ""                         # 선언형 — 감지 안 함(SPEC 원칙)
+        try:                                                # x-marina.gateway (보관 compose, 새 SoT) 우선
             cfile = proj.get("composeFile", "docker-compose.yml")
-            xm_routes = (_mc().xmarina_for_stored(str(MARINA_HOME / str(pid) / cfile)).get("gateway") or {}).get("routes") or {}
+            xm_gw = _mc().xmarina_for_stored(str(MARINA_HOME / str(pid) / cfile)).get("gateway") or {}
+            xm_routes = xm_gw.get("routes") or {}
+            gprimary = str(xm_gw.get("primary") or "")      # 대표 도메인 서비스(명시). 없으면 web-name 자동
         except Exception:
             xm_routes = {}
         if xm_routes:
@@ -299,7 +301,7 @@ def _gateway_snapshot() -> list:
                 groutes = _bj.get("gatewayRoutes") or {}
             except Exception:
                 groutes = {}
-        out.append({"id": p.get("id"), "projectId": pid,
+        out.append({"id": p.get("id"), "projectId": pid, "primary": gprimary,
                     "services": [{"service": s.get("service"), "port": s.get("port"), "running": s.get("running"),
                                   "routes": groutes.get(s.get("service")) or []}
                                  for s in (p.get("services") or [])]})

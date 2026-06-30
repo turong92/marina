@@ -44,20 +44,38 @@ PY
 # glob 링크 룰(기본 < 프로젝트 공유 < service.links < 워크트리 override) 을 service 의 서브레포(cwd 첫 segment) 기준으로 적용.
 # mode=copy 는 복제, 그 외는 symlink. idempotent·best-effort. source==dest(main)면 skip.
 apply_glob_links() {
-  local service="$1" stored="${2:-}" cp="${3:-}" cwd _xml=""
+  local service="$1" stored="${2:-}" cp="${3:-}" sub_override="${4:-}" cwd _xml=""
   cwd="$(service_json_field "$service" cwd)"
-  # x-marina.links {symlink:[],copy:[]} (보관 compose, opt-in SoT) — 있으면 그것만 적용(레거시 글롭 무시).
+  # x-marina.links (보관 compose, opt-in SoT) — 있으면 그것만 적용(레거시 글롭 무시). 서브레포별 {sub:{symlink,copy}} 또는 전역.
   [[ -n "$stored" && -n "$cp" && -f "$stored" ]] && _xml="$(python3 "$cp" xmarina --stored "$stored" --key links 2>/dev/null)"
-  python3 - "$(merged_services_json)" "$service" "$(overrides_json_file)" "$_DEFAULT_LINKS_JSON" "$SOURCE_ROOT" "$ROOT" "${cwd:-.}" "$(central_links_json)" "$_xml" <<'PY'
+  # workspace 호출(service="") + 서브레포별 x-marina → 각 서브레포로 재귀(sub_override). sub="." 단일 호출론 서브레포별을 못 잡기 때문.
+  if [[ -z "$service" && -z "$sub_override" && -n "$_xml" ]]; then
+    local _subs _s
+    _subs="$(python3 -c "import json,sys; d=json.loads(sys.argv[1] or '{}'); print(' '.join(k for k,v in d.items() if isinstance(v,dict) and ('symlink' in v or 'copy' in v)))" "$_xml" 2>/dev/null)"
+    if [[ -n "$_subs" ]]; then
+      for _s in $_subs; do apply_glob_links "" "$stored" "$cp" "$_s"; done
+      return 0
+    fi
+  fi
+  python3 - "$(merged_services_json)" "$service" "$(overrides_json_file)" "$_DEFAULT_LINKS_JSON" "$SOURCE_ROOT" "$ROOT" "${cwd:-.}" "$(central_links_json)" "$_xml" "$sub_override" <<'PY'
 import json, sys, os, fnmatch, shutil
 data = json.loads(sys.argv[1]); service = sys.argv[2]; ovr_path = sys.argv[3]
 defaults = json.loads(sys.argv[4]); source_root = sys.argv[5]; root = sys.argv[6]; cwd = sys.argv[7]
 central = json.loads(sys.argv[8]) if len(sys.argv) > 8 and sys.argv[8].strip() else {}
-xmlinks = json.loads(sys.argv[9]) if len(sys.argv) > 9 and sys.argv[9].strip() else {}   # x-marina.links
-sub = cwd.split("/")[0] if cwd and cwd != "." else "."
-# ops: [(glob, op)] — op in {symlink, copy}. x-marina.links 있으면 그 명시 리스트만(빌드출력은 목록 외=자동 제외).
+xmlinks_raw = json.loads(sys.argv[9]) if len(sys.argv) > 9 and sys.argv[9].strip() else {}   # x-marina.links
+sub_override = sys.argv[10] if len(sys.argv) > 10 else ""   # 서브레포별 x-marina 재귀 시 명시 sub
+sub = sub_override if sub_override else (cwd.split("/")[0] if cwd and cwd != "." else ".")
+def _xm_sub(xm, s):                    # 서브레포별 {sub:{symlink,copy}} → 그 sub 것. 레거시 전역 {symlink,copy} → 모든 서브레포 공통.
+    if not isinstance(xm, dict):
+        return {}
+    if "symlink" in xm or "copy" in xm:
+        return xm
+    v = xm.get(s) if isinstance(xm.get(s), dict) else xm.get(".")
+    return v if isinstance(v, dict) else {}
+# ops: [(glob, op)]. x-marina.links 있으면(전역/서브레포별) 그것만 — 그 sub 에 항목 없으면 아무것도(레거시 폴백 X).
 ops = []
-if isinstance(xmlinks, dict) and ("symlink" in xmlinks or "copy" in xmlinks):   # 키 존재로 판정 — 빈 리스트는 '아무것도 안 함' opt-out(legacy 폴백 아님)
+if isinstance(xmlinks_raw, dict) and xmlinks_raw:
+    xmlinks = _xm_sub(xmlinks_raw, sub)
     for g in (xmlinks.get("symlink") or []):
         if isinstance(g, str) and g.strip():
             ops.append((g.strip(), "symlink"))
@@ -157,9 +175,10 @@ PY
 # 우선순위: 기본(default) < 프로젝트 공유(central) < service.links < 워크트리 override(null=끄기).
 # [{name, source: default|service|override, disabled: bool, rule: {...}}]
 links_json() {
-  local service="$1" subrepo="${2:-}" cwd
+  local service="$1" subrepo="${2:-}" stored="${3:-}" cp="${4:-}" cwd _xml=""
   cwd="$(service_json_field "$service" cwd)"
-  python3 - "$(merged_services_json)" "$service" "$(overrides_json_file)" "$_DEFAULT_LINKS_JSON" "$(central_links_json)" "$SOURCE_ROOT" "$ROOT" "${cwd:-.}" "$subrepo" <<'PY'
+  [[ -n "$stored" && -n "$cp" && -f "$stored" ]] && _xml="$(python3 "$cp" xmarina --stored "$stored" --key links 2>/dev/null)"
+  python3 - "$(merged_services_json)" "$service" "$(overrides_json_file)" "$_DEFAULT_LINKS_JSON" "$(central_links_json)" "$SOURCE_ROOT" "$ROOT" "${cwd:-.}" "$subrepo" "$_xml" <<'PY'
 import json, sys, os, fnmatch
 data = json.loads(sys.argv[1]); service = sys.argv[2]; ovr_path = sys.argv[3]
 defaults = json.loads(sys.argv[4])
@@ -168,15 +187,43 @@ source_root = sys.argv[6] if len(sys.argv) > 6 else ""
 root = sys.argv[7] if len(sys.argv) > 7 else ""
 cwd = sys.argv[8] if len(sys.argv) > 8 else "."
 subrepo = sys.argv[9] if len(sys.argv) > 9 else ""   # 명시 서브레포(compose 정밀 present) — 있으면 cwd 대신
+xmlinks_raw = json.loads(sys.argv[10]) if len(sys.argv) > 10 and sys.argv[10].strip() else {}   # x-marina.links(SoT)
 svc = next((s for s in data.get("services", []) if s.get("name") == service), None) or {}
 svc_links = svc.get("links") or {}
 sub = subrepo if subrepo else (cwd.split("/")[0] if cwd and cwd != "." else ".")
-central = {}
-for k, v in central_raw.items():                        # 프로젝트 공유 링크가 특정 subrepo 용이면 해당 탭에서만 표시
-    if isinstance(v, dict) and v.get("subrepo") and v.get("subrepo") != sub:
-        continue
-    central[k] = v
-base = dict(defaults); base.update(central); base.update(svc_links)   # 기본 < 프로젝트 커스텀(central) < 앱레포 service
+def _xm_sub(xm, s):                                     # 서브레포별 {sub:{symlink,copy}} → 그 sub. 레거시 전역 {symlink,copy} → 공통.
+    if not isinstance(xm, dict):
+        return {}
+    if "symlink" in xm or "copy" in xm:
+        return xm
+    v = xm.get(s) if isinstance(xm.get(s), dict) else xm.get(".")
+    return v if isinstance(v, dict) else {}
+_DIRG = {"node_modules", ".venv", "build", "dist", "out", "target", ".next"}
+def _glob_kind(g):
+    b = g.replace("**/", "").rstrip("/").split("/")[-1]
+    if b in _DIRG:
+        return "dir"
+    if "*" in b or b.startswith(".") or "." in b:
+        return "file"
+    return "dir"
+if isinstance(xmlinks_raw, dict) and xmlinks_raw:        # x-marina.links 가 SoT(서브레포별/전역) — 기본 무시, 이 sub 글롭만 표시
+    xlsub = _xm_sub(xmlinks_raw, sub)
+    base = {}
+    for g in (xlsub.get("symlink") or []):
+        if isinstance(g, str) and g.strip():
+            base[g.strip()] = {"glob": g.strip(), "kind": _glob_kind(g.strip())}
+    for g in (xlsub.get("copy") or []):
+        if isinstance(g, str) and g.strip():
+            base[g.strip()] = {"glob": g.strip(), "kind": _glob_kind(g.strip()), "mode": "copy"}
+    central = dict(base)                                 # x-marina 가 유일 SoT(compose, 공유 단위) — 리스트=적용목록, links.json 미사용
+    defaults = {}                                        # 서브레포 무관 기본링크 자동표시 끔
+else:
+    central = {}
+    for k, v in central_raw.items():                     # 프로젝트 공유 링크가 특정 subrepo 용이면 해당 탭에서만 표시
+        if isinstance(v, dict) and v.get("subrepo") and v.get("subrepo") != sub:
+            continue
+        central[k] = v
+    base = dict(defaults); base.update(central); base.update(svc_links)   # 기본 < 프로젝트 커스텀 < 앱레포 service
 try:
     ov = json.load(open(ovr_path, encoding="utf-8"))
     olinks_raw = {**((ov.get("links") or {}).get("") or {}), **((ov.get("links") or {}).get(service) or {})}   # 워크트리레벨("")+서비스별(우선)
@@ -245,7 +292,7 @@ for name in list(base.keys()) + [k for k in olinks if k not in base]:
                     "present": present(defaults.get(name) or {}),
                     "category": categorize(name, defaults.get(name) or {}), "dangling": False})
         continue
-    disabled = overridden and olinks[name] is None
+    disabled = overridden and olinks[name] is None   # 워크트리 override 끄기(overrides.json) — x-marina 엔 끔 상태 없음(있으면 적용·없으면 빠짐)
     rule = (olinks[name] if (overridden and not disabled) else base.get(name)) or {}
     if name in svc_links:
         src = "service"

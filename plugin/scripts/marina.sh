@@ -173,7 +173,14 @@ main() {
     links-json)
       local svc="${1:-}"
       [[ -n "$svc" ]] || die "links-json: service name required"
-      links_json "$svc" "${2:-}" ;;
+      local _jmeta _jpid _jcfile _jstored="" _jcp="$SCRIPT_DIR/marina-compose.py"
+      _jmeta="$(project_meta 2>/dev/null || true)"
+      if [[ -n "$_jmeta" ]]; then
+        _jpid="$(printf '%s' "$_jmeta"   | python3 -c 'import json,sys;print(json.load(sys.stdin).get("id",""))')"
+        _jcfile="$(printf '%s' "$_jmeta" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("composeFile") or "")')"
+        [[ -n "$_jpid" && -n "$_jcfile" && -f "$MARINA_HOME/$_jpid/$_jcfile" ]] && _jstored="$MARINA_HOME/$_jpid/$_jcfile"
+      fi
+      links_json "$svc" "${2:-}" "$_jstored" "$_jcp" ;;
     gateway)
       # 호스트 브라우저 게이트웨이 caddy 제어 — 설치 사용자도 PATH 의 marina 로 도달(코덱스 P2). marina gateway {start|stop|status|install|uninstall}
       exec bash "$SCRIPT_DIR/marina-gateway-control.sh" "$@" ;;

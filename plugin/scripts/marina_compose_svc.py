@@ -496,7 +496,7 @@ def unified_compose_yaml(root: Path, project: dict) -> str:
                 b.setdefault("args", {})
                 b["args"].update({str(k): str(v) for k, v in args.items()})
                 services[svc]["build"] = b
-    xm = mc.parse_xmarina(text) or _migrate_to_xmarina(pid)      # stored x-marina 우선, 없으면 레거시 합침
+    xm = mc.parse_xmarina(text) or _migrate_to_xmarina(pid)      # x-marina(SoT) 우선, 없으면 레거시 마이그레이션
     data["services"] = services                                  # 로드한 문서를 in-place 갱신 — networks/volumes/secrets/include 등 top-level 보존
     if xm:
         data["x-marina"] = mc._stringify_keys(xm)               # x-marina 키 string 화(docker x-* 호환)

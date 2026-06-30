@@ -75,6 +75,61 @@ def serialize_xmarina(services: dict, xmarina: dict) -> str:
     return _yaml().safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
 
 
+def _edit_xmarina_block(stored: str, mutate) -> bool:
+    """보관 compose 의 x-marina 블록만 파싱 → mutate(xm) 제자리 수정 → 재직렬화. 위쪽 services/volumes
+    텍스트(=사용자 주석)는 원본 보존(ruamel 없이 주석 살림). 대시보드의 x-marina 편집(links·gateway) 공용."""
+    with open(stored, encoding="utf-8") as f:
+        lines = f.read().splitlines(keepends=True)
+    xi = next((i for i, l in enumerate(lines) if l.startswith("x-marina:")), None)
+    xj = len(lines)
+    if xi is not None:
+        for i in range(xi + 1, len(lines)):
+            l = lines[i]
+            if l.strip() and not l[0].isspace() and not l.lstrip().startswith("#"):
+                xj = i
+                break
+        xm = parse_xmarina("".join(lines[xi:xj]))
+        head, tail = "".join(lines[:xi]), "".join(lines[xj:])
+    else:
+        xm = {}
+        head, tail = "".join(lines), ""
+        if head and not head.endswith("\n"):
+            head += "\n"
+    mutate(xm)
+    new_block = _yaml().safe_dump({"x-marina": _stringify_keys(xm)}, sort_keys=False, allow_unicode=True, default_flow_style=False) if xm else ""
+    with open(stored, "w", encoding="utf-8") as f:
+        f.write(head + new_block + (tail if not tail.startswith("\n") else tail))
+    return True
+
+def set_xmarina_link(stored: str, subrepo: str, glob: str, mode: str = "symlink", remove: bool = False) -> bool:
+    """x-marina.links 편집(SoT). 리스트에 글롭 있으면 적용·없으면 안 함(켜짐/꺼짐 별도 상태 없음).
+      remove=True → 글롭 빼기(✕; symlink/copy 양쪽서 제거)  ·  그 외 → 글롭 추가(mode 리스트에)"""
+    glob = (glob or "").strip()
+    if not glob:
+        return False
+    key = "copy" if mode == "copy" else "symlink"
+    sub = subrepo or "."
+    def _m(xm):
+        links = xm.setdefault("links", {})
+        is_global = isinstance(links, dict) and ("symlink" in links or "copy" in links)
+        node = links if is_global else links.setdefault(sub, {})
+        if remove:
+            for kk in ("symlink", "copy"):
+                if isinstance(node.get(kk), list):
+                    node[kk] = [g for g in node[kk] if g != glob]
+                    if not node[kk]:
+                        node.pop(kk, None)
+            if not is_global and not node:
+                links.pop(sub, None)
+            if not links:
+                xm.pop("links", None)
+        else:
+            lst = node.setdefault(key, [])
+            if glob not in lst:
+                lst.append(glob)
+    return _edit_xmarina_block(stored, _m)
+
+
 def xmarina_for_stored(stored: str) -> dict:
     """보관 compose 파일 경로 → x-marina dict. forward·prebuild·gateway 소비처가 이걸로 읽는다.
     best-effort — 어떤 실패든(파일 없음·PyYAML 없음·YAML 파싱 에러·compose 커스텀 태그 !reset/!override

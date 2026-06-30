@@ -22,6 +22,17 @@ from marina_logtext import read_log_chunk, redact_text, scan_log_matches
 from marina_registry import discover_all_roots, discover_roots, external_repos_for, is_source_checkout, project_for, subrepos_of
 from marina_paths import selected_log, session_dir, session_id, write_config, write_meta
 from marina_cli import _marina_cli, run_marina, run_marina_registry
+
+
+def _apply_now(root: Path, service: str = "") -> None:
+    """link-set 직후 이 워크트리에 apply(심링크/복제 즉시 생성) — 대시보드에서 넣으면 바로 뜨게.
+    main(원본)은 대상 아님(apply 내부에서 src==dst skip 이지만, 불필요한 subprocess 도 생략). best-effort."""
+    try:
+        if is_source_checkout(root):
+            return
+        run_marina(root, "link", service) if service else run_marina(root, "link")
+    except Exception:
+        pass
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml
 from marina_sessions import append_console_log, claude_session_titles, codex_session_titles, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
@@ -661,32 +672,22 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("rule 은 {glob,kind[,mode]} 여야 함")
 
                 if scope == "base":
-                    # 프로젝트 커스텀 base(모든 워크트리 공유). 탐색기 등록이 여기.
-                    # disable(null) = 기본/공유 링크를 프로젝트 전체에서 끔(모든 워크트리 제외). clear = 되돌림(기본 복귀/삭제).
+                    # 링크의 단일 SoT = stored compose 의 x-marina.links (이 머신 로컬 설정 = 공유 단위). 대시보드가 직접 편집(links.json 미사용).
+                    #   리스트에 있으면 적용·없으면 안 함 — '켜짐/꺼짐' 별도 상태 없음. set=추가(+폴더 탐색) · clear=빼기(🗑)
+                    # ruamel 없어 전체 regen 은 주석 손실 → set_xmarina_link 가 x-marina 블록만 갱신하고 위쪽(services 주석)은 보존.
+                    if op not in ("set", "clear"):
+                        raise ValueError("base 는 set|clear 만 (x-marina 리스트에 추가/빼기)")
                     proj = project_for(root)
                     if not proj:
                         raise ValueError("프로젝트 미등록 — base 링크 저장 불가")
                     cdir = MARINA_HOME / str(proj["id"]); cdir.mkdir(parents=True, exist_ok=True)
-                    cfile = cdir / "links.json"
-                    try:
-                        cur = json.loads(cfile.read_text(encoding="utf-8")) if cfile.exists() else {}
-                        if not isinstance(cur, dict):
-                            raise ValueError("object 아님")
-                    except (ValueError, OSError) as _e:
-                        raise ValueError(f"links.json 손상으로 저장 거부: {_e}")
-                    cur.setdefault("version", 1)
-                    cl = cur.setdefault("links", {})
-                    if not isinstance(cl, dict):
-                        cl = cur["links"] = {}
-                    if op == "clear":
-                        cl.pop(name, None)
-                    elif op == "disable":
-                        cl[name] = None       # 프로젝트 전체 끄기 — apply_glob_links 가 None 룰을 자동 제외
-                    else:
-                        cl[name] = clean
-                    tmp = cfile.with_suffix(".json.tmp")
-                    tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-                    tmp.replace(cfile)
+                    stored = cdir / proj.get("composeFile", "docker-compose.yml")
+                    _sub = (clean.get("subrepo") if clean else None) or str(body.get("subrepo") or "").strip() or "."
+                    if op == "set":
+                        _mc().set_xmarina_link(str(stored), _sub, clean["glob"], clean.get("mode") or "symlink", remove=False)
+                    else:                              # clear = 🗑 빼기
+                        _mc().set_xmarina_link(str(stored), _sub, name, remove=True)
+                    _apply_now(root, service)          # 즉시 materialize — 넣으면 바로 이 워크트리에 뜸(main 은 src==dst 라 내부 skip)
                     self.send_json({"ok": True})
                     return
 
@@ -717,6 +718,7 @@ class Handler(BaseHTTPRequestHandler):
                 tmp = ojson.with_suffix(".json.tmp")
                 tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
                 tmp.replace(ojson)
+                _apply_now(root, service)              # 즉시 materialize — 이 워크트리에 apply(켜기/리다이렉트 바로 반영)
                 self.send_json({"ok": True})
                 return
 

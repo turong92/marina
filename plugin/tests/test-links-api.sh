@@ -74,64 +74,79 @@ assert m['node_modules']['source'] == 'default' and not m['node_modules']['disab
 code="$(curl -s -o /dev/null -w '%{http_code}' "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"x\",\"op\":\"bogus\"}")"
 [[ "$code" == 4* ]] || { echo "FAIL: bad op should 4xx (got $code)"; exit 1; }
 
-# 6) scope=base set → central ~/.marina/<id>/links.json (모든 워크트리 공유), GET 에 source=project
+# 6) scope=base set → stored compose 의 x-marina.links(단일 SoT, links.json 미사용). GET 에 source=project.
+SC="$MARINA_HOME/proj/docker-compose.yml"
+xm_links() { python3 -c "
+import importlib.util as u
+s=u.spec_from_file_location('mc','$HERE/../scripts/marina-compose.py'); mc=u.module_from_spec(s); s.loader.exec_module(mc)
+import json; print(json.dumps((mc.xmarina_for_stored('$SC') or {}).get('links',{})))
+"; }
 curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
   -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"dist\",\"op\":\"set\",\"scope\":\"base\",\"rule\":{\"glob\":\"dist\",\"kind\":\"dir\"}}" | grep -q '"ok": true' || { echo "FAIL: base set"; exit 1; }
-ID="$(python3 -c "import json;print(json.load(open('$MARINA_HOME/projects.json'))['projects'][0]['id'])")"
-python3 -c "
-import json
-d = json.load(open('$MARINA_HOME/$ID/links.json'))
-assert d['links']['dist'] == {'glob':'dist','kind':'dir'}, d
-" || { echo "FAIL: central links.json not written"; exit 1; }
+[[ ! -f "$MARINA_HOME/proj/links.json" ]] || { echo "FAIL: links.json 가 다시 생김(미사용이어야)"; exit 1; }
+xm_links | python3 -c "
+import json, sys
+links = json.load(sys.stdin)
+node = links.get('.', links)   # subrepo 없는 set → '.' 또는 전역
+assert 'dist' in (node.get('symlink', []) + node.get('copy', [])), links
+" || { echo "FAIL: x-marina.links 에 안 들어감"; exit 1; }
 curl -s "${hdr[@]}" "$base/api/links?$RE&service=web" | python3 -c "
 import json, sys
 m = {l['name']: l for l in json.load(sys.stdin)['links']}
-assert m['dist']['source'] == 'project', m   # central base = project source(모든 워크트리 공유)
+assert m['dist']['source'] == 'project', m   # x-marina base = project source(모든 워크트리 공유)
 " || { echo "FAIL: base not project source"; exit 1; }
 
-# 7) subrepo-scoped base 링크는 해당 subrepo 탭에만 노출
+# 7) subrepo-scoped base 링크 → x-marina.links[<sub>], 해당 subrepo 탭에만 노출
 curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
-  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"web/dist\",\"op\":\"set\",\"scope\":\"base\",\"rule\":{\"glob\":\"dist\",\"kind\":\"dir\",\"subrepo\":\"web\"}}" | grep -q '"ok": true' || { echo "FAIL: subrepo base set"; exit 1; }
+  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"web/dist\",\"op\":\"set\",\"scope\":\"base\",\"rule\":{\"glob\":\"webdist\",\"kind\":\"dir\",\"subrepo\":\"web\"}}" | grep -q '"ok": true' || { echo "FAIL: subrepo base set"; exit 1; }
+xm_links | python3 -c "
+import json, sys
+links = json.load(sys.stdin)
+assert 'webdist' in (links.get('web',{}).get('symlink',[]) + links.get('web',{}).get('copy',[])), links
+" || { echo "FAIL: subrepo glob 이 x-marina.links[web] 에 없음"; exit 1; }
 curl -s "${hdr[@]}" "$base/api/links?$RE&service=web&subrepo=web" | python3 -c "
 import json, sys
 m = {l['name']: l for l in json.load(sys.stdin)['links']}
-assert m['web/dist']['source'] == 'project' and m['web/dist']['rule']['subrepo'] == 'web', m
+assert 'webdist' in m and m['webdist']['source'] == 'project', m
 " || { echo "FAIL: subrepo link missing from own tab"; exit 1; }
 curl -s "${hdr[@]}" "$base/api/links?$RE&service=web&subrepo=api" | python3 -c "
 import json, sys
 m = {l['name']: l for l in json.load(sys.stdin)['links']}
-assert 'web/dist' not in m, m
+assert 'webdist' not in m, m
 " || { echo "FAIL: subrepo link leaked into another tab"; exit 1; }
 
-# 8) 탐색기 copy mode 저장/노출
+# 8) 탐색기 copy mode → x-marina.links[web].copy
 curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
-  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"web/dist-copy\",\"op\":\"set\",\"scope\":\"base\",\"rule\":{\"glob\":\"dist\",\"kind\":\"dir\",\"subrepo\":\"web\",\"mode\":\"copy\"}}" | grep -q '"ok": true' || { echo "FAIL: copy mode base set"; exit 1; }
-python3 -c "
-import json
-d = json.load(open('$MARINA_HOME/$ID/links.json'))
-assert d['links']['web/dist-copy'] == {'glob':'dist','kind':'dir','mode':'copy','subrepo':'web'}, d
-" || { echo "FAIL: copy mode not persisted"; exit 1; }
+  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"web/dist-copy\",\"op\":\"set\",\"scope\":\"base\",\"rule\":{\"glob\":\"copyglob\",\"kind\":\"dir\",\"subrepo\":\"web\",\"mode\":\"copy\"}}" | grep -q '"ok": true' || { echo "FAIL: copy mode base set"; exit 1; }
+xm_links | python3 -c "
+import json, sys
+links = json.load(sys.stdin)
+assert 'copyglob' in links.get('web',{}).get('copy',[]), links
+" || { echo "FAIL: copy mode 가 x-marina copy 에 없음"; exit 1; }
 curl -s "${hdr[@]}" "$base/api/links?$RE&service=web&subrepo=web" | python3 -c "
 import json, sys
 m = {l['name']: l for l in json.load(sys.stdin)['links']}
-assert m['web/dist-copy']['rule']['mode'] == 'copy', m
+assert m['copyglob']['rule']['mode'] == 'copy', m
 " || { echo "FAIL: copy mode not reflected"; exit 1; }
 
-# 9) base disable = 기본 링크를 프로젝트 전체에서 끔(모든 워크트리 제외) → GET 에 baseOff/disabled
+# 9) base clear = x-marina.links 에서 제거 → 탭에서 사라짐
 curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
-  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"node_modules\",\"op\":\"disable\",\"scope\":\"base\"}" | grep -q '"ok": true' || { echo "FAIL: base disable should 200"; exit 1; }
-curl -s "${hdr[@]}" "$base/api/links?root=$P&service=web" | python3 -c "
+  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"copyglob\",\"op\":\"clear\",\"scope\":\"base\",\"subrepo\":\"web\"}" | grep -q '"ok": true' || { echo "FAIL: base clear"; exit 1; }
+xm_links | python3 -c "
+import json, sys
+links = json.load(sys.stdin)
+assert 'copyglob' not in links.get('web',{}).get('copy',[]), links
+" || { echo "FAIL: base clear 가 x-marina 에서 제거 안 함"; exit 1; }
+curl -s "${hdr[@]}" "$base/api/links?$RE&service=web&subrepo=web" | python3 -c "
 import json, sys
 m = {l['name']: l for l in json.load(sys.stdin)['links']}
-assert m['node_modules']['baseOff'] is True and m['node_modules']['disabled'] is True, ('base disable 미반영', m['node_modules'])
-" || { echo "FAIL: base disable not reflected as baseOff"; exit 1; }
-# 9b) base clear = 되돌림(기본 복귀)
-curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
-  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"node_modules\",\"op\":\"clear\",\"scope\":\"base\"}" | grep -q '"ok": true' || { echo "FAIL: base clear"; exit 1; }
-curl -s "${hdr[@]}" "$base/api/links?root=$P&service=web" | python3 -c "
-import json, sys
-m = {l['name']: l for l in json.load(sys.stdin)['links']}
-assert m['node_modules']['source'] == 'default' and not m['node_modules'].get('baseOff') and not m['node_modules']['disabled'], ('base clear 후 기본 복귀 실패', m['node_modules'])
-" || { echo "FAIL: base clear should restore default"; exit 1; }
+assert 'copyglob' not in m, m
+" || { echo "FAIL: base clear 후에도 탭에 남음"; exit 1; }
+
+# 10) link-set 성공 후 워크트리에 즉시 apply(materialize) — 대시보드에서 넣으면 바로 뜨게(main 은 src==dst skip)
+HANDLER="$HERE/../scripts/marina_handler.py"
+grep -q 'def _apply_now' "$HANDLER" || { echo "FAIL: _apply_now(즉시 materialize) 헬퍼 없음"; exit 1; }
+[[ "$(grep -c '_apply_now(root, service)' "$HANDLER")" -ge 2 ]] || { echo "FAIL: link-set base·override 양쪽서 _apply_now 호출해야(즉시 반영)"; exit 1; }
+grep -q 'is_source_checkout(root)' "$HANDLER" || { echo "FAIL: main(원본)은 apply 대상 아님(is_source_checkout skip)"; exit 1; }
 
 echo "PASS test-links-api"

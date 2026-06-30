@@ -21,14 +21,20 @@ def _domain_label(s: str) -> str:
     return out or "x"
 
 
-def _is_primary(services: list, svc_name: str) -> bool:
-    """svc_name 이 이 워크트리의 대표 web 인가 — WEB_NAMES 중 첫 매칭, 없으면 포트 보유 첫 서비스."""
+def _effective_primary(services: list, explicit: str = "") -> str:
+    """이 워크트리의 대표 도메인 서비스명 — x-marina.gateway.primary(명시) 우선, 없으면 WEB_NAMES 중 첫 매칭,
+    그것도 없으면 포트 보유 첫 서비스. (포트 있고 running 인 것 중에서만)"""
     have = [s for s in (services or []) if str((s or {}).get("port") or "").strip() and (s or {}).get("running")]
+    if explicit and any((s.get("service") or "") == explicit for s in have):
+        return explicit
     for w in WEB_NAMES:
         for s in have:
             if (s.get("service") or "") == w:
-                return svc_name == w
-    return bool(have) and (have[0].get("service") == svc_name)
+                return w
+    return have[0].get("service") if have else ""
+
+def _is_primary(services: list, svc_name: str) -> bool:
+    return _effective_primary(services) == svc_name
 
 
 def build_caddyfile(snapshot: list, port: int = 80) -> str:
@@ -45,13 +51,14 @@ def build_caddyfile(snapshot: list, port: int = 80) -> str:
         wid = _domain_label(wid_raw)
         pid = _domain_label(pid_raw)
         svcs = (wt or {}).get("services") or []
+        prim = _effective_primary(svcs, (wt or {}).get("primary") or "")   # 대표: x-marina.gateway.primary 명시 우선
         for s in svcs:
             hostport = str((s or {}).get("port") or "").strip()
             if not hostport.isdigit() or not (s or {}).get("running"):
                 continue                                    # 미퍼블리시·미실행(stop) → 라우트 없음(죽은 컨테이너로 안 보냄, 코덱스 P2)
             svc_raw = (s or {}).get("service") or ""
             name = _domain_label(svc_raw)
-            is_primary = _is_primary(svcs, svc_raw)
+            is_primary = (svc_raw == prim)
             sub = f"{wid}.{pid}" if is_primary else f"{wid}-{name}.{pid}"
             if sub in used:                                 # sanitize 충돌(feat_x vs feat-x 등) → 원본 해시로 유니크화. 한 워크트리가 전체 config reject 막지 않게(코덱스 P2)
                 sub = f"{sub}-{hashlib.sha1(f'{wid_raw}|{pid_raw}|{svc_raw}'.encode()).hexdigest()[:6]}"

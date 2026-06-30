@@ -12,7 +12,7 @@
       return rule && (rule.mode === 'copy' || rule.op === 'copy') ? 'copy' : 'symlink';
     }
 
-    function renderLinksRows(session) {   // link — 서브레포별 링크/복제 설정 진입
+    function renderLinksRows(session) {   // link — 진입 버튼
       return `<button data-links-open class="links-open-btn" title="main checkout의 deps/config를 이 worktree로 링크(참조)/카피(복제)">↔ <span class="summary-sub">link</span></button>`;
     }
     function openLinksModal(session) {   // link 모달 — 해당 서브레포에 실제 있는 것만
@@ -20,8 +20,8 @@
       const back = document.createElement('div');
       back.id = 'linksModalBack'; back.className = 'modal-backdrop'; back.style.zIndex = '200';
       const desc = session.source === 'main'
-        ? '여긴 <b>원본(main)</b> — 여기 설정이 이 머신의 새 worktree에 자동 적용됩니다(로컬 공유 · git 공유 아님). 기본 링크는 체크박스로 <b>프로젝트 전체 켜기/끄기</b>, 공유 링크는 <b>+ 폴더 탐색</b>으로 추가 · 🗑로 삭제. main 자신엔 적용되지 않아요.'
-        : 'main checkout의 deps/config를 이 worktree로 가져옵니다. 링크는 원본을 같이 쓰고, 카피는 현재 내용을 복제합니다. 끄기는 이 worktree override입니다.';
+        ? '여긴 <b>원본(main)</b> — 이 목록이 이 머신의 새 worktree에 자동 적용되고, 그대로 <b>docker-compose.yml 공유 단위</b>입니다(목록에 있으면 적용·없으면 안 함). <b>+ 폴더 탐색</b>으로 추가, <b>✕로 빼기</b>. 카피/참조는 worktree가 받을 방식이고, main 자신엔 적용되지 않아요.'
+        : 'main 의 deps/config 를 이 worktree 로 가져옵니다(목록 = 프로젝트 공유 링크, x-marina). 링크는 원본을 같이 쓰고, 카피는 현재 내용을 복제. <b>+ 폴더 탐색</b>으로 연결, <b>✕</b>로 해제.';
       back.innerHTML = `<div class="links-modal">
         <div class="links-modal-head"><strong>link — ${escapeHtml(session.alias || session.id)}</strong><button class="links-modal-x" title="닫기">✕</button></div>
         <div class="config-label" style="margin-bottom:8px">${desc}</div>
@@ -56,18 +56,20 @@
           <button class="lk-rm" data-lk-rm-ovr title="끄기 잔재 제거 — 이 워크트리 override 삭제">✕</button>
         </div>`;
       }
-      // main: 기본·발견 링크(또는 이미 끈 것)는 base 토글 체크박스 = 프로젝트 전체 켜기/끄기. 공유 링크(project)는 🗑 로 삭제.
-      const baseToggle = isMain && (l.base === 'default' || l.base === 'discovered' || l.baseOff);
-      const lead = baseToggle
-        ? `<input type="checkbox" data-lk-base ${l.baseOff ? '' : 'checked'} title="프로젝트 전체에서 이 기본 링크 켜기/끄기 — 끄면 모든 worktree 에 적용 안 함" />`
-        : isMain
-          ? '<span class="lk-shared-dot" title="공유 링크 — 이 머신의 새 worktree에 적용됨(main 자신엔 적용 안 함). 삭제는 🗑">●</span>'
-          : `<input type="checkbox" data-lk-toggle ${l.disabled ? '' : 'checked'} title="이 워크트리에서 켜기/끄기" />`;
-      return `<div class="lk-row${l.disabled ? ' off' : ''}${l.present === false ? ' missing' : ''}" data-lk-name="${escapeHtml(l.name)}">
+      // 발견(discovered): 소스에 있지만 아직 링크 설정 안 된 파생물(빌드출력·jar 등) — 기본 미선택(unchecked).
+      //   체크는 "실제 적용된 링크"만 반영. 켜야 등록(빌드출력은 보통 워크트리별 독립이라 공유 비권장).
+      // main: 기본 링크는 base 토글(프로젝트 전체 on/off). 공유 링크(project)는 ✕(빼기).
+      const isDisc = l.source === 'discovered';
+      // 리드 컨트롤 없음(메인·워크트리 동일): 목록에 있으면 적용. 연결 = + 폴더 탐색, 해제 = ✕. on/off 토글 없음.
+      //   예외 — discovered(발견된 파생물, 아직 미등록): 켜면 x-marina 에 연결(opt-in).
+      const lead = isDisc
+        ? `<input type="checkbox" data-lk-disc data-glob="${escapeHtml(r.glob || l.name)}" data-kind="${escapeHtml(r.kind || 'dir')}" title="발견됨 — 아직 미연결(파생물). 켜면 이 패턴을 링크로 연결. 빌드출력·jar 는 워크트리별 독립이라 보통 안 함" />`
+        : '<span class="lk-dot" aria-hidden="true"></span>';
+      return `<div class="lk-row${l.present === false ? ' missing' : ''}" data-lk-name="${escapeHtml(l.name)}">
         ${lead}
         <span class="lk-name" title="${escapeHtml(l.name)}">${escapeHtml(shownName)}</span>${badge}${modeBadge}${cat}${missing}
         <span class="lk-rule">${escapeHtml(ruleDisp)}</span>
-        ${removable ? '<button class="lk-rm" data-lk-rm title="공유 링크 삭제(모든 워크트리)">🗑</button>' : ''}
+        ${removable ? '<button class="lk-rm" data-lk-rm title="이 링크 빼기 — x-marina 목록에서 제거(원본 파일은 안 지움)">✕</button>' : ''}
       </div>`;
     }
     function visibleLinks(links, session) {
@@ -128,43 +130,29 @@
       body.querySelectorAll('[data-lk-tab]').forEach(btn => {
         btn.onclick = () => loadLinks(session, body, btn.dataset.lkTab);
       });
-      body.querySelectorAll('[data-lk-toggle]').forEach(cb => {
-        cb.onchange = async () => {
-          const row = cb.closest('.lk-row');
-          const on = cb.checked;
-          row.classList.toggle('off', !on);   // 제자리 반영 — 목록 통째 reload 안 함(항목 사라지는 깜빡임 제거)
-          cb.disabled = true;
-          try {
-            await linkSet(session, {service: '', name: row.dataset.lkName, scope: 'override', op: on ? 'clear' : 'disable'});   // 워크트리 레벨
-            const tabCount = body.querySelector('[data-lk-tab].active .lk-tab-count');   // 개수 칩만 갱신(행은 그대로 유지)
-            if (tabCount) tabCount.textContent = body.querySelectorAll('.lk-row').length;
-          } catch (e) { alert('실패: ' + (e.message || e)); cb.checked = on ? false : true; row.classList.toggle('off', on); }
-          finally { cb.disabled = false; }
-        };
-      });
-      body.querySelectorAll('[data-lk-base]').forEach(cb => {   // main: 기본 링크를 프로젝트 전체에서 켜기/끄기(base disable/clear)
-        cb.onchange = async () => {
-          const row = cb.closest('.lk-row');
-          const on = cb.checked;
-          row.classList.toggle('off', !on);   // 제자리 반영(깜빡임 없이)
-          cb.disabled = true;
-          try {
-            await linkSet(session, {service: '', name: row.dataset.lkName, scope: 'base', op: on ? 'clear' : 'disable'});
-          } catch (e) { alert('실패: ' + (e.message || e)); cb.checked = on ? false : true; row.classList.toggle('off', on); }
-          finally { cb.disabled = false; }
-        };
-      });
-      body.querySelectorAll('[data-lk-rm]').forEach(btn => {
+      body.querySelectorAll('[data-lk-rm]').forEach(btn => {   // ✕ 해제: x-marina 목록에서 제거(이 서브레포)
         btn.onclick = async () => {
           const row = btn.closest('.lk-row');
           const name = row.dataset.lkName;
-          if (!confirm(`공유 링크 '${name}' 삭제 — 이 프로젝트의 모든 워크트리에서 사라집니다. 계속?`)) return;
+          const sub = linksActiveSubrepo.get(linkSessionKey(session));
           btn.disabled = true;
           try {
-            await linkSet(session, {service: '', name, scope: 'base', op: 'clear'});       // 프로젝트 공유 정의 제거
-            await linkSet(session, {service: '', name, scope: 'override', op: 'clear'});    // 이 워크트리 override 도 함께 제거 — base만 지우면 override 가 행을 살려둬 "🗑만 사라지는" orphan 발생
-            await loadLinks(session, body, linksActiveSubrepo.get(linkSessionKey(session)));
+            await linkSet(session, {service: '', name, scope: 'base', op: 'clear', subrepo: sub});
+            await loadLinks(session, body, sub);
           } catch (e) { alert('실패: ' + (e.message || e)); btn.disabled = false; }
+        };
+      });
+      body.querySelectorAll('[data-lk-disc]').forEach(cb => {   // 발견 항목: 켜면 링크로 등록(base set), 끄면 해제(base clear)
+        cb.onchange = async () => {
+          const row = cb.closest('.lk-row');
+          const on = cb.checked;
+          const sub = linksActiveSubrepo.get(linkSessionKey(session));
+          cb.disabled = true;
+          try {
+            if (on) await linkSet(session, {service: '', name: row.dataset.lkName, scope: 'base', op: 'set', rule: {glob: cb.dataset.glob, kind: cb.dataset.kind || 'dir', subrepo: sub}});
+            else await linkSet(session, {service: '', name: row.dataset.lkName, scope: 'base', op: 'clear', subrepo: sub});
+            await loadLinks(session, body, sub);   // source 가 바뀌므로(discovered↔project) 재로드
+          } catch (e) { alert('실패: ' + (e.message || e)); cb.checked = !on; cb.disabled = false; }
         };
       });
       body.querySelectorAll('[data-lk-rm-ovr]').forEach(btn => {   // 끄기 잔재(dangling override) 제거
