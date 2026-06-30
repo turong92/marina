@@ -17,7 +17,7 @@ from typing import Any
 import importlib.util as _ilu
 
 from marina_state import MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_info_cache
-from marina_cache import cache_paths_by_category, disk_usage_mb
+from marina_cache import cache_items_by_category, disk_usage_mb, docker_volume_rm
 from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, marina_env, script
@@ -220,20 +220,35 @@ def restart_service(root: Path, service: str, force: bool = False) -> dict[str, 
     return {"restarted": True, "output": out[-1000:]}
 
 def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
-    by_category = cache_paths_by_category(root)
+    by_category = cache_items_by_category(root)
     if category != "all" and category not in by_category:
         raise ValueError("unknown cache category")
-    targets = [p for cat, paths in by_category.items() if category in ("all", cat) for p in paths]
+    targets = [item for cat, items in by_category.items() if category in ("all", cat) for item in items]
     removed: list[str] = []
     freed = 0
-    for path in targets:
-        size = disk_usage_mb(path) or 0
+    for item in targets:
+        size = int(item.get("sizeMb") or 0)
         try:
-            shutil.rmtree(path)
-            removed.append(str(path.relative_to(root)))
+            if item.get("type") == "volume":
+                volume = str(item.get("volume") or "")
+                docker_volume_rm(volume)
+                removed.append(volume)
+            else:
+                path = item.get("path")
+                if not isinstance(path, Path):
+                    continue
+                if not size:
+                    size = disk_usage_mb(path) or 0
+                shutil.rmtree(path)
+                try:
+                    label = os.path.relpath(os.path.realpath(str(path)), os.path.realpath(str(root))).replace(os.sep, "/")
+                except (ValueError, OSError):
+                    label = str(path)
+                removed.append(label)
             freed += size
-        except OSError as exc:
-            removed.append(f"{path.relative_to(root)} (실패: {exc})")
+        except (OSError, subprocess.CalledProcessError) as exc:
+            label = str(item.get("volume") or item.get("name") or item.get("path") or "cache")
+            removed.append(f"{label} (실패: {exc})")
     _worktree_info_cache.pop(str(root), None)
     return {"removed": removed, "freedMb": freed}
 

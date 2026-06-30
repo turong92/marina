@@ -283,7 +283,8 @@
       return [...r.slice(i).map(() => '..'), ...t.slice(i)].join('/') || '.';
     }
     // 공용 파일탐색기 — /api/browse 디렉토리 entries 를 클릭 가능한 행으로 렌더. 등록 패널·링크 모달이 공유.
-    // opts: { onEnter(childPath), onPick(name, childPath)?, pickLabel?, showGit?, showUpRow?, emptyText? }
+    // opts: { onEnter(childPath), onPick(name, childPath, row)?, multiPick?, pickedPaths?(Set), pickLabel?, selectedPath?, addedPaths?, showGit?, showUpRow?, emptyText? }
+    // multiPick: 행마다 버튼 대신 우측 체크 토글 — 이름 클릭=진입, 체크 클릭=선택 유지(다중). 이미 추가된 건 ✓ 잠금.
     function renderBrowseEntries(listEl, data, opts) {
       const o = opts || {};
       listEl.innerHTML = '';
@@ -297,13 +298,27 @@
         const child = data.path.replace(/\/$/, '') + '/' + e.name;
         const row = document.createElement('div');
         row.className = 'browse-row';
+        const added = !!(o.addedPaths && o.addedPaths.has && o.addedPaths.has(child));
+        const picked = !!(o.pickedPaths && o.pickedPaths.has && o.pickedPaths.has(child));
+        const selected = o.multiPick ? picked : (o.selectedPath === child);
+        row.classList.toggle('selected', selected);
+        row.classList.toggle('added', added);
         const git = (o.showGit && e.isGitRepo) ? '<span class="repo-badge">git</span>' : '';
-        const pickBtn = o.onPick ? `<button class="fb-pick" type="button">${escapeHtml(o.pickLabel || '선택')}</button>` : '';
-        row.innerHTML = `<span class="fb-enter">📁 ${escapeHtml(e.name)}</span>${git}${pickBtn}`;
-        if (o.onPick) {
+        if (o.multiPick && o.onPick) {
+          const mark = added ? '✓' : (picked ? '✓' : '+');
+          const aria = added ? '이미 추가됨' : (picked ? '선택 해제' : '선택');
+          row.innerHTML = `<span class="fb-enter">📁 ${escapeHtml(e.name)}</span>${git}`
+            + `<button class="fb-check${picked ? ' on' : ''}${added ? ' added' : ''}" type="button" title="${aria}" aria-pressed="${picked || added}"${added ? ' disabled' : ''}>${mark}</button>`;
           row.querySelector('.fb-enter').onclick = () => o.onEnter(child);
-          row.querySelector('.fb-pick').onclick = () => o.onPick(e.name, child);
+          const chk = row.querySelector('.fb-check');
+          if (!added) chk.onclick = (ev) => { ev.stopPropagation(); o.onPick(e.name, child, row); };
+        } else if (o.onPick) {
+          const label = added ? '추가됨' : (selected ? '선택됨' : (o.pickLabel || '선택'));
+          row.innerHTML = `<span class="fb-enter">📁 ${escapeHtml(e.name)}</span>${git}<button class="fb-pick" type="button">${escapeHtml(label)}</button>`;
+          row.querySelector('.fb-enter').onclick = () => o.onEnter(child);
+          row.querySelector('.fb-pick').onclick = () => o.onPick(e.name, child, row);
         } else {
+          row.innerHTML = `<span class="fb-enter">📁 ${escapeHtml(e.name)}</span>${git}`;
           row.onclick = () => o.onEnter(child);
         }
         listEl.appendChild(row);

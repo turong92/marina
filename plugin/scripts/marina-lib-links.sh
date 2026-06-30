@@ -12,7 +12,7 @@
 _DEFAULT_LINKS_JSON='{"node_modules":{"glob":"node_modules","kind":"dir"},".venv":{"glob":".venv","kind":"dir"},"local-yml":{"glob":"*local.yml","kind":"file"},"local-env":{"glob":".env*.local","kind":"file"}}'
 
 # 프로젝트 단위 커스텀 base 링크(~/.marina/<id>/links.json = {name: rule}) — 모든 워크트리 공유, 앱 레포 불변.
-# 대시보드 탐색기 등록이 여기 저장. rule 은 {glob,kind[,subrepo]} — subrepo 는 optional(구조 열어둠, 비면 전 서브레포).
+# 대시보드 탐색기 등록이 여기 저장. rule 은 {glob,kind[,mode,subrepo]} — mode=copy 면 복제, 비면 symlink.
 central_links_json() {
   python3 - "$ROOT" "$SOURCE_ROOT" "$PROJECTS_FILE" "$MARINA_HOME" <<'PY'
 import json, os, sys
@@ -42,7 +42,7 @@ PY
 }
 
 # glob 링크 룰(기본 < 프로젝트 공유 < service.links < 워크트리 override) 을 service 의 서브레포(cwd 첫 segment) 기준으로 적용.
-# glob 링크 룰만 (heavy-dir 심링크). idempotent·best-effort. source==dest(main)면 skip.
+# mode=copy 는 복제, 그 외는 symlink. idempotent·best-effort. source==dest(main)면 skip.
 apply_glob_links() {
   local service="$1" stored="${2:-}" cp="${3:-}" cwd _xml=""
   cwd="$(service_json_field "$service" cwd)"
@@ -85,7 +85,8 @@ else:                                  # 레거시 fallback: 기본<central<serv
             rules[k] = v
     for k, r in rules.items():
         if isinstance(r, dict) and r.get("glob"):
-            ops.append((r["glob"], "symlink"))
+            op = "copy" if r.get("mode") == "copy" or r.get("op") == "copy" else "symlink"
+            ops.append((r["glob"], op))
 if not ops:
     sys.exit(0)
 src_base = os.path.join(source_root, sub) if sub != "." else source_root
@@ -162,21 +163,33 @@ links_json() {
 import json, sys, os, fnmatch
 data = json.loads(sys.argv[1]); service = sys.argv[2]; ovr_path = sys.argv[3]
 defaults = json.loads(sys.argv[4])
-central = json.loads(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5].strip() else {}
+central_raw = json.loads(sys.argv[5]) if len(sys.argv) > 5 and sys.argv[5].strip() else {}
 source_root = sys.argv[6] if len(sys.argv) > 6 else ""
 root = sys.argv[7] if len(sys.argv) > 7 else ""
 cwd = sys.argv[8] if len(sys.argv) > 8 else "."
 subrepo = sys.argv[9] if len(sys.argv) > 9 else ""   # 명시 서브레포(compose 정밀 present) — 있으면 cwd 대신
 svc = next((s for s in data.get("services", []) if s.get("name") == service), None) or {}
 svc_links = svc.get("links") or {}
+sub = subrepo if subrepo else (cwd.split("/")[0] if cwd and cwd != "." else ".")
+central = {}
+for k, v in central_raw.items():                        # 프로젝트 공유 링크가 특정 subrepo 용이면 해당 탭에서만 표시
+    if isinstance(v, dict) and v.get("subrepo") and v.get("subrepo") != sub:
+        continue
+    central[k] = v
 base = dict(defaults); base.update(central); base.update(svc_links)   # 기본 < 프로젝트 커스텀(central) < 앱레포 service
 try:
     ov = json.load(open(ovr_path, encoding="utf-8"))
-    olinks = {**((ov.get("links") or {}).get("") or {}), **((ov.get("links") or {}).get(service) or {})}   # 워크트리레벨("")+서비스별(우선)
+    olinks_raw = {**((ov.get("links") or {}).get("") or {}), **((ov.get("links") or {}).get(service) or {})}   # 워크트리레벨("")+서비스별(우선)
 except Exception:
-    olinks = {}
+    olinks_raw = {}
+olinks = {}
+for k, v in olinks_raw.items():
+    if isinstance(v, dict) and v.get("subrepo") and v.get("subrepo") != sub:
+        continue
+    if v is None and sub != "." and isinstance(k, str) and "/" in k and not k.startswith(sub + "/"):
+        continue
+    olinks[k] = v
 # 존재 검사용 — 소스 서브레포(명시 subrepo > cwd 첫 segment) 의 dir 이름·파일 이름 수집(heavy prune·cap)
-sub = subrepo if subrepo else (cwd.split("/")[0] if cwd and cwd != "." else ".")
 src_base = os.path.join(source_root, sub) if sub != "." else source_root
 dst_base = os.path.join(root, sub) if sub != "." else root
 dst_base_real = os.path.realpath(dst_base) if dst_base else ""
@@ -224,6 +237,14 @@ for name in list(base.keys()) + [k for k in olinks if k not in base]:
     if not isinstance(name, str):
         continue
     overridden = name in olinks
+    base_off = name in central and central[name] is None   # 프로젝트 전체 끄기(main 에서 base disable) — 모든 워크트리 제외
+    if base_off:
+        src = "default" if name in defaults else "project"
+        out.append({"name": name, "source": src, "disabled": True, "baseOff": True,
+                    "rule": defaults.get(name) or {}, "base": src,
+                    "present": present(defaults.get(name) or {}),
+                    "category": categorize(name, defaults.get(name) or {}), "dangling": False})
+        continue
     disabled = overridden and olinks[name] is None
     rule = (olinks[name] if (overridden and not disabled) else base.get(name)) or {}
     if name in svc_links:
@@ -233,8 +254,9 @@ for name in list(base.keys()) + [k for k in olinks if k not in base]:
     else:
         src = "default"
     source = "override" if overridden else src
-    out.append({"name": name, "source": source, "disabled": disabled, "rule": rule,
-                "base": src, "present": present(rule), "category": categorize(name, rule)})
+    dangling = overridden and name not in base   # 가리킬 기본/공유 정의가 없는 override = 끄기 잔재(공유 링크 삭제 후 override 만 남음)
+    out.append({"name": name, "source": source, "disabled": disabled, "baseOff": False, "rule": rule,
+                "base": src, "present": present(rule), "category": categorize(name, rule), "dangling": dangling})
 # 소스에 존재하는 빌드출력은 설정엔 없어도 노출(source=discovered) — 위저드가 "제외(독립 빌드)" 로 안내
 configured = set(base) | set(olinks)
 for bd in sorted(BUILD):

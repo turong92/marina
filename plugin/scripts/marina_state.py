@@ -126,7 +126,7 @@ _total_mem_mb_cache: list[int] = []
 
 _status_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
-_SUBREPO_MAP_CACHE: dict = {}   # str(stored compose path) → (mtime, submap{service:subrepo}, buildPaths{service:dfpath}) — 폴링마다 config 안 돌게(degraded 존재판정은 매 poll)
+_SUBREPO_MAP_CACHE: dict = {}   # (stored compose path, root realpath) → (mtime, submap{service:subrepo}, buildPaths{service:dfpath}) — 폴링마다 config 안 돌게(degraded 존재판정은 매 poll)
 
 _worktree_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 

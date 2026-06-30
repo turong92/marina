@@ -51,13 +51,13 @@
     function renderCacheDetails(area, session, wt) {
       const cats = Object.entries(wt?.cacheCats ?? {}).filter(([, mb]) => mb > 0);
       area.innerHTML = cats.length ? cats.map(([cat, mb]) =>
-        `<div>${CACHE_CAT_LABEL[cat] ?? cat} — ${(mb / 1024).toFixed(1)}GB <button data-clear-cat="${cat}">Clear</button></div>`
+        `<div>${escapeHtml(CACHE_CAT_LABEL[cat] ?? cat)} — ${(mb / 1024).toFixed(1)}GB <button data-clear-cat="${escapeHtml(cat)}">Clear</button></div>`
       ).join('') : '회수할 캐시 없음';
       for (const btn of area.querySelectorAll('[data-clear-cat]')) {
         btn.onclick = () => {
           const cat = btn.dataset.clearCat;
           const mb = wt?.cacheCats?.[cat] ?? 0;
-          if (!confirm(`${session.alias || session.id} 의 ${cat} 캐시(${(mb / 1024).toFixed(1)}GB)를 비울까?\n다음 dev 시작 때 재생성돼. ${cat} 서비스 구동 중이면 거부돼.`)) return;
+          if (!confirm(`${session.alias || session.id} 의 ${cat} 캐시(${(mb / 1024).toFixed(1)}GB)를 비울까?\n다음 dev 시작 때 재생성돼. Docker volume 이 사용 중이면 거부돼.`)) return;
           withBusy(btn, 'Clearing…', async () => {
             const result = await api('/api/clear-cache', {
               method: 'POST',
@@ -80,6 +80,7 @@
     };
     function pillState(svc) {
       if (svc.degraded) return {text: '비활성', cls: 'bad', title: 'Dockerfile 없음 — 이 서비스만 기동에서 건너뜁니다(나머지는 정상). compose 편집에서 Dockerfile 을 추가하거나 이 서비스를 빼세요.'};
+      if (svc.external) return {text: `외부 :${svc.port}`, cls: 'run', title: `marina 컨테이너가 아닌 외부 프로세스가 포트 ${svc.port} 를 사용 중 — 직접(node·gradlew 등)으로 띄운 dev 서버로 보입니다. marina 로 관리하려면 그 프로세스를 끄고 ▶ 로 시작하세요.`};
       if (!svc.running) return {text: '꺼짐', cls: 'stop', title: '정지됨'};
       return HEALTH_PILLS[svc.health] ?? HEALTH_PILLS.ok;
     }
@@ -178,25 +179,22 @@
             metaPills.push(`<span class="pill-stat ahead" title="main 에 없는 이 세션 커밋${srcTitle} — Remove 해도 브랜치는 보존">↑ ${wt.aheadTotal}${escapeHtml(src)}</span>`);
           }
         }
+        let branchRow = '';
         if (wt?.branches && Object.keys(wt.branches).length) {
-          // 브랜치 칩은 "함정 신호"일 때만 — 기본(전 레포 단일 브랜치 = claude/<id>)이면 생략(보조줄과 중복).
-          // main 카드에 비-main 이 섞이거나(offMain), 레포마다 브랜치가 다르면(mixed) 커밋이 엉뚱한 곳으로 가는 함정.
-          const fullMap = Object.entries(wt.branches).map(([repo, branch]) => `${repo}=${branch}`).join(' · ');
+          // 브랜치는 항상 보이는 전용 줄로 — 어느 브랜치를 체크아웃 중인지 한눈에. 길면 줄바꿈(안 잘림).
+          // 레포마다 다르거나(mixed), main 세션에 비-main 이 섞이면(offMain) 경고색 — 커밋이 엉뚱한 곳으로 갈 함정.
+          const entries = Object.entries(wt.branches);
+          const fullMap = entries.map(([repo, branch]) => `${repo}=${branch}`).join(' · ');
           const uniqueBranches = [...new Set(Object.values(wt.branches))];
           const offMain = session.source === 'main' && uniqueBranches.some(branch => branch !== 'main');
           const mixed = uniqueBranches.length > 1;
-          if (offMain || mixed) {
-            const grouped = {};
-            for (const [repo, branch] of Object.entries(wt.branches)) {
-              if (session.source === 'main' && branch === 'main') continue;
-              (grouped[branch] ??= []).push(repo);
-            }
-            const parts = Object.entries(grouped).map(([branch, repos]) =>
-              repos.length === Object.keys(wt.branches).length ? branch : `${branch} (${repos.join('·')})`);
-            if (parts.length) {
-              riskPills.push(`<span class="pill-stat pill-branch warn" title="체크아웃 브랜치 — ${escapeHtml(fullMap)} · 레포마다 브랜치가 달라 커밋이 의도와 다른 곳으로 갈 수 있음">⎇ ${escapeHtml(parts.join(' · '))}</span>`);
-            }
-          }
+          const grouped = {};
+          for (const [repo, branch] of entries) (grouped[branch] ??= []).push(repo);
+          const parts = Object.entries(grouped).map(([branch, repos]) =>
+            repos.length === entries.length ? escapeHtml(branch) : `${escapeHtml(branch)} <span class="br-repos">${escapeHtml(repos.join('·'))}</span>`);
+          const warnTitle = mixed ? ' · 레포마다 브랜치가 달라 커밋이 의도와 다른 곳으로 갈 수 있음'
+                          : offMain ? ' · main 세션인데 비-main 브랜치가 섞임' : '';
+          branchRow = `<div class="branch-row${(offMain || mixed) ? ' warn' : ''}" title="체크아웃 브랜치 — ${escapeHtml(fullMap)}${warnTitle}"><span class="br-ic" aria-hidden="true">⎇</span><span class="br-text">${parts.join('<span class="br-sep"> · </span>')}</span></div>`;
         }
         if (session.webPortConflictWith?.length) {
           const conflictText = `⚠ 포트 충돌: ${session.webPortConflictWith.map(escapeHtml).join(', ')}`;
@@ -224,11 +222,11 @@
               </div>
               <div class="session-tools">
                 ${session.kind === 'compose' ? '<button data-edit-compose title="compose 편집 — 보관된 docker-compose.yml 수정 후 저장">✎</button>' : ''}
-                ${wt && wt.cacheMb > 50 ? '<button data-clear-cache title="Clear cache — 빌드 캐시 전체 회수. 카테고리별 회수는 캐시 칩 클릭">♻</button>' : ''}
-                <button data-cleanup class="icon" title="Cleanup — 로그·pid·포트설정·alias 리셋 (코드는 무관)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20h-10.5l-4.21 -4.3a1 1 0 0 1 0 -1.41l10 -10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 0 1.41l-9.2 9.3"/><path d="M18 13.3l-6.3 -6.3"/></svg></button>
+                ${wt && wt.cacheMb > 50 ? '<button data-clear-cache title="Clear cache — compose에서 찾은 재생성 캐시 전체 회수. 카테고리별 회수는 캐시 칩 클릭">♻</button>' : ''}
                 ${session.source === 'main' ? '' : '<button data-remove class="danger" title="Remove — worktree 삭제. 미머지 브랜치는 보존, 변경분은 confirm 후 폐기">✕</button>'}
               </div>
             </div>
+            ${branchRow}
             ${renderServiceChips(session)}
             ${actionStrip}
             ${riskPills.length ? `<div class="risk-row">${riskPills.join('')}</div>` : ''}
@@ -276,8 +274,6 @@
         stopAllBtn.onclick = () => withBusy(stopAllBtn, '…', () => sessionAction('stop-all', session), toolButtons);
         const startAllBtn = card.querySelector('[data-start-all]');       // compose: 항상 표시(미실행·include 미해석 시에도 전체 시작 가능)
         if (startAllBtn) startAllBtn.onclick = () => withBusy(startAllBtn, '…', () => sessionAction('start-all', session), toolButtons);
-        const cleanupBtn = card.querySelector('[data-cleanup]');
-        cleanupBtn.onclick = () => withBusy(cleanupBtn, '…', () => sessionAction('cleanup', session), toolButtons);
         const editComposeBtn = card.querySelector('[data-edit-compose]');
         if (editComposeBtn) editComposeBtn.onclick = (e) => { e.stopPropagation(); openComposeEdit(session.root); };
         const changesToggles = card.querySelectorAll('[data-changes-toggle]');
@@ -321,7 +317,7 @@
         if (clearCacheBtn) {
           clearCacheBtn.onclick = () => {
             const cacheGb = ((wtByRoot.get(session.root)?.cacheMb || 0) / 1024).toFixed(1);
-            if (!confirm(`${session.alias || session.id} 의 빌드 캐시(${cacheGb}GB)를 비울까?\n다음 dev 시작 때 재생성돼. 서비스 구동 중이면 거부돼.`)) return;
+            if (!confirm(`${session.alias || session.id} 의 재생성 캐시(${cacheGb}GB)를 비울까?\n다음 dev 시작 때 재생성돼. Docker volume 이 사용 중이면 거부돼.`)) return;
             withBusy(clearCacheBtn, '…', async () => {
               const result = await api('/api/clear-cache', {
                 method: 'POST',

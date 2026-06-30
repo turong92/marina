@@ -14,7 +14,12 @@ import json, os, re, sys
 def ok(p):
     p = os.path.expanduser(p or "")
     return bool(p) and os.path.isfile(os.path.join(p, "scripts", "marina-entrypoint.sh"))
+def is_dev(p):
+    p = os.path.realpath(os.path.expanduser(p or ""))
+    return os.path.basename(p) == "plugin" and os.path.isdir(os.path.join(os.path.dirname(p), ".git"))
 cands = []
+if len(sys.argv) > 1 and is_dev(sys.argv[1]):
+    cands.append(sys.argv[1])   # source checkout launcher: keep serving the editable dev tree
 for mf in [os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude") + "/plugins/installed_plugins.json"),
            os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex") + "/plugins/installed_plugins.json")]:
     try:
@@ -57,7 +62,12 @@ import json, os, re, sys
 def ok(p):
     p = os.path.expanduser(p or "")
     return bool(p) and os.path.isfile(os.path.join(p, "scripts", "marina-entrypoint.sh"))
+def is_dev(p):
+    p = os.path.realpath(os.path.expanduser(p or ""))
+    return os.path.basename(p) == "plugin" and os.path.isdir(os.path.join(os.path.dirname(p), ".git"))
 cands = []
+if len(sys.argv) > 1 and is_dev(sys.argv[1]):
+    cands.append(sys.argv[1])   # source checkout launcher: keep serving the editable dev tree
 for mf in [os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR", "~/.claude") + "/plugins/installed_plugins.json"),
            os.path.expanduser(os.environ.get("CODEX_HOME", "~/.codex") + "/plugins/installed_plugins.json")]:
     try:
@@ -72,7 +82,7 @@ try:
         cands += [os.path.join(s.group(1), "plugin"), s.group(1)]
 except Exception:
     pass
-if len(sys.argv) > 1 and sys.argv[1]:
+if len(sys.argv) > 1 and sys.argv[1] and not is_dev(sys.argv[1]):
     cands.append(sys.argv[1])   # 설치 시점 경로(fallback)
 for c in cands:
     if ok(c):

@@ -35,13 +35,31 @@ mrun link >/dev/null 2>&1
 [[ "$(cat "$P/node_modules/dep/i.js")" == m ]] || { echo "FAIL: symlink content unreachable"; exit 1; }
 
 # 2) override null 로 node_modules 만 끔 (.venv 는 계속)
-rm -rf "$P/node_modules" "$P/.venv"
+mkdir -p "$SRC/copy-me"
+echo c > "$SRC/copy-me/value.txt"
+rm -rf "$P/node_modules" "$P/.venv" "$P/copy-me"
 cat > "$SDIR/overrides.json" <<JSON
 {"version":1,"links":{"app":{"node_modules":null}}}
 JSON
 mrun link >/dev/null 2>&1
 [[ ! -e "$P/node_modules" ]] || { echo "FAIL: node_modules linked despite null override"; exit 1; }
 [[ -L "$P/.venv" ]] || { echo "FAIL: .venv should still link"; exit 1; }
+
+# 2b) 대시보드 탐색기 copy mode — central links.json mode=copy 는 symlink 가 아니라 복제
+PID="$(python3 -c "import json; print(json.load(open('$MARINA_HOME/projects.json'))['projects'][0]['id'])")"
+mkdir -p "$MARINA_HOME/$PID"
+cat > "$MARINA_HOME/$PID/links.json" <<'JSON'
+{"version":1,"links":{"copy-me":{"glob":"copy-me","kind":"dir","mode":"copy"}}}
+JSON
+mrun link >/dev/null 2>&1
+[[ -d "$P/copy-me" && ! -L "$P/copy-me" ]] || { echo "FAIL: mode=copy should create a real copied directory"; exit 1; }
+[[ "$(cat "$P/copy-me/value.txt")" == c ]] || { echo "FAIL: copied directory content unreachable"; exit 1; }
+pjc="$(cd "$P" && MARINA_HOME="$MARINA_HOME" SOURCE_ROOT="$SRC" bash "$SH" links-json app)"
+echo "$pjc" | python3 -c "
+import json, sys
+m = {l['name']: l for l in json.load(sys.stdin)}
+assert m['copy-me']['rule']['mode'] == 'copy', m['copy-me']
+" || { echo "FAIL: copy mode not shown in links-json"; exit 1; }
 
 # 3) claude worktree가 SOURCE_ROOT 아래에 있어도 dst/worktree 하위로 재귀 링크하지 않음
 PN="$SRC/.claude/worktrees/wt"

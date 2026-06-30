@@ -21,7 +21,7 @@ from marina_logtext import redact_text
 from marina_cache import cache_category_mb, disk_usage_mb
 from marina_registry import default_attach_of, discover_all_roots, discover_roots, is_source_checkout, project_for, project_label, root_source, subrepos_of
 from marina_paths import ensure_current_log, log_run_payload, read_config, read_meta, session_dir, session_id
-from marina_compose_svc import _compose_services, compose_service_names
+from marina_compose_svc import _compose_services, compose_service_names, compose_service_subrepos
 
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(["git", *args], cwd=str(cwd), text=True, stderr=subprocess.STDOUT)
@@ -53,11 +53,23 @@ def _repo_status_entry(name: str, path: Path, lines: list[str]) -> dict[str, Any
             "changes": lines[:80], "changeCount": len(lines),
             "trackedCount": len(lines) - untracked, "untrackedCount": untracked}
 
+def compose_scoped_subrepos(root: Path) -> list[str]:
+    subs = subrepos_of(root)
+    project = project_for(root)
+    if not project or project.get("kind", "compose") != "compose":
+        return subs
+    try:
+        used = {name for name in compose_service_subrepos(root, project).values() if name and name != "."}
+    except Exception:
+        used = set()
+    return [repo for repo in subs if repo in used] if used else subs
+
 def worktree_status(root: Path) -> dict[str, Any]:
     repos: list[dict[str, Any]] = []
-    subrepos = subrepos_of(root)
-    repos.append(_repo_status_entry(project_label(root), root, status_lines(root, {*subrepos, ".workspace"})))
-    for repo in subrepos:
+    all_subrepos = subrepos_of(root)
+    scan_subrepos = compose_scoped_subrepos(root)
+    repos.append(_repo_status_entry(project_label(root), root, status_lines(root, {*all_subrepos, ".workspace"})))
+    for repo in scan_subrepos:
         path = root / repo
         if not path.exists():
             repos.append({"name": repo, "path": str(path), "missing": True, "broken": False,
@@ -355,6 +367,7 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
 
     is_main = is_source_checkout(root)
     subs = subrepos_of(root)
+    scan_subs = compose_scoped_subrepos(root)
     # 물리 attach 상태(fs 판정). main 체크아웃은 원본 클론이라 전부 attach 로 본다.
     attached_subrepos = list(subs) if is_main else [s for s in subs if (root / s / ".git").exists()]
     default_explicit = default_attach_of(root)
@@ -363,7 +376,7 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
     ahead: dict[str, int] = {}
     branches: dict[str, str] = {}
     # claude worktree 는 서브레포가 없는 경우가 많아 root 레포도 활동·ahead 에 포함
-    repos_to_scan = [(project_label(root), root)] + [(name, root / name) for name in subrepos_of(root)]
+    repos_to_scan = [(project_label(root), root)] + [(name, root / name) for name in scan_subs]
     for repo_name, repo in repos_to_scan:
         if not (repo / ".git").exists():
             continue

@@ -16,9 +16,46 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import MARINA_HOME, _SUBREPO_MAP_CACHE, _mc
+from marina_state import MARINA_HOME, _SUBREPO_MAP_CACHE, _bin, _mc
 from marina_dockerfile import _detect_injections, _prebuild_suggest, detect_profile_var, is_profile_var
 from marina_paths import log_run_payload, service_log, session_id
+
+def _docker_cmd(*args: str) -> list[str]:
+    return [_bin("docker"), *args]
+
+def _service_host_ports(svc_cfg: Any) -> dict[str, list[int]]:
+    """compose config(서비스) → {pub: publish된 호스트포트, tgt: 컨테이너(앱) 포트}. 포트 기반 liveness 용.
+    pub 은 어느 세션에서나 격리 호스트포트라 안전. tgt 는 직접 실행(npm/node) 시 앱이 host 에 바인딩하는 포트 — main 에서만 fallback."""
+    pub: list[int] = []
+    tgt: list[int] = []
+    def _add(lst, v):
+        try:
+            if v not in (None, ""):
+                lst.append(int(str(v)))
+        except (TypeError, ValueError):
+            pass
+    for p in ((svc_cfg or {}).get("ports") if isinstance(svc_cfg, dict) else None) or []:
+        if isinstance(p, dict):
+            _add(pub, p.get("published")); _add(tgt, p.get("target"))
+        elif isinstance(p, str):                       # "3000:3000" · "127.0.0.1:3000:3000" · "3000"
+            parts = p.split(":")
+            _add(tgt, parts[-1])
+            if len(parts) >= 2:
+                _add(pub, parts[-2])
+    return {"pub": sorted(set(pub)), "tgt": sorted(set(tgt))}
+
+def _port_listening(port: int) -> bool:
+    """로컬에서 그 TCP 포트를 누가 listen 중인지(연결 가능 여부). docker 컨테이너 밖(직접 node/gradle 실행)도 감지."""
+    import socket
+    for family, addr in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+        try:
+            with socket.socket(family, socket.SOCK_STREAM) as s:
+                s.settimeout(0.25)
+                if s.connect_ex((addr, port)) == 0:
+                    return True
+        except OSError:
+            pass
+    return False
 
 def _yaml_without_external_includes(yaml_text: str) -> str:
     """compose_validate 전용 — `.workspace/external` 를 가리키는 include 항목 제거.
@@ -54,8 +91,8 @@ def compose_validate(yaml_text: str, project_dir: Path,
         f.write_text(_yaml_without_external_includes(yaml_text), encoding="utf-8")
         try:
             r = subprocess.run(
-                ["docker", "compose", "-f", str(f), "--project-directory", str(project_dir),
-                 "config", "--format", "json"],
+                _docker_cmd("compose", "-f", str(f), "--project-directory", str(project_dir),
+                            "config", "--format", "json"),
                 capture_output=True, text=True, env=env)
         except FileNotFoundError:
             return {"ok": False,
@@ -113,6 +150,7 @@ def build_compose_services(ps_rows: list) -> list:
             "port": str(min(pubs)) if pubs else None,
             "running": health is not None,
             "health": health,
+            "external": False,
             "trackedPid": None,
             "trackedAlive": False,
             "listenerPids": [],
@@ -131,7 +169,7 @@ def compose_ps(root: Path, project_name: str) -> list:
     --all 로 정지 컨테이너도 포함(대시보드에서 재기동 가능)."""
     try:
         out = subprocess.check_output(
-            ["docker", "compose", "-p", project_name, "ps", "--all", "--format", "json"],
+            _docker_cmd("compose", "-p", project_name, "ps", "--all", "--format", "json"),
             cwd=str(root), text=True, stderr=subprocess.DEVNULL, timeout=5,
         )
     except Exception:
@@ -214,7 +252,7 @@ def _subrepo_label_from_context(ctx, root: Path) -> str:
         return parts[2]
     return parts[0]
 
-def _compose_config_maps(root: Path, project: dict) -> tuple[dict, dict]:
+def _compose_config_maps(root: Path, project: dict) -> tuple[dict, dict, dict]:
     """보관 compose 를 `docker compose config` 로 한 번 해석 → (서비스→서브레포 라벨 맵, degraded 맵{svc: 없는 Dockerfile 경로}).
     config 결과(submap·build Dockerfile 경로)는 보관 compose mtime 으로 캐시(폴링마다 docker 안 돌림).
     degraded(파일 존재)는 매 poll 재판정 — Dockerfile 추가/삭제를 즉시 반영(코덱스 리뷰 #2). config 실패(미attach 등) → 직전 캐시/빈."""
@@ -222,32 +260,35 @@ def _compose_config_maps(root: Path, project: dict) -> tuple[dict, dict]:
         sp = MARINA_HOME / str(project["id"]) / project.get("composeFile", "docker-compose.yml")
         mtime = sp.stat().st_mtime
     except (OSError, KeyError):
-        return {}, {}
-    key = str(sp)
+        return {}, {}, {}
+    key = (str(sp), os.path.realpath(str(root)))
     hit = _SUBREPO_MAP_CACHE.get(key)
     if hit and hit[0] == mtime and hit[1]:
-        submap, build_paths = hit[1], hit[2]
+        submap, build_paths, port_map = hit[1], hit[2], (hit[3] if len(hit) > 3 else {})
     else:
-        submap, build_paths = {}, {}
+        submap, build_paths, port_map = {}, {}, {}
         try:
             out = subprocess.check_output(
-                ["docker", "compose", "-f", str(sp), "--project-directory", str(root),
-                 "config", "--format", "json"],
+                _docker_cmd("compose", "-f", str(sp), "--project-directory", str(root),
+                            "config", "--format", "json"),
                 text=True, stderr=subprocess.DEVNULL, timeout=8)
             config = json.loads(out)
             for sname, svc in (config.get("services") or {}).items():
                 b = (svc or {}).get("build")
                 ctx = b.get("context") if isinstance(b, dict) else (b if isinstance(b, str) else None)
                 submap[sname] = _subrepo_label_from_context(ctx, root)
+                hp = _service_host_ports(svc)
+                if hp["pub"] or hp["tgt"]:
+                    port_map[sname] = hp
             build_paths = _mc().build_dockerfile_paths(config)   # 경로만(존재 여부 X) → 캐시 가능
         except Exception:
             if not hit:
-                return {}, {}
-            submap, build_paths = hit[1], hit[2]                 # config 실패 → 직전 캐시 유지
+                return {}, {}, {}
+            submap, build_paths, port_map = hit[1], hit[2], (hit[3] if len(hit) > 3 else {})  # config 실패 → 직전 캐시 유지
         if submap:
-            _SUBREPO_MAP_CACHE[key] = (mtime, submap, build_paths)
+            _SUBREPO_MAP_CACHE[key] = (mtime, submap, build_paths, port_map)
     degraded = {svc: p for svc, p in build_paths.items() if not os.path.exists(p)}   # 매 poll 재판정(Dockerfile 추가/삭제 즉시 반영)
-    return submap, degraded
+    return submap, degraded, port_map
 
 def compose_service_subrepos(root: Path, project: dict) -> dict:
     """서비스 → 서브레포 라벨 (하위호환 래퍼 — _compose_config_maps 의 submap)."""
@@ -284,8 +325,8 @@ def compose_resolved_view(root: Path, project: dict) -> dict:
         return {"ok": False, "error": f"보관 compose 없음: {sp}"}
     try:   # stdout/stderr 분리 — docker 경고(version obsolete 등)가 JSON 에 섞이면 안 됨
         proc = subprocess.run(
-            ["docker", "compose", "-f", str(sp), "--project-directory", str(root),
-             "config", "--format", "json"],
+            _docker_cmd("compose", "-f", str(sp), "--project-directory", str(root),
+                        "config", "--format", "json"),
             capture_output=True, text=True, timeout=12)
     except FileNotFoundError:
         return {"ok": False, "error": "docker 미설치"}
@@ -372,11 +413,12 @@ def _compose_services(root: Path, project: dict) -> list:
     """compose-kind 워크트리 서비스 = docker compose ps 라이브 + 정의됐지만 미실행 서비스(보관 compose)도 표시.
     중지 서비스도 행으로 보여 ▶ 시작 가능. log/logRuns 는 네이티브 헬퍼 재사용 → 로그 뷰어 그대로. /api/sessions 절대 500 금지."""
     try:
+        is_main = session_id(root) == "main"            # 원본 checkout — 직접 실행(npm/node) dev 가 흔해 포트 fallback 폭 넓힘
         name = _mc().compose_project_name(project.get("id", ""), session_id(root))
         live_rows = compose_ps(root, name)
         live_names = {(r.get("Service") or r.get("Name")) for r in live_rows
                       if isinstance(r, dict) and (r.get("Service") or r.get("Name"))}
-        submap, degraded = _compose_config_maps(root, project)  # 서비스→서브레포(빌드 컨텍스트) + Dockerfile 없는 서비스(비활성). include 해석분 포함.
+        submap, degraded, port_map = _compose_config_maps(root, project)  # 서비스→서브레포(빌드 컨텍스트) + Dockerfile 없는 서비스(비활성) + 서비스→호스트포트. include 해석분 포함.
         defined = set(_compose_defined_services(project)) | set(submap)   # 직접 정의 + include 해석분(정지 상태도 표시)
         stub_rows = [{"Service": s, "State": "stopped"}        # 미실행 정의 서비스 → OFF 행(▶)
                      for s in sorted(defined) if s not in live_names]
@@ -391,6 +433,15 @@ def _compose_services(root: Path, project: dict) -> list:
             s["logRuns"] = log_run_payload(root, s["service"])
             _svc_ba = ba_all.get(s["service"]) if isinstance(ba_all.get(s["service"]), dict) else {}
             s["profile"] = _profile_value(_svc_ba)
+            if not s["running"] and not s["degraded"]:   # compose 컨테이너로는 안 도는데 그 서비스 포트를 누가 listen → 외부/직접 실행으로 점등(예: main 에서 node 로 직접 dev)
+                pm = port_map.get(s["service"], {})
+                ports = list(pm.get("pub") or [])
+                if is_main:                               # main 은 직접 실행(npm/node)이 흔해 앱 포트(tgt)도 확인 — worktree 는 격리 host포트(pub)만(공유포트 오탐 방지)
+                    ports += [p for p in (pm.get("tgt") or []) if p not in ports]
+                for hp in ports:
+                    if _port_listening(hp):
+                        s["running"], s["health"], s["external"], s["port"] = True, "ok", True, str(hp)
+                        break
         return svcs
     except Exception:
         return []

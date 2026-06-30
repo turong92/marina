@@ -121,7 +121,6 @@
     }
 
     async function sessionAction(type, session) {
-      if (type === 'cleanup' && !confirm(`${session.alias || session.id} 세션을 리셋할까?\n(로그·pid·포트 설정·alias 삭제 — 코드/worktree 는 무관)`)) return;
       await api(`/api/${type}`, {
         method: 'POST',
         headers: {'content-type': 'application/json'},

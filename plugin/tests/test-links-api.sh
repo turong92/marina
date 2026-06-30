@@ -8,6 +8,7 @@ cleanup() { [[ -n "$SRV" ]] && kill "$SRV" 2>/dev/null || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 export MARINA_HOME="$TMP/home"
 P="$TMP/wt"; mkdir -p "$P" "$TMP/src" "$MARINA_HOME/proj"
+mkdir -p "$P/web/dist" "$P/api/dist"
 cat > "$MARINA_HOME/proj/docker-compose.yml" <<'YML'
 services:
   web:
@@ -88,8 +89,49 @@ m = {l['name']: l for l in json.load(sys.stdin)['links']}
 assert m['dist']['source'] == 'project', m   # central base = project source(모든 워크트리 공유)
 " || { echo "FAIL: base not project source"; exit 1; }
 
-# 7) base 는 disable 불가(끄기는 override) → 4xx
-code="$(curl -s -o /dev/null -w '%{http_code}' "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"dist\",\"op\":\"disable\",\"scope\":\"base\"}")"
-[[ "$code" == 4* ]] || { echo "FAIL: base disable should 4xx (got $code)"; exit 1; }
+# 7) subrepo-scoped base 링크는 해당 subrepo 탭에만 노출
+curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
+  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"web/dist\",\"op\":\"set\",\"scope\":\"base\",\"rule\":{\"glob\":\"dist\",\"kind\":\"dir\",\"subrepo\":\"web\"}}" | grep -q '"ok": true' || { echo "FAIL: subrepo base set"; exit 1; }
+curl -s "${hdr[@]}" "$base/api/links?$RE&service=web&subrepo=web" | python3 -c "
+import json, sys
+m = {l['name']: l for l in json.load(sys.stdin)['links']}
+assert m['web/dist']['source'] == 'project' and m['web/dist']['rule']['subrepo'] == 'web', m
+" || { echo "FAIL: subrepo link missing from own tab"; exit 1; }
+curl -s "${hdr[@]}" "$base/api/links?$RE&service=web&subrepo=api" | python3 -c "
+import json, sys
+m = {l['name']: l for l in json.load(sys.stdin)['links']}
+assert 'web/dist' not in m, m
+" || { echo "FAIL: subrepo link leaked into another tab"; exit 1; }
+
+# 8) 탐색기 copy mode 저장/노출
+curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
+  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"web/dist-copy\",\"op\":\"set\",\"scope\":\"base\",\"rule\":{\"glob\":\"dist\",\"kind\":\"dir\",\"subrepo\":\"web\",\"mode\":\"copy\"}}" | grep -q '"ok": true' || { echo "FAIL: copy mode base set"; exit 1; }
+python3 -c "
+import json
+d = json.load(open('$MARINA_HOME/$ID/links.json'))
+assert d['links']['web/dist-copy'] == {'glob':'dist','kind':'dir','mode':'copy','subrepo':'web'}, d
+" || { echo "FAIL: copy mode not persisted"; exit 1; }
+curl -s "${hdr[@]}" "$base/api/links?$RE&service=web&subrepo=web" | python3 -c "
+import json, sys
+m = {l['name']: l for l in json.load(sys.stdin)['links']}
+assert m['web/dist-copy']['rule']['mode'] == 'copy', m
+" || { echo "FAIL: copy mode not reflected"; exit 1; }
+
+# 9) base disable = 기본 링크를 프로젝트 전체에서 끔(모든 워크트리 제외) → GET 에 baseOff/disabled
+curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
+  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"node_modules\",\"op\":\"disable\",\"scope\":\"base\"}" | grep -q '"ok": true' || { echo "FAIL: base disable should 200"; exit 1; }
+curl -s "${hdr[@]}" "$base/api/links?root=$P&service=web" | python3 -c "
+import json, sys
+m = {l['name']: l for l in json.load(sys.stdin)['links']}
+assert m['node_modules']['baseOff'] is True and m['node_modules']['disabled'] is True, ('base disable 미반영', m['node_modules'])
+" || { echo "FAIL: base disable not reflected as baseOff"; exit 1; }
+# 9b) base clear = 되돌림(기본 복귀)
+curl -s "${hdr[@]}" -X POST "$base/api/link-set" -H "content-type: application/json" \
+  -d "{\"root\":\"$P\",\"service\":\"web\",\"name\":\"node_modules\",\"op\":\"clear\",\"scope\":\"base\"}" | grep -q '"ok": true' || { echo "FAIL: base clear"; exit 1; }
+curl -s "${hdr[@]}" "$base/api/links?root=$P&service=web" | python3 -c "
+import json, sys
+m = {l['name']: l for l in json.load(sys.stdin)['links']}
+assert m['node_modules']['source'] == 'default' and not m['node_modules'].get('baseOff') and not m['node_modules']['disabled'], ('base clear 후 기본 복귀 실패', m['node_modules'])
+" || { echo "FAIL: base clear should restore default"; exit 1; }
 
 echo "PASS test-links-api"

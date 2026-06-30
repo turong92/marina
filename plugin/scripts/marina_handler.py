@@ -650,18 +650,22 @@ class Handler(BaseHTTPRequestHandler):
                         raise ValueError("set 은 rule(object) 필요")
                     if rule.get("glob"):
                         clean = {"glob": str(rule["glob"]), "kind": ("dir" if rule.get("kind") == "dir" else "file")}
+                        mode = str(rule.get("mode") or rule.get("op") or "symlink").strip()
+                        if mode not in ("symlink", "copy"):
+                            raise ValueError("rule.mode 은 symlink|copy 여야 함")
+                        if mode == "copy":
+                            clean["mode"] = "copy"
                         if rule.get("subrepo"):                 # 구조 열어둠 — 특정 서브레포만(비면 전 서브레포)
                             clean["subrepo"] = str(rule["subrepo"])
                     else:
-                        raise ValueError("rule 은 {glob,kind} 여야 함 (heavy-dir 심링크)")
+                        raise ValueError("rule 은 {glob,kind[,mode]} 여야 함")
 
                 if scope == "base":
-                    # 프로젝트 커스텀 base(모든 워크트리 공유). 탐색기 등록이 여기. 끄기(disable)는 override 전용.
+                    # 프로젝트 커스텀 base(모든 워크트리 공유). 탐색기 등록이 여기.
+                    # disable(null) = 기본/공유 링크를 프로젝트 전체에서 끔(모든 워크트리 제외). clear = 되돌림(기본 복귀/삭제).
                     proj = project_for(root)
                     if not proj:
                         raise ValueError("프로젝트 미등록 — base 링크 저장 불가")
-                    if op == "disable":
-                        raise ValueError("base 는 disable 불가(끄기는 워크트리 override) — set/clear 만")
                     cdir = MARINA_HOME / str(proj["id"]); cdir.mkdir(parents=True, exist_ok=True)
                     cfile = cdir / "links.json"
                     try:
@@ -676,6 +680,8 @@ class Handler(BaseHTTPRequestHandler):
                         cl = cur["links"] = {}
                     if op == "clear":
                         cl.pop(name, None)
+                    elif op == "disable":
+                        cl[name] = None       # 프로젝트 전체 끄기 — apply_glob_links 가 None 룰을 자동 제외
                     else:
                         cl[name] = clean
                     tmp = cfile.with_suffix(".json.tmp")
