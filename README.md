@@ -280,7 +280,33 @@ x-marina:
     routes: { be: ["/api"] }    # 대표 도메인의 /api/* → be (브라우저 상대주소 be 호출)
 ```
 - **동적 반영**: 데몬이 라이브 상태를 폴링(빠짐없음, 변할 때만 reload)하고 start/stop/restart 시 즉시 갱신. 현재 라우트는 `GET /api/gateway-status`.
-- **잔여(물리 한계)**: fe 가 브라우저에서 절대주소 `http://localhost:8081` 을 박으면 게이트웨이가 워크트리를 못 갈라줌 → fe 를 상대경로 `/api` 로(1줄). 같은 내부 포트 여러 서비스는 compose 에서 포트 분리.
+
+#### `expose` — fe→be 브라우저 배선 (앱 소스 무수정)
+
+fe 가 브라우저에서 be 를 부르는 절대주소(`http://localhost:8081`)는 워크트리 격리와 양립 불가(고정 호스트 포트 = 충돌·비격리). marina 가 fe 의 API base env 를 **표준 compose `environment:` 로 주입**해 게이트웨이로 닿게 한다 — 앱 소스는 안 건드린다. `x-marina.gateway.expose.<소비자서비스>.<ENV_VAR>` 에 토큰으로 선언:
+
+```yaml
+x-marina:
+  gateway:
+    expose:
+      web:
+        NEXT_PUBLIC_API_URL: "${gateway:user-api}"   # 도메인 모드
+        # 또는  "${origin:user-api}"                 # same-origin 모드
+    routes:
+      user-api: ["/v1.0", "/v2.0"]                   # same-origin 모드일 때만(be prefix)
+```
+
+| 토큰 | 주입값 | 게이트웨이 | CORS | 적합 인증 |
+|---|---|---|---|---|
+| `${gateway:svc}` | `http://<wt>-svc.<proj>.localhost:<port>` | be 서브도메인 catch-all | **caddy 가 전담**(be 무수정) | 헤더 토큰(stateless) |
+| `${origin:svc}` | `""`(상대) | 대표 도메인 path 라우팅(`routes[svc]`) | 없음(same-origin) | **쿠키 세션** |
+
+- **CORS(도메인 모드)**: 게이트웨이 경로에선 caddy 가 CORS 를 처리한다(be 응답 ACAO replace + preflight 204 + credentialed + 요청 헤더 echo). be 자체 CORS 는 직접 접근 경로에만 적용. 유효 라우팅·CORS 쌍은 `marina gateway config` 로 확인.
+- **쿠키 세션 앱**은 서브도메인 간 쿠키(Secure·부모도메인 충돌) 취약 → **`${origin:}` (same-origin) 모드 권고**. marina 는 Set-Cookie 를 재작성하지 않는다.
+- next dev 는 런타임에 env 를 읽어 무수정 반영(prod 정적 빌드는 `NEXT_PUBLIC_*` 빌드타임 인라인이라 별도). 한 env 를 브라우저·서버 겸용하는 앱은 서버쪽 var 을 분리(서버사이드는 서비스 DNS).
+- 설계: [docs/superpowers/specs/2026-07-01-gateway-expose-design.md](docs/superpowers/specs/2026-07-01-gateway-expose-design.md).
+
+- **잔여(물리 한계)**: 같은 내부 포트를 여러 서비스가 서빙하면 compose 에서 포트 분리(엮기 자동타겟 모호).
 
 ---
 
