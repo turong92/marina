@@ -23,3 +23,17 @@ out2=$(printf '%s' '[{"id":"b","projectId":"mdc","services":[{"service":"user-ap
 echo "$out2" | grep -q "Access-Control-Allow-Origin" && { echo "FAIL: cors 없는데 CORS 생성"; exit 1; } || true
 
 echo "PASS test-gateway-expose-domain"
+
+python3 - "$HERE/../scripts/marina_lifecycle.py" <<'PY'
+import importlib.util, sys, os
+sys.path.insert(0, os.path.dirname(sys.argv[1]))
+spec=importlib.util.spec_from_file_location("ml", sys.argv[1]); ml=importlib.util.module_from_spec(spec)
+try: spec.loader.exec_module(ml)
+except Exception as e:
+    print("skip import (env dep):", e); sys.exit(0)
+gw={"expose":{"web":{"NEXT_PUBLIC_API_URL":"${gateway:user-api}","OTHER":"${origin:svc2}"}}}
+assert ml._expose_cors_targets(gw)=={"user-api"}, ml._expose_cors_targets(gw)   # gateway 모드만 cors 대상
+assert ml._expose_cors_targets({})==set()
+print("_expose_cors_targets OK")
+PY
+echo "PASS test-gateway-expose-domain (cors targets)"

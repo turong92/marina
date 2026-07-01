@@ -274,6 +274,18 @@ def bootout_session_dashboard(sid: str) -> None:
             stderr=subprocess.DEVNULL,
         )
 
+def _expose_cors_targets(xm_gateway: dict) -> set:
+    """x-marina.gateway.expose 에서 ${gateway:svc} 로 지목된 be 서비스명 집합(=CORS 대상).
+    ${origin:} 은 same-origin 이라 CORS 불요 → 제외."""
+    out = set()
+    for _consumer, envmap in ((xm_gateway or {}).get("expose") or {}).items():
+        for _var, val in (envmap or {}).items():
+            tok = _mc().parse_expose_token(str(val))
+            if tok and tok[0] == "gateway":
+                out.add(tok[1])
+    return out
+
+
 def _gateway_snapshot() -> list:
     """모든 워크트리 → {id, projectId, services:[{service,port,running,routes}]} (라이브 호스트포트). 게이트웨이 config 입력.
     routes = backing.json top-level gatewayRoutes[<service>](경로 prefix 리스트) — 브라우저 상대주소 be 호출을 대표 도메인에서 path 라우팅(limit#1)."""
@@ -285,7 +297,7 @@ def _gateway_snapshot() -> list:
             pid = proj.get("id") or p.get("source") or ""
         except Exception:
             continue
-        groutes = {}; gprimary = ""                         # 선언형 — 감지 안 함(SPEC 원칙)
+        groutes = {}; gprimary = ""; xm_gw = {}             # 선언형 — 감지 안 함(SPEC 원칙)
         try:                                                # x-marina.gateway (보관 compose, 새 SoT) 우선
             cfile = proj.get("composeFile", "docker-compose.yml")
             xm_gw = _mc().xmarina_for_stored(str(MARINA_HOME / str(pid) / cfile)).get("gateway") or {}
@@ -301,9 +313,11 @@ def _gateway_snapshot() -> list:
                 groutes = _bj.get("gatewayRoutes") or {}
             except Exception:
                 groutes = {}
+        cors_targets = _expose_cors_targets(xm_gw)          # 도메인 모드 expose 타겟 → 그 be 서브도메인에 CORS
         out.append({"id": p.get("id"), "projectId": pid, "primary": gprimary,
                     "services": [{"service": s.get("service"), "port": s.get("port"), "running": s.get("running"),
-                                  "routes": groutes.get(s.get("service")) or []}
+                                  "routes": groutes.get(s.get("service")) or [],
+                                  "cors": s.get("service") in cors_targets}
                                  for s in (p.get("services") or [])]})
     return out
 
