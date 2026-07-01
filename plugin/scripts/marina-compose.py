@@ -60,6 +60,48 @@ def parse_expose_token(val: str):
     return (m.group(1), m.group(2).strip()) if m else None
 
 
+def resolve_expose_env(expose: dict, wt: str, proj: str, gwport: int, services: list, gw_mod, primary: str = "") -> dict:
+    """expose 선언 → {consumer:{ENV:value}}. gateway 모드=be 게이트웨이 URL, origin 모드=''(상대).
+    services 는 대표 판정용([{service,port,running}]). gw_mod=marina-gateway 모듈(service_domain/_is_primary 재사용).
+    primary(명시 x-marina.gateway.primary)가 있으면 그걸 우선, 없으면 gw 자동판정."""
+    out = {}
+    for consumer, envmap in (expose or {}).items():
+        for var, val in (envmap or {}).items():
+            tok = parse_expose_token(str(val))
+            if not tok:
+                continue
+            mode, target = tok
+            if mode == "origin":
+                out.setdefault(consumer, {})[var] = ""
+            else:
+                is_prim = (target == primary) if primary else gw_mod._is_primary(services, target)
+                out.setdefault(consumer, {})[var] = gw_mod.service_domain(wt, proj, target, is_prim, gwport)
+    return out
+
+
+def _gw_module():
+    """marina-gateway.py 를 모듈로 로드(service_domain/_is_primary 재사용). 파일명 하이픈이라 import 불가 → importlib."""
+    import importlib.util
+    p = os.path.join(os.path.dirname(__file__), "marina-gateway.py")
+    s = importlib.util.spec_from_file_location("marina_gateway", p)
+    m = importlib.util.module_from_spec(s)
+    s.loader.exec_module(m)
+    return m
+
+
+def _gateway_port_for_up() -> int:
+    """게이트웨이 포트: MARINA_GATEWAY_PORT env 우선, 없으면 $MARINA_HOME/gateway/port, 기본 3902."""
+    v = os.environ.get("MARINA_GATEWAY_PORT")
+    if v and v.isdigit():
+        return int(v)
+    try:
+        home = os.environ.get("MARINA_HOME") or os.path.expanduser("~/.marina")
+        with open(os.path.join(home, "gateway", "port"), encoding="utf-8") as f:
+            return int(f.read().strip())
+    except Exception:
+        return 3902
+
+
 def _stringify_keys(obj):
     """x-marina 안 모든 dict 키를 문자열로 — docker compose config 는 x-* 확장의 맵 키가
     string 이 아니면 거부한다('non-string key in x-marina.forward: 6379'). forward 의 포트 키(6379)
@@ -545,8 +587,16 @@ def cmd_up(a):
     try:
         forward = {**_auto_service_forward(config), **_normalize_forward(conn), **_normalize_forward(xm)}   # 자동 서비스타겟 < backing.json 명시 < x-marina(SoT). _port_targets 포트범위 ValueError 가능 → try 안(코덱스 리뷰 P3)
         overlay_conn = {"forward": forward}
+        gw_gateway = xm.get("gateway") or {}                          # ⑥ expose(fe→be 브라우저 배선) → environment 주입
+        exp_env = {}
+        if gw_gateway.get("expose"):
+            gw_mod = _gw_module()
+            gwport = _gateway_port_for_up()
+            snap_services = [{"service": k, "port": "1", "running": True} for k in (config.get("services") or {})]   # 대표 판정용(존재/후보만 필요)
+            exp_env = resolve_expose_env(gw_gateway.get("expose") or {}, a.session, a.project_id, gwport,
+                                         snap_services, gw_mod, primary=str(gw_gateway.get("primary") or ""))
         overlay_text = build_overlay(config, build_args=_parse_build_args(getattr(a, "build_arg", [])),
-                                     connectivity=overlay_conn)  # P2/P3/P4 + build args + 엮기
+                                     connectivity=overlay_conn, expose_env=exp_env)  # P2/P3/P4 + build args + 엮기 + expose
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2

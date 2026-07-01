@@ -28,3 +28,21 @@ assert mc.parse_expose_token("") is None
 print("parse_expose_token OK")
 PY
 echo "PASS test-expose-token (parser)"
+
+python3 - "$MC" "$GW" <<'PY'
+import importlib.util, sys
+def load(n,p):
+    s=importlib.util.spec_from_file_location(n,p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); return m
+mc=load("mc",sys.argv[1]); gw=load("gw",sys.argv[2])
+# expose dict + (wt,proj,port,대표판정) → {consumer:{ENV:value}}
+expose={"web":{"NEXT_PUBLIC_API_URL":"${gateway:user-api}","REL":"${origin:user-api}"}}
+services=[{"service":"web","port":"1","running":True},{"service":"user-api","port":"2","running":True}]
+res=mc.resolve_expose_env(expose, "alpha", "mdc", 8088, services, gw)
+assert res["web"]["NEXT_PUBLIC_API_URL"]=="http://alpha-user-api.mdc.localhost:8088", res
+assert res["web"]["REL"]=="", res     # origin 모드 → 빈값(상대)
+# 명시 primary 우선(대표면 bare 도메인)
+res2=mc.resolve_expose_env({"web":{"U":"${gateway:web}"}}, "alpha", "mdc", 8088, services, gw, primary="web")
+assert res2["web"]["U"]=="http://alpha.mdc.localhost:8088", res2
+print("resolve_expose_env OK")
+PY
+echo "PASS test-expose-token (resolve)"
