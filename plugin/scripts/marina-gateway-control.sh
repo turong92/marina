@@ -28,6 +28,11 @@ case "${1:-}" in
     if gw_running; then kill "$(cat "$PID")" 2>/dev/null || true; rm -f "$PID"; echo "게이트웨이 정지"; else echo "실행 중 아님"; fi ;;
   status)
     if gw_running; then echo "running pid=$(cat "$PID") port=$PORT"; else echo "stopped"; fi ;;
+  config)                                   # 유효 라우팅 + CORS 쌍 노출(관측 — CORS 블랙박스 방지)
+    HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+    snap="$(python3 -c 'import sys,json; sys.path.insert(0,sys.argv[1]); import marina_lifecycle as ml; print(json.dumps(ml._gateway_snapshot()))' "$HERE" 2>/dev/null)" \
+      || { echo "스냅샷 생성 실패(marina 환경 필요)" >&2; exit 1; }
+    printf '%s' "$snap" | python3 "$HERE/marina-gateway.py" config --port "$PORT" ;;
   install)
     cb="$(caddy_bin)"; [[ -n "$cb" ]] || { echo "caddy 먼저 설치" >&2; exit 3; }
     ensure_config
@@ -63,5 +68,5 @@ PLIST
         sudo setcap -r "$(caddy_bin)" 2>/dev/null || echo "참고: cap 제거 실패(이미 없거나 권한) — 수동: sudo setcap -r $(caddy_bin)" >&2
         echo "게이트웨이 정지 + cap_net_bind_service 제거. (systemd unit 썼으면: sudo systemctl disable --now marina-gateway)" ;;
     esac ;;
-  *) echo "usage: marina-gateway-control.sh {start|stop|status|install|uninstall}" >&2; exit 1 ;;
+  *) echo "usage: marina-gateway-control.sh {start|stop|status|config|install|uninstall}" >&2; exit 1 ;;
 esac

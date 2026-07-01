@@ -111,6 +111,33 @@ def build_caddyfile(snapshot: list, port: int = 80) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def summarize_gateway(snapshot: list, port: int = 80) -> list:
+    """스냅샷 → 유효 라우팅/CORS 요약(관측용). [{domain, service, hostport, cors_origin|None, routes}].
+    build_caddyfile 과 같은 순회(대표=bare, cors 는 대표 origin 허용) — 블랙박스 방지(marina gateway config)."""
+    out = []
+    used = set()
+    for wt in (snapshot or []):
+        wid = _domain_label((wt or {}).get("id") or "")
+        pid = _domain_label((wt or {}).get("projectId") or "")
+        svcs = (wt or {}).get("services") or []
+        prim = _effective_primary(svcs, (wt or {}).get("primary") or "")
+        fe_origin = f"http://{wid}.{pid}.localhost:{port}"
+        for s in svcs:
+            hostport = str((s or {}).get("port") or "").strip()
+            if not hostport.isdigit() or not (s or {}).get("running"):
+                continue
+            name = _domain_label((s or {}).get("service") or "")
+            is_primary = ((s or {}).get("service") or "") == prim
+            sub = f"{wid}.{pid}" if is_primary else f"{wid}-{name}.{pid}"
+            if sub in used:
+                sub = f"{sub}-{hashlib.sha1(f'{wid}|{pid}|{name}'.encode()).hexdigest()[:6]}"
+            used.add(sub)
+            out.append({"domain": f"{sub}.localhost:{port}", "service": (s or {}).get("service"),
+                        "hostport": hostport, "cors_origin": fe_origin if (s or {}).get("cors") else None,
+                        "routes": list((s or {}).get("routes") or [])})
+    return out
+
+
 def write_config(text: str, state_path: str) -> None:
     os.makedirs(os.path.dirname(state_path), exist_ok=True)
     with open(state_path, "w", encoding="utf-8") as f:
@@ -169,9 +196,13 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd", required=True)
     g = sub.add_parser("gen")                 # stdin=snapshot json → stdout Caddyfile (테스트/디버그)
     g.add_argument("--port", type=int, default=80)
+    c = sub.add_parser("config")              # stdin=snapshot json → stdout 요약 JSON (라우팅+CORS, 관측)
+    c.add_argument("--port", type=int, default=80)
     args = ap.parse_args(argv)
     if args.cmd == "gen":
         print(build_caddyfile(json.load(sys.stdin), args.port), end="")
+    elif args.cmd == "config":
+        print(json.dumps(summarize_gateway(json.load(sys.stdin), args.port), ensure_ascii=False, indent=2))
     return 0
 
 

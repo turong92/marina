@@ -37,3 +37,16 @@ assert ml._expose_cors_targets({})==set()
 print("_expose_cors_targets OK")
 PY
 echo "PASS test-gateway-expose-domain (cors targets)"
+
+python3 - "$GW" <<'PY'
+import importlib.util, sys
+spec=importlib.util.spec_from_file_location("gw", sys.argv[1]); gw=importlib.util.module_from_spec(spec); spec.loader.exec_module(gw)
+snap=[{"id":"alpha","projectId":"mdc","services":[
+  {"service":"web","port":"3100","running":True},
+  {"service":"user-api","port":"3200","running":True,"cors":True,"routes":[]}]}]
+s=gw.summarize_gateway(snap, 8088)
+assert any(r["domain"]=="alpha-user-api.mdc.localhost:8088" and r["cors_origin"]=="http://alpha.mdc.localhost:8088" for r in s), s
+assert any(r["domain"]=="alpha.mdc.localhost:8088" and r["cors_origin"] is None for r in s), s   # 대표 web 은 CORS 없음
+print("summarize_gateway OK")
+PY
+echo "PASS test-gateway-expose-domain (summarize)"
