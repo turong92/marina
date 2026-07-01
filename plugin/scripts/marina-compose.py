@@ -54,6 +54,12 @@ def parse_xmarina(compose_text: str) -> dict:
     return xm if isinstance(xm, dict) else {}
 
 
+def parse_expose_token(val: str):
+    """expose 값 파싱. '${gateway:svc}'→('gateway',svc), '${origin:svc}'→('origin',svc). 그 외/토큰아님→None."""
+    m = re.fullmatch(r"\$\{(gateway|origin):([^}]+)\}", (val or "").strip())
+    return (m.group(1), m.group(2).strip()) if m else None
+
+
 def _stringify_keys(obj):
     """x-marina 안 모든 dict 키를 문자열로 — docker compose config 는 x-* 확장의 맵 키가
     string 이 아니면 거부한다('non-string key in x-marina.forward: 6379'). forward 의 포트 키(6379)

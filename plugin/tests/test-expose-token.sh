@@ -15,3 +15,16 @@ assert gw.service_domain("Feat_X","MDC","User_API",False,80)=="http://feat-x-use
 print("service_domain OK")
 PY
 echo "PASS test-expose-token (service_domain)"
+
+python3 - "$MC" <<'PY'
+import importlib.util, sys
+spec=importlib.util.spec_from_file_location("mc", sys.argv[1]); mc=importlib.util.module_from_spec(spec); spec.loader.exec_module(mc)
+assert mc.parse_expose_token("${gateway:user-api}")==("gateway","user-api")
+assert mc.parse_expose_token("${origin:user-api}")==("origin","user-api")
+assert mc.parse_expose_token("  ${gateway:svc-a}  ")==("gateway","svc-a")   # 공백 허용
+assert mc.parse_expose_token("http://localhost:8081") is None               # 토큰 아님 → None
+assert mc.parse_expose_token("${bogus:x}") is None                          # 미지원 모드 → None
+assert mc.parse_expose_token("") is None
+print("parse_expose_token OK")
+PY
+echo "PASS test-expose-token (parser)"
