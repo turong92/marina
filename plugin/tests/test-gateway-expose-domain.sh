@@ -31,7 +31,7 @@ spec=importlib.util.spec_from_file_location("ml", sys.argv[1]); ml=importlib.uti
 try: spec.loader.exec_module(ml)
 except Exception as e:
     print("skip import (env dep):", e); sys.exit(0)
-gw={"expose":{"web":{"NEXT_PUBLIC_API_URL":"${gateway:user-api}","OTHER":"${origin:svc2}"}}}
+gw={"expose":{"web":{"NEXT_PUBLIC_API_URL":"gateway:user-api","OTHER":"origin:svc2"}}}
 assert ml._expose_cors_targets(gw)=={"user-api"}, ml._expose_cors_targets(gw)   # gateway 모드만 cors 대상
 assert ml._expose_cors_targets({})==set()
 print("_expose_cors_targets OK")

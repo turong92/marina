@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** `x-marina.gateway.expose` 로 프론트→백엔드 브라우저 배선을 앱 소스 무수정으로 잇는다 — 도메인 모드(`${gateway:svc}`)와 same-origin 모드(`${origin:svc}`), 도메인 모드는 caddy 가 CORS 전담.
+**Goal:** `x-marina.gateway.expose` 로 프론트→백엔드 브라우저 배선을 앱 소스 무수정으로 잇는다 — 도메인 모드(`gateway:svc`)와 same-origin 모드(`origin:svc`), 도메인 모드는 caddy 가 CORS 전담.
 
 **Architecture:** 도메인 스킴을 marina-gateway.py 단일 헬퍼(`service_domain`)로 통일해 build_caddyfile 과 expose resolve 가 공유(DRY). expose 토큰은 순수 파서로 파싱, cmd_up 에서 이 워크트리의 be 도메인/`''` 로 resolve 해 표준 compose `environment:` 로 주입. 도메인 모드 타겟 be 는 스냅샷에 `cors` 플래그가 붙고, build_caddyfile 이 그 서브도메인에 워크트리 대표 origin 을 허용하는 CORS(header_down replace + preflight 204 + credentialed + 헤더 echo)를 생성.
 
@@ -86,7 +86,7 @@ git commit -m "feat(marina): service_domain 헬퍼 — 게이트웨이 도메인
 
 ---
 
-## Task 2: `parse_expose_token()` — `${gateway:svc}` / `${origin:svc}` 파서
+## Task 2: `parse_expose_token()` — `gateway:svc` / `origin:svc` 파서
 
 **Files:**
 - Modify: `plugin/scripts/marina-compose.py` (x-marina 계열 함수 근처, `parse_xmarina` 아래)
@@ -98,9 +98,9 @@ git commit -m "feat(marina): service_domain 헬퍼 — 게이트웨이 도메인
 python3 - "$MC" <<'PY'
 import importlib.util, sys
 spec=importlib.util.spec_from_file_location("mc", sys.argv[1]); mc=importlib.util.module_from_spec(spec); spec.loader.exec_module(mc)
-assert mc.parse_expose_token("${gateway:user-api}")==("gateway","user-api")
-assert mc.parse_expose_token("${origin:user-api}")==("origin","user-api")
-assert mc.parse_expose_token("  ${gateway:svc-a}  ")==("gateway","svc-a")   # 공백 허용
+assert mc.parse_expose_token("gateway:user-api")==("gateway","user-api")
+assert mc.parse_expose_token("origin:user-api")==("origin","user-api")
+assert mc.parse_expose_token("  gateway:svc-a  ")==("gateway","svc-a")   # 공백 허용
 assert mc.parse_expose_token("http://localhost:8081") is None               # 토큰 아님 → None
 assert mc.parse_expose_token("${bogus:x}") is None                          # 미지원 모드 → None
 assert mc.parse_expose_token("") is None
@@ -120,7 +120,7 @@ Expected: FAIL — `AttributeError: ... 'parse_expose_token'`
 import re as _re_expose
 
 def parse_expose_token(val: str):
-    """expose 값 파싱. '${gateway:svc}'→('gateway',svc), '${origin:svc}'→('origin',svc). 그 외/토큰아님→None."""
+    """expose 값 파싱. 'gateway:svc'→('gateway',svc), 'origin:svc'→('origin',svc). 그 외/토큰아님→None."""
     m = _re_expose.fullmatch(r"\$\{(gateway|origin):([^}]+)\}", (val or "").strip())
     return (m.group(1), m.group(2).strip()) if m else None
 ```
@@ -134,7 +134,7 @@ Expected: `PASS test-expose-token (parser)`
 
 ```bash
 git add plugin/scripts/marina-compose.py plugin/tests/test-expose-token.sh
-git commit -m "feat(marina): parse_expose_token — \${gateway:svc}/\${origin:svc} 파서"
+git commit -m "feat(marina): parse_expose_token — \gateway:svc/\origin:svc 파서"
 ```
 
 ---
@@ -264,7 +264,7 @@ git commit -m "feat(marina): build_caddyfile CORS 생성 — cors:true be 서브
 
 ## Task 4: `_gateway_snapshot` — 도메인 모드 expose 타겟에 `cors: True`
 
-x-marina.gateway.expose 를 읽어, `${gateway:svc}` 로 지목된 be 서비스의 스냅샷 항목에 `cors: True` 를 붙인다.
+x-marina.gateway.expose 를 읽어, `gateway:svc` 로 지목된 be 서비스의 스냅샷 항목에 `cors: True` 를 붙인다.
 
 **Files:**
 - Modify: `plugin/scripts/marina_lifecycle.py` `_gateway_snapshot` (현재 [:288-307], xm.gateway 읽는 블록 + services 조립)
@@ -280,7 +280,7 @@ spec=importlib.util.spec_from_file_location("ml", sys.argv[1]); ml=importlib.uti
 try: spec.loader.exec_module(ml)
 except Exception as e:
     print("skip import (env dep):", e); sys.exit(0)
-gw={"expose":{"web":{"NEXT_PUBLIC_API_URL":"${gateway:user-api}","OTHER":"${origin:svc2}"}}}
+gw={"expose":{"web":{"NEXT_PUBLIC_API_URL":"gateway:user-api","OTHER":"origin:svc2"}}}
 assert ml._expose_cors_targets(gw)=={"user-api"}, ml._expose_cors_targets(gw)   # gateway 모드만 cors 대상
 assert ml._expose_cors_targets({})==set()
 print("_expose_cors_targets OK")
@@ -297,7 +297,7 @@ Expected: FAIL — `'ml' has no attribute '_expose_cors_targets'`
 
 ```python
 def _expose_cors_targets(xm_gateway: dict) -> set:
-    """x-marina.gateway.expose 에서 ${gateway:svc} 로 지목된 be 서비스명 집합(=CORS 대상). ${origin:} 은 same-origin 이라 제외."""
+    """x-marina.gateway.expose 에서 gateway:svc 로 지목된 be 서비스명 집합(=CORS 대상). ${origin:} 은 same-origin 이라 제외."""
     out = set()
     for _consumer, envmap in ((xm_gateway or {}).get("expose") or {}).items():
         for _var, val in (envmap or {}).items():
@@ -430,7 +430,7 @@ def load(n,p):
     s=importlib.util.spec_from_file_location(n,p); m=importlib.util.module_from_spec(s); s.loader.exec_module(m); return m
 mc=load("mc",sys.argv[1]); gw=load("gw",sys.argv[2])
 # expose dict + (wt,proj,port,primary판정) → {consumer:{ENV:value}}
-expose={"web":{"NEXT_PUBLIC_API_URL":"${gateway:user-api}","REL":"${origin:user-api}"}}
+expose={"web":{"NEXT_PUBLIC_API_URL":"gateway:user-api","REL":"origin:user-api"}}
 services=[{"service":"web","port":"1","running":True},{"service":"user-api","port":"2","running":True}]
 res=mc.resolve_expose_env(expose, "alpha", "mdc", 8088, services, gw)
 assert res["web"]["NEXT_PUBLIC_API_URL"]=="http://alpha-user-api.mdc.localhost:8088", res
@@ -543,7 +543,7 @@ echo "PASS test-gateway-expose-domain (summarize)"
 
 - [ ] **Step 4: 통과 확인** → `PASS ... (summarize)`
 
-- [ ] **Step 5: 실 docker e2e (docker 있을 때만)** — mdc 또는 픽스처 compose 에 `x-marina.gateway.expose.web.NEXT_PUBLIC_API_URL: "${gateway:user-api}"` 를 넣고, `MARINA_GATEWAY=on` 으로 up → 게이트웨이 caddy 가 be 서브도메인에 CORS 를 내는지 `curl -H "Origin: http://<wt>.<proj>.localhost:<port>" -X OPTIONS` 로 204 + ACAO 확인. docker 없으면 `SKIP`. (테스트 상단 `command -v docker … || SKIP`, 데몬 leak 방지는 이 테스트는 게이트웨이 대상이라 그대로 ON.)
+- [ ] **Step 5: 실 docker e2e (docker 있을 때만)** — mdc 또는 픽스처 compose 에 `x-marina.gateway.expose.web.NEXT_PUBLIC_API_URL: "gateway:user-api"` 를 넣고, `MARINA_GATEWAY=on` 으로 up → 게이트웨이 caddy 가 be 서브도메인에 CORS 를 내는지 `curl -H "Origin: http://<wt>.<proj>.localhost:<port>" -X OPTIONS` 로 204 + ACAO 확인. docker 없으면 `SKIP`. (테스트 상단 `command -v docker … || SKIP`, 데몬 leak 방지는 이 테스트는 게이트웨이 대상이라 그대로 ON.)
 
 - [ ] **Step 6: 커밋**
 
@@ -561,7 +561,7 @@ git commit -m "feat(marina): gateway config 관측(라우팅+CORS 쌍) + expose 
 Run: `for f in plugin/tests/test-*.sh; do bash "$f" >/dev/null 2>&1 && echo "ok $f" || echo "FAIL $f"; done` + 스위트 전후 `pgrep -f 'caddy run' | wc -l` 동일 확인.
 Expected: 전부 ok, caddy leak 0.
 
-- [ ] **Step 2: README/docs — expose 사용법 한 문단** (`${gateway:svc}` vs `${origin:svc}`, 토큰-인증 vs 쿠키-세션, CORS 는 게이트웨이가 처리, 쿠키앱은 same-origin 권고). 스펙 파일 링크.
+- [ ] **Step 2: README/docs — expose 사용법 한 문단** (`gateway:svc` vs `origin:svc`, 토큰-인증 vs 쿠키-세션, CORS 는 게이트웨이가 처리, 쿠키앱은 same-origin 권고). 스펙 파일 링크.
 
 - [ ] **Step 3: 커밋**
 

@@ -290,16 +290,16 @@ x-marina:
   gateway:
     expose:
       web:
-        NEXT_PUBLIC_API_URL: "${gateway:user-api}"   # 도메인 모드
-        # 또는  "${origin:user-api}"                 # same-origin 모드
+        NEXT_PUBLIC_API_URL: "gateway:user-api"   # 도메인 모드
+        # 또는  "origin:user-api"                 # same-origin 모드
     routes:
       user-api: ["/v1.0", "/v2.0"]                   # same-origin 모드일 때만(be prefix)
 ```
 
 | 토큰 | 주입값 | 게이트웨이 | CORS | 적합 인증 |
 |---|---|---|---|---|
-| `${gateway:svc}` | `http://<wt>-svc.<proj>.localhost:<port>` | be 서브도메인 catch-all | **caddy 가 전담**(be 무수정) | 헤더 토큰(stateless) |
-| `${origin:svc}` | `""`(상대) | 대표 도메인 path 라우팅(`routes[svc]`) | 없음(same-origin) | **쿠키 세션** |
+| `gateway:svc` | `http://<wt>-svc.<proj>.localhost:<port>` | be 서브도메인 catch-all | **caddy 가 전담**(be 무수정) | 헤더 토큰(stateless) |
+| `origin:svc` | `""`(상대) | 대표 도메인 path 라우팅(`routes[svc]`) | 없음(same-origin) | **쿠키 세션** |
 
 - **CORS(도메인 모드)**: 게이트웨이 경로에선 caddy 가 CORS 를 처리한다(be 응답 ACAO replace + preflight 204 + credentialed + 요청 헤더 echo). be 자체 CORS 는 직접 접근 경로에만 적용. 유효 라우팅·CORS 쌍은 `marina gateway config` 로 확인.
 - **쿠키 세션 앱**은 서브도메인 간 쿠키(Secure·부모도메인 충돌) 취약 → **`${origin:}` (same-origin) 모드 권고**. marina 는 Set-Cookie 를 재작성하지 않는다.

@@ -35,23 +35,23 @@ x-marina:
   gateway:
     expose:
       web:                                         # 소비자(프론트) 서비스명
-        NEXT_PUBLIC_API_URL: "${gateway:user-api}" # 도메인 모드
+        NEXT_PUBLIC_API_URL: "gateway:user-api" # 도메인 모드
         # 또는
-        NEXT_PUBLIC_API_URL: "${origin:user-api}"  # same-origin 모드
+        NEXT_PUBLIC_API_URL: "origin:user-api"  # same-origin 모드
     routes:
       user-api: ['/v1.0', '/v2.0']                 # same-origin 모드일 때만 필요(be prefix)
 ```
 
 - **토큰 2종** (resolve됨을 명시, 기존 `${}` 컨벤션과 일관):
-  - `${gateway:<svc>}` → **도메인 모드**
-  - `${origin:<svc>}` → **same-origin 모드**
+  - `gateway:<svc>` → **도메인 모드**
+  - `origin:<svc>` → **same-origin 모드**
 - 모드는 **expose 항목(env var) 단위** 선택.
 - `expose.<consumer>.<ENV_VAR>: <token>` 구조. `<consumer>`·`<svc>`는 compose
   서비스명.
 
 ## 두 모드
 
-| | **gateway-domain** `${gateway:svc}` | **same-origin** `${origin:svc}` |
+| | **gateway-domain** `gateway:svc` | **same-origin** `origin:svc` |
 |---|---|---|
 | 주입 env 값 | `http://<wt>-<svc>.<proj>.localhost:<gwport>` | `''` (빈 값 = 상대) |
 | 게이트웨이 config | be 서브도메인 catch-all(기존) + **CORS 부착** | 대표 도메인 **path 라우팅**(`routes[svc]` 재사용, 기존) |

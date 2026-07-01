@@ -55,8 +55,9 @@ def parse_xmarina(compose_text: str) -> dict:
 
 
 def parse_expose_token(val: str):
-    """expose 값 파싱. '${gateway:svc}'→('gateway',svc), '${origin:svc}'→('origin',svc). 그 외/토큰아님→None."""
-    m = re.fullmatch(r"\$\{(gateway|origin):([^}]+)\}", (val or "").strip())
+    """expose 값 파싱. 'gateway:svc'→('gateway',svc), 'origin:svc'→('origin',svc). 그 외/토큰아님→None.
+    주: `$` 접두 토큰(${...})은 `docker compose config` 가 보간을 시도해 거부한다(x-marina 값도 보간 대상) → `$` 없는 순수 토큰."""
+    m = re.fullmatch(r"(gateway|origin):(.+)", (val or "").strip())
     return (m.group(1), m.group(2).strip()) if m else None
 
 
