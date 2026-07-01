@@ -21,6 +21,14 @@ def _domain_label(s: str) -> str:
     return out or "x"
 
 
+def service_domain(wt: str, proj: str, svc: str, is_primary: bool, port: int) -> str:
+    """이 워크트리 서비스의 게이트웨이 URL. 대표(primary)=<wt>.<proj>.localhost, 그 외=<wt>-<svc>.<proj>.localhost.
+    도메인 스킴 SoT — build_caddyfile 과 expose resolve 가 라벨 규칙을 공유(DRY)."""
+    w, p, s = _domain_label(wt), _domain_label(proj), _domain_label(svc)
+    sub = f"{w}.{p}" if is_primary else f"{w}-{s}.{p}"
+    return f"http://{sub}.localhost:{port}"
+
+
 def _effective_primary(services: list, explicit: str = "") -> str:
     """이 워크트리의 대표 도메인 서비스명 — x-marina.gateway.primary(명시) 우선, 없으면 WEB_NAMES 중 첫 매칭,
     그것도 없으면 포트 보유 첫 서비스. (포트 있고 running 인 것 중에서만)"""
