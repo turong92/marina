@@ -337,7 +337,7 @@ def _auto_service_forward(config: dict) -> dict:
 
 
 def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict = None,
-                  connectivity: dict = None) -> str:
+                  connectivity: dict = None, expose_env: dict = None) -> str:
     """resolved config → overlay YAML. 워크트리 격리를 위해 *비침투적으로* 덮는다(앱·외부 레포 불변):
     ① published ports → 127.0.0.1::<target> (호스트포트 Docker 자동할당)
     ② container_name → 제거(!reset, 워크트리별 자동명명 — 다중 인스턴스 충돌 방지)
@@ -347,7 +347,7 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
        localhost:<port> 를 타겟(host=host.docker.internal / 서비스명=컨테이너 DNS)으로 중계. 자기 서빙 포트 제외.
     덮을 게 하나도 없으면 빈 문자열. 포트값·비밀번호는 안 들어감."""
     services = (config or {}).get("services") or {}
-    build_args, connectivity = build_args or {}, connectivity or {}
+    build_args, connectivity, expose_env = build_args or {}, connectivity or {}, expose_env or {}
     out, any_ = ["services:"], False
     for name in sorted(services):
         svc = services[name] or {}
@@ -378,10 +378,13 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
         # profile 후보 build arg 는 런타임 environment 로도 미러링 — stored 의 하드코딩 env 를
         # overlay 머지에서 덮어 profile 이 런타임에도 적용되게(ai-api 케이스). stored compose 불변.
         prof_env = {k: margs[k] for k in margs if is_profile_var(k)}
-        if prof_env:
+        env_pairs = dict(prof_env)                          # profile 후보 env
+        for k, v in (expose_env.get(name) or {}).items():   # ⑥ expose 주입(브라우저 fe→be 배선) — profile 보다 우선
+            env_pairs[k] = v
+        if env_pairs:
             body.append("    environment:")
-            for k in sorted(prof_env):
-                body.append(f"      {k}: {json.dumps(str(prof_env[k]))}")
+            for k in sorted(env_pairs):
+                body.append(f"      {k}: {json.dumps(str(env_pairs[k]))}")
         if body:
             any_ = True
             out += [f"  {name}:", *body]
