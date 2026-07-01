@@ -21,6 +21,22 @@ def _domain_label(s: str) -> str:
     return out or "x"
 
 
+def _cors_preflight_lines(fe_origin: str) -> list:
+    """be 서브도메인 preflight(OPTIONS) 처리 — be 로 안 넘기고 caddy 가 204 자체응답.
+    credentialed(특정 origin), Allow-Headers 는 요청 헤더 echo(Authorization 등 커스텀 범용). caddy v2 문법."""
+    return [
+        "    @cors_pre method OPTIONS",
+        "    handle @cors_pre {",
+        f'        header Access-Control-Allow-Origin "{fe_origin}"',
+        "        header Access-Control-Allow-Credentials true",
+        '        header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"',
+        '        header Access-Control-Allow-Headers "{http.request.header.Access-Control-Request-Headers}"',
+        "        header Access-Control-Max-Age 600",
+        "        respond 204",
+        "    }",
+    ]
+
+
 def service_domain(wt: str, proj: str, svc: str, is_primary: bool, port: int) -> str:
     """이 워크트리 서비스의 게이트웨이 URL. 대표(primary)=<wt>.<proj>.localhost, 그 외=<wt>-<svc>.<proj>.localhost.
     도메인 스킴 SoT — build_caddyfile 과 expose resolve 가 라벨 규칙을 공유(DRY)."""
@@ -82,7 +98,15 @@ def build_caddyfile(snapshot: list, port: int = 80) -> str:
                         rc = "/" + str(rp).strip().strip("/")
                         if rc != "/":
                             block += [f"    handle {rc}/* {{", f"        reverse_proxy 127.0.0.1:{sp}", "    }"]
-            block += [f"    reverse_proxy 127.0.0.1:{hostport}", "}", ""]
+            if (s or {}).get("cors"):                       # expose 도메인 모드 타겟 → 게이트웨이가 CORS 전담
+                fe_origin = f"http://{wid}.{pid}.localhost:{port}"   # 이 워크트리 대표 origin
+                block += _cors_preflight_lines(fe_origin)
+                block += [f"    reverse_proxy 127.0.0.1:{hostport} {{",
+                          f'        header_down Access-Control-Allow-Origin "{fe_origin}"',   # be 응답 ACAO replace(중복 방지)
+                          "        header_down Access-Control-Allow-Credentials true",
+                          "    }", "}", ""]
+            else:
+                block += [f"    reverse_proxy 127.0.0.1:{hostport}", "}", ""]
             lines += block
     return "\n".join(lines).rstrip() + "\n"
 
