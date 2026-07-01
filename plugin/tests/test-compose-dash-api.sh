@@ -5,6 +5,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"; CTRL="$HERE/../scripts/marina-control.py"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-compose-dash-api (docker 데몬 미가용)"; exit 0; }
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"
+export MARINA_GATEWAY=off   # 게이트웨이 auto-spawn 차단(이 테스트는 게이트웨이 대상 아님 → caddy leak 방지)
 P="$TMP/proj-$$"; mkdir -p "$P"; P="$(cd "$P" && pwd -P)"   # 고유 basename — 실제 'proj' 프로젝트(-p proj-main)와 충돌 방지
 cat > "$P/docker-compose.yml" <<'YML'
 services:

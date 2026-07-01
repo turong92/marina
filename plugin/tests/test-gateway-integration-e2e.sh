@@ -15,6 +15,7 @@ mrun() { (cd "$P" && MARINA_HOME="$MARINA_HOME" bash "$SH" "$@"); }
 cleanup() {
   [ -n "$DPID" ] && kill "$DPID" 2>/dev/null || true
   MARINA_HOME="$MARINA_HOME" MARINA_GATEWAY_PORT="$GP" bash "$GWC" stop >/dev/null 2>&1 || true
+  pkill -f "$MARINA_HOME/gateway/Caddyfile" 2>/dev/null || true   # 데몬-spawn 등 PID 추적 밖의 caddy 도 확실히 정리(leak 방지). tmp 유니크라 이 테스트 것만
   mrun stop --all >/dev/null 2>&1 || true
   rm -rf "$TMP"
 }

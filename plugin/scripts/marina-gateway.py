@@ -94,7 +94,14 @@ def config_changed(text: str, state_path: str) -> bool:
 
 
 def caddy_bin():
-    return shutil.which("caddy")
+    # 데몬(launchd) 최소 PATH 엔 homebrew 등이 없어 which 가 놓친다 → 흔한 설치 위치도 폴백(docker 처럼).
+    b = shutil.which("caddy")
+    if b:
+        return b
+    for c in (os.path.expanduser("~/.local/bin/caddy"), "/opt/homebrew/bin/caddy", "/usr/local/bin/caddy"):
+        if os.path.isfile(c) and os.access(c, os.X_OK):
+            return c
+    return None
 
 
 def reload_caddy(config_path: str) -> bool:

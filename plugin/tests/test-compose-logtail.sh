@@ -5,6 +5,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export MARINA_HOME="$TMP/home"
+export MARINA_GATEWAY=off   # 게이트웨이 auto-spawn 차단(이 테스트는 게이트웨이 대상 아님 → caddy leak 방지)
 mkdir -p "$TMP/bin"
 cat > "$TMP/bin/docker" <<'EOF'
 #!/usr/bin/env bash

@@ -25,7 +25,7 @@ HOST="${MARINA_CONTROL_HOST:-localhost}"
 PORT="${MARINA_CONTROL_PORT:-3900}"
 CODEX_WORKTREES_ROOT="${CODEX_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
 MARINA_GATEWAY="${MARINA_GATEWAY:-}"            # 게이트웨이 옵트인(빈=off) — supervised 기동에도 전파(코덱스 P2)
-MARINA_GATEWAY_PORT="${MARINA_GATEWAY_PORT:-80}"   # 실 기본값 — 빈 문자열 export 로 데몬 int('') 크래시 방지(코덱스 P1)
+MARINA_GATEWAY_PORT="${MARINA_GATEWAY_PORT:-3902}"   # 비특권 기본(권한·:80 충돌 회피, marina_state 와 일치) — 빈 문자열 export 로 데몬 int('') 크래시 방지(코덱스 P1)
 MARINA_GATEWAY_POLL="${MARINA_GATEWAY_POLL:-5}"
 
 usage() {

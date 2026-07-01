@@ -3,10 +3,15 @@
 set -euo pipefail
 MARINA_HOME="${MARINA_HOME:-$HOME/.marina}"
 GW_DIR="$MARINA_HOME/gateway"; CFG="$GW_DIR/Caddyfile"; PID="$GW_DIR/caddy.pid"; LOG="$GW_DIR/caddy.log"
-PORT="${MARINA_GATEWAY_PORT:-80}"
+PORT="${MARINA_GATEWAY_PORT:-3902}"   # 비특권 기본(권한·:80 충돌 회피) — marina_state 와 일치
 mkdir -p "$GW_DIR"
 
-caddy_bin() { command -v caddy || true; }
+caddy_bin() {   # 데몬 최소 PATH 엔 homebrew 등이 없어 command -v 가 놓침 → 흔한 위치 폴백
+  command -v caddy 2>/dev/null && return 0
+  local c; for c in "$HOME/.local/bin/caddy" /opt/homebrew/bin/caddy /usr/local/bin/caddy; do
+    [[ -x "$c" ]] && { echo "$c"; return 0; }
+  done; true
+}
 
 ensure_config() { [[ -f "$CFG" ]] || printf '{\n    admin localhost:2021\n    auto_https off\n}\n' > "$CFG"; }   # marina 전용 admin(코덱스 P2)
 
