@@ -13,11 +13,14 @@ cleanup(){ [ -n "${CADDY_PID:-}" ] && kill "$CADDY_PID" 2>/dev/null; [ -n "${BE_
            pkill -f "$TMP/Caddyfile" 2>/dev/null; rm -rf "$TMP"; }   # 테스트 것만(유니크 tmp 경로) — 실 게이트웨이 불침해
 trap cleanup EXIT
 
-# 백엔드: 200 + 자기 ACAO(bogus) → caddy 가 replace 하는지 증명
+# 백엔드: Origin 헤더 보이면 403(Spring Security CORS 재현) — caddy 가 header_up -Origin 으로 벗겨야 200.
+# Origin 없을 때만 200 + 자기 ACAO(bogus) → caddy 가 응답 ACAO 를 replace 하는지도 증명.
 cat > "$TMP/be.py" <<PY
 from http.server import BaseHTTPRequestHandler, HTTPServer
 class H(BaseHTTPRequestHandler):
     def _r(self):
+        if self.headers.get("Origin"):                       # be(Spring)처럼 cross-origin 거부
+            self.send_response(403); self.end_headers(); self.wfile.write(b"Invalid CORS request"); return
         self.send_response(200); self.send_header("Access-Control-Allow-Origin","http://evil.example")
         self.send_header("Content-Type","text/plain"); self.end_headers(); self.wfile.write(b"be-ok")
     def do_GET(self): self._r()

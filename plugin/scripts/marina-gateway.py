@@ -102,6 +102,7 @@ def build_caddyfile(snapshot: list, port: int = 80) -> str:
                 fe_origin = f"http://{wid}.{pid}.localhost:{port}"   # 이 워크트리 대표 origin
                 block += _cors_preflight_lines(fe_origin)
                 block += [f"    reverse_proxy 127.0.0.1:{hostport} {{",
+                          "        header_up -Origin",                                          # be(예: Spring Security)가 Origin 보고 'Invalid CORS request' 403 내는 것 방지 — 게이트웨이가 CORS 전담하므로 upstream 은 non-CORS 로
                           f'        header_down Access-Control-Allow-Origin "{fe_origin}"',   # be 응답 ACAO replace(중복 방지)
                           "        header_down Access-Control-Allow-Credentials true",
                           "    }", "}", ""]
