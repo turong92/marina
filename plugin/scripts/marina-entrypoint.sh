@@ -28,6 +28,12 @@ usage (marina = 전역 CLI):
     marina project add <path> --compose <file>      # 기존 docker-compose 로 등록 (또는 대시보드 위저드)
     marina project add <path> --external name=path  # 외부 git 레포를 서비스로 (워크트리마다 격리)
     marina project ls | rm <id> | default <id> a,b,c | infer <path>
+  워크트리 (작업 시작 — 브랜치명 지정 생성 + 서브레포 미러):
+    marina worktree create <branch> [base] [--project <id>]
+  게이트웨이 (호스트 브라우저 → <wt>.<proj>.localhost, 보통 start 시 자동 기동):
+    marina gateway start|stop|status|config|install|uninstall
+  링크 (main checkout 의 deps·빌드산출물·설정을 워크트리로):
+    marina link
   dashboard (:3900):
     marina dashboard [start|stop|status|open]    # 무인자 marina = dashboard start
   setup: marina attach | install-cli | uninstall-cli
@@ -44,8 +50,9 @@ command="${1:-dashboard}"
 shift || true
 
 case "$command" in
-  project)
-    # 그룹 → marina.sh dispatch 로 위임 (project {add|rm|ls|default|infer})
+  project|worktree|gateway|link)
+    # 그룹 → marina.sh dispatch 로 위임 (project {add|rm|ls|...} · worktree create · gateway {start|...} · link)
+    # worktree/gateway 누락이 "설치 shim 은 이 명령 없음" 증상의 원인이었음(도그푸드에서 발견)
     "$SESSION" "$command" "$@"
     ;;
   start|stop|restart)
