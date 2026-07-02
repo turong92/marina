@@ -25,6 +25,55 @@ from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, marina_env, script
 from marina_sessions import git_output, session_payload, system_memory, worktree_status
 
+def stop_external(root: Path, service: str, port: int) -> dict[str, Any]:
+    """'외부 :<port>'(marina 컨테이너가 아닌 호스트 프로세스가 서비스 포트 점유 — IDE/터미널 직접 실행) 정지.
+    리스너 pid 를 찾아 SIGTERM. docker 소유 리스너는 거부(다른 워크트리 컨테이너의 published 포트일 수 있음 —
+    그건 그 워크트리 카드에서 내려야 안전)."""
+    if not (0 < int(port) < 65536):
+        raise ValueError(f"잘못된 포트: {port}")
+    try:
+        out = subprocess.check_output(["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN", "-t"],
+                                      text=True, stderr=subprocess.DEVNULL, timeout=5)
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        return {"stopped": False, "reason": f":{port} 리스너 없음 — 이미 종료된 듯(새로고침하면 반영)"}
+    pids = sorted({int(x) for x in out.split() if x.strip().isdigit()})
+    if not pids:
+        return {"stopped": False, "reason": f":{port} 리스너 없음 — 이미 종료된 듯(새로고침하면 반영)"}
+    comms = {}
+    for pid in pids:
+        try:
+            comms[pid] = subprocess.run(["ps", "-p", str(pid), "-o", "comm="],
+                                        capture_output=True, text=True, timeout=3).stdout.strip()
+        except Exception:
+            comms[pid] = ""
+        if "docker" in comms[pid].lower():
+            raise ValueError(f":{port} 는 docker 가 점유 중(pid {pid}) — 다른 워크트리 컨테이너일 수 있어 여기선 안 내림. 그 워크트리 카드에서 정지하세요.")
+    import signal
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        except PermissionError:
+            raise ValueError(f"pid {pid} 종료 권한 없음({comms.get(pid) or '?'})")
+    import socket
+    def _listening() -> bool:
+        for family, addr in ((socket.AF_INET, "127.0.0.1"), (socket.AF_INET6, "::1")):
+            try:
+                with socket.socket(family, socket.SOCK_STREAM) as s:
+                    s.settimeout(0.25)
+                    if s.connect_ex((addr, int(port))) == 0:
+                        return True
+            except OSError:
+                pass
+        return False
+    for _ in range(15):   # 최대 ~3s 포트 해제 대기 — 폴링이 바로 '꺼짐'으로 그리게
+        if not _listening():
+            break
+        time.sleep(0.2)
+    return {"stopped": True, "pids": pids, "comm": [comms.get(p) or "?" for p in pids]}
+
+
 def _clear_busy_error(key: str) -> None:
     """최근 실패 마커만 청소(진행중 항목은 그 스레드가 스스로 정리)."""
     cur = LIFECYCLE_BUSY.get(key)

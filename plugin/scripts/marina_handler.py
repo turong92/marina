@@ -36,7 +36,7 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml
 from marina_sessions import append_console_log, claude_session_titles, codex_session_titles, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
-from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_service
+from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
 
@@ -796,6 +796,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = start_service(root, service, force=force)
             elif self.path == "/api/stop":
                 result = stop_service(root, service)
+            elif self.path == "/api/stop-external":   # '외부 :<port>' — IDE/터미널 직접 실행 프로세스 정지
+                result = stop_external(root, service, int(body.get("port") or 0))
             elif self.path == "/api/restart":
                 result = restart_service(root, service, force=force)
             else:
