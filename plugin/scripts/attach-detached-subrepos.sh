@@ -175,6 +175,23 @@ resolve_source_root() {
   printf '%s\n' "$DEST_ROOT"
 }
 
+promote_dest_root_if_subrepo() {
+  local repo parent parent_real
+  DEST_ROOT_PROMOTED_FROM=""
+  for repo in ${SUBREPOS[@]+"${SUBREPOS[@]}"}; do
+    [[ "$(basename "$DEST_ROOT")" == "$repo" ]] || continue
+    parent="$(dirname "$DEST_ROOT")"
+    [[ -d "$parent" ]] || continue
+    parent_real="$(cd "$parent" 2>/dev/null && pwd -P)" || continue
+    # If the hook was invoked from a nested subrepo worktree, attach sibling
+    # subrepos to the containing project worktree instead of under that subrepo.
+    [[ "$(basename "$parent_real")" == "$(basename "$SOURCE_ROOT")" ]] || continue
+    DEST_ROOT_PROMOTED_FROM="$DEST_ROOT"
+    DEST_ROOT="$parent_real"
+    return 0
+  done
+}
+
 load_local_env_file() {
   local file="$1"
   [[ -f "$file" ]] || return 0
@@ -186,9 +203,10 @@ load_local_env_file() {
 
 DEST_ROOT="$(resolve_dest_root)"
 resolve_subrepos
+SOURCE_ROOT="$(resolve_source_root)"
+promote_dest_root_if_subrepo
 load_local_env_file "$DEST_ROOT/.workspace/marina/local.env"
 load_local_env_file "$DEST_ROOT/.workspace/dev-sessions/local.env"
-SOURCE_ROOT="$(resolve_source_root)"
 if [[ "$SOURCE_ROOT" != "$DEST_ROOT" ]]; then
   load_local_env_file "$SOURCE_ROOT/.workspace/marina/local.env"
   load_local_env_file "$SOURCE_ROOT/.workspace/dev-sessions/local.env"
@@ -319,6 +337,9 @@ main() {
   fi
 
   echo "source: $SOURCE_ROOT"
+  if [[ -n "${DEST_ROOT_PROMOTED_FROM:-}" ]]; then
+    echo "promote dest: $DEST_ROOT_PROMOTED_FROM -> $DEST_ROOT"
+  fi
   echo "dest:   $DEST_ROOT"
   echo "branch: $branch"
 
