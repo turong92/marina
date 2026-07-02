@@ -625,7 +625,11 @@ def cmd_up(a):
         if gw_gateway.get("expose"):
             gw_mod = _gw_module()
             gwport = _gateway_port_for_up()
-            snap_services = [{"service": k, "port": "1", "running": True} for k in (config.get("services") or {})]   # 대표 판정용(존재/후보만 필요)
+            # 대표 판정 후보 = published(ports 선언) 서비스만 — 게이트웨이 라우팅 대상과 동일 집합.
+            # 전 서비스를 후보로 넣으면 미퍼블리시 서비스(db 등)가 대표로 뽑혀 주입 URL 이
+            # 라우팅 없는 도메인을 가리킬 수 있다(코덱스 P2). 순서 무관: _effective_primary 폴백이 이름 정렬.
+            snap_services = [{"service": k, "port": "1", "running": True}
+                             for k, sv in (config.get("services") or {}).items() if (sv or {}).get("ports")]
             exp_env = resolve_expose_env(gw_gateway.get("expose") or {}, a.session, a.project_id, gwport,
                                          snap_services, gw_mod, primary=str(gw_gateway.get("primary") or ""))
         overlay_text = build_overlay(config, build_args=_parse_build_args(getattr(a, "build_arg", [])),

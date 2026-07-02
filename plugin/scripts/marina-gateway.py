@@ -41,13 +41,13 @@ def _cors_headers_204(fe_origin: str) -> list:
 
 
 def _cors_preflight_lines(fe_origin: str, tag: str = "", origin_exact: str = "") -> list:
-    """be 서브도메인 preflight 처리 — be 로 안 넘기고 caddy 가 204 자체응답. (단일 consumer origin=태그 없음)
-    진짜 preflight 만 매치(Origin + Access-Control-Request-Method 존재) — 앱의 정당한 OPTIONS
-    엔드포인트는 그대로 be 로 통과(코덱스 P2). origin_exact 는 다중 consumer 때 origin 별 분기."""
+    """be 서브도메인 preflight 처리 — 허용 origin 의 진짜 preflight(OPTIONS + 그 Origin +
+    Access-Control-Request-Method 존재)만 caddy 가 204 자체응답. 그 외 OPTIONS(앱의 정당한
+    엔드포인트·비허용 origin)는 be 로 통과(코덱스 P2). tag=origin 별 매처 이름 분리."""
     m = f"@cors_pre{tag}"
     return [f"    {m} {{",
             "        method OPTIONS",
-            f'        header Origin "{origin_exact}"' if origin_exact else "        header Origin *",
+            f'        header Origin "{origin_exact or fe_origin}"',
             "        header Access-Control-Request-Method *",
             "    }",
             f"    handle {m} {{"] + _cors_headers_204(fe_origin) + ["    }"]
@@ -87,7 +87,9 @@ def _effective_primary(services: list, explicit: str = "") -> str:
         for s in have:
             if (s.get("service") or "") == w:
                 return w
-    return have[0].get("service") if have else ""
+    # 최후 폴백은 이름 정렬로 결정적 — 호출측(라이브 스냅샷 vs cmd_up 합성 리스트)의 순서 차이로
+    # 대표가 갈리면 expose 주입 URL 이 라우팅 없는 도메인을 가리킨다(코덱스 P2).
+    return min((s.get("service") or "" for s in have), default="")
 
 def _is_primary(services: list, svc_name: str) -> bool:
     return _effective_primary(services) == svc_name
@@ -134,26 +136,20 @@ def build_caddyfile(snapshot: list, port: int = 80) -> str:
                         if rc != "/":
                             block += [f"    handle {rc}/* {{", f"        reverse_proxy 127.0.0.1:{sp}", "    }"]
             origins = _cors_origins(wid, pid, prim, s, port)
-            if origins and len(origins) == 1:               # expose 도메인 모드 타겟 → 게이트웨이가 CORS 전담 (consumer origin, 코덱스 P2)
-                fe_origin = origins[0]
-                block += _cors_preflight_lines(fe_origin)
-                block += [f"    reverse_proxy 127.0.0.1:{hostport} {{",
-                          "        header_up -Origin",                                          # be(예: Spring Security)가 Origin 보고 'Invalid CORS request' 403 내는 것 방지 — 게이트웨이가 CORS 전담하므로 upstream 은 non-CORS 로
-                          f'        header_down Access-Control-Allow-Origin "{fe_origin}"',   # be 응답 ACAO replace(중복 방지)
-                          "        header_down Access-Control-Allow-Credentials true",
-                          "    }", "}", ""]
-            elif origins:                                   # 다중 consumer — 요청 Origin 별 exact-match 분기(credentialed CORS 는 echo 불가, 허용목록 매칭)
+            if origins:                                     # expose 도메인 모드 타겟 → 게이트웨이가 CORS 전담(consumer origin 별 exact-match 분기, 코덱스 P2)
+                # 허용 origin 요청만 Origin 제거+ACAO — 그 외 Origin 은 손대지 않고 통과시켜 be 의
+                # Origin 기반 거부(CSRF 방어)가 그대로 동작하게(코덱스 P2: 무조건 strip 은 우회가 됨).
                 for i, o in enumerate(origins):
                     block += _cors_preflight_lines(o, tag=str(i), origin_exact=o)
                 for i, o in enumerate(origins):
                     block += [f'    @cors_from{i} header Origin "{o}"',
                               f"    handle @cors_from{i} {{",
                               f"        reverse_proxy 127.0.0.1:{hostport} {{",
-                              "            header_up -Origin",
-                              f'            header_down Access-Control-Allow-Origin "{o}"',
+                              "            header_up -Origin",                                        # be(예: Spring Security)가 Origin 보고 'Invalid CORS request' 403 내는 것 방지 — 이 분기(허용 origin)는 게이트웨이가 CORS 전담
+                              f'            header_down Access-Control-Allow-Origin "{o}"',           # be 응답 ACAO replace(중복 방지)
                               "            header_down Access-Control-Allow-Credentials true",
                               "        }", "    }"]
-                block += ["    handle {", f"        reverse_proxy 127.0.0.1:{hostport}", "    }", "}", ""]   # 그 외 Origin/무Origin → CORS 헤더 없이 통과
+                block += ["    handle {", f"        reverse_proxy 127.0.0.1:{hostport}", "    }", "}", ""]   # 그 외 Origin/무Origin → 원형 통과(CORS 헤더 없음)
             else:
                 block += [f"    reverse_proxy 127.0.0.1:{hostport}", "}", ""]
             lines += block

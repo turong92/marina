@@ -87,10 +87,22 @@ assert 'header_down Access-Control-Allow-Origin "http://a.p.localhost"' in out3,
 assert 'localhost:80"' not in out3, out3
 print("port-80 origin OK")
 
-# [P2] preflight 매처가 진짜 preflight 한정 (Origin + Access-Control-Request-Method)
+# [P2] preflight 매처가 진짜 preflight 한정 (허용 Origin + Access-Control-Request-Method)
 assert "header Access-Control-Request-Method *" in out3, out3
-assert "header Origin *" in out3, out3
+assert 'header Origin "http://a.p.localhost"' in out3, out3
 print("preflight-only matcher OK")
+
+# [P2 2R] 단일 consumer 도 Origin 매처 게이트 + 무매치 폴백(원형 통과) — 비허용 Origin strip 우회 방지
+blk1=out3.split("a-api.p.localhost:80 {",1)[1].split("\nhttp://",1)[0]
+assert '@cors_from0 header Origin "http://a.p.localhost"' in blk1, blk1
+assert blk1.count("reverse_proxy 127.0.0.1:3200")==2, blk1     # 허용 origin 1 + 폴백 1
+assert blk1.rindex("handle {") > blk1.rindex("@cors_from0"), blk1
+print("single-consumer origin-gate OK")
+
+# [P2 2R] 대표 최후 폴백 결정적(이름 정렬) — 합성/라이브 순서 달라도 동일 대표
+assert gw._effective_primary([{"service":"zfront","port":"1","running":True},{"service":"api","port":"2","running":True}])=="api"
+assert gw._effective_primary([{"service":"api","port":"2","running":True},{"service":"zfront","port":"1","running":True}])=="api"
+print("deterministic primary OK")
 
 # 레거시 스냅샷(cors:true, corsConsumers 없음) → 대표 origin 폴백(하위호환)
 snap4=[{"id":"a","projectId":"p","services":[
