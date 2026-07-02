@@ -358,6 +358,8 @@
     .run { background: hsl(148, 55%, 94%); color: var(--sys-cont-positive-default); }
     .stop { background: hsl(358, 70%, 96%); color: var(--sys-cont-negative-default); }
     .boot { background: hsl(36, 90%, 94%); color: hsl(30, 80%, 38%); }
+    .pill.boot { width: auto; min-width: 52px; padding: 0 7px; animation: pill-pulse 1.6s ease-in-out infinite; }  /* 기동 중 — 텍스트 길이 가변 + 살아있음 표시 */
+    @keyframes pill-pulse { 50% { opacity: .55; } }
     .bad { background: var(--sys-cont-negative-default); color: white; }
     .actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
     .actions button { height: 28px; min-width: 30px; padding: 0 7px; font-size: 13px; }

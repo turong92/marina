@@ -81,11 +81,14 @@
     // 상태 적응형 액션 가시성 — external(marina 컨테이너 아닌 외부 dev 가 포트 점유)은 marina 가 관리 안 함:
     //   ▶ 시작은 보임(외부 끄고 marina 로 띄울 수 있게), ■ 정지·↻ 재시작은 숨김(외부 프로세스엔 무효).
     function serviceActHidden(svc, type) {
+      if (svc.busy) return true;   // 기동/재시작 진행 중 — 중복 조작 방지(완료/실패는 폴링이 복원)
       if (type === 'start') return (svc.running && !svc.external) || svc.degraded;
       if (type === 'restart') return !svc.running || svc.degraded || svc.external;
       return !svc.running || svc.external;   // stop
     }
     function pillState(svc) {
+      if (svc.busy) return {text: svc.busy === 'restart' ? '재시작 중…' : '기동 중…', cls: 'boot', title: 'prebuild·이미지 빌드 포함 — 첫 시작은 몇 분 걸릴 수 있어요. 끝나면 자동으로 갱신됩니다.'};
+      if (svc.busyError) return {text: '시작 실패', cls: 'bad', title: svc.busyError};
       if (svc.degraded) return {text: '비활성', cls: 'bad', title: 'Dockerfile 없음 — 이 서비스만 기동에서 건너뜁니다(나머지는 정상). compose 편집에서 Dockerfile 을 추가하거나 이 서비스를 빼세요.'};
       if (svc.external) return {text: `외부 :${svc.port}`, cls: 'run', title: `marina 컨테이너가 아닌 외부 프로세스가 포트 ${svc.port} 를 사용 중 — 직접(node·gradlew 등)으로 띄운 dev 서버로 보입니다. marina 로 관리하려면 그 프로세스를 끄고 ▶ 로 시작하세요.`};
       if (!svc.running) return {text: '꺼짐', cls: 'stop', title: '정지됨'};

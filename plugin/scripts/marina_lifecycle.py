@@ -16,18 +16,27 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_info_cache
+import threading
+
+from marina_state import LIFECYCLE_BUSY, MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_info_cache, busy_key
 from marina_cache import cache_items_by_category, disk_usage_mb, docker_volume_rm
 from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, marina_env, script
 from marina_sessions import git_output, session_payload, system_memory, worktree_status
 
+def _clear_busy_error(key: str) -> None:
+    """최근 실패 마커만 청소(진행중 항목은 그 스레드가 스스로 정리)."""
+    cur = LIFECYCLE_BUSY.get(key)
+    if cur and "error" in cur:
+        LIFECYCLE_BUSY.pop(key, None)
+
 def stop_service(root: Path, service: str) -> dict[str, Any]:
     try:
         out = _marina_cli(root, "stop", f"--{service}")   # compose_main → docker compose stop <svc>
     except subprocess.CalledProcessError as exc:
         raise ValueError(f"stop failed: {(exc.output or '')[-500:]}")
+    _clear_busy_error(busy_key(root, service))
     refresh_gateway()   # 이벤트 즉시반영
     return {"stopped": True, "output": out[-1000:]}
 
@@ -36,16 +45,42 @@ def stop_all(root: Path) -> dict[str, Any]:
         out = _marina_cli(root, "stop", "--all")          # compose_main → docker compose down --remove-orphans
     except subprocess.CalledProcessError as exc:
         raise ValueError(f"stop-all failed: {(exc.output or '')[-500:]}")
+    for k in [k for k in LIFECYCLE_BUSY if k.startswith(f"{root}::")]:
+        _clear_busy_error(k)
     refresh_gateway()   # 이벤트 즉시반영
     return {"stoppedAll": True, "output": out[-1000:]}
 
+LIFECYCLE_TIMEOUT = int(_env("LIFECYCLE_TIMEOUT", "1800"))   # start/restart 백그라운드 실행 상한 — prebuild(gradle)+첫 이미지 빌드가 몇 분 걸림(120s 로 죽이던 버그 수정)
+
+
+def _spawn_lifecycle(key: str, op: str, fn) -> dict[str, Any]:
+    """긴 lifecycle(start/restart)을 백그라운드 스레드로 — API 는 즉시 응답, 진행/실패는
+    LIFECYCLE_BUSY 로 폴링 payload 에 실린다(대시보드가 120s 타임아웃으로 빌드를 죽이던 버그의 근본 수정).
+    이미 진행 중이면 중복 기동 거부. 실패 항목은 다음 시도/정지 때 청소."""
+    cur = LIFECYCLE_BUSY.get(key)
+    if cur and "error" not in cur:
+        return {"busy": True, "op": cur.get("op")}
+    LIFECYCLE_BUSY[key] = {"op": op, "ts": time.time()}
+
+    def _run():
+        try:
+            fn()
+            LIFECYCLE_BUSY.pop(key, None)
+            refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh 훅의 gateway-ensure 가 단일 처리 — CLI·대시보드 공통)
+        except subprocess.CalledProcessError as exc:
+            LIFECYCLE_BUSY[key] = {"op": op, "error": f"{op} failed: {(exc.output or '')[-500:]}", "endedTs": time.time()}
+        except subprocess.TimeoutExpired:
+            LIFECYCLE_BUSY[key] = {"op": op, "error": f"{op} timed out ({LIFECYCLE_TIMEOUT}s)", "endedTs": time.time()}
+        except Exception as exc:
+            LIFECYCLE_BUSY[key] = {"op": op, "error": str(exc)[-500:], "endedTs": time.time()}
+
+    threading.Thread(target=_run, daemon=True, name=f"lifecycle-{op}").start()
+    return {"starting": True, "op": op}
+
+
 def start_all(root: Path) -> dict[str, Any]:
-    try:
-        out = _marina_cli(root, "start", "--all")          # compose_main → ensure+pre-build+ up -d --build (전체 스택)
-    except subprocess.CalledProcessError as exc:
-        raise ValueError(f"start-all failed: {(exc.output or '')[-1500:]}")
-    refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh start 훅의 gateway-ensure 가 단일 처리 — CLI·대시보드 공통)
-    return {"startedAll": True, "output": (out or "")[-2000:]}
+    return _spawn_lifecycle(busy_key(root, "--all"), "start",
+                            lambda: _marina_cli(root, "start", "--all", timeout=LIFECYCLE_TIMEOUT))   # compose_main → ensure+pre-build+ up -d --build (전체 스택)
 
 def cleanup_session(root: Path) -> dict[str, Any]:
     stop_all(root)
@@ -195,29 +230,23 @@ def start_service(root: Path, service: str, force: bool = False) -> dict[str, An
     env = marina_env(root)
     # codex worktree 는 dashboard 기동 시 prepare 완료 — claude worktree 는 미attach 면 start 가 attach 수행
     env["MARINA_SKIP_PREPARE"] = "1" if has_attached_subrepos(root) else "0"
-    try:
-        output = subprocess.check_output(
+
+    def _do_start():
+        subprocess.check_output(
             [str(script(root)), "start", f"--{service}"],
             cwd=str(root),
             text=True,
             stderr=subprocess.STDOUT,
             env=env,
-            timeout=120,
+            timeout=LIFECYCLE_TIMEOUT,
         )
-    except subprocess.CalledProcessError as exc:
-        raise ValueError(f"start failed: {(exc.output or '')[-500:]}")
-    except subprocess.TimeoutExpired:
-        raise ValueError("start timed out (120s)")
-    refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh start 훅의 gateway-ensure 가 단일 처리)
-    return {"started": True, "output": output[-1000:]}
+
+    return _spawn_lifecycle(busy_key(root, service), "start", _do_start)
 
 def restart_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
-    try:
-        out = _marina_cli(root, "restart", f"--{service}")  # compose_main → docker compose restart <svc>
-    except subprocess.CalledProcessError as exc:
-        raise ValueError(f"restart failed: {(exc.output or '')[-500:]}")
-    refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh restart 훅의 gateway-ensure 가 단일 처리)
-    return {"restarted": True, "output": out[-1000:]}
+    # restart 도 up --build 재적용이라 이미지 재빌드로 길어질 수 있다 — start 와 동일하게 백그라운드.
+    return _spawn_lifecycle(busy_key(root, service), "restart",
+                            lambda: _marina_cli(root, "restart", f"--{service}", timeout=LIFECYCLE_TIMEOUT))
 
 def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
     by_category = cache_items_by_category(root)

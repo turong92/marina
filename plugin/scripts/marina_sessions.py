@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import CODEX_HOME, PORT, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_info_cache
+from marina_state import CODEX_HOME, LIFECYCLE_BUSY, PORT, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_info_cache, busy_key
 from marina_logtext import redact_text
 from marina_cache import cache_category_mb, disk_usage_mb
 from marina_registry import default_attach_of, discover_all_roots, discover_roots, is_source_checkout, project_for, project_label, root_source, subrepos_of
@@ -130,6 +130,19 @@ def session_payload(root: Path) -> dict[str, Any]:
     project = project_for(root)
     kind = (project or {}).get("kind", "compose")
     services = _compose_services(root, project) if kind == "compose" else []
+    # 기동/재시작 진행·실패 상태 머지 — start 는 백그라운드(prebuild+빌드 수 분)라 폴링이 이걸로 "기동 중"을 그린다(새로고침에도 유지).
+    all_busy = LIFECYCLE_BUSY.get(busy_key(root, "--all"))
+    for s in services:
+        own = LIFECYCLE_BUSY.get(busy_key(root, s.get("service") or ""))
+        b = own or all_busy
+        if not b:
+            continue
+        if "error" in b:
+            s["busyError"] = b["error"]
+        elif own or not s.get("running"):
+            # 자기 서비스 op 는 항상 표시(restart 중엔 구 컨테이너가 아직 running) —
+            # --all 폴백만 미기동 서비스에 한정(부분 완료된 스택에서 이미 뜬 건 running 표시 우선)
+            s["busy"] = b.get("op") or "start"
     return {
         "id": session_id(root),
         "alias": read_meta(root).get("alias", ""),

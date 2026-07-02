@@ -133,3 +133,11 @@ _worktree_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _session_titles_cache: tuple[float, dict[str, dict[str, str]]] = (0.0, {})
 
 _codex_titles_cache: tuple[float, dict[str, str]] = (0.0, {})
+
+# 서비스 기동/재시작 진행 상태 — "root::svc"(전체는 "root::--all") → 진행중 {"op","ts"} | 최근 실패 {"op","error","endedTs"}.
+# start 는 prebuild(gradle)+이미지 빌드로 몇 분 걸릴 수 있어 백그라운드로 돌리고, 폴링 payload 가
+# 이걸 읽어 카드에 "기동 중/실패"를 표시한다(새로고침에도 유지). dict 원자연산만 사용(GIL) — 락 불요.
+LIFECYCLE_BUSY: dict[str, dict[str, Any]] = {}
+
+def busy_key(root, service: str) -> str:
+    return f"{root}::{service}"
