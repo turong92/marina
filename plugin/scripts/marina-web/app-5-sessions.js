@@ -279,7 +279,23 @@
         const toolButtons = card.querySelectorAll('.session-tools button, .session-actions button');
         const stopAllBtn = card.querySelector('[data-stop-all]');
         stopAllBtn.hidden = !session.services.some(svc => svc.running);   // 정지할 게 없으면 숨김 — 개별 서비스 버튼과 동일한 상태적응
-        stopAllBtn.onclick = () => withBusy(stopAllBtn, '…', () => sessionAction('stop-all', session), toolButtons);
+        stopAllBtn.onclick = () => withBusy(stopAllBtn, '…', async () => {
+          // 외부(IDE/터미널 직접 실행)는 compose down 이 못 내림 — 확인 받아 stop-external 로 함께 종료(안 하면 external 만 남아 '전체 정지가 안 먹은 것'처럼 보임)
+          const externals = session.services.filter(svc => svc.external && svc.running);
+          const killExternals = externals.length > 0 &&
+            confirm(`marina 컨테이너 밖(IDE/터미널)에서 직접 띄운 프로세스도 있어:\n  ${externals.map(svc => `${svc.service} (:${svc.port})`).join(', ')}\n같이 종료할까? (취소=컨테이너만 정지)`);
+          await sessionAction('stop-all', session);
+          if (killExternals) {
+            for (const svc of externals) {
+              try {
+                const r = await api('/api/stop-external', {method: 'POST', headers: {'content-type': 'application/json'},
+                  body: JSON.stringify({root: session.root, service: svc.service, port: Number(svc.port)})});
+                if (r && r.stopped === false && r.reason) alert(`${svc.service}: ${r.reason}`);
+              } catch (e) { alert(`${svc.service} 외부 종료 실패: ${String((e && e.message) || e)}`); }
+            }
+            await load({force: true});
+          }
+        }, toolButtons);
         const startAllBtn = card.querySelector('[data-start-all]');       // compose: 항상 표시(미실행·include 미해석 시에도 전체 시작 가능)
         if (startAllBtn) startAllBtn.onclick = () => withBusy(startAllBtn, '…', () => sessionAction('start-all', session), toolButtons);
         const editComposeBtn = card.querySelector('[data-edit-compose]');
