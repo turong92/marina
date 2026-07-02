@@ -6,8 +6,8 @@
 `:3900` 웹 대시보드에서 등록·기동·로그·포트를 관리한다. **앱 레포는 건드리지 않는다** —
 compose 와 설정은 전부 `~/.marina` 에 보관된다.
 
-의존성 0 — `python3`(표준 라이브러리만) + bash. **compose 프로젝트** 실행에는 Docker
-(compose v2.24.4+)가 필요하다.
+의존성 0 — `python3`(표준 라이브러리만) + bash. 실행에는 **Docker**(compose v2.24.4+)가,
+게이트웨이(호스트 브라우저 진입, 선택)에는 **Caddy**(v2.7+)가 필요하다 — [요구사항](#요구사항제약) 참조.
 
 > 잘 모르겠으면 한 줄만 기억하세요: 대시보드(`marina`)를 열고 **`+ 프로젝트 등록 → 🆕 새로 설정 (위저드)`**.
 > 위저드가 Dockerfile 을 스캔해 서비스·파일·연결을 단계별로 채우고, 등록 직전 compose 미리보기까지 가져다 줍니다.
@@ -117,6 +117,30 @@ plugin/scripts/marina-entrypoint.sh uninstall-cli     # 제거
 
 > 한계: 전역 위치에 깔아 **여러 사용자가 한 shim 을 공유**하면 baked fallback 이 설치한 사람의 플러그인
 > 경로를 가리킬 수 있어 권장하지 않는다(각자 user-scope 설치 권장). 경로 해석 단계는 `python3` 가 PATH 필요.
+
+### 구버전(네이티브 시절) 사용자 — 삭제 후 재설치
+
+지금 marina 는 **compose 전용**이다. 네이티브(launch.json·프로세스 직접 실행) 시절 설치는 설정 포맷과
+shim 이 달라 부분 업데이트로는 잔재가 남는다(구 `projects.json`·launch.json·옛 shim 등).
+**한 번 지우고 새로 까는 게 가장 빠르고 확실하다**:
+
+```bash
+# 1) 기존 것 정지·제거
+marina stop --all                    # 떠 있는 스택 정리(사용 중인 워크트리마다)
+marina gateway uninstall             # :80 시스템 데몬을 설치했던 경우만
+marina dashboard stop
+marina uninstall-cli                 # 옛 shim 제거
+
+# 2) 플러그인 제거 — 설치했던 쪽에서 (Claude Code: /plugin 화면에서 marina 제거,
+#    Codex: codex plugin remove marina@marina-dev) + 마켓플레이스 등록도 제거
+
+# 3) 설정 초기화 — 네이티브 잔재 일괄 제거 (launchd plist 도 이 안에 있음)
+mv ~/.marina ~/.marina.bak           # 보관 compose 등 참고할 게 있으면 백업, 확신 있으면 rm -rf
+
+# 4) 재설치(위 '설치' 절차) + shim + 프로젝트 재등록
+marina install-cli
+marina project add <path> --compose <공유받은 compose>    # '팀에 공유' 섹션 참조
+```
 
 ---
 
@@ -307,6 +331,8 @@ x-marina:
 - 설계: [docs/superpowers/specs/2026-07-01-gateway-expose-design.md](docs/superpowers/specs/2026-07-01-gateway-expose-design.md).
 
 - **잔여(물리 한계)**: 같은 내부 포트를 여러 서비스가 서빙하면 compose 에서 포트 분리(엮기 자동타겟 모호).
+  서비스·워크트리 이름이 DNS 라벨 정리 후 충돌하면(`user_api` vs `user-api`) 게이트웨이는 해시로 도메인을
+  분리하지만 expose 주입 URL 은 해시 전 라벨이라 어긋날 수 있다(경고 출력) — 이름을 분리해 쓰는 걸 권장.
 
 ---
 
@@ -367,7 +393,13 @@ x-marina:
 
 ## 요구사항·제약
 
-- **Docker (compose v2.24.4+)** — `!override` 머지 태그 사용.
+- **Docker — compose v2.24.4 이상** (`!override` 머지 태그 사용. 미달이면 start 때 명확한 에러로 거부).
+  `docker compose version` 으로 확인 — Docker Desktop 4.28+ 면 충족. 게이트웨이 CORS·엮기 사이드카도
+  전부 이 안에서 동작하므로 Docker 외 추가 데몬은 없다.
+- **Caddy v2.7 이상** (게이트웨이 전용, **선택**) — `brew install caddy` / `apt install caddy`,
+  `caddy version` 으로 확인(실측 v2.11). 표준 Caddyfile 지시어만 쓰므로 v2 면 대체로 동작하나 2.7 미만은
+  미검증. 없으면 게이트웨이만 비활성(안내 출력)되고 marina 나머지는 정상.
+- **python3**(표준 라이브러리만)·**bash**·**git** — 별도 pip 설치 없음.
 - 단일 포트만 지원(포트 **범위**는 거부). `network_mode: host` 는 격리를 깨므로 **거부**된다(명확한 에러).
   `container_name` 은 격리를 위해 overlay 에서 **자동 제거**된다(`!reset`, 경고). `external` 네트워크·볼륨은 경고만.
 - `restart --<svc>` 는 `up --build` 재적용(변경 반영). 컨테이너 단순 재시작이 아니다.
