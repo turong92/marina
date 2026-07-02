@@ -11,7 +11,7 @@ spec=importlib.util.spec_from_file_location("gw", sys.argv[1]); gw=importlib.uti
 # 대표(primary)면 bare, 아니면 <wt>-<svc>. 라벨은 sanitize.
 assert gw.service_domain("main","shop","web",True,3902)=="http://main.shop.localhost:3902", gw.service_domain("main","shop","web",True,3902)
 assert gw.service_domain("main","shop","user-api",False,3902)=="http://main-user-api.shop.localhost:3902", gw.service_domain("main","shop","user-api",False,3902)
-assert gw.service_domain("Feat_X","MDC","User_API",False,80)=="http://feat-x-user-api.mdc.localhost:80"
+assert gw.service_domain("Feat_X","MDC","User_API",False,80)=="http://feat-x-user-api.mdc.localhost"   # :80 은 브라우저 Origin 과 일치하게 생략(코덱스 P2)
 print("service_domain OK")
 PY
 echo "PASS test-expose-token (service_domain)"

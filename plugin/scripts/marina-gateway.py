@@ -21,28 +21,60 @@ def _domain_label(s: str) -> str:
     return out or "x"
 
 
-def _cors_preflight_lines(fe_origin: str) -> list:
-    """be 서브도메인 preflight(OPTIONS) 처리 — be 로 안 넘기고 caddy 가 204 자체응답.
-    credentialed(특정 origin), Allow-Headers 는 요청 헤더 echo(Authorization 등 커스텀 범용). caddy v2 문법."""
+def origin_for(sub: str, port: int) -> str:
+    """<sub>.localhost 의 브라우저 origin. :80 은 브라우저가 Origin 헤더에서 생략하므로 함께 생략 —
+    CORS 는 문자열 일치라 :80 을 붙이면 credentialed 요청이 깨진다(코덱스 P2)."""
+    return f"http://{sub}.localhost" + ("" if int(port) == 80 else f":{port}")
+
+
+def _cors_headers_204(fe_origin: str) -> list:
+    """preflight 응답 헤더 + 204 (handle 블록 내부). credentialed(특정 origin),
+    Allow-Headers 는 요청 헤더 echo(Authorization 등 커스텀 범용). caddy v2 문법."""
     return [
-        "    @cors_pre method OPTIONS",
-        "    handle @cors_pre {",
         f'        header Access-Control-Allow-Origin "{fe_origin}"',
         "        header Access-Control-Allow-Credentials true",
         '        header Access-Control-Allow-Methods "GET, POST, PUT, PATCH, DELETE, OPTIONS"',
         '        header Access-Control-Allow-Headers "{http.request.header.Access-Control-Request-Headers}"',
         "        header Access-Control-Max-Age 600",
         "        respond 204",
-        "    }",
     ]
+
+
+def _cors_preflight_lines(fe_origin: str, tag: str = "", origin_exact: str = "") -> list:
+    """be 서브도메인 preflight 처리 — be 로 안 넘기고 caddy 가 204 자체응답. (단일 consumer origin=태그 없음)
+    진짜 preflight 만 매치(Origin + Access-Control-Request-Method 존재) — 앱의 정당한 OPTIONS
+    엔드포인트는 그대로 be 로 통과(코덱스 P2). origin_exact 는 다중 consumer 때 origin 별 분기."""
+    m = f"@cors_pre{tag}"
+    return [f"    {m} {{",
+            "        method OPTIONS",
+            f'        header Origin "{origin_exact}"' if origin_exact else "        header Origin *",
+            "        header Access-Control-Request-Method *",
+            "    }",
+            f"    handle {m} {{"] + _cors_headers_204(fe_origin) + ["    }"]
+
+
+def _cors_origins(wid: str, pid: str, prim: str, svc: dict, port: int) -> list:
+    """expose 도메인 모드 타겟의 CORS 허용 origin 목록 — corsConsumers(consumer 서비스명들) 각각의
+    도메인(대표=bare, 그 외=<wt>-<consumer>)을 origin 으로. 레거시 스냅샷(cors:true 만)은 대표 origin 폴백.
+    비대표 consumer(admin 등)의 Origin 도 통과해야 하므로 대표 고정이 아니라 consumer 기준(코덱스 P2)."""
+    consumers = list((svc or {}).get("corsConsumers") or [])
+    if not consumers and (svc or {}).get("cors"):
+        consumers = [prim]                                  # 레거시 bool — 대표가 consumer 라고 가정
+    out = []
+    for c in consumers:
+        sub = f"{wid}.{pid}" if (c or "") == prim else f"{wid}-{_domain_label(c)}.{pid}"
+        o = origin_for(sub, port)
+        if o not in out:
+            out.append(o)
+    return out
 
 
 def service_domain(wt: str, proj: str, svc: str, is_primary: bool, port: int) -> str:
     """이 워크트리 서비스의 게이트웨이 URL. 대표(primary)=<wt>.<proj>.localhost, 그 외=<wt>-<svc>.<proj>.localhost.
-    도메인 스킴 SoT — build_caddyfile 과 expose resolve 가 라벨 규칙을 공유(DRY)."""
+    도메인 스킴 SoT — build_caddyfile 과 expose resolve 가 라벨 규칙을 공유(DRY). :80 은 생략(origin 문자열 일치)."""
     w, p, s = _domain_label(wt), _domain_label(proj), _domain_label(svc)
     sub = f"{w}.{p}" if is_primary else f"{w}-{s}.{p}"
-    return f"http://{sub}.localhost:{port}"
+    return origin_for(sub, port)
 
 
 def _effective_primary(services: list, explicit: str = "") -> str:
@@ -85,7 +117,10 @@ def build_caddyfile(snapshot: list, port: int = 80) -> str:
             is_primary = (svc_raw == prim)
             sub = f"{wid}.{pid}" if is_primary else f"{wid}-{name}.{pid}"
             if sub in used:                                 # sanitize 충돌(feat_x vs feat-x 등) → 원본 해시로 유니크화. 한 워크트리가 전체 config reject 막지 않게(코덱스 P2)
-                sub = f"{sub}-{hashlib.sha1(f'{wid_raw}|{pid_raw}|{svc_raw}'.encode()).hexdigest()[:6]}"
+                hashed = f"{sub}-{hashlib.sha1(f'{wid_raw}|{pid_raw}|{svc_raw}'.encode()).hexdigest()[:6]}"
+                # expose(service_domain)는 해시 전 라벨로 URL 을 만들므로 이 서비스에 expose 를 걸면 불일치(코덱스 P3) — 이름 분리 권장
+                sys.stderr.write(f"gateway: 도메인 라벨 충돌 {sub} → {hashed} (expose 주입 URL 과 불일치 가능 — 서비스/워크트리 이름 분리 권장)\n")
+                sub = hashed
             used.add(sub)
             block = [f"http://{sub}.localhost:{port} {{",
                      "    bind 127.0.0.1 ::1"]              # 로컬 전용 — LAN 노출 방지(코덱스 P1)
@@ -98,14 +133,27 @@ def build_caddyfile(snapshot: list, port: int = 80) -> str:
                         rc = "/" + str(rp).strip().strip("/")
                         if rc != "/":
                             block += [f"    handle {rc}/* {{", f"        reverse_proxy 127.0.0.1:{sp}", "    }"]
-            if (s or {}).get("cors"):                       # expose 도메인 모드 타겟 → 게이트웨이가 CORS 전담
-                fe_origin = f"http://{wid}.{pid}.localhost:{port}"   # 이 워크트리 대표 origin
+            origins = _cors_origins(wid, pid, prim, s, port)
+            if origins and len(origins) == 1:               # expose 도메인 모드 타겟 → 게이트웨이가 CORS 전담 (consumer origin, 코덱스 P2)
+                fe_origin = origins[0]
                 block += _cors_preflight_lines(fe_origin)
                 block += [f"    reverse_proxy 127.0.0.1:{hostport} {{",
                           "        header_up -Origin",                                          # be(예: Spring Security)가 Origin 보고 'Invalid CORS request' 403 내는 것 방지 — 게이트웨이가 CORS 전담하므로 upstream 은 non-CORS 로
                           f'        header_down Access-Control-Allow-Origin "{fe_origin}"',   # be 응답 ACAO replace(중복 방지)
                           "        header_down Access-Control-Allow-Credentials true",
                           "    }", "}", ""]
+            elif origins:                                   # 다중 consumer — 요청 Origin 별 exact-match 분기(credentialed CORS 는 echo 불가, 허용목록 매칭)
+                for i, o in enumerate(origins):
+                    block += _cors_preflight_lines(o, tag=str(i), origin_exact=o)
+                for i, o in enumerate(origins):
+                    block += [f'    @cors_from{i} header Origin "{o}"',
+                              f"    handle @cors_from{i} {{",
+                              f"        reverse_proxy 127.0.0.1:{hostport} {{",
+                              "            header_up -Origin",
+                              f'            header_down Access-Control-Allow-Origin "{o}"',
+                              "            header_down Access-Control-Allow-Credentials true",
+                              "        }", "    }"]
+                block += ["    handle {", f"        reverse_proxy 127.0.0.1:{hostport}", "    }", "}", ""]   # 그 외 Origin/무Origin → CORS 헤더 없이 통과
             else:
                 block += [f"    reverse_proxy 127.0.0.1:{hostport}", "}", ""]
             lines += block
@@ -122,7 +170,6 @@ def summarize_gateway(snapshot: list, port: int = 80) -> list:
         pid = _domain_label((wt or {}).get("projectId") or "")
         svcs = (wt or {}).get("services") or []
         prim = _effective_primary(svcs, (wt or {}).get("primary") or "")
-        fe_origin = f"http://{wid}.{pid}.localhost:{port}"
         for s in svcs:
             hostport = str((s or {}).get("port") or "").strip()
             if not hostport.isdigit() or not (s or {}).get("running"):
@@ -133,8 +180,10 @@ def summarize_gateway(snapshot: list, port: int = 80) -> list:
             if sub in used:
                 sub = f"{sub}-{hashlib.sha1(f'{wid}|{pid}|{name}'.encode()).hexdigest()[:6]}"
             used.add(sub)
+            origins = _cors_origins(wid, pid, prim, s, port)
             out.append({"domain": f"{sub}.localhost:{port}", "service": (s or {}).get("service"),
-                        "hostport": hostport, "cors_origin": fe_origin if (s or {}).get("cors") else None,
+                        "hostport": hostport, "cors_origin": origins[0] if origins else None,
+                        "cors_origins": origins,
                         "routes": list((s or {}).get("routes") or [])})
     return out
 

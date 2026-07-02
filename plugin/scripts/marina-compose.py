@@ -91,16 +91,48 @@ def _gw_module():
 
 
 def _gateway_port_for_up() -> int:
-    """게이트웨이 포트: MARINA_GATEWAY_PORT env 우선, 없으면 $MARINA_HOME/gateway/port, 기본 3902."""
+    """게이트웨이 포트(expose URL 주입용): MARINA_GATEWAY_PORT env → $MARINA_HOME/gateway/port → 빈 포트 선점.
+    up 이 gateway-ensure 보다 먼저 돌므로, 파일이 없으면 여기서 빈 포트를 골라 **선기록**한다 —
+    직후 ensure_gateway 가 같은 파일을 재사용해 주입 URL 과 실제 기동 포트가 일치(코덱스 P2).
+    미기동 + 파일 포트가 이미 점유(타 프로세스)면 그 값도 못 쓰므로 새로 골라 갱신."""
     v = os.environ.get("MARINA_GATEWAY_PORT")
     if v and v.isdigit():
         return int(v)
+    home = os.environ.get("MARINA_HOME") or os.path.expanduser("~/.marina")
+    gw_dir = os.path.join(home, "gateway")
+    pf = os.path.join(gw_dir, "port")
+    import socket
+
+    def _free(p):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            try:
+                s.bind(("127.0.0.1", p))
+                return True
+            except OSError:
+                return False
+
+    gw_alive = False                                       # 게이트웨이(caddy)가 살아있으면 파일 포트가 곧 실포트(점유돼 보여도 신뢰)
     try:
-        home = os.environ.get("MARINA_HOME") or os.path.expanduser("~/.marina")
-        with open(os.path.join(home, "gateway", "port"), encoding="utf-8") as f:
-            return int(f.read().strip())
+        pid = int(open(os.path.join(gw_dir, "caddy.pid"), encoding="utf-8").read().strip())
+        os.kill(pid, 0)
+        gw_alive = True
     except Exception:
-        return 3902
+        pass
+    try:
+        with open(pf, encoding="utf-8") as f:
+            p = int(f.read().strip())
+        if 0 < p < 65536 and (gw_alive or _free(p)):
+            return p
+    except Exception:
+        pass
+    port = next((p for p in range(3902, 3952) if _free(p)), 3902)
+    try:
+        os.makedirs(gw_dir, exist_ok=True)
+        with open(pf, "w", encoding="utf-8") as f:
+            f.write(str(port))
+    except OSError:
+        pass
+    return port
 
 
 def _stringify_keys(obj):

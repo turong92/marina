@@ -32,8 +32,9 @@ try: spec.loader.exec_module(ml)
 except Exception as e:
     print("skip import (env dep):", e); sys.exit(0)
 gw={"expose":{"web":{"NEXT_PUBLIC_API_URL":"gateway:user-api","OTHER":"origin:svc2"}}}
-assert ml._expose_cors_targets(gw)=={"user-api"}, ml._expose_cors_targets(gw)   # gateway 모드만 cors 대상
-assert ml._expose_cors_targets({})==set()
+assert ml._expose_cors_targets(gw)=={"user-api":["web"]}, ml._expose_cors_targets(gw)   # gateway 모드만, be→consumer 목록(코덱스 P2)
+assert ml._expose_cors_targets({"expose":{"web":{"A":"gateway:api"},"admin":{"B":"gateway:api"}}})=={"api":["admin","web"]}
+assert ml._expose_cors_targets({})=={}
 print("_expose_cors_targets OK")
 PY
 echo "PASS test-gateway-expose-domain (cors targets)"
@@ -50,3 +51,72 @@ assert any(r["domain"]=="alpha.mdc.localhost:8088" and r["cors_origin"] is None 
 print("summarize_gateway OK")
 PY
 echo "PASS test-gateway-expose-domain (summarize)"
+
+# ── 코덱스 리뷰 반영 회귀 ──────────────────────────────────────────────
+python3 - "$HERE/../scripts/marina-gateway.py" <<'PY'
+import importlib.util, sys
+spec=importlib.util.spec_from_file_location("gw", sys.argv[1]); gw=importlib.util.module_from_spec(spec); spec.loader.exec_module(gw)
+
+# [P2] 비대표 consumer(admin) → ACAO 가 admin origin
+snap=[{"id":"a","projectId":"p","services":[
+  {"service":"web","port":"3100","running":True},
+  {"service":"admin","port":"3300","running":True},
+  {"service":"api","port":"3200","running":True,"cors":True,"corsConsumers":["admin"]}]}]
+out=gw.build_caddyfile(snap, 8088)
+assert 'header_down Access-Control-Allow-Origin "http://a-admin.p.localhost:8088"' in out, out
+print("non-primary consumer OK")
+
+# [P2] 다중 consumer → origin 별 exact 분기 + 무매치 폴백
+snap2=[{"id":"a","projectId":"p","services":[
+  {"service":"web","port":"3100","running":True},
+  {"service":"admin","port":"3300","running":True},
+  {"service":"api","port":"3200","running":True,"cors":True,"corsConsumers":["admin","web"]}]}]
+out2=gw.build_caddyfile(snap2, 8088)
+blk=out2.split("a-api.p.localhost:8088 {",1)[1].split("\nhttp://",1)[0]
+assert '@cors_from0 header Origin "http://a-admin.p.localhost:8088"' in blk, blk
+assert '@cors_from1 header Origin "http://a.p.localhost:8088"' in blk, blk
+assert blk.count("reverse_proxy 127.0.0.1:3200")==3, blk        # origin 2 + 폴백 1
+print("multi consumer OK")
+
+# [P2] :80 → origin 에서 생략 (브라우저 Origin 문자열 일치)
+snap3=[{"id":"a","projectId":"p","services":[
+  {"service":"web","port":"3100","running":True},
+  {"service":"api","port":"3200","running":True,"cors":True,"corsConsumers":["web"]}]}]
+out3=gw.build_caddyfile(snap3, 80)
+assert 'header_down Access-Control-Allow-Origin "http://a.p.localhost"' in out3, out3
+assert 'localhost:80"' not in out3, out3
+print("port-80 origin OK")
+
+# [P2] preflight 매처가 진짜 preflight 한정 (Origin + Access-Control-Request-Method)
+assert "header Access-Control-Request-Method *" in out3, out3
+assert "header Origin *" in out3, out3
+print("preflight-only matcher OK")
+
+# 레거시 스냅샷(cors:true, corsConsumers 없음) → 대표 origin 폴백(하위호환)
+snap4=[{"id":"a","projectId":"p","services":[
+  {"service":"web","port":"3100","running":True},
+  {"service":"api","port":"3200","running":True,"cors":True}]}]
+out4=gw.build_caddyfile(snap4, 8088)
+assert 'header_down Access-Control-Allow-Origin "http://a.p.localhost:8088"' in out4, out4
+print("legacy bool fallback OK")
+PY
+echo "PASS test-gateway-expose-domain (codex round2: consumer-origin/:80/preflight)"
+
+# [P2] _gateway_port_for_up 선기록 — up 이 고른 포트를 파일에 남겨 ensure 와 일치
+python3 - "$HERE/../scripts/marina-compose.py" <<'PY'
+import importlib.util, sys, os, tempfile
+spec=importlib.util.spec_from_file_location("mc", sys.argv[1]); mc=importlib.util.module_from_spec(spec); spec.loader.exec_module(mc)
+with tempfile.TemporaryDirectory() as td:
+    os.environ.pop("MARINA_GATEWAY_PORT", None)
+    os.environ["MARINA_HOME"]=td
+    p1=mc._gateway_port_for_up()
+    on_disk=int(open(os.path.join(td,"gateway","port")).read())
+    assert p1==on_disk, (p1,on_disk)                       # 선기록
+    assert p1==mc._gateway_port_for_up()                   # 재호출 동일(파일 재사용)
+    os.environ["MARINA_GATEWAY_PORT"]="4444"
+    assert mc._gateway_port_for_up()==4444                 # env 우선
+    os.environ.pop("MARINA_GATEWAY_PORT", None)
+os.environ.pop("MARINA_HOME", None)
+print("port pre-claim OK")
+PY
+echo "PASS test-gateway-expose-domain (port pre-claim)"

@@ -274,16 +274,19 @@ def bootout_session_dashboard(sid: str) -> None:
             stderr=subprocess.DEVNULL,
         )
 
-def _expose_cors_targets(xm_gateway: dict) -> set:
-    """x-marina.gateway.expose 에서 ${gateway:svc} 로 지목된 be 서비스명 집합(=CORS 대상).
-    ${origin:} 은 same-origin 이라 CORS 불요 → 제외."""
-    out = set()
-    for _consumer, envmap in ((xm_gateway or {}).get("expose") or {}).items():
+def _expose_cors_targets(xm_gateway: dict) -> dict:
+    """x-marina.gateway.expose 에서 `gateway:svc` 로 지목된 be → 그 consumer 서비스명 목록(=CORS 허용 origin 의 주인).
+    `origin:` 은 same-origin 이라 CORS 불요 → 제외. consumer 가 비대표(admin 등)여도 그 origin 을 허용해야
+    하므로 bool 이 아니라 consumer 목록을 스냅샷에 실어 보낸다(코덱스 P2)."""
+    out = {}
+    for consumer, envmap in ((xm_gateway or {}).get("expose") or {}).items():
         for _var, val in (envmap or {}).items():
             tok = _mc().parse_expose_token(str(val))
             if tok and tok[0] == "gateway":
-                out.add(tok[1])
-    return out
+                out.setdefault(tok[1], [])
+                if consumer not in out[tok[1]]:
+                    out[tok[1]].append(consumer)
+    return {k: sorted(v) for k, v in out.items()}
 
 
 def _gateway_snapshot() -> list:
@@ -313,11 +316,12 @@ def _gateway_snapshot() -> list:
                 groutes = _bj.get("gatewayRoutes") or {}
             except Exception:
                 groutes = {}
-        cors_targets = _expose_cors_targets(xm_gw)          # 도메인 모드 expose 타겟 → 그 be 서브도메인에 CORS
+        cors_map = _expose_cors_targets(xm_gw)              # 도메인 모드 expose 타겟 → {be: [consumer...]} (그 be 서브도메인에 consumer origin CORS)
         out.append({"id": p.get("id"), "projectId": pid, "primary": gprimary,
                     "services": [{"service": s.get("service"), "port": s.get("port"), "running": s.get("running"),
                                   "routes": groutes.get(s.get("service")) or [],
-                                  "cors": s.get("service") in cors_targets}
+                                  "cors": s.get("service") in cors_map,
+                                  "corsConsumers": cors_map.get(s.get("service")) or []}
                                  for s in (p.get("services") or [])]})
     return out
 
@@ -337,6 +341,23 @@ def _gw_pid_alive() -> bool:
         return "caddy" in comm
     except Exception:
         return False
+
+
+def _port_file_reusable() -> int:
+    """게이트웨이 미기동 상태에서 port 파일 값이 유효 범위·빈 포트면 그 값(재사용), 아니면 0."""
+    try:
+        p = int(_GW_PORT_FILE.read_text().strip())
+        if not (0 < p < 65536):
+            return 0
+    except Exception:
+        return 0
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", p))
+            return p
+        except OSError:
+            return 0
 
 
 def _free_port_from(base: int, span: int = 50) -> int:
@@ -376,7 +397,9 @@ def ensure_gateway() -> None:
         if _gw_pid_alive():
             port = _resolved_gateway_port()
         else:
-            port = _GATEWAY_PORT if _env("GATEWAY_PORT", "") else _free_port_from(_GATEWAY_PORT)
+            # port 파일 값이 아직 빈 포트면 재사용 — 먼저 돈 cmd_up(expose env 주입)이 그 파일을 읽고/선기록하므로
+            # 여기서 딴 포트를 고르면 주입 URL 과 기동 포트가 어긋난다(코덱스 P2). 못 쓰면 그때만 새로.
+            port = _GATEWAY_PORT if _env("GATEWAY_PORT", "") else (_port_file_reusable() or _free_port_from(_GATEWAY_PORT))
             _GW_DIR.mkdir(parents=True, exist_ok=True)
             _GW_PORT_FILE.write_text(str(port))
             # caddy 가 읽을 config 를 기동 전에 선기록 → caddy run 이 즉시 포트+라우트로 바인드
