@@ -197,3 +197,44 @@ def _marina_cli(root: Path, *args: str, timeout: float = 120) -> str:
         [str(script(root)), *args], cwd=str(root), text=True,
         stderr=subprocess.STDOUT, env=marina_env(root), timeout=timeout,
     )
+
+def _direct_cli_root(cwd: Path | None = None) -> Path:
+    if os.environ.get("ROOT"):
+        return Path(os.environ["ROOT"]).expanduser().resolve()
+    start = (cwd or Path.cwd()).resolve()
+    try:
+        raw = subprocess.check_output(
+            ["git", "-C", str(start), "rev-parse", "--show-toplevel"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+        root = Path(raw).resolve()
+    except Exception:
+        root = start
+
+    project = project_for(root)
+    subrepos = [str(s) for s in (project or {}).get("subrepos", [])]
+    if root.name in subrepos:
+        parent = root.parent.resolve()
+        if project is None or parent.name == project["root"].name or project_for(parent):
+            return parent
+    return root
+
+def exec_marina_with_env(args: list[str]) -> int:
+    if not args:
+        print("usage: marina_cli.py exec <marina.sh args...>", file=sys.stderr)
+        return 2
+    root = _direct_cli_root()
+    target = script(root)
+    os.execve(str(target), [str(target), *args], marina_env(root))
+    return 127
+
+def main(argv: list[str] | None = None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:1] == ["exec"]:
+        return exec_marina_with_env(argv[1:])
+    print("usage: marina_cli.py exec <marina.sh args...>", file=sys.stderr)
+    return 2
+
+if __name__ == "__main__":
+    raise SystemExit(main())

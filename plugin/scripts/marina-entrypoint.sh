@@ -15,8 +15,15 @@ SESSION="$SCRIPT_DIR/marina.sh"
 DASHBOARD="$SCRIPT_DIR/marina-dashboard.sh"
 ATTACH="$SCRIPT_DIR/attach-detached-subrepos.sh"
 RESOLVE="$SCRIPT_DIR/marina-resolve.sh"
+CLI="$SCRIPT_DIR/marina_cli.py"
 # shellcheck source=/dev/null
 source "$RESOLVE"
+
+exec_session_with_env() {
+  local py="${MARINA_PYTHON:-}"
+  [[ -n "$py" ]] || py="$(command -v python3 || echo /usr/bin/python3)"
+  exec "$py" "$CLI" exec "$@"
+}
 
 usage() {
   cat <<'EOF'
@@ -65,11 +72,11 @@ case "$command" in
         *)   lifecycle_args+=("--$arg") ;;
       esac
     done
-    "$SESSION" "$command" ${lifecycle_args[@]+"${lifecycle_args[@]}"}
+    exec_session_with_env "$command" ${lifecycle_args[@]+"${lifecycle_args[@]}"}
     ;;
   status|ports|logs)
     # 변환 불요(단일/무인자)
-    "$SESSION" "$command" "$@"
+    exec_session_with_env "$command" "$@"
     ;;
   dashboard)
     case "${1:-start}" in
