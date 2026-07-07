@@ -57,6 +57,47 @@ if [[ -x "$SCRIPT_DIR/attach-detached-subrepos.sh" ]]; then
   DEST_ROOT="$ROOT" SYNC_IDEA=false "$SCRIPT_DIR/attach-detached-subrepos.sh" >> "$LOG_FILE" 2>&1 || true
 fi
 
+# --- 편집 위치 감지 (worktree 세션 한정) ---
+# 서브레포는 worktree 마다 attach 돼 있을 수도/없을 수도 있다($ROOT/<sub>/.git 존재로 판정 —
+# attach-detached-subrepos.sh 와 동일 기준). 실제 붙은 미러만 "여기서 편집" 으로 안내한다.
+# marina 는 이 미러(브랜치)를 실행하므로, 프로젝트 루트의 같은 이름 서브레포(= 다른 브랜치)를
+# 편집하면 실행/배포가 어긋난다. main 체크아웃 세션($ROOT==프로젝트 루트)은 혼동이 없어 생략.
+edit_rules=""
+if command -v python3 >/dev/null 2>&1 && [[ -f "$PROJECTS_FILE" ]]; then
+  _proj_line="$(python3 - "$PROJECTS_FILE" "$ROOT" <<'PY'
+import json, os, sys
+try:
+    data = json.load(open(sys.argv[1], encoding="utf-8"))
+except Exception:
+    sys.exit(0)
+root = os.path.realpath(os.path.expanduser(sys.argv[2]))
+best = None; best_len = -1
+for p in data.get("projects", []):
+    pr = os.path.realpath(os.path.expanduser(p.get("root", "")))
+    if pr and (root == pr or root.startswith(pr + os.sep)) and len(pr) > best_len:
+        best = p; best_len = len(pr)
+if best:
+    pr = os.path.realpath(os.path.expanduser(best.get("root", "")))
+    print(pr + "\t" + ",".join(str(s) for s in best.get("subrepos", [])))
+PY
+)"
+  if [[ "$_proj_line" == *$'\t'* ]]; then
+    proj_root="${_proj_line%%$'\t'*}"
+    proj_subs="${_proj_line#*$'\t'}"
+    if [[ -n "$proj_root" && "$ROOT" != "$proj_root" ]]; then
+      attached=""
+      IFS=',' read -r -a _subs <<< "$proj_subs"
+      for sub in "${_subs[@]}"; do
+        [[ -n "$sub" && -e "$ROOT/$sub/.git" ]] && attached="${attached}· $ROOT/$sub"$'\n'
+      done
+      if [[ -n "$attached" ]]; then
+        edit_rules="[marina] 코드 편집 위치 — 이 worktree 에 attach 된 서브레포(marina 가 실행하는 브랜치)에서만 편집:
+${attached}프로젝트 루트($proj_root)의 같은 이름 서브레포는 다른 브랜치라 marina 가 실행/배포하지 않습니다 — 절대경로로 거기를 편집하지 마세요. 위 목록에 없는 서브레포는 이 worktree 에 attach 되지 않았습니다."
+      fi
+    fi
+  fi
+fi
+
 # --- 규칙 주입 (pull 모델): LLM 이 marina 로 서버를 다루게 한다. stdout=순수 JSON 한 줄. ---
 # attach 출력은 위에서 모두 파일로 갔으므로 여기서부터의 stdout 만 호출자(하네스)가 본다.
 
@@ -73,6 +114,9 @@ read -r -d '' rules <<EOF || true
 · 포트 충돌은 자동으로 빈 포트로 이동 — 실제 포트는 $caller status 로 확인
 · compose 정의(서비스·env·마운트) 변경: 대시보드 ✎ compose 편집·위저드 또는 $caller project add <path> --compose
 EOF
+
+# 편집 위치 규칙(worktree 세션에서 attach 된 미러가 있을 때만)을 서버 규칙 뒤에 덧붙인다.
+[[ -n "$edit_rules" ]] && rules="$rules"$'\n'"$edit_rules"
 
 # JSON escape (bash 파라미터 치환 — superpowers session-start 훅 방식).
 escape_for_json() {
