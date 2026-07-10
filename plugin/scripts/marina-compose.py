@@ -493,9 +493,23 @@ def _parse_build_args(items):
     return out
 
 
+def _legacy_host_forward(conn: dict) -> dict:
+    """legacy top-level hostForward(["6379"]) → {"6379":"host"}. README 가 안내해 온 포맷이라 계속 읽되
+    (조용한 무시 금지), 자동 서비스타겟보다 **약하다** — redis 등을 나중에 compose 서비스로 옮긴 뒤 남은
+    스테일 hostForward 가 auto 라우트를 덮어 엮기를 깨지 않게 (코덱스/셀프 리뷰)."""
+    hf = conn.get("hostForward")
+    out: dict = {}
+    for port in (hf if isinstance(hf, (list, tuple)) else []):
+        p = str(port).strip()
+        if p.isdigit():
+            out[p] = "host"
+    return out
+
+
 def _normalize_forward(conn: dict) -> dict:
-    """backing.json 의 forward 선언 → {port(str): target(str)}. target="host"(host.docker.internal) 또는 같은 compose 서비스명(DNS).
-    소스: top-level forward({port:{target:svc|host}} 또는 {port:"svc"|"host"})."""
+    """backing.json/x-marina 의 **명시** forward 선언 → {port(str): target(str)}. target="host"(host.docker.internal)
+    또는 같은 compose 서비스명(DNS). 소스: top-level forward({port:{target:svc|host}} 또는 {port:"svc"|"host"}).
+    legacy hostForward 는 _legacy_host_forward 소관(우선순위가 다름 — auto 보다 약함)."""
     fwd: dict = {}
     for port, spec in (conn.get("forward") or {}).items():
         p = str(port).strip()
@@ -505,9 +519,30 @@ def _normalize_forward(conn: dict) -> dict:
         tgt = str(tgt or "").strip()
         if tgt:
             fwd[p] = tgt
-    # 옛 services.<svc>.endpoints(삭제된 모달 저장분)는 무시한다 — 서비스타겟은 _auto_service_forward 가,
-    # host 타겟은 top-level forward 로 선언한다. 전역 승격은 서비스별 스코프가 깨져 auto 라우트를 잘못 덮는다(코덱스 리뷰 P1).
+    # 옛 services.<svc>.endpoints(삭제된 모달 저장분)·서비스별 hostForward 는 무시한다 — 서비스타겟은 _auto_service_forward 가,
+    # host 타겟은 top-level 로 선언한다. 전역 승격은 서비스별 스코프가 깨져 auto 라우트를 잘못 덮는다(코덱스 리뷰 P1). 발견 시 경고는 cmd_up.
     return fwd
+
+
+def _forward_summary(forward: dict) -> str:
+    """{port:target} → '엮기: localhost:6379→host · localhost:8081→be' (빈 dict 는 ''). start 성공 출력용 — 적용 상태 가시화."""
+    if not forward:
+        return ""
+    return "엮기: " + " · ".join(f"localhost:{p}→{forward[p]}" for p in sorted(forward, key=int))
+
+
+def _applied_forward(services: dict, names, forward: dict) -> dict:
+    """실제 사이드카가 받는 (port→target) 합집합 — names 중 build 서비스만, 자기서빙 포트 제외
+    (_forward_for_service 와 동일 규칙). 선언만 있고 어느 컨테이너에도 안 붙는 포워드는 요약에 안 나온다
+    — 요약이 '적용 상태'를 말하게 (셀프 리뷰: 선언 맵 출력은 image-only 구성에서 거짓 성공 표시)."""
+    applied: dict = {}
+    for n in names:
+        svc = services.get(n) or {}
+        if not svc.get("build"):
+            continue
+        for p, t in _forward_for_service(forward, n, _served_ports(svc)):
+            applied[p] = t
+    return applied
 
 
 def parse_ps_ports(ps_text: str):
@@ -615,10 +650,18 @@ def cmd_up(a):
             conn = {}
     if any((_sc or {}).get("endpoints") for _sc in (conn.get("services") or {}).values()):   # 옛 service-redirect 잔재 — 무시되니 안내(코덱스 리뷰: silent 회피)
         sys.stderr.write("warning: backing.json 의 옛 service-redirect endpoints 는 이제 무시됩니다(엮기로 일원화). "
-                         "host 타겟(redis/db 등)은 backing.json top-level forward 로 선언하세요 — 서비스↔서비스는 자동.\n")
+                         "host 타겟(redis/db 등)은 x-marina.forward 로 선언하세요 — 서비스↔서비스는 자동.\n")
+    if any((_sc or {}).get("hostForward") for _sc in (conn.get("services") or {}).values()):   # 서비스별 hostForward — 조용한 무시 금지
+        sys.stderr.write("warning: services.*.hostForward 는 지원되지 않습니다 — top-level forward 또는 x-marina.forward 로 선언하세요.\n")
     xm = xmarina_for_stored(a.stored)                                # x-marina 가 forward/prebuild/gateway 의 새 SoT — backing.json(레거시) 위에 우선
     try:
-        forward = {**_auto_service_forward(config), **_normalize_forward(conn), **_normalize_forward(xm)}   # 자동 서비스타겟 < backing.json 명시 < x-marina(SoT). _port_targets 포트범위 ValueError 가능 → try 안(코덱스 리뷰 P3)
+        forward = {**_legacy_host_forward(conn), **_legacy_host_forward(xm),
+                   **_auto_service_forward(config),
+                   **_normalize_forward(conn), **_normalize_forward(xm)}   # legacy hostForward < 자동 서비스타겟 < 명시 forward(backing.json < x-marina). _port_targets 포트범위 ValueError 가능 → try 안(코덱스 리뷰 P3)
+        _xm_all = {**_legacy_host_forward(xm), **_normalize_forward(xm)}
+        _conn_all = {**_legacy_host_forward(conn), **_normalize_forward(conn)}
+        if any(forward.get(p) == t and _xm_all.get(p) != t for p, t in _conn_all.items()):   # backing.json 이 실효 소스일 때만 — 이전 완료 사용자에게 영구 반복 안 함(셀프 리뷰)
+            sys.stderr.write("notice: 엮기 선언을 backing.json 에서 읽었습니다 — x-marina.forward 로 compose 파일 하나에 모으는 걸 권장합니다.\n")
         overlay_conn = {"forward": forward}
         gw_gateway = xm.get("gateway") or {}                          # ⑥ expose(fe→be 브라우저 배선) → environment 주입
         exp_env = {}
@@ -663,6 +706,9 @@ def cmd_up(a):
     print("compose: " + " ".join(argv))
     rc = subprocess.call(argv, env=env)                            # P1: same env to up
     if rc == 0:
+        summary = _forward_summary(_applied_forward(svc_cfg, startable, forward))   # 사이드카가 실제 받는 것만
+        if summary:
+            print(summary)
         _show_ports(name)
     return rc
 

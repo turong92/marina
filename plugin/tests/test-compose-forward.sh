@@ -47,8 +47,23 @@ assert "be-bind:" in ov2, ("be 도 6379(host) 는 받음", ov2)              # b
 # --- _normalize_forward: backing.json top-level forward 선언 정규화 (precedence·edge) ---
 assert mc._normalize_forward({"forward":{"8081":{"target":"be"},"6379":{"target":"host"}}})=={"8081":"be","6379":"host"}   # 객체형
 assert mc._normalize_forward({"forward":{"8081":"be"}})=={"8081":"be"}                                                     # 축약형
-assert mc._normalize_forward({"forward":{"8081":"be"},"hostForward":["6379"]})=={"8081":"be"}                              # legacy hostForward 무시
-assert mc._normalize_forward({"services":{"app":{"hostForward":["6379"]}}})=={}                                             # legacy service hostForward 무시
+assert mc._normalize_forward({"forward":{"8081":"be"},"hostForward":["6379"]})=={"8081":"be"}                              # hostForward 는 _legacy_host_forward 소관
+# --- _legacy_host_forward: README 안내 포맷(hostForward) 반영 — 단 auto 서비스타겟보다 약함 ---
+assert mc._legacy_host_forward({"hostForward":["6379","abc","3306"]})=={"6379":"host","3306":"host"}                        # 숫자 아닌 항목 무시
+assert mc._legacy_host_forward({"hostForward":"6379"})=={}                                                                  # 리스트 아니면 무시(방어)
+assert mc._legacy_host_forward({"services":{"app":{"hostForward":["6379"]}}})=={}                                           # 서비스별 hostForward 는 미지원(경고는 cmd_up)
+# 우선순위: legacy hostForward < 자동 서비스타겟 < 명시 forward — 스테일 hostForward 가 compose 서비스 라우트를 못 덮는다
+_c={"hostForward":["6379"]}; _cfg={"services":{"redis":{"image":"r","ports":[{"target":6379,"published":"6379"}]}}}
+assert {**mc._legacy_host_forward(_c), **mc._auto_service_forward(_cfg), **mc._normalize_forward(_c)}=={"6379":"redis"}     # redis 를 compose 로 옮긴 뒤 스테일 선언 → auto 승
+assert {**mc._legacy_host_forward(_c), **mc._auto_service_forward({"services":{}}), **mc._normalize_forward(_c)}=={"6379":"host"}   # 아무도 안 서빙 → hostForward 적용
+_c2={"forward":{"6379":"redis"},"hostForward":["6379"]}
+assert {**mc._legacy_host_forward(_c2), **mc._normalize_forward(_c2)}=={"6379":"redis"}                                     # 같은 포트 → 명시 forward 우선
+# --- _forward_summary + _applied_forward: start 성공 시 실제 적용분만 1줄 요약 ---
+assert mc._forward_summary({"8081":"be","6379":"host"})=="엮기: localhost:6379→host · localhost:8081→be"
+assert mc._forward_summary({})==""
+assert mc._applied_forward({"cache":{"image":"redis"}}, ["cache"], {"6379":"host"})=={}                                     # build 서비스 없음 → 사이드카 0 → 요약 없음
+assert mc._applied_forward(SV["services"], ["fe","be","cache"], {"6379":"host","8081":"be"})=={"6379":"host","8081":"be"}
+assert mc._applied_forward(SV["services"], ["be"], {"8081":"be"})=={}                                                       # be 자기서빙 제외 → 받는 컨테이너 없음
 assert mc._normalize_forward({"forward":{"abc":"be","8081":{"target":""},"6379":"host"}})=={"6379":"host"}                 # 숫자 아닌 포트·빈 target 무시
 # --- codex review #1: expose-only 서비스도 자동 서비스타겟 (marina 스캐폴드/LLM 은 expose 사용) ---
 assert mc._auto_service_forward({"services":{"be":{"expose":["8081"]},"fe":{"ports":[{"target":3000}]}}})=={"8081":"be","3000":"fe"}

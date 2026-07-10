@@ -465,6 +465,10 @@ def _migrate_to_xmarina(pid) -> dict:
             xm["prebuild"] = pb
     bj = _read_marina_json(pid, "backing.json")
     if isinstance(bj, dict):
+        hf = bj.get("hostForward")                                     # legacy hostForward 도 이전 — 런타임이 읽는 걸 migrate 가 떨구면 통합 뷰 채택 시 설정 소실(셀프 리뷰)
+        hf_ports = [str(k).strip() for k in (hf if isinstance(hf, (list, tuple)) else []) if str(k).strip().isdigit()]
+        if hf_ports:
+            xm["hostForward"] = hf_ports                               # forward 로 승격하지 않는다 — 약한 우선순위(legacy<auto) 보존, export→재채택이 라우팅을 못 바꾸게(코덱스 P2)
         fwd = bj.get("forward")
         if isinstance(fwd, dict) and fwd:
             xm["forward"] = {str(k): v for k, v in fwd.items()}        # 포트 키 string(docker x-* 호환)

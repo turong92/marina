@@ -22,7 +22,7 @@ YAML
 echo '{"be":{"PROFILE":"local"}}' > "$PD/build-args.json"
 echo '{"be-api":"./gradlew assemble"}' > "$PD/prebuild.json"
 echo '{"links":{"mylib":{"glob":"mylib","kind":"dir"}}}' > "$PD/links.json"
-echo '{"forward":{"6379":{"target":"host"}},"gatewayRoutes":{"be":["/v1.0"]}}' > "$PD/backing.json"
+echo '{"forward":{"6379":{"target":"host"}},"hostForward":["3306"],"gatewayRoutes":{"be":["/v1.0"]}}' > "$PD/backing.json"
 cat > "$MARINA_HOME/projects.json" <<JSON
 {"projects":[{"id":"$PID","root":"$ROOT","kind":"compose","composeFile":"docker-compose.yml"}]}
 JSON
@@ -36,6 +36,7 @@ root=Path(sys.argv[2]); pid=sys.argv[3]
 xm = m._migrate_to_xmarina(pid)
 assert xm.get("prebuild")=={"be-api":"./gradlew assemble"}, xm
 assert xm.get("forward")=={"6379":{"target":"host"}}, xm
+assert xm.get("hostForward")==["3306"], xm   # hostForward 는 약한 선언 그대로 이전 — forward 승격 금지(우선순위 보존, 코덱스 P2)
 assert (xm.get("gateway") or {}).get("routes")=={"be":["/v1.0"]}, xm
 assert "mylib" in (xm.get("links") or {}).get("symlink", []), xm   # links.json custom → symlink
 # 2) unified_compose_yaml — 합쳐진 compose 반환(원래 동작 동일 정보)
@@ -44,6 +45,7 @@ yml = m.unified_compose_yaml(root, proj)
 back = m._mc().parse_xmarina(yml)
 assert back.get("prebuild")=={"be-api":"./gradlew assemble"}, back
 assert back.get("forward")=={"6379":{"target":"host"}}, back
+assert back.get("hostForward")==["3306"], back
 import yaml
 doc = yaml.safe_load(yml)
 svcs = doc["services"]

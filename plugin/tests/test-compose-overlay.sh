@@ -54,11 +54,7 @@ assert mc._parse_build_args(["web=BUILD_ENV=development","api=X=1"])=={"web":{"B
 assert mc._parse_build_args(["bad","svc=noeq",""])=={}, "malformed skipped"
 ps='[{"Service":"web","Publishers":[{"URL":"127.0.0.1","TargetPort":80,"PublishedPort":55001,"Protocol":"tcp"},{"PublishedPort":0}]},{"Service":"be","Publishers":[{"PublishedPort":55002}]}]'
 assert mc.parse_ps_ports(ps)=={"web":[55001],"be":[55002]}, mc.parse_ps_ports(ps)
-# 엮기 — _normalize_forward: backing.json forward 선언 → {port: target}
-assert mc._normalize_forward({"forward":{"8081":{"target":"be"},"6379":{"target":"host"}}})=={"8081":"be","6379":"host"}
-assert mc._normalize_forward({"forward":{"8081":"be"}})=={"8081":"be"}                          # 축약형
-assert mc._normalize_forward({"hostForward":["6379","3306"]})=={}                               # legacy top-level hostForward 무시
-assert mc._normalize_forward({"services":{"api":{"hostForward":["6379"]},"web":{"hostForward":["3306"]}}})=={}  # legacy 서비스별 hostForward 무시
+# 엮기 — _normalize_forward/_legacy_host_forward 상세는 test-compose-forward.sh 소관(중복 유지비 제거)
 # 엮기 — _auto_service_forward: compose 가 서빙하는 포트 → 그 서비스 (자동 서비스타겟)
 assert mc._auto_service_forward({"services":{"be":{"ports":[{"target":8081,"published":"8081"}]},"fe":{"ports":[{"target":3000}]},"redis":{"image":"r"}}})=={"8081":"be","3000":"fe"}
 assert mc._auto_service_forward({"services":{}})=={}, "포트 서빙 서비스 없으면 빈"
