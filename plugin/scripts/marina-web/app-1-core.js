@@ -17,6 +17,25 @@
     let selectedProjectId = localStorage.getItem('marinaSelectedProject') || null;
     let switcherOpen = false;
 
+    // 인라인 토스트 — 네이티브 alert 대체(R5, Orca 톤). kind: 'ok' | 'err' | '' (기본=info). 3s 후 자동 소멸.
+    function showToast(msg, kind) {
+      let box = document.getElementById('marinaToast');
+      if (!box) {
+        box = document.createElement('div');
+        box.id = 'marinaToast';
+        box.className = 'marina-toast';
+        document.body.appendChild(box);
+      }
+      const item = document.createElement('div');
+      item.className = 'marina-toast-item' + (kind ? ' ' + kind : '');
+      item.textContent = msg;
+      box.appendChild(item);
+      setTimeout(() => {
+        item.classList.add('out');
+        setTimeout(() => item.remove(), 200);
+      }, 3000);
+    }
+
     function projectSummaries() {
       // worktreeData 가 모든 등록 프로젝트의 main 엔트리를 포함 → projectId 로 그룹.
       const byId = new Map();
@@ -91,19 +110,22 @@
       document.getElementById('registerBackdrop').hidden = !show;
     }
 
-    // 작업공간 모드(.workspace, 넓은 폭·고정 높이·sticky footer) = compose 에디터가 보일 때만.
+    // 워크벤치 모드(.workbench, 넓은 폭·고정 높이) = compose 에디터가 보일 때만.
     // composeSection 가시성을 바꾸는 모든 경로에서 호출 — subrepos 편집('new' 뷰지만 compose 아님) 등 오적용 방지.
+    // composeSection 은 이제 #registerWorkbench2b(app-2b) 안에 이동돼 있어 — 이 함수가 그 래퍼의 hidden 도 같이 맞춘다.
     function syncRegisterWorkspace() {
       const on = !document.getElementById('composeSection').hidden;
-      document.getElementById('registerPanel').classList.toggle('workspace', on);
+      document.getElementById('registerPanel').classList.toggle('workbench', on);
+      const wb = document.getElementById('registerWorkbench2b');
+      if (wb) wb.hidden = !on;
     }
 
-    // 진입 2경로(spec §4): [새로 설정(위저드)] · [팀원 설정 붙여넣기]
-    function setRegisterView(view) {   // 'entry' | 'new' | 'paste' | 'wizard'
+    // 진입 경로(R1): [팀원 설정 받았어요(붙여넣기)] · [처음 설정해요(레포 후보 → 워크벤치)]
+    function setRegisterView(view) {   // 'entry' | 'candidates' | 'new' | 'paste'
       document.getElementById('registerEntry').hidden = view !== 'entry';
       document.getElementById('registerPaste').hidden = view !== 'paste';
-      document.getElementById('registerWizard').hidden = view !== 'wizard';
-      const pathOn = view === 'new' || view === 'wizard';
+      document.getElementById('registerCandidates').hidden = view !== 'candidates';
+      const pathOn = view === 'new';
       document.getElementById('registerPathLabel').hidden = !pathOn;
       document.getElementById('registerPathRow').hidden = !pathOn;
       if (view !== 'new') {   // raw(new) 뷰 아니면 compose/preview/browse 숨김
@@ -123,9 +145,10 @@
       showRegisterPanel(true);
       renderSwitcher();
     }
+    document.getElementById('headerRegister').onclick = () => openRegisterPanel();
 
-    document.getElementById('entryWizard').onclick = () => openWizard();
     document.getElementById('entryPaste').onclick = () => openPasteImport();
+    document.getElementById('entryNew').onclick = () => openCandidates();   // app-2e-entry.js
 
     function openPasteImport() {
       document.getElementById('registerTitle').textContent = '팀원 설정 붙여넣기';
@@ -138,65 +161,11 @@
 
     // compose 의 ${VAR} 보간 기본값 — 단일입력 UI 는 제거(P1 ${VAR} 테이블이 대체). 저장된 값은 편집·등록 왕복에서 보존.
     let composeStoredEnv = { envVar: '', envDefault: '' };
-    function openComposeRegister() {
-      document.getElementById('registerTitle').textContent = '프로젝트 등록';
-      document.getElementById('registerPath').value = '';
-      document.getElementById('registerPath').disabled = false;
-      document.getElementById('registerBrowse').hidden = false;  // 등록: 경로 탐색·분석 노출
-      document.getElementById('registerInfer').hidden = false;
-      document.getElementById('registerPreview').hidden = true;
-      document.getElementById('registerError').hidden = true;
-      document.getElementById('browsePanel').hidden = true;
-      // 이전 infer 잔재 제거 — 새 등록은 빈 상태에서 시작
-      document.getElementById('registerChecklist').innerHTML = '';
-      document.getElementById('registerMeta').textContent = '';
-      // compose 에디터도 초기화 — 직전 편집(✎)/등록 내용이 새 등록에 남지 않게
-      setComposeYaml('');
-      composeStoredEnv = { envVar: '', envDefault: '' };   // 신규 등록 — env 보간값 초기화
-      document.getElementById('composeProgress').hidden = true;
-      document.getElementById('composeDetectList').hidden = true;
-      document.getElementById('composeSubrepos').hidden = true;
-      document.getElementById('composeSubrepos').innerHTML = '';
-      setRegisterView('new');       // 위저드/직접 작성 뷰 노출
-      setRegisterKind('compose');   // compose-only — 등록은 compose만
-      showRegisterPanel(true);
-      renderSwitcher();
-    }
 
     // 이미 등록된 compose 프로젝트의 보관 docker-compose.yml 편집 (카드 ✎). 저장 = compose-register upsert(덮어쓰기).
+    // 실제 화면(2열 워크벤치)·로딩·초안 복원은 app-2b-workbench.js 의 openWorkbench 가 담당.
     async function openComposeEdit(root) {
-      switcherOpen = false;
-      setRegisterView('new');   // 진입 선택/붙여넣기 뷰 숨기고 경로행 노출
-      document.getElementById('registerTitle').textContent = 'compose 편집';
-      document.getElementById('registerPath').value = root;
-      document.getElementById('registerPath').disabled = true;     // 편집: 경로 고정
-      document.getElementById('registerBrowse').hidden = true;
-      document.getElementById('registerInfer').hidden = true;
-      document.getElementById('registerPreview').hidden = true;
-      document.getElementById('browsePanel').hidden = true;
-      document.getElementById('registerError').hidden = true;
-      document.getElementById('composeProgress').hidden = true;
-      document.getElementById('composeDetectList').hidden = true;
-      setComposeYaml('불러오는 중…');
-      document.getElementById('composeSection').hidden = false;
-      syncRegisterWorkspace();   // compose 편집 = 작업공간 모드
-      renderComposeSubrepos(root);
-      showRegisterPanel(true);
-      renderSwitcher();
-      const err = document.getElementById('registerError');
-      try {
-        const r = await api('/api/compose-detect?path=' + enc(root));
-        if (r && r.stored) {
-          setComposeYaml(r.stored.yaml || '');
-          composeStoredEnv = { envVar: r.stored.envVar || '', envDefault: r.stored.envDefault || '' };   // 저장된 env 보간값 보존(등록 시 재전송)
-        } else {
-          setComposeYaml('');
-          err.textContent = '보관된 compose 를 찾지 못했습니다'; err.hidden = false;
-        }
-      } catch (e) {
-        setComposeYaml('');
-        err.textContent = String(e.message || e); err.hidden = false;
-      }
+      openWorkbench({ root, mode: 'edit' });
     }
 
     function addChecklistRow(name, checked, removable) {
@@ -364,15 +333,13 @@
       if (browseMode === 'subrepo') {
         const rel = relPath(browseRoot, browseCurrent);
         if (rel !== '.') addChecklistRow(rel, true, true);  // root 자신만 제외, 그 외(../ 상위 포함)는 자유 등록
-      } else if (browseMode === 'composeSub') {
-        const rel = relPath(browseRoot, browseCurrent);
-        const box = document.getElementById('composeSubrepos');
-        if (rel !== '.' && box.lastElementChild) box.insertBefore(makeSubrepoRow(composeSubBrowsePath, rel, externalMount(rel)), box.lastElementChild);
       } else if (browseMode === 'paste') {
         document.getElementById('pastePath').value = browseCurrent;
+      } else if (browseMode === 'candidates') {
+        document.getElementById('candPath').value = browseCurrent;
       } else {
         document.getElementById('registerPath').value = browseCurrent;
-        if (!document.getElementById('composeSection').hidden) renderComposeSubrepos(browseCurrent);
+        if (!document.getElementById('composeSection').hidden && typeof wbOnPathChanged === 'function') wbOnPathChanged();
       }
       document.getElementById('browsePanel').hidden = true;
     };
@@ -416,137 +383,25 @@
       syncRegisterWorkspace();   // compose 에디터 가시성에 작업공간 모드 동기화
 
       document.getElementById('registerInfer').hidden = compose;       // compose 면 기존 분석 흐름 숨김
-      if (compose) {
-        document.getElementById('registerPreview').hidden = true;
-        document.getElementById('composeProgress').hidden = true;
-        document.getElementById('composeDetectList').hidden = true;
-      }
+      if (compose) document.getElementById('registerPreview').hidden = true;
     }
 
-    // 서브레포 감지 + 수동추가 → 각 서브레포를 "+ 서비스" 스캐폴드로 에디터에 추가.
-    async function renderComposeSubrepos(path) {
-      const box = document.getElementById('composeSubrepos');
-      box.innerHTML = '';
-      if (!path) { box.hidden = true; return; }
-      let subs = [], ext = [];
-      try { const r = await api('/api/compose-detect?path=' + enc(path)); subs = (r && r.subrepos) || []; ext = (r && r.externalRepos) || []; } catch {}
-      box.hidden = false;
-      const head = document.createElement('div');
-      head.style = 'font-size:12px;color:var(--muted)';
-      head.textContent = '서브레포 — 서비스로 추가';
-      box.appendChild(head);
-      for (const s of subs) box.appendChild(makeSubrepoRow(path, s));
-      for (const e of ext) box.appendChild(makeSubrepoRow(path, e.sub, e.mount));   // 등록된 외부 레포 복원(재등록 시 드롭 방지)
-      const man = document.createElement('div');
-      man.style = 'display:flex;align-items:center;gap:8px';
-      const browseBtn = document.createElement('button');
-      browseBtn.type = 'button'; browseBtn.className = 'svc-llm-go'; browseBtn.textContent = '📁 찾아보기';
-      browseBtn.title = '폴더를 골라 서브레포로 추가';
-      browseBtn.onclick = () => openComposeSubBrowse(path);
-      const inp = document.createElement('input');
-      inp.placeholder = '또는 상대경로 직접 (예: services/api)';
-      inp.style = 'flex:1;font-size:13px;height:30px';
-      const addBtn = document.createElement('button');
-      addBtn.type = 'button'; addBtn.className = 'svc-llm-go'; addBtn.textContent = '+ 추가';
-      const doAdd = () => { const v = inp.value.trim(); if (!v) return; if (v.startsWith('/')) { setComposeProgress('err', '절대경로는 📁 찾아보기로 추가하세요'); return; } box.insertBefore(makeSubrepoRow(path, v, externalMount(v)), man); inp.value = ''; };
-      addBtn.onclick = doAdd;
-      inp.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); doAdd(); } });
-      man.appendChild(browseBtn); man.appendChild(inp); man.appendChild(addBtn);
-      box.appendChild(man);
-    }
-    let composeSubBrowsePath = '';
-    async function openComposeSubBrowse(path) {
-      if (!path) return;
-      browseMode = 'composeSub';
-      composeSubBrowsePath = path;
-      document.getElementById('composeSubrepos').after(document.getElementById('browsePanel'));
-      try {
-        const data = await api('/api/browse?path=' + enc(path));
-        browseRoot = data.path;                 // 프로젝트 root — 이 위로는 못 올라감(상대경로 기준)
-        openBrowse(data.path);
-      } catch (e) { setComposeProgress('err', String((e && e.message) || e)); }
-    }
-    function makeSubrepoRow(path, s, mount) {
-      const row = document.createElement('div');
-      row.dataset.subrepo = s;
-      if (mount) row.dataset.mount = mount;
-      row.style = 'display:flex;align-items:center;gap:8px;font-size:13px';
-      const nm = document.createElement('span'); nm.textContent = '📁 ' + s;
-      nm.style = 'flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
-      const ctxQ = mount ? ('&context=' + enc(mount)) : '';
-      const scaffold = async (chosen) => {
-        try {
-          const rr = await api('/api/compose-scaffold?path=' + enc(path) + '&subrepo=' + enc(s) + ctxQ
-            + (chosen ? '&dockerfile=' + enc(chosen) : ''));
-          if (rr && rr.include) { appendComposeInclude(rr.include); setComposeProgress('ok', s + ' 자체 compose 가져옴 (include) — 포트는 marina 가 격리'); }
-          else if (rr && rr.needPick) showDockerfilePicker(row, s, rr.dockerfiles || [], scaffold);
-          else if (rr && rr.yaml) { appendComposeService(rr.yaml); setComposeProgress('ok', s + ' 서비스 추가 — 포트·명령 다듬고 등록'); }
-          else setComposeProgress('err', (rr && rr.error) || '스캐폴드 실패');
-        } catch (e) { setComposeProgress('err', String((e && e.message) || e)); }
-      };
-      const add = document.createElement('button');
-      add.type = 'button'; add.textContent = '＋ 서비스';
-      // prominent accent pill 대신 컴팩트·subtle — 서브레포 행이 깔끔한 리스트로 보이게(버튼 벽 방지)
-      add.style = 'height:24px;padding:0 10px;border-radius:6px;border:1px solid var(--sys-style-neutral-default);background:transparent;color:var(--sys-cont-neutral-default);font-size:12px;font-weight:600;cursor:pointer;white-space:nowrap';
-      add.title = s + ' → 서비스 추가: 자체 docker-compose.yml 있으면 통째로 가져오고(include), 없으면 Dockerfile 기반(자체 서브레포 N개면 각각)';
-      add.onclick = async () => { add.disabled = true; await scaffold(''); add.disabled = false; };
-      const del = document.createElement('button');
-      del.type = 'button'; del.className = 'check-remove'; del.textContent = '✕';
-      del.title = '이 서브레포를 목록에서 제거';
-      del.onclick = () => { const p = row.nextElementSibling; if (p && p.dataset.picker === '1') p.remove(); row.remove(); };
-      row.appendChild(nm);
-      if (mount) {   // 외부 레포 — 워크트리마다 격리(.workspace/external) 표시
-        const bdg = document.createElement('span'); bdg.textContent = '외부';
-        bdg.title = '프로젝트 밖 레포 — 워크트리마다 git worktree 로 격리';
-        bdg.style = 'font-size:11px;color:var(--muted);border:1px solid var(--muted);border-radius:8px;padding:0 5px;opacity:.85';
-        row.appendChild(bdg);
-      }
-      row.appendChild(add); row.appendChild(del);
-      return row;
-    }
-    function externalMount(rel) {   // 프로젝트 밖(../)이면 .workspace/external/<name> 마운트, 내부면 ''
-      if (!rel || !rel.split('/').includes('..')) return '';
-      const base = (rel.split('/').filter(p => p && p !== '..').pop() || 'ext');
-      const name = base.toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/^[-_]+|[-_]+$/g, '') || 'ext';
-      return './.workspace/external/' + name;
-    }
-    function showDockerfilePicker(row, s, dockerfiles, scaffold) {
-      let pick = row.nextElementSibling;
-      if (!pick || pick.dataset.picker !== '1') {
-        pick = document.createElement('div'); pick.dataset.picker = '1';
-        pick.style = 'display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:12px;color:var(--muted);margin:-2px 0 4px 18px';
-        row.after(pick);
-      }
-      pick.innerHTML = '';
-      const lab = document.createElement('span');
-      lab.textContent = 'Dockerfile마다 서비스 — 각각/전체 추가:';
-      lab.title = s + ' 안의 자체 서브레포들 (Dockerfile 하나당 서비스 하나, 디렉터리=이름·컨텍스트)';
-      pick.appendChild(lab);
-      const addOne = async (df, b) => { b.disabled = true; await scaffold(df); b.textContent = '✓ ' + df; };
-      for (const df of dockerfiles) {
-        const b = document.createElement('button'); b.type = 'button'; b.className = 'svc-llm-go'; b.textContent = df;
-        b.onclick = () => addOne(df, b);   // 각각 추가 — 누르면 그 Dockerfile 서비스 추가(피커 유지)
-        pick.appendChild(b);
-      }
-      if (dockerfiles.length > 1) {        // 여러 개면 한 번에
-        const all = document.createElement('button'); all.type = 'button'; all.className = 'svc-llm-go';
-        all.textContent = '전체 추가';
-        all.onclick = async () => { all.disabled = true; for (const df of dockerfiles) await scaffold(df); pick.remove(); };
-        pick.appendChild(all);
-      }
-    }
+    // 구 서브레포 스캐폴드 rail(renderComposeSubrepos·makeSubrepoRow·openComposeSubBrowse·externalMount·showDockerfilePicker)은
+    // 제거 — 기능은 좌측 재료 서랍(app-2b-workbench.js, data-wb-materials)으로 흡수(스펙 R2 M3). 아래 두 삽입 헬퍼는 재료 서랍이 재사용.
     function appendComposeService(block) {
       const ed = document.getElementById('composeYaml');
       let cur = ed.value.replace(/\s+$/, '');
       if (!/^services:/m.test(cur)) cur = (cur ? cur + '\n' : '') + 'services:';
       setComposeYaml(cur + '\n' + block.replace(/\s+$/, '') + '\n');   // 하이라이트·line# 갱신 경유
     }
-    function appendComposeInclude(p) {   // 서브레포 자체 compose 를 top-level include: 로 (중복 방지)
+    function appendComposeInclude(p, srcComment) {   // 서브레포 자체 compose 를 top-level include: 로 (중복 방지). srcComment(선택) — 재료 서랍 출처 주석 줄, 반환값=실제 삽입 여부
       const ed = document.getElementById('composeYaml');
       let cur = ed.value.replace(/\s+$/, '');
       const esc = p.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      if (new RegExp('^\\s*-\\s*' + esc + '\\s*$', 'm').test(cur)) return;   // 이미 있음
-      if (/^include:/m.test(cur)) cur = cur.replace(/^include:[^\n]*\n/m, (m) => m + '  - ' + p + '\n');
-      else cur = 'include:\n  - ' + p + '\n' + cur;
+      if (new RegExp('^\\s*-\\s*' + esc + '\\s*$', 'm').test(cur)) return false;   // 이미 있음
+      const line = (srcComment ? '  ' + srcComment + '\n' : '') + '  - ' + p + '\n';
+      if (/^include:/m.test(cur)) cur = cur.replace(/^include:[^\n]*\n/m, (m) => m + line);
+      else cur = 'include:\n' + line + cur;
       setComposeYaml(cur.replace(/\s+$/, '') + '\n');   // 하이라이트·line# 갱신 경유
+      return true;
     }

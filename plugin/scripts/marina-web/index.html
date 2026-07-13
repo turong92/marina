@@ -12,11 +12,13 @@
     <h1>Marina <span class="brand-sub">dev sessions</span></h1>
     <div class="toolbar">
       <div class="mem" id="mem" hidden title="dev = marina 추적 서비스의 RSS 합 / 시스템 = OS 전체 사용량(브라우저·IDE 등 모든 앱 포함, memory_pressure 기준이라 활동 모니터 수치와 다를 수 있음). 가용 4GB 미만이면 적색 + 서비스 시작 차단"><span id="memText"></span><span class="mem-bar"><i id="memBar"></i></span></div>
+      <button id="notifyToggle" class="notify-toggle" title="알림 꺼짐(기본, 옵트인) — 클릭하면 서비스 기동 완료/실패를 브라우저 알림으로 받아요">🔕</button>
       <select id="themeSelect" title="대시보드 테마 — 시스템은 OS 다크/라이트 실시간 추종">
         <option value="system">시스템</option>
         <option value="light">라이트</option>
         <option value="dark">다크</option>
       </select>
+      <button id="headerRegister" class="register-btn-secondary" title="새 프로젝트 등록">+ 등록</button>
       <button id="refresh" title="새로고침 — 세션·디스크 분석(du) 전체 재계산">↻</button>
     </div>
   </header>
@@ -31,12 +33,23 @@
           </button>
           <div id="switcherMenu" class="switcher-menu" hidden></div>
         </div>
+        <button id="worktreeCreateBtn" title="선택한 프로젝트에 워크트리(브랜치) 생성">+ 워크트리</button>
         <button id="collapseAll" title="세션 카드 전체 접기/펼치기">⇈</button>
       </div>
+      <!-- CC/CX 소스 필터 — 클로드·코덱스 워크트리가 섞여 있을 때만 노출 (app-5 renderSourceTabs) -->
+      <div class="src-tabs" id="wtSourceTabs" hidden></div>
       <div class="sessions" id="sessions"></div>
     </aside>
     <div class="rail"><button id="asideToggle" title="세션 패널 좌우 접기/펼치기 (로그 전체 화면)">◀</button></div>
     <section>
+      <div class="ws-tabs" id="wsTabs">
+        <button data-ws-tab="logs" class="on" title="서비스 로그 뷰어">로그</button>
+        <button data-ws-tab="git" title="깃 그래프 — worktree 브랜치·커밋·diff">깃</button>
+        <button data-ws-tab="conn" title="연결 — 게이트웨이 진입(in)·엮기 아웃바운드(out) 흐름도">연결</button>
+        <button data-ws-tab="term" disabled title="추후 — worktree 터미널">터미널</button>
+        <span class="ws-ctx" id="wsCtx"></span>
+      </div>
+      <div class="ws-pane" id="tab-logs">
       <div class="log-head">
         <div class="log-src">
           <div class="log-title">
@@ -72,6 +85,10 @@
         <span class="gauge-note" id="gaugePos"></span>
       </div>
       <div class="log-body" id="log"><div class="empty">서비스 행을 선택하세요</div></div>
+      </div>
+      <div class="ws-pane" id="tab-git" hidden></div>
+      <div class="ws-pane" id="tab-conn" hidden></div>
+      <div class="ws-pane" id="tab-term" hidden></div>
     </section>
   </main>
   <div class="modal-backdrop" id="registerBackdrop" hidden>
@@ -80,33 +97,43 @@
         <span class="register-title" id="registerTitle">프로젝트 등록</span>
         <button id="registerClose" title="닫기">✕</button>
       </div>
-      <div class="register-entry" id="registerEntry" hidden style="display:flex;flex-direction:column;gap:10px;margin-top:6px">
-        <div style="font-size:13px;color:var(--muted)">프로젝트를 어떻게 설정할까요?</div>
-        <button id="entryWizard" class="register-confirm" title="처음 만드는 사람 — 스캔·파일·연결을 단계별로 채웁니다">🆕 새로 설정 (위저드)</button>
-        <button id="entryPaste" class="register-confirm" style="background:var(--sys-cont-neutral-light,#e5e7eb);color:var(--text,#111)" title="팀원이 공유한 compose+x-marina 블록을 붙여넣어 한 번에 재현">📋 팀원 설정 붙여넣기</button>
+      <div class="register-entry" id="registerEntry" hidden>
+        <div class="register-entry-hint">프로젝트를 어떻게 설정할까요?</div>
+        <button id="entryPaste" class="register-entry-card" title="팀원이 공유한 compose+x-marina 블록을 붙여넣어 한 번에 재현">
+          <span class="register-entry-ic">📋</span>
+          <span class="register-entry-text"><b>팀원 설정 받았어요</b><em>공유 블록을 붙여넣어 한 번에 재현</em></span>
+        </button>
+        <button id="entryNew" class="register-entry-card" title="처음 만드는 사람 — 레포 후보를 고르고 워크벤치에서 compose 를 직접 완성합니다">
+          <span class="register-entry-ic">🆕</span>
+          <span class="register-entry-text"><b>처음 설정해요</b><em>레포를 고르고 워크벤치에서 직접 만들어요</em></span>
+        </button>
       </div>
-      <div class="register-paste" id="registerPaste" hidden style="display:flex;flex-direction:column;gap:8px;margin-top:6px">
+      <!-- 레포 후보 목록(R1) — '처음 설정해요' 진입. GET /api/repo-candidates(버튼 트리거). app-2e-entry.js. -->
+      <div class="register-candidates" id="registerCandidates" hidden>
+        <div class="register-entry-hint">경로를 바로 입력하거나, 후보에서 골라 워크벤치로 들어가세요.</div>
+        <div class="register-path-row">
+          <input id="candPath" class="register-input" placeholder="~/path/to/project" />
+          <button id="candBrowse" title="폴더 탐색">찾아보기</button>
+          <button id="candGo" class="register-confirm" style="margin:0">이 경로로 시작</button>
+        </div>
+        <div class="cand-scan-row">
+          <span class="cand-scan-scope" id="candScanScope">스캔 범위 — ~/IdeaProjects · ~/projects · ~/dev · ~/workspace 중 존재하는 곳 (2단계까지)</span>
+          <button type="button" id="candScanBtn" class="svc-llm-go">🔍 후보 찾기</button>
+        </div>
+        <div class="cand-status" id="candStatus" hidden></div>
+        <div class="cand-list" id="candList"></div>
+      </div>
+      <div class="register-paste" id="registerPaste" hidden>
         <label class="register-label">프로젝트 경로</label>
         <div class="register-path-row">
           <input id="pastePath" class="register-input" placeholder="~/path/to/project" />
           <button id="pasteBrowse" title="폴더 탐색">찾아보기</button>
         </div>
         <label class="register-label">공유 블록 (compose + x-marina)<span class="help-q" title="팀원이 [공유용 복사] 로 준 한 블록을 그대로 붙여넣으세요. compose 서비스 + x-marina(links·prebuild·forward·gateway) 가 한 번에 등록·적용됩니다. 시크릿(.env 값)은 각자 본인 것을 채우세요.">?</span></label>
-        <textarea id="pasteBlob" spellcheck="false" style="min-height:200px;font-family:ui-monospace,Menlo,monospace;white-space:pre" placeholder="services:&#10;  app:&#10;    build: .&#10;x-marina:&#10;  links: { symlink: [node_modules] }"></textarea>
+        <textarea id="pasteBlob" spellcheck="false" placeholder="services:&#10;  app:&#10;    build: .&#10;x-marina:&#10;  links: { symlink: [node_modules] }"></textarea>
         <label class="register-check" style="font-size:12px"><input type="checkbox" id="pasteApply" checked /> 가져온 뒤 바로 시작</label>
         <div class="register-error" id="pasteError" hidden></div>
         <button id="pasteImport" class="register-confirm" title="공유 블록을 검증(compose 유효·레포 매칭)한 뒤 등록 + 전체 설정 적용">가져오기 → 끝</button>
-      </div>
-      <div class="register-wizard" id="registerWizard" hidden style="display:flex;flex-direction:column;gap:10px;margin-top:6px">
-        <div class="wiz-steps" id="wizSteps" style="display:flex;gap:6px;font-size:12px"></div>
-        <div class="register-error" id="wizError" hidden></div>
-        <div class="wiz-body" id="wizBody" style="min-height:220px;max-height:52vh;overflow:auto"></div>
-        <div class="wiz-nav" style="display:flex;align-items:center;gap:8px">
-          <button id="wizPrev" type="button">← 이전</button>
-          <button id="wizAdvanced" type="button" title="같은 설정을 raw compose YAML 로 직접 편집(파워유저)" style="background:var(--sys-cont-neutral-light,#e5e7eb);color:var(--text,#111)">고급 (YAML)</button>
-          <span style="flex:1"></span>
-          <button id="wizNext" type="button" class="register-confirm" style="margin:0">다음 →</button>
-        </div>
       </div>
       <label class="register-label" id="registerPathLabel">프로젝트 경로</label>
       <div class="register-path-row" id="registerPathRow">
@@ -130,31 +157,51 @@
         </div>
         <button id="registerConfirm" class="register-confirm">등록</button>
       </div>
-      <!-- 작업공간: 왼쪽 rail(컨트롤 스크롤 + sticky 검증후등록) · 오른쪽 compose 에디터(세로 풀높이) -->
-      <div class="compose-section" id="composeSection" hidden>
-        <div class="compose-rail">
-          <div class="compose-rail-scroll">
-            <div id="composeSubrepos" hidden style="display:flex;flex-direction:column;gap:5px"></div>
-            <div class="compose-hint">compose 채우기<span class="help-q" title="이 프로젝트를 Docker compose 로 worktree마다 격리 실행하려면 docker-compose.yml 한 개가 필요합니다. 오른쪽 에디터가 그 본체이고, 등록하면 marina 에만 저장돼요(앱 레포는 안 건드림).">?</span></div>
-            <div class="compose-fill-row">
-              <button class="svc-llm-go" id="composeImport" type="button" title="프로젝트 폴더(하위 1단계까지)에서 기존 docker-compose 파일을 자동으로 찾아 목록으로 보여줍니다. 클릭하면 에디터로 불러와요.">📁 레포에서 찾기</button>
-              <span>· 오른쪽에 직접 작성</span>
+      <!-- 등록 워크벤치(M2 골격, R2) — 좌: 재료(M3)/marina 옵션(M4) 자리 · 우: 기존 compose 에디터(#composeSection, DOM 그대로 이동) -->
+      <div class="register-workbench" id="registerWorkbench2b" hidden>
+        <div class="wb-draft-banner" id="wbDraftBanner" hidden></div>
+        <div class="wb-body">
+          <div class="wb-left" id="wbLeft">
+            <div class="wb-mat-panel" data-wb-materials>
+              <div class="wb-mat-head">
+                <span class="wb-mat-title">🧱 재료</span>
+                <button type="button" id="wbScanBtn" class="svc-llm-go" title="프로젝트 서브레포를 스캔해 Dockerfile·자체 compose 를 근거와 함께 찾습니다(자동 실행 아님 — 눌러야 스캔).">🔍 레포 스캔</button>
+              </div>
+              <div class="wb-mat-status svc-llm-progress" id="wbMatStatus" hidden></div>
+              <div class="wb-mat-list" id="wbMatExisting"></div>
+              <div class="wb-mat-list" id="wbMatScan"></div>
             </div>
-            <div class="svc-llm-progress" id="composeProgress" hidden></div>
-            <div class="browse-list" id="composeDetectList" hidden style="max-height:140px"></div>
+            <!-- marina 옵션 폼(M4) — app-2c-xmarina-form.js 의 wbFormRender 가 채운다. 정적 플레이스홀더는 첫 렌더 전 짧게만 보임. -->
+            <div class="wb-placeholder" data-wb-form>⚙️ marina 옵션 — 불러오는 중…</div>
           </div>
-          <button id="composeConfirm" class="register-confirm compose-footer-btn" title="docker compose config·격리·Dockerfile 을 자동 검증한 뒤 등록(편집이면 저장)합니다. 문제가 있으면 등록하지 않고 알려줘요.">검증 후 등록</button>
+          <div class="wb-right" id="wbRight">
+            <!-- 작업공간: compose 에디터(세로 풀높이) — 하이라이트·키핸들러(app-2 의 yamlEditor*) 는 이 DOM 그대로 동작.
+                 구 .compose-rail(서브레포 스캐폴드·레포에서 찾기)은 제거 — 기능은 좌측 재료 서랍(data-wb-materials)으로 흡수(app-2b M3). -->
+            <div class="compose-section" id="composeSection" hidden>
+              <div class="svc-modal-field compose-editor">
+                <div class="compose-editor-head">
+                  <label for="composeYaml">docker-compose.yml<span class="help-q" title="등록하면 이 내용이 marina 에만 저장됩니다(~/.marina 안 — 앱 레포는 안 건드림). env 는 compose 표준대로 environment: / env_file: / ${VAR}, 시크릿은 env_file: .env (gitignore).">?</span></label>
+                  <!-- R3 해석 토글(M5) — 'YAML'/'해석' 전환. 렌더/배선은 app-2d-explain.js(data-wb-explain-*). -->
+                  <div class="wb-explain-toggle" data-wb-explain-toggle role="tablist">
+                    <button type="button" class="active" data-wb-explain-tab="yaml">YAML</button>
+                    <button type="button" data-wb-explain-tab="explain">해석</button>
+                  </div>
+                  <button class="svc-llm-go" id="composeViewConfig" type="button" title="이미 등록·저장된 compose 의 해석된 구성 보기 — 서비스별 빌드 컨텍스트·Dockerfile·포트·env (읽기전용). 신규 등록 중에는 아직 저장본이 없어 안 보입니다.">📄 저장된 구성 보기</button>
+                </div>
+                <div class="yaml-wrap">
+                  <div class="yaml-gutter" id="composeGutter" aria-hidden="true">1</div>
+                  <pre class="yaml-hl" id="composeHl" aria-hidden="true"></pre>
+                  <textarea id="composeYaml" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="services:&#10;  web:&#10;    build: ./web&#10;    environment: { APP_ENV: local }"></textarea>
+                </div>
+                <!-- R3 해석 패널(M5) — '해석' 선택 시 .yaml-wrap 을 덮는다(숨김만, 편집 상태 보존). app-2d-explain.js 가 채운다. -->
+                <div class="wb-explain-panel" id="wbExplainPanel" hidden></div>
+              </div>
+            </div>
+          </div>
         </div>
-        <div class="svc-modal-field compose-editor">
-          <div class="compose-editor-head">
-            <label for="composeYaml">docker-compose.yml<span class="help-q" title="등록하면 이 내용이 marina 에만 저장됩니다(~/.marina 안 — 앱 레포는 안 건드림). env 는 compose 표준대로 environment: / env_file: / ${VAR}, 시크릿은 env_file: .env (gitignore).">?</span></label>
-            <button class="svc-llm-go" id="composeViewConfig" type="button" title="이미 등록·저장된 compose 의 해석된 구성 보기 — 서비스별 빌드 컨텍스트·Dockerfile·포트·env (읽기전용). 신규 등록 중에는 아직 저장본이 없어 안 보입니다.">📄 저장된 구성 보기</button>
-          </div>
-          <div class="yaml-wrap">
-            <div class="yaml-gutter" id="composeGutter" aria-hidden="true">1</div>
-            <pre class="yaml-hl" id="composeHl" aria-hidden="true"></pre>
-            <textarea id="composeYaml" spellcheck="false" autocapitalize="off" autocomplete="off" placeholder="services:&#10;  web:&#10;    build: ./web&#10;    environment: { APP_ENV: local }"></textarea>
-          </div>
+        <div class="wb-footer">
+          <span class="wb-lint" data-wb-lint>검증 전 — [검증 후 등록]을 누르면 확인해요</span>
+          <button id="composeConfirm" class="register-confirm compose-footer-btn" title="docker compose config·격리·Dockerfile 을 자동 검증한 뒤 등록(편집이면 저장)합니다. 문제가 있으면 등록하지 않고 알려줘요.">검증 후 등록</button>
         </div>
       </div>
     </div>
@@ -162,10 +209,21 @@
   <datalist id="profileSuggest"><option value="local"></option><option value="dev"></option><option value="prod"></option><option value="staging"></option></datalist>
   <script src="/web/app-1-core.js"></script>
   <script src="/web/app-2-register.js"></script>
+  <script src="/web/app-2b-workbench.js"></script>
+  <script src="/web/app-2c-xmarina-form.js"></script>
+  <script src="/web/app-2d-explain.js"></script>
+  <script src="/web/app-2e-entry.js"></script>
   <script src="/web/app-3-util.js"></script>
   <script src="/web/app-4-logs.js"></script>
   <script src="/web/app-5-sessions.js"></script>
+  <script src="/web/app-5b-actions.js"></script>
+  <script src="/web/app-5c-config.js"></script>
+  <script src="/web/app-5d-worktree-create.js"></script>
   <script src="/web/app-6-modals.js"></script>
+  <script src="/web/app-6b-notify.js"></script>
+  <script src="/web/app-8-git.js"></script>
+  <script src="/web/app-8b-git-commit.js"></script>
+  <script src="/web/app-9-connections.js"></script>
   <script src="/web/app-7-init.js"></script>
 </body>
 </html>

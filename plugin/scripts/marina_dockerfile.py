@@ -186,11 +186,21 @@ def _compose_scaffold_service(target: Path, subrepo: str, dockerfile: str = "",
     name = re.sub(r"[^a-z0-9_-]+", "-", base.lower()).strip("-_") or "app"
     ctx = ctx_base + ("/" + subpath if subpath else "")              # 컨텍스트 = Dockerfile 의 디렉터리(루트면 ".")
     port = _dockerfile_expose(scan_dir / df_rel) if df_rel else None
+    try:
+        _df_text = (scan_dir / df_rel).read_text(encoding="utf-8", errors="replace") if df_rel else ""
+    except OSError:
+        _df_text = ""
+    required = _detect_injections(_df_text)["requiredArgs"] if _df_text else []
     lines = [f"  {name}:"]
-    if not df_rel or df_name == "Dockerfile":
+    if (not df_rel or df_name == "Dockerfile") and not required:
         lines.append(f"    build: {ctx}")
     else:
-        lines += ["    build:", f"      context: {ctx}", f"      dockerfile: {df_name}"]
+        lines += ["    build:", f"      context: {ctx}"]
+        if df_rel and df_name != "Dockerfile":
+            lines.append(f"      dockerfile: {df_name}")
+        if required:                                             # 필수 ARG 는 build.args 로 — environment 는 런타임이라 빌드에 전달 안 됨(코덱스 P2)
+            lines.append("      args:")
+            lines += [f'        {k}: "???"          # 필수 빌드 인자 — 값 채우기' for k in required]
     if port:
         lines += [f'    expose: ["{port}"]          # 컨테이너 간 DNS — 다른 서비스가 http://{name}:{port} 로 호출',
                   f'    # ports: ["{port}:{port}"]   # 호스트에서 직접 열 때만 (marina 가 포트 자동 격리)']

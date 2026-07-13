@@ -18,11 +18,11 @@ import importlib.util as _ilu
 
 import threading
 
-from marina_state import LIFECYCLE_BUSY, MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_info_cache, busy_key
+from marina_state import LIFECYCLE_BUSY, MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_du_cache, _worktree_info_cache, busy_key
 from marina_cache import cache_items_by_category, disk_usage_mb, docker_volume_rm
 from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
 from marina_paths import session_dir, session_id
-from marina_cli import _marina_cli, marina_env, script
+from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
 from marina_sessions import git_output, session_payload, system_memory, worktree_status
 
 def stop_external(root: Path, service: str, port: int) -> dict[str, Any]:
@@ -129,7 +129,7 @@ def _spawn_lifecycle(key: str, op: str, fn) -> dict[str, Any]:
 
 def start_all(root: Path) -> dict[str, Any]:
     return _spawn_lifecycle(busy_key(root, "--all"), "start",
-                            lambda: _marina_cli(root, "start", "--all", timeout=LIFECYCLE_TIMEOUT))   # compose_main → ensure+pre-build+ up -d --build (전체 스택)
+                            lambda: _marina_cli_logged(root, "start", "--all", timeout=LIFECYCLE_TIMEOUT))   # compose_main → ensure+pre-build+ up -d --build. 출력은 'build' 로그 run 으로(대시보드 노출)
 
 def cleanup_session(root: Path) -> dict[str, Any]:
     stop_all(root)
@@ -214,6 +214,7 @@ def remove_worktree(root: Path, force: bool = False) -> dict[str, Any]:
         except OSError:
             pass
     _worktree_info_cache.pop(str(root), None)
+    _worktree_du_cache.pop(str(root), None)
     _roots_cache.clear()  # 삭제된 root 가 60s 캐시에 남지 않게
     return results
 
@@ -234,6 +235,7 @@ def attach_subrepo_action(root: Path, subrepo: str) -> dict[str, Any]:
     except subprocess.CalledProcessError as exc:
         raise ValueError((exc.output or "").strip() or str(exc))
     _worktree_info_cache.pop(str(root), None)
+    _worktree_du_cache.pop(str(root), None)
     _status_cache.pop(str(root), None)
     return {"ok": True, "attached": subrepo, "output": out.strip()}
 
@@ -252,6 +254,7 @@ def detach_subrepo_action(root: Path, subrepo: str, force: bool = False, stop_se
     # 브랜치는 보존(worktree remove 만) — 미머지 커밋 안전, 재attach 시 재사용.
     res = remove_git_worktree(source_repo, target, force=force)
     _worktree_info_cache.pop(str(root), None)
+    _worktree_du_cache.pop(str(root), None)
     _status_cache.pop(str(root), None)
     if "error" in res:
         return res
@@ -281,21 +284,15 @@ def start_service(root: Path, service: str, force: bool = False) -> dict[str, An
     env["MARINA_SKIP_PREPARE"] = "1" if has_attached_subrepos(root) else "0"
 
     def _do_start():
-        subprocess.check_output(
-            [str(script(root)), "start", f"--{service}"],
-            cwd=str(root),
-            text=True,
-            stderr=subprocess.STDOUT,
-            env=env,
-            timeout=LIFECYCLE_TIMEOUT,
-        )
+        _marina_cli_logged(root, "start", f"--{service}", timeout=LIFECYCLE_TIMEOUT,
+                           extra_env={"MARINA_SKIP_PREPARE": env["MARINA_SKIP_PREPARE"]})
 
     return _spawn_lifecycle(busy_key(root, service), "start", _do_start)
 
 def restart_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
     # restart 도 up --build 재적용이라 이미지 재빌드로 길어질 수 있다 — start 와 동일하게 백그라운드.
     return _spawn_lifecycle(busy_key(root, service), "restart",
-                            lambda: _marina_cli(root, "restart", f"--{service}", timeout=LIFECYCLE_TIMEOUT))
+                            lambda: _marina_cli_logged(root, "restart", f"--{service}", timeout=LIFECYCLE_TIMEOUT))
 
 def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
     by_category = cache_items_by_category(root)
@@ -328,6 +325,7 @@ def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
             label = str(item.get("volume") or item.get("name") or item.get("path") or "cache")
             removed.append(f"{label} (실패: {exc})")
     _worktree_info_cache.pop(str(root), None)
+    _worktree_du_cache.pop(str(root), None)
     return {"removed": removed, "freedMb": freed}
 
 def delete_merged_branch(source_repo: Path, branch: str) -> dict[str, Any]:

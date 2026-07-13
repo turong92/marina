@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -19,7 +20,7 @@ import importlib.util as _ilu
 from marina_state import CONTROL_SCRIPT, HOST, LOG_TAIL_BYTES, MARINA_HOME, PORT, _GATEWAY_ON, _GATEWAY_PORT, _env, _gw, _mc, invalidate_registry_caches, json_bytes
 from marina_dockerfile import _compose_scaffold_service, _compose_scan, _detect_subrepos, _list_dockerfiles, _subrepo_compose, is_profile_var
 from marina_logtext import read_log_chunk, redact_text, scan_log_matches
-from marina_registry import discover_all_roots, discover_roots, external_repos_for, is_source_checkout, project_for, subrepos_of
+from marina_registry import containing_project_for, discover_all_roots, discover_roots, external_repos_for, is_source_checkout, load_projects, project_for, source_root_for, subrepos_of
 from marina_paths import selected_log, session_dir, session_id, write_config, write_meta
 from marina_cli import _marina_cli, run_marina, run_marina_registry
 
@@ -34,8 +35,9 @@ def _apply_now(root: Path, service: str = "") -> None:
     except Exception:
         pass
 from marina_update import _serving_sha, update_claude, update_codex, update_status
-from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml
-from marina_sessions import append_console_log, claude_session_titles, codex_session_titles, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
+from marina_sessions import agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_git import git_commit, git_commit_info, git_diff, git_graph, git_merge, git_pull, git_push, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
@@ -124,9 +126,13 @@ class Handler(BaseHTTPRequestHandler):
             # 세션 타이틀은 앱에서 수정 시 빨리 반영돼야 해 캐시된 worktree_info 밖에서 신선하게 덧씌운다.
             titles = claude_session_titles(refresh)       # Claude 데스크톱 (20s 캐시)
             codex_titles = codex_session_titles(refresh)  # Codex (60s 캐시)
+            roots = discover_all_roots(refresh)
+            # 깃 배지 계산은 root 당 ~0.3s(전부 git subprocess 대기)라 직렬로는 root 수에 비례 —
+            # root 끼리 독립이니 병렬 프리컴퓨트(실측 14 roots 4.4s→0.8s). 오버레이는 캐시 히트라 직렬 유지.
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                infos = list(pool.map(lambda r: dict(worktree_info(r, refresh)), roots))
             worktrees = []
-            for root in discover_all_roots(refresh):
-                info = dict(worktree_info(root, refresh))  # 캐시 객체 오염 방지 위해 복사 후 오버레이
+            for root, info in zip(roots, infos):
                 entry = titles.get(str(root))
                 if entry:
                     info["sessionTitle"] = entry["title"]
@@ -134,6 +140,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif str(root) in codex_titles:
                     info["sessionTitle"] = codex_titles[str(root)]
                     info["titleSource"] = "codex"
+                agents = agents_payload(root, refresh)   # A1 — 카드 AGENTS 섹션(같은 titles 캐시 리듬에 편승)
+                if agents:
+                    info["agents"] = agents
                 worktrees.append(info)
             self.send_json({"worktrees": worktrees})
             return
@@ -170,6 +179,74 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, 400)
             return
 
+        if parsed.path == "/api/repo-candidates":
+            # 등록 워크벤치 진입(R1) — 관례 루트(존재하는 것만)를 2단계까지 스캔해 .git 후보를 모은다.
+            # 자동 아님(버튼에서만 호출) · 홈 전체 rglob 금지 · 상한 100개.
+            CONVENTION_ROOTS = ["~/IdeaProjects", "~/projects", "~/dev", "~/workspace"]
+            SKIP_NAMES = {"node_modules", ".git", ".workspace"}
+            LIMIT = 100
+            registered_roots: set[str] = set()
+            for proj in load_projects():
+                try:
+                    registered_roots.add(str(Path(proj["root"]).resolve()))
+                except Exception:
+                    continue
+
+            def _has_compose(d: Path) -> bool:
+                try:
+                    return next(d.glob("*compose*.y*ml"), None) is not None
+                except OSError:
+                    return False
+
+            def _subdirs(d: Path) -> list[Path]:
+                try:
+                    return sorted(
+                        (c for c in d.iterdir()
+                         if c.is_dir() and not c.name.startswith(".") and c.name not in SKIP_NAMES),
+                        key=lambda p: p.name.lower(),
+                    )
+                except OSError:
+                    return []
+
+            candidates: list[dict[str, Any]] = []
+            seen: set[str] = set()
+
+            def _consider(d: Path) -> None:
+                if len(candidates) >= LIMIT:
+                    return
+                try:
+                    if not (d / ".git").exists():
+                        return
+                    rp = str(d.resolve())
+                except OSError:
+                    return
+                if rp in seen:
+                    return
+                seen.add(rp)
+                candidates.append({
+                    "path": rp,
+                    "name": d.name,
+                    "hasCompose": _has_compose(d),
+                    "registered": rp in registered_roots,
+                })
+
+            scanned: list[str] = []
+            for raw in CONVENTION_ROOTS:
+                base = Path(raw).expanduser()
+                if not base.is_dir():
+                    continue
+                scanned.append(str(base))
+                for d1 in _subdirs(base):
+                    if len(candidates) >= LIMIT:
+                        break
+                    _consider(d1)
+                    for d2 in _subdirs(d1):
+                        if len(candidates) >= LIMIT:
+                            break
+                        _consider(d2)
+            self.send_json({"candidates": candidates[:LIMIT], "scanned": scanned})
+            return
+
         if parsed.path == "/api/compose-detect":
             qs = urllib.parse.parse_qs(parsed.query)
             target = Path((qs.get("path", [""])[0] or "").strip()).expanduser()
@@ -200,7 +277,7 @@ class Handler(BaseHTTPRequestHandler):
                 if len(files) >= 50:
                     break
             stored = None
-            proj = project_for(target)
+            proj = containing_project_for(target)   # 단일 등록 폴백 금지 — 무관한 레포에 남의 저장본을 제안하지 않게(코덱스 P2)
             if proj and proj.get("kind") == "compose":
                 sp = MARINA_HOME / proj["id"] / proj.get("composeFile", "docker-compose.yml")
                 if sp.exists():
@@ -279,6 +356,81 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, 400)
                 return
             self.send_json({"repos": worktree_status(root)["repos"]})
+            return
+
+        if parsed.path == "/api/git-graph":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                payload = git_graph(root, query.get("repo", ["."])[0],
+                                    refresh=query.get("refresh", ["0"])[0] == "1")
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
+            return
+
+        if parsed.path == "/api/weave-map":   # 연결 탭(P3) — 엮기(forward) 최종 맵 + 서비스별 적용분. compose 미등록/미해석 → ok:false(200).
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+            except Exception as exc:
+                self.send_json({"ok": False, "error": str(exc)}, 400)
+                return
+            proj = project_for(root)
+            if not proj or proj.get("kind") != "compose":
+                self.send_json({"ok": False, "error": "compose 프로젝트가 아니거나 미등록"})
+                return
+            result = weave_map(root, proj)
+            if result.get("ok"):
+                result["services"] = session_payload(root).get("services") or []
+            self.send_json(result)
+            return
+
+        if parsed.path == "/api/agent-transcript":   # AGENTS 행 클릭 — user/assistant 텍스트 턴(마스킹 적용)
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                payload = agent_transcript(root, query.get("source", [""])[0], query.get("sid", [""])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
+            return
+
+        if parsed.path == "/api/git-wip-stat":   # WIP 상세 — 파일별 +/-(numstat)·untracked
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                payload = git_wip_stat(root, query.get("repo", ["."])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
+            return
+
+        if parsed.path == "/api/git-commit-info":   # 깃 탭 우측 상세 패널 — 커밋 메타+파일 목록(파일 클릭=변경 탭 드릴인)
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                payload = git_commit_info(root, query.get("repo", ["."])[0], query.get("commit", [""])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
+            return
+
+        if parsed.path == "/api/git-diff":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                payload = git_diff(root, query.get("repo", ["."])[0],
+                                   file=query.get("file", [""])[0],
+                                   commit=query.get("commit", [""])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
             return
 
         if parsed.path == "/api/links":   # 서비스 effective links (기본 glob + service + override) — 대시보드 표시용
@@ -483,6 +635,32 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, "id": final_id, "output": out.strip()})
                 return
 
+            if self.path == "/api/worktree-create":   # A4 — 대시보드에서 워크트리 생성 (marina worktree create CLI 재사용)
+                target = Path(str(body.get("projectRoot", "")).strip()).expanduser()
+                if not str(body.get("projectRoot", "")).strip() or not target.is_dir():
+                    raise ValueError(f"디렉토리 없음: {body.get('projectRoot', '')}")
+                proj = containing_project_for(target)              # 등록 프로젝트 root 자신만 허용 — 워크트리/하위경로에서는 거부
+                if not proj or proj["root"].resolve() != target.resolve():
+                    raise ValueError("등록된 프로젝트 root 가 아닙니다 — 그 프로젝트의 main 카드에서 시도하세요")
+                branch = str(body.get("branch", "")).strip()
+                if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or ".." in branch:
+                    raise ValueError("브랜치명은 영문/숫자/./_/-(슬래시 포함)만 가능 — 공백·'..' 금지")
+                try:
+                    out = _marina_cli(target, "worktree", "create", branch, timeout=180)
+                except subprocess.CalledProcessError as exc:
+                    raise ValueError((exc.output or "").strip() or str(exc))
+                except subprocess.TimeoutExpired:
+                    raise ValueError("워크트리 생성 시간 초과(180s) — 서브레포 attach 가 오래 걸릴 수 있습니다. 잠시 후 새로고침해 확인하세요")
+                invalidate_registry_caches()
+                m = re.search(r"✓ 워크트리:\s*(.+)", out)   # worktree_create() 의 성공 출력에서 실경로 추출, 실패 시 관례 경로로 폴백
+                if m:
+                    new_root = m.group(1).strip()
+                else:
+                    san = re.sub(r"[/:]", "-", branch)
+                    new_root = str(target / ".claude" / "worktrees" / san)
+                self.send_json({"ok": True, "root": new_root, "output": out.strip()[-2000:]})
+                return
+
             if self.path == "/api/compose-serialize":   # 위저드 검토: services YAML + x-marina dict → 합쳐진 compose 미리보기
                 yaml_text = str(body.get("yaml", ""))
                 xmarina = body.get("xmarina") if isinstance(body.get("xmarina"), dict) else {}
@@ -500,13 +678,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True, **_compose_scan(target)})
                 return
 
-            if self.path == "/api/compose-validate":
+            if self.path == "/api/compose-validate":   # 등록 없이 단독 검증(M5 인라인 검증) — compose-register 와 같은 compose_validate 재사용
                 yaml_text = str(body.get("yaml", ""))
                 target = Path(str(body.get("path", "")).strip()).expanduser()
                 if not yaml_text.strip():
                     raise ValueError("yaml required")
                 if not str(body.get("path", "")).strip() or not target.is_dir():
                     raise ValueError(f"디렉토리 없음: {body.get('path', '')}")
+                _own4 = containing_project_for(target)             # 포함 프로젝트만 승격 — 단일 폴백이면 무관 레포 검증이 남의 트리에서 돎(코덱스 P2)
+                if _own4 and Path(_own4["root"]).resolve() != target.resolve():
+                    target = Path(_own4["root"])
                 self.send_json(compose_validate(
                     yaml_text, target,
                     str(body.get("envVar", "")).strip(), str(body.get("envDefault", "")).strip()))
@@ -516,6 +697,9 @@ class Handler(BaseHTTPRequestHandler):
                 target = Path(str(body.get("path", "")).strip()).expanduser()
                 if not str(body.get("path", "")).strip() or not target.is_dir():
                     raise ValueError(f"디렉토리 없음: {body.get('path', '')}")
+                _own = containing_project_for(target)              # 워크트리 경로면 그걸 실제로 포함하는 프로젝트로 승격 —
+                if _own and Path(_own["root"]).resolve() != target.resolve():   # 워크트리 신규등록 버그 차단.
+                    target = Path(_own["root"])                    # (project_for 단일 폴백 금지 — 무관한 새 레포 흡수 방지)
                 yaml_text = str(body.get("yaml", ""))
                 if not yaml_text.strip():
                     raise ValueError("yaml required")
@@ -557,6 +741,9 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/compose-import":   # 팀원 공유 블록(compose+x-marina) 한 번에 등록+적용 — 위저드/개별설정 생략
                 target = Path(str(body.get("root", "")).strip()).expanduser()
+                _own2 = containing_project_for(target)             # 워크트리 → 포함 프로젝트 승격(위와 동일 가드, 단일 폴백 금지)
+                if _own2 and target.is_dir() and Path(_own2["root"]).resolve() != target.resolve():
+                    target = Path(_own2["root"])
                 blob = str(body.get("blob", ""))
                 if not str(body.get("root", "")).strip() or not target.is_dir():
                     raise ValueError(f"디렉토리 없음: {body.get('root', '')}")
@@ -750,6 +937,25 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(clear_worktree_cache(root, str(body.get("category", "all"))))
                 return
 
+            if self.path == "/api/git-commit":   # 깃 탭 WIP 커밋(P2) — root 는 워크트리, main 체크아웃은 백엔드가 거부
+                files = body.get("files")
+                if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
+                    raise ValueError("files must be a list of strings")
+                self.send_json(git_commit(root, str(body.get("repo", ".")), files, str(body.get("message", ""))))
+                return
+
+            if self.path == "/api/git-push":
+                self.send_json(git_push(root, str(body.get("repo", ".")), force=bool(body.get("force"))))
+                return
+
+            if self.path == "/api/git-pull":   # D&D ☁→로컬 당겨오기 (ff-only)
+                self.send_json(git_pull(root, str(body.get("repo", "."))))
+                return
+
+            if self.path == "/api/git-merge":   # D&D 로컬→로컬 병합 — root = 타깃 브랜치의 워크트리
+                self.send_json(git_merge(root, str(body.get("repo", ".")), str(body.get("branch", ""))))
+                return
+
             if self.path == "/api/set-default-attach":
                 project = project_for(root)
                 if not project:
@@ -869,6 +1075,20 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     time.sleep(0.5)
                     idle += 0.5
+                    # run rotation 감지 — restart 가 <svc>.log 심링크를 새 run 으로 옮겨도 열린 핸들은
+                    # 옛 inode 를 tail 해 "재시작 후 로그가 안 뜨는" 원인이었다. 심링크가 다른 파일을
+                    # 가리키면 rotated 이벤트로 클라이언트를 새 파일에 재접속시킨다. (~2s 마다)
+                    if idle % 2.0 < 0.25:
+                        try:
+                            if path.stat().st_ino != os.fstat(handle.fileno()).st_ino:
+                                try:
+                                    self.wfile.write(b"event: rotated\ndata: {}\n\n")
+                                    self.wfile.flush()
+                                except (BrokenPipeError, ConnectionResetError, OSError):
+                                    pass
+                                return
+                        except OSError:
+                            pass
                     if idle >= 10.0:
                         # 로그가 조용하면 write 가 없어 끊긴 클라이언트를 영영 감지 못했다
                         # → keepalive 로 연결 검증, 끊겼으면 스레드 종료 (스레드/fd 누수 방지)

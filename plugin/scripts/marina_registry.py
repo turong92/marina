@@ -127,6 +127,37 @@ def project_for(root: Path) -> dict[str, Any] | None:
                 return project
     return projects[0] if len(projects) == 1 else None
 
+def containing_project_for(root: Path) -> dict[str, Any] | None:
+    """root 를 실제로 포함하는 프로젝트만 — project_for 의 '단일 등록이면 무조건 그 프로젝트' 폴백 제외.
+    등록 가드(compose-register/import 의 워크트리 승격)용: 폴백 포함 판정을 쓰면 프로젝트가 1개일 때
+    무관한 새 레포 등록이 기존 프로젝트로 흡수된다."""
+    projects = load_projects()
+    if not projects:
+        return None
+    try:
+        rroot = root.resolve()
+    except OSError:
+        rroot = root
+    best = None
+    best_len = -1
+    for project in projects:
+        proot = project["root"].resolve()
+        sproot = str(proot)
+        if rroot == proot or str(rroot).startswith(sproot + os.sep):
+            if len(sproot) > best_len:
+                best, best_len = project, len(sproot)
+    if best is not None:
+        return best
+    try:
+        in_codex_layout = rroot.parent.parent == WORKTREES_ROOT.resolve()
+    except (OSError, ValueError):
+        in_codex_layout = False
+    if in_codex_layout:
+        for project in projects:
+            if root.name == project["root"].name:
+                return project
+    return None
+
 def subrepos_of(root: Path) -> list[str]:
     project = project_for(root)
     return list(project["subrepos"]) if project else list(_DEFAULT_SUBREPOS)

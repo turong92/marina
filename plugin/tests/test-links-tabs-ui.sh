@@ -6,8 +6,9 @@ APP="$HERE/../scripts/marina-web/app-6-modals.js"
 CORE="$HERE/../scripts/marina-web/app-1-core.js"
 CSS="$HERE/../scripts/marina-web/styles.css"
 
-grep -q '"links-open-btn"' "$APP" || { echo "FAIL: link open button missing"; exit 1; }
-grep -q '>link</span>' "$APP" || { echo "FAIL: dashboard link button should say link"; exit 1; }
+# link 진입은 카드 ⋯ 메뉴로 이동(카드 다이어트 2026-07-13) — 버튼 잔재 금지 + 메뉴 항목 존재
+! grep -q '"links-open-btn"' "$APP" || { echo "FAIL: 구 link 버튼 잔재"; exit 1; }
+grep -q "openLinksModal(session)" "$HERE/../scripts/marina-web/app-5b-actions.js" || { echo "FAIL: 카드 ⋯ 메뉴에 link 진입 없음"; exit 1; }
 ! grep -q '파일 가져오기' "$APP" || { echo "FAIL: old '파일 가져오기' label still present"; exit 1; }
 ! grep -q '링크 (symlink)' "$APP" || { echo "FAIL: old symlink label still present"; exit 1; }
 grep -q 'data-lk-tab' "$APP" || { echo "FAIL: link modal should render subrepo tabs"; exit 1; }

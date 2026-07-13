@@ -12,9 +12,6 @@
       return rule && (rule.mode === 'copy' || rule.op === 'copy') ? 'copy' : 'symlink';
     }
 
-    function renderLinksRows(session) {   // link — 진입 버튼
-      return `<button data-links-open class="links-open-btn" title="main checkout의 deps/config를 이 worktree로 링크(참조)/카피(복제)">↔ <span class="summary-sub">link</span></button>`;
-    }
     function openLinksModal(session) {   // link 모달 — 해당 서브레포에 실제 있는 것만
       const ex = document.getElementById('linksModalBack'); if (ex) ex.remove();
       const back = document.createElement('div');
@@ -279,6 +276,7 @@
       const sessionListChanged = nextSignature !== sessionSignature;
       sessions = nextSessions;
       sessionSignature = nextSignature;
+      if (typeof notifyScan === 'function') notifyScan(sessions);   // A3 브라우저 알림 — 전이 감지는 app-6b-notify.js
       if (passive && !sessionListChanged) {
         updateServiceStates();
         return;
@@ -292,6 +290,7 @@
     }
 
     let updateBusy = false;
+    let updateBannerSig = '';
     async function loadUpdateStatus() {
       let s;
       try { s = await api('/api/update-status'); } catch { return; }
@@ -299,26 +298,32 @@
     }
 
     function renderUpdateBanner(s) {
+      if (updateBusy) return;   // 진행 중(버튼이 busy 표시) — 폴링이 DOM 을 갈아엎지 않게
       const el = document.getElementById('updateBanner');
+      const sig = JSON.stringify(s ? [s.state, s.serving, s.installed, s.origin, s.harnessStatus] : null);
+      if (sig === updateBannerSig) return;   // 변화 없으면 재생성 스킵
+      updateBannerSig = sig;
       if (!s || s.state === 'current' || s.state === 'unknown') { el.hidden = true; el.innerHTML = ''; return; }
       el.hidden = false;
       el.classList.toggle('stale', s.state === 'stale');
       if (s.state === 'stale') {
-        el.innerHTML = `<span class="ub-msg">업데이트 설치됨 — 재시작하면 적용</span>
+        el.innerHTML = `<span class="ub-dot"></span><span class="ub-msg">업데이트 설치됨</span>
+          <span class="ub-note">재시작하면 적용돼요</span>
           <span class="ub-sha">${escapeHtml(s.serving || '?')} → ${escapeHtml(s.installed || '?')}</span>
-          <span class="ub-actions"><button data-restart class="primary">재시작</button></span>`;
-      } else { // new — 하네스별 뒤처짐 칩 (정보) + 단일 [지금 받기] 버튼
+          <span class="ub-actions"><button data-restart class="ub-btn">재시작</button></span>`;
+      } else { // new — 하네스별 상태 칩(점=최신/뒤처짐) + 단일 [지금 받기] 버튼
         const hs = s.harnessStatus || {};
         const chips = [];
         for (const h of (s.harnesses || [])) {
           const st = hs[h];
           if (!st) continue;
           const cur = !st.behind;
-          chips.push(`<span class="ub-hchip ${cur ? 'cur' : 'old'}">${escapeHtml(h)} <span class="sha">${escapeHtml(st.installed || '?')}</span> ${cur ? '최신' : '뒤처짐'}</span>`);
+          chips.push(`<span class="ub-hchip ${cur ? 'cur' : 'old'}" title="${escapeHtml(h)} ${cur ? '최신' : '뒤처짐 — 받으면 갱신돼요'}"><i></i>${escapeHtml(h)} <span class="sha">${escapeHtml(st.installed || '?')}</span></span>`);
         }
         const anyBehind = (s.harnesses || []).some(h => hs[h]?.behind);
-        const updateBtn = anyBehind ? '<button data-update-now class="primary">지금 받기</button>' : '';
-        el.innerHTML = `<span class="ub-msg">새 버전 ${escapeHtml(s.origin || '?')}</span>
+        const updateBtn = anyBehind ? '<button data-update-now class="ub-btn">지금 받기</button>' : '';
+        el.innerHTML = `<span class="ub-dot"></span><span class="ub-msg">새 버전</span>
+          <span class="ub-sha">${escapeHtml(s.origin || '?')}</span>
           <span class="ub-actions">${chips.join('')}${updateBtn}</span>`;
       }
       const restartBtn = el.querySelector('[data-restart]');
@@ -327,16 +332,9 @@
       if (updateNowBtn) updateNowBtn.onclick = () => doUpdateNow(updateNowBtn);
     }
 
-    async function doRestartDashboard(btn) {
-      if (updateBusy) return;
-      if (!confirm('대시보드를 재시작해 새 코드로 띄울까요?\n(dev 서버는 유지 · 브라우저 자동 새로고침 · 수 초)')) return;
-      updateBusy = true;
-      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
-      try {
-        await api('/api/restart-dashboard', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
-      } catch {}
-      // 서버만 재시작하면 브라우저는 옛 INDEX_HTML(HTML/JS/CSS) 그대로라 UI 변경이 안 보임 →
-      // 데몬이 죽었다 다시 살아나는 걸 감지하면 페이지를 새로고침해 새 코드 전체 반영
+    // 서버만 재시작하면 브라우저는 옛 INDEX_HTML(HTML/JS/CSS) 그대로라 UI 변경이 안 보임 →
+    // 데몬이 죽었다 다시 살아나는 걸 감지하면 페이지를 새로고침해 새 코드 전체 반영
+    async function watchRestartThenReload() {
       let down = false;
       for (let i = 0; i < 20; i++) {                 // 최대 ~8초
         await new Promise(r => setTimeout(r, 400));
@@ -349,9 +347,20 @@
       location.reload();                             // fallback — transition 못 봐도 새로고침
     }
 
+    async function doRestartDashboard(btn) {
+      if (updateBusy) return;
+      if (!confirm('대시보드를 재시작해 새 코드로 띄울까요?\n(dev 서버는 유지 · 브라우저 자동 새로고침 · 수 초)')) return;
+      updateBusy = true;
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
+      try {
+        await api('/api/restart-dashboard', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
+      } catch {}
+      await watchRestartThenReload();
+    }
+
     async function doUpdateNow(btn) {
       if (updateBusy) return;
-      if (!confirm('새 버전을 받아 대시보드만 재시작합니다.\n실행 중인 dev 서버(be/web 등)는 그대로 유지됩니다 · 약 1초.\n진행할까요?')) return;
+      if (!confirm('새 버전을 받아 대시보드만 재시작합니다.\n실행 중인 dev 서버(be/web 등)는 그대로 유지됩니다.\n(받기 수 초~수십 초 · 완료되면 화면 자동 새로고침)')) return;
       updateBusy = true;
       btn.disabled = true; btn.innerHTML = BUSY_DOTS;
       const errs = [];
@@ -372,15 +381,16 @@
         } catch (e) { errs.push('codex: ' + e); }
       }
       if (errs.length) {
-        alert('업데이트 실패:\n' + errs.join('\n'));
+        showToast('업데이트 실패 — ' + errs.join(' · '), 'err');
         updateBusy = false; btn.disabled = false; btn.innerHTML = '지금 받기';
         return;
       }
-      // 업데이트 성공 → 재시작 (confirm 이미 했으므로 바로 진행)
+      // 업데이트 성공 → 재시작. 재시작 완료를 감지해 새로고침해야 새 프론트 코드가 실린다
+      // (재시작만 하고 두면 브라우저는 옛 JS 로 새 백엔드를 치는 반쪽 상태).
       try {
         await api('/api/restart-dashboard', {method: 'POST', headers: {'content-type': 'application/json'}, body: '{}'});
       } catch {}
-      setTimeout(() => { updateBusy = false; loadUpdateStatus().catch(() => {}); }, 3000);
+      await watchRestartThenReload();
     }
 
     const themeSelect = document.getElementById('themeSelect');
@@ -403,11 +413,46 @@
       else for (const session of sessions) expandedRoots.add(session.root);
       render();
     };
-    // 레일 띠 전체가 클릭 영역 (버튼은 pointer-events 없음 — 이중 토글 방지)
-    document.querySelector('.rail').onclick = () => {
-      const collapsed = document.querySelector('main').classList.toggle('aside-collapsed');
-      document.getElementById('asideToggle').textContent = collapsed ? '▶' : '◀';
-    };
+    // 레일 = IDE 식 분할 핸들 — 드래그(4px+)로 좌측 패널 폭 조절(--aside-w, localStorage 기억),
+    // 그냥 클릭은 기존 접기/펼치기 그대로 (버튼은 pointer-events 없음 — 이중 토글 방지)
+    (() => {
+      const rail = document.querySelector('.rail');
+      const mainEl = document.querySelector('main');
+      const clampW = w => Math.min(Math.max(w, 320), Math.round(innerWidth * 0.7));
+      const saved = parseInt(localStorage.getItem('marinaAsideW'), 10);
+      if (saved) mainEl.style.setProperty('--aside-w', clampW(saved) + 'px');
+      let dragged = false;
+      rail.addEventListener('pointerdown', (e) => {
+        if (mainEl.classList.contains('aside-collapsed')) return;   // 접힘 상태에선 클릭 토글만
+        e.preventDefault();   // 드래그 중 텍스트 선택 방지
+        const downX = e.clientX;
+        const startW = document.querySelector('aside').getBoundingClientRect().width;
+        let w = startW;
+        rail.setPointerCapture(e.pointerId);
+        const move = (ev) => {
+          const dx = ev.clientX - downX;
+          if (!dragged && Math.abs(dx) < 4) return;   // 4px 미만은 클릭
+          dragged = true;
+          w = clampW(Math.round(startW + dx));
+          mainEl.style.setProperty('--aside-w', w + 'px');
+        };
+        const up = (ev) => {
+          rail.removeEventListener('pointermove', move);
+          rail.removeEventListener('pointerup', up);
+          rail.removeEventListener('pointercancel', up);
+          if (dragged) localStorage.setItem('marinaAsideW', String(w));
+          if (ev.type === 'pointercancel') dragged = false;   // click 이 안 따라오는 종료 — 스왈로 플래그 해제
+        };
+        rail.addEventListener('pointermove', move);
+        rail.addEventListener('pointerup', up);
+        rail.addEventListener('pointercancel', up);
+      });
+      rail.addEventListener('click', () => {
+        if (dragged) { dragged = false; return; }   // 방금 드래그였음 — 접기 오발 방지
+        const collapsed = mainEl.classList.toggle('aside-collapsed');
+        document.getElementById('asideToggle').textContent = collapsed ? '▶' : '◀';
+      });
+    })();
     document.getElementById('logFilter').oninput = (event) => {
       logFilterText = event.target.value.trim().toLowerCase();
       applyLogFilter();
@@ -477,6 +522,26 @@
       if (!mode || !selected) return;
       selectLog(selected.root, selected.service, 'current', mode);
     };
+    // ── 워크스페이스 뷰 탭 (콘솔 스펙 D2) — 새 뷰 = WS_VIEWS 등록 + pane div 하나. 컨텍스트는 좌측 선택 추종. ──
+    const WS_VIEWS = { logs: {}, git: {}, conn: {}, term: {} };   // {activate(pane, ctx)?, deactivate()?} — diff 는 깃 탭 오버레이로 흡수(탭 철거)
+    let wsActive = 'logs';
+    function wsContext() { return selected ? { root: selected.root, service: selected.service } : null; }
+    function setWsTab(name) {
+      if (!WS_VIEWS[name] || name === wsActive) return;
+      const prev = WS_VIEWS[wsActive];
+      if (prev.deactivate) prev.deactivate();
+      wsActive = name;
+      document.querySelectorAll('[data-ws-tab]').forEach(b => b.classList.toggle('on', b.dataset.wsTab === name));
+      document.querySelectorAll('.ws-pane').forEach(p => { p.hidden = p.id !== 'tab-' + name; });
+      const v = WS_VIEWS[name];
+      if (v.activate) v.activate(document.getElementById('tab-' + name), wsContext());
+      updateWsCtx();
+    }
+    function updateWsCtx() {
+      const el = document.getElementById('wsCtx');
+      if (el) el.textContent = selected ? `${shortPath(selected.root)} · ${selected.service}` : '';
+    }
+    document.querySelectorAll('[data-ws-tab]').forEach(b => { if (!b.disabled) b.onclick = () => setWsTab(b.dataset.wsTab); });
     document.getElementById('openWeb').onclick = () => {
       if (!selected) return;
       const {session} = serviceMeta(selected.root, selected.service);
@@ -546,6 +611,37 @@
     document.addEventListener('scroll', hideTip, {capture: true, passive: true});
     document.addEventListener('click', hideTip, true);
 
+    // ── AGENTS 행 클릭 뷰어 — 서비스 행=로그 탭과 같은 "누르면 바로 열림" 문법(형 통일). 대화 끝부분(user/assistant 텍스트만) ──
+    async function openAgentTranscript(session, agent) {
+      const ex = document.getElementById('agentModalBack'); if (ex) ex.remove();
+      const back = document.createElement('div');
+      back.id = 'agentModalBack'; back.className = 'modal-backdrop'; back.style.zIndex = '250';
+      const isCodex = agent.source === 'codex';
+      back.innerHTML = `<div class="links-modal agent-modal">
+        <div class="links-modal-head"><strong><span class="agent-src ${isCodex ? 'codex' : 'claude'}">${isCodex ? 'Codex' : 'Claude'}</span> ${escapeHtml(agent.title)}</strong>
+          <button class="links-modal-x" title="닫기 (Esc)">✕</button></div>
+        <div class="config-label" style="margin-bottom:8px">대화 끝부분 — 도구 호출/결과는 생략, 민감정보는 로그처럼 마스킹</div>
+        <div class="agent-turns" data-agent-turns>불러오는 중…</div>
+      </div>`;
+      document.body.appendChild(back);
+      const close = () => { back.remove(); document.removeEventListener('keydown', onKey); };
+      const onKey = (e) => { if (e.key === 'Escape') close(); };
+      document.addEventListener('keydown', onKey);
+      back.querySelector('.links-modal-x').onclick = close;
+      back.onclick = (e) => { if (e.target === back) close(); };   // 읽기 전용 뷰어 — 바깥 클릭 닫기 허용
+      const body = back.querySelector('[data-agent-turns]');
+      try {
+        const d = await api(`/api/agent-transcript?root=${enc(session.root)}&source=${enc(agent.source)}&sid=${enc(agent.sid)}`);
+        const turns = d.turns || [];
+        body.innerHTML = turns.length ? turns.map(t => `
+          <div class="agent-turn ${t.role === 'user' ? 'user' : 'ai'}">
+            <span class="turn-role">${t.role === 'user' ? '나' : (isCodex ? 'Codex' : 'Claude')}</span>
+            <div class="turn-text">${escapeHtml(t.text)}</div>
+          </div>`).join('') : '<div class="config-label">표시할 대화가 없어요 (도구 호출만 있었거나 빈 세션)</div>';
+        body.scrollTop = body.scrollHeight;   // 최신이 아래 — 로그처럼 끝으로
+      } catch (e) { body.innerHTML = `<div class="git-err">${escapeHtml(e.message)}</div>`; }
+    }
+
     let pollTimer = null;
     let pollTick = 0;
     function startPolling() {
@@ -553,9 +649,10 @@
       pollTimer = setInterval(() => {
         pollTick += 1;
         load({passive: true}).catch(console.error);
-        if (pollTick % 2 === 0) loadUpdateStatus().catch(console.error);
-        // 60초마다 — 서버 10분 캐시를 타서 비용 ~0, 배지(삭제 권장)·디스크 표시 신선도 유지
-        if (pollTick % 12 === 0) loadWorktrees().catch(console.error);
+        // 60초마다 — 업데이트 상태는 분 단위로만 변함(서버도 UPDATE_TTL 캐시). 렌더는 signature 스킵.
+        if (pollTick % 12 === 6) loadUpdateStatus().catch(console.error);
+        // 15초마다 — 깃 배지(dirty/ahead)·AGENTS 는 서버 15s 캐시(값싼 부분만), du 는 서버가 장수 캐시로 분리
+        if (pollTick % 3 === 0) loadWorktrees().catch(console.error);
       }, 5000);
     }
     function stopPolling() {

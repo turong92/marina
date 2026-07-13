@@ -1,14 +1,7 @@
+    // 경로가 바뀌면 재료 서랍의 "기존 compose" 가벼운 목록을 재조회(스캔은 버튼 전용 — 자동 아님). app-2b-workbench.js.
     document.getElementById('registerPath').addEventListener('change', () => {
-      if (!document.getElementById('composeSection').hidden)
-        renderComposeSubrepos(document.getElementById('registerPath').value.trim());
+      if (!document.getElementById('composeSection').hidden && typeof wbOnPathChanged === 'function') wbOnPathChanged();
     });
-
-    function setComposeProgress(kind, text) {
-      const prog = document.getElementById('composeProgress');
-      prog.hidden = false;
-      prog.className = 'svc-llm-progress ' + kind;
-      prog.innerHTML = '<span>' + escapeHtml(text) + '</span>';
-    }
 
     // ── compose YAML 하이라이트 오버레이 (dep0 — 라이브러리 없음) ───────────────
     function yamlCommentStart(line) {   // 따옴표 밖의 첫 # (인라인 주석) 위치, 없으면 -1
@@ -39,7 +32,7 @@
       const ta = document.getElementById('composeYaml'), hl = document.getElementById('composeHl'), gut = document.getElementById('composeGutter');
       if (!ta || !hl || !gut) return;
       const n = (ta.value.match(/\n/g) || []).length + 1;
-      hl.innerHTML = highlightYaml(ta.value);
+      hl.innerHTML = highlightYaml(ta.value) + '\n';   // 끝 개행 sentinel — <pre>는 trailing newline 을 안 그려 마지막 빈 줄이 밀린다
       gut.textContent = Array.from({ length: n }, (_, i) => i + 1).join('\n');
       hl.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;   // transform 동기화 — scrollbar-clamp 어긋남 없음
       gut.style.transform = `translateY(${-ta.scrollTop}px)`;
@@ -49,10 +42,89 @@
       if (ta) ta.value = v == null ? '' : v;
       refreshComposeHighlight();
     }
+    // ── YAML 편집 기본기 (형 요청) — 탭=들여쓰기 삽입, 엔터=YAML 문맥 맞는 들여쓰기 유지 ──
+    const YAML_INDENT = '  ';   // compose/YAML 표준 2칸 — 템플릿·스캐폴드 출력과 일치
+    function yamlInsertText(ta, text) {   // execCommand 우선 — 브라우저 undo 스택 보존. 폴백은 setRangeText+input
+      if (!document.execCommand || !document.execCommand('insertText', false, text)) {
+        ta.setRangeText(text, ta.selectionStart, ta.selectionEnd, 'end');
+        ta.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+    }
+    function yamlShiftLines(ta, outdent) {   // 선택 블록(또는 현재 줄) 들여쓰기/내어쓰기
+      const v = ta.value;
+      const selS = ta.selectionStart, selE = ta.selectionEnd;
+      const ls = v.lastIndexOf('\n', selS - 1) + 1;
+      let le = v.indexOf('\n', Math.max(selE - 1, selS));
+      if (le === -1) le = v.length;
+      const block = v.slice(ls, le);
+      const re = new RegExp(`^ {1,${YAML_INDENT.length}}`);
+      const shifted = block.split('\n').map(l => outdent ? l.replace(re, '') : (l.length ? YAML_INDENT + l : l)).join('\n');
+      if (shifted === block) return;
+      ta.setSelectionRange(ls, le);
+      yamlInsertText(ta, shifted);
+      ta.setSelectionRange(ls, ls + shifted.length);
+    }
+    function yamlEnterIndent(line) {
+      // 엔터 후 들여쓰기 결정 — 핵심: `key: value` 줄에서의 개행은 "값의 연속"이라 키보다 깊어야
+      // YAML fold 로 한 값이 된다(얕으면 형제 키로 파싱돼 '깨진 걸로 인식' — 보고된 버그).
+      const sp = (line.match(/^ */) || [''])[0];
+      if (/^\s*[A-Za-z0-9_."'\-]+:\s*$/.test(line)) return sp + YAML_INDENT;        // key: (빈 값) → 중첩 시작
+      if (/^\s*[A-Za-z0-9_."'\-]+:\s+\S/.test(line)) return sp + YAML_INDENT;       // key: value → 값 연속(fold)
+      if (/^\s*-\s/.test(line)) return sp;                                          // 리스트 항목 → 같은 깊이(다음 - 항목)
+      return sp;                                                                    // 그 외 → 현재 들여쓰기 유지
+    }
+    function yamlTabInsert(ta) {
+      const ls = ta.value.lastIndexOf('\n', ta.selectionStart - 1) + 1;
+      const col = ta.selectionStart - ls;
+      yamlInsertText(ta, ' '.repeat(YAML_INDENT.length - (col % YAML_INDENT.length)));   // 다음 들여쓰기 칸으로
+    }
+    let _yamlTabTs = 0;   // keydown 에서 처리한 Tab 을 beforeinput('\t')이 중복 처리하지 않게 (합성 입력은 둘 다 발생)
+    function yamlEditorKeydown(e) {
+      const ta = e.target;
+      if (e.key === 'Tab') {
+        e.preventDefault();   // 포커스 이동 대신 들여쓰기
+        _yamlTabTs = Date.now();
+        if (e.shiftKey || ta.selectionStart !== ta.selectionEnd) yamlShiftLines(ta, e.shiftKey);
+        else yamlTabInsert(ta);
+      }
+    }
+    let _yamlPendIndent = null;
+    function yamlEditorBeforeInput(e) {
+      const ta = e.target;
+      // Enter: 기본 개행을 막지 않는다 — 합성 입력(자동화)은 preventDefault 를 무시하고 개행을 강행해
+      // '내 삽입+기본 개행' 이중이 됐다(실측). 대신 개행 직전에 들여쓰기만 계산해 두고 input 에서 삽입(fix-up).
+      if (e.inputType === 'insertLineBreak' || (e.inputType === 'insertText' && e.data === '\n')) {
+        if (ta.selectionStart !== ta.selectionEnd) { _yamlPendIndent = null; return; }
+        const s = ta.selectionStart;
+        const ls = ta.value.lastIndexOf('\n', s - 1) + 1;
+        _yamlPendIndent = yamlEnterIndent(ta.value.slice(ls, s)) || null;
+        return;
+      }
+      if (e.inputType === 'insertText' && e.data === '\t') {   // 탭 문자는 어느 경로로 와도 스페이스로
+        e.preventDefault();
+        if (Date.now() - _yamlTabTs > 80) yamlTabInsert(ta);   // keydown 이 이미 처리한 직후면 스킵
+        return;
+      }
+      if (e.inputType === 'insertText' && (e.data === '\r' || e.data === '\r\n')) {
+        e.preventDefault();   // 합성 입력(CDP)의 중복 CR — insertLineBreak 뒤에 "\r" 이 한 번 더 온다(실측). 실키보드엔 없음
+      }
+    }
+    function yamlEditorInput(e) {
+      if (_yamlPendIndent && (e.inputType === 'insertLineBreak' || (e.inputType === 'insertText' && e.data === '\n'))) {
+        const ind = _yamlPendIndent;
+        _yamlPendIndent = null;
+        yamlInsertText(e.target, ind);   // 개행은 이미 적용됨 — 들여쓰기만 캐럿 위치에
+        return;   // yamlInsertText 가 input 을 다시 발화 → refresh 는 그 경로에서
+      }
+      refreshComposeHighlight();
+    }
     (function wireComposeHighlight() {
       const ta = document.getElementById('composeYaml');
       if (!ta) return;
-      ta.addEventListener('input', refreshComposeHighlight);
+      ta.setAttribute('wrap', 'off');   // 줄바꿈 어긋남 — textarea 는 CSS white-space 가 아니라 wrap 속성이 지배. soft-wrap 이 오버레이(no-wrap)와 줄을 어긋나게 한다
+      ta.addEventListener('keydown', yamlEditorKeydown);
+      ta.addEventListener('beforeinput', yamlEditorBeforeInput);
+      ta.addEventListener('input', yamlEditorInput);
       ta.addEventListener('scroll', () => {
         const hl = document.getElementById('composeHl'), gut = document.getElementById('composeGutter');
         if (hl) hl.style.transform = `translate(${-ta.scrollLeft}px, ${-ta.scrollTop}px)`;
@@ -65,59 +137,30 @@
 
     document.getElementById('composeViewConfig').onclick = () => {   // 편집 모달에서 해석된 구성 보기
       const path = document.getElementById('registerPath').value.trim();
-      if (!path) { setComposeProgress('err', '프로젝트 경로 먼저 입력'); return; }
+      const err = document.getElementById('registerError');
+      if (!path) { err.textContent = '프로젝트 경로 먼저 입력'; err.hidden = false; return; }
       openProjectConfig(path);
     };
-    function okToReplaceYaml() {   // 편집기에 내용이 있으면 덮어쓰기 전 확인 — 직접 작성분 유실 방지(코덱스 UX #2)
+    function okToReplaceYaml() {   // 편집기에 내용이 있으면 덮어쓰기 전 확인 — 직접 작성분 유실 방지(코덱스 UX #2). 재료 서랍(app-2b)도 재사용.
       const ta = document.getElementById('composeYaml');
       const v = ((ta && ta.value) || '').trim();
       if (!v || v === '불러오는 중…') return true;
       return confirm('편집기에 작성한 compose 내용이 있어요. 새로 불러온 내용으로 덮어쓸까요?');
     }
-    document.getElementById('composeImport').onclick = async () => {
-      const path = document.getElementById('registerPath').value.trim();
-      const list = document.getElementById('composeDetectList');
-      if (!path) { setComposeProgress('err', '프로젝트 경로 먼저 입력'); return; }
-      try {
-        const r = await api('/api/compose-detect?path=' + enc(path));
-        const files = (r && r.files) || [];
-        list.innerHTML = '';
-        if (r && r.stored && r.stored.yaml) {
-          const row = document.createElement('div');
-          row.className = 'browse-row';
-          row.innerHTML = '<span>💾 marina 저장본 (' + escapeHtml(r.stored.composeFile || 'docker-compose.yml') + ')</span>';
-          row.onclick = () => {
-            if (!okToReplaceYaml()) return;
-            setComposeYaml(r.stored.yaml);
-            composeStoredEnv = { envVar: r.stored.envVar || '', envDefault: r.stored.envDefault || '' };   // 저장된 env 보간값 보존
-            list.hidden = true; setComposeProgress('ok', 'marina 저장본을 불러왔어요 — 수정 후 등록하면 교체됩니다');
-          };
-          list.appendChild(row);
-        }
-        if (!files.length && !(r && r.stored)) {
-          list.innerHTML = '<div class="register-empty">레포에서 compose 파일을 못 찾음 — 직접 작성</div>';
-        }
-        for (const f of files) {
-          const row = document.createElement('div');
-          row.className = 'browse-row';
-          row.innerHTML = '<span>📄 ' + escapeHtml(f.rel) + '</span>';
-          row.onclick = () => {
-            if (!okToReplaceYaml()) return;
-            setComposeYaml(f.content || '');
-            list.hidden = true; setComposeProgress('ok', f.rel + ' 불러옴 — 검토·검증 후 등록');
-          };
-          list.appendChild(row);
-        }
-        list.hidden = false;
-      } catch (e) { setComposeProgress('err', String((e && e.message) || e)); }
-    };
+    // 구 "📁 레포에서 찾기"(composeImport) 버튼·목록은 제거 — 같은 compose-detect 호출로 재료 서랍의
+    // "기존 compose" 카드(app-2b-workbench.js, wbMatExisting)가 대체(스펙 R2 M3, okToReplaceYaml 재사용).
 
     document.getElementById('composeConfirm').onclick = async () => {
       const path = document.getElementById('registerPath').value.trim();
       const yaml = document.getElementById('composeYaml').value;
-      const isEdit = document.getElementById('registerTitle').textContent === 'compose 편집';
+      const isEdit = wbMode === 'edit';   // 제목 문자열 비교 대신 openWorkbench 가 보관한 모드(app-2b)
       const err = document.getElementById('registerError');
       err.hidden = true;
+      if (wbMarkerLines.length) {   // M5 — ??? 값이 남아있으면 인라인 배너로 차단(alert 금지, app-2b 가 매 입력마다 갱신)
+        err.textContent = '⚠ 채워야 할 값 ' + wbMarkerLines.length + '개(' + wbMarkerLines.join(', ') + '행) — ??? 를 채우고 다시 시도하세요';
+        err.hidden = false;
+        return;
+      }
       if (!path) { err.textContent = '프로젝트 경로를 입력하세요'; err.hidden = false; return; }
       if (!yaml.trim()) { err.textContent = 'compose 내용을 입력하세요 (📁 import / 직접 작성)'; err.hidden = false; return; }
       const btn = document.getElementById('composeConfirm'); const label = btn.textContent;
@@ -126,10 +169,9 @@
       try {
         res = await api('/api/compose-register', {
           method: 'POST', headers: {'content-type': 'application/json'},
-          body: JSON.stringify({path, yaml,
-            envVar: composeStoredEnv.envVar,
-            envDefault: composeStoredEnv.envDefault,
-            externalRepos: [...document.querySelectorAll('#composeSubrepos [data-mount]')].map(r => ({name: r.dataset.mount.split('/').pop(), sub: r.dataset.subrepo}))}),   // 저장만(자동 실행 X) + env var/default + 외부 서브레포 기록
+          // 저장만(자동 실행 X) + env var/default. externalRepos 는 안 보냄 — 서버가 기존 등록분을 보존(prev-merge, marina-lib-registry.sh)하고,
+          // 새로 추가하려면 CLI(marina project add --external)를 쓴다(구 composeSubrepos UI 는 재료 서랍으로 흡수되며 정리됨 — 스펙 R2 M3).
+          body: JSON.stringify({path, yaml, envVar: composeStoredEnv.envVar, envDefault: composeStoredEnv.envDefault}),
         });
       } catch (e) {
         err.textContent = String(e.message || e); err.hidden = false;
@@ -139,15 +181,18 @@
         err.textContent = '검증 실패: ' + ((res.errors && res.errors.join(' / ')) || ''); err.hidden = false;
         btn.disabled = false; btn.textContent = label; return;
       }
+      wbClearDraft();   // 등록/저장 성공 — 워크벤치 초안 정리(app-2b)
       showRegisterPanel(false);
       await loadWorktrees(true);
       await load({ force: true });
       btn.disabled = false; btn.textContent = label;
-      if (res && res.id && [...new Set(worktreeData.map(w => w.projectId))].includes(res.id)) setSelectedProject(res.id);
+      // R5 — 등록 성공 후 새 프로젝트 자동 선택 + 해당 main 카드 하이라이트(app-5 render() 가 pendingFlashProjectId 소비)
+      const known = res && res.id && [...new Set(worktreeData.map(w => w.projectId))].includes(res.id);
+      if (known) { pendingFlashProjectId = res.id; setSelectedProject(res.id); }
       else render();
       if (res && res.ok !== false) {
-        alert((isEdit ? 'compose 저장 완료' : 'compose 등록 완료')
-          + ' — 자동 실행은 안 했어요. 카드에서 ▶로 시작하세요 (이미 실행 중이면 ■ 정지 후 ▶ 시작해야 변경분이 반영됩니다).');
+        showToast(isEdit ? 'compose 저장 완료 — 변경분은 카드에서 ▶(재시작)로 반영돼요'
+                          : '등록 완료 — ▶ 로 시작하면 빌드 로그 탭에서 진행이 보여요', 'ok');
       }
     };
 
@@ -185,249 +230,16 @@
       await loadWorktrees(true);
       await load({ force: true });
       btn.disabled = false; btn.textContent = label;
-      if (res && res.id && [...new Set(worktreeData.map(w => w.projectId))].includes(res.id)) setSelectedProject(res.id);
+      const known = res && res.id && [...new Set(worktreeData.map(w => w.projectId))].includes(res.id);
+      if (known) { pendingFlashProjectId = res.id; setSelectedProject(res.id); }   // R5 — 하이라이트(app-5)
       else render();
-      const warn = (res && res.warnings && res.warnings.length) ? ('\n경고: ' + res.warnings.join(' / ')) : '';
-      alert('가져오기 완료 — 등록 + 설정 적용됨.' + (apply ? ' 시작도 시도했어요.' : ' 카드에서 ▶로 시작하세요.')
-        + ' 시크릿(.env 값)은 본인 것을 채우세요.' + warn);
+      const warn = (res && res.warnings && res.warnings.length) ? (' 경고: ' + res.warnings.join(' / ')) : '';
+      showToast('가져오기 완료 — 등록 + 설정 적용됨.' + (apply ? ' 시작도 시도했어요.' : ' ▶ 로 시작하면 빌드 로그 탭에서 진행이 보여요.')
+        + ' 시크릿(.env 값)은 본인 것을 채우세요.' + warn, 'ok');
     };
 
-    // ── 새 프로젝트 위저드 (스캔→파일→연결→검토) — 하나의 config 객체(고급뷰와 공유) ──────────
-    const WIZ_STEPS = ['스캔', '파일', '연결', '검토'];
-    let wiz = null;
-    function openWizard() {
-      document.getElementById('registerTitle').textContent = '새 프로젝트 설정';
-      document.getElementById('registerPath').value = '';
-      document.getElementById('registerPath').disabled = false;
-      document.getElementById('registerBrowse').hidden = false;
-      document.getElementById('registerInfer').hidden = true;
-      wiz = { step: 0, scan: null, servicesYaml: '', includes: [], buildArgs: {},
-              links: { symlink: ['node_modules', '.venv'], copy: [] },
-              configMode: 'symlink', forward: {}, gateway: { routes: {} }, mergedYaml: '' };
-      setRegisterView('wizard');
-      renderWiz();
-      showRegisterPanel(true);
-      renderSwitcher();
-    }
-    function wizErr(msg) { const e = document.getElementById('wizError'); if (!msg) { e.hidden = true; return; } e.textContent = msg; e.hidden = false; }
-    function renderWiz() {
-      const bar = document.getElementById('wizSteps'); bar.innerHTML = '';
-      WIZ_STEPS.forEach((label, i) => {
-        const s = document.createElement('span');
-        s.textContent = (i + 1) + '. ' + label;
-        s.style = 'padding:3px 8px;border-radius:10px;' + (i === wiz.step
-          ? 'background:var(--accent,#2563eb);color:#fff' : (i < wiz.step ? 'color:var(--accent,#2563eb)' : 'color:var(--muted)'));
-        bar.appendChild(s);
-      });
-      document.getElementById('wizPrev').disabled = wiz.step === 0;
-      document.getElementById('wizNext').textContent = wiz.step === WIZ_STEPS.length - 1 ? '등록' : '다음 →';
-      wizErr('');
-      [renderWizScan, renderWizFiles, renderWizConnect, renderWizReview][wiz.step]();
-    }
-    function wizServiceNames() {   // servicesYaml 에서 서비스명 추출 (연결/게이트웨이용)
-      return [...wiz.servicesYaml.matchAll(/^ {2}([A-Za-z0-9_-]+):/gm)].map(m => m[1]);
-    }
-    // 스텝1: 스캔 — Dockerfile·ARG·EXPOSE + build-args 입력 + 포함 선택
-    async function renderWizScan() {
-      const body = document.getElementById('wizBody'); body.innerHTML = '';
-      const hint = document.createElement('div'); hint.style = 'font-size:12px;color:var(--muted);margin-bottom:8px';
-      hint.textContent = '프로젝트 경로를 입력하고 스캔하세요 — 서브레포의 Dockerfile 을 찾아 서비스 후보로 보여줍니다.';
-      body.appendChild(hint);
-      const scanBtn = document.createElement('button'); scanBtn.type = 'button'; scanBtn.className = 'svc-llm-go'; scanBtn.textContent = '🔍 스캔';
-      scanBtn.onclick = async () => {
-        const root = document.getElementById('registerPath').value.trim();
-        if (!root) { wizErr('프로젝트 경로를 먼저 입력하세요'); return; }
-        scanBtn.disabled = true; scanBtn.textContent = '스캔 중…';
-        try {
-          const r = await api('/api/compose-scan', { method: 'POST', headers: {'content-type':'application/json'}, body: JSON.stringify({ root }) });
-          wiz.scan = r; renderWiz();
-        } catch (e) { wizErr(String(e.message || e)); scanBtn.disabled = false; scanBtn.textContent = '🔍 스캔'; }
-      };
-      body.appendChild(scanBtn);
-      if (!wiz.scan) return;
-      const cards = document.createElement('div'); cards.id = 'wizScanCards'; cards.style = 'display:flex;flex-direction:column;gap:8px;margin-top:10px';
-      let any = false;
-      for (const sub of (wiz.scan.subrepos || [])) {
-        if (!(sub.dockerfiles || []).length) {   // Dockerfile 없는 서브레포 — 자체 compose 가 있으면 include 로 (codex P2: 기존 compose 프로젝트도 위저드 등록 가능)
-          if (sub.subrepo === '.' || sub.subrepo === '') continue;   // 루트 자체는 include 후보 아님(서브레포만)
-          any = true;
-          const card = document.createElement('div');
-          card.className = 'wiz-svc-card'; card.dataset.subrepo = sub.subrepo; card.dataset.dockerfile = '';
-          card.style = 'border:1px solid var(--border,#333);border-radius:8px;padding:8px;font-size:12px';
-          card.innerHTML = `<label class="register-check" style="font-weight:600"><input type="checkbox" class="wiz-inc" /> ${escapeHtml(sub.subrepo)} · 🧩 자체 compose (include)</label>
-            <div style="color:var(--muted);margin-top:4px">Dockerfile 없음 — 이 서브레포의 docker-compose.yml 을 통째로 가져옵니다(있을 때).</div>`;
-          cards.appendChild(card);
-          continue;
-        }
-        for (const df of (sub.dockerfiles || [])) {
-          any = true;
-          const card = document.createElement('div');
-          card.className = 'wiz-svc-card'; card.dataset.subrepo = sub.subrepo; card.dataset.dockerfile = df.dockerfile;
-          card.style = 'border:1px solid var(--border,#333);border-radius:8px;padding:8px;font-size:12px';
-          const argstr = (df.args || []).map(a => (df.requiredArgs || []).includes(a) ? a + '*' : a).join(', ') || '없음';
-          card.innerHTML = `<label class="register-check" style="font-weight:600"><input type="checkbox" class="wiz-inc" checked /> ${escapeHtml(sub.subrepo)} · 🐳 ${escapeHtml(df.dockerfile)}</label>
-            <div style="color:var(--muted);margin:4px 0">EXPOSE: ${df.expose ? escapeHtml(df.expose) : '—'} · ARG: ${escapeHtml(argstr)}${(df.artifacts||[]).length ? ' · 아티팩트(선빌드 필요)' : ''}</div>`;
-          const ba = document.createElement('textarea');
-          ba.className = 'wiz-buildargs'; ba.placeholder = 'build-args (KEY=VALUE, 줄마다) — 선택';
-          ba.style = 'width:100%;min-height:38px;font-family:ui-monospace,monospace;font-size:11px';
-          if ((df.requiredArgs || []).length) ba.value = df.requiredArgs.map(a => a + '=').join('\n');
-          card.appendChild(ba);
-          cards.appendChild(card);
-        }
-      }
-      if (!any) { const e = document.createElement('div'); e.className = 'register-empty'; e.textContent = 'Dockerfile 을 못 찾았습니다 — [고급]에서 직접 작성하세요.'; cards.appendChild(e); }
-      body.appendChild(cards);
-    }
-    async function wizCommitScan() {   // 선택된 Dockerfile → scaffold → servicesYaml + buildArgs
-      const root = document.getElementById('registerPath').value.trim();
-      const cards = [...document.querySelectorAll('#wizScanCards .wiz-svc-card')].filter(c => c.querySelector('.wiz-inc').checked);
-      if (!cards.length) { wizErr('서비스를 하나 이상 선택하세요 (또는 [고급]에서 직접 작성)'); return false; }
-      let services = '', includes = [], buildArgs = {};
-      for (const c of cards) {
-        try {
-          const rr = await api('/api/compose-scaffold?path=' + enc(root) + '&subrepo=' + enc(c.dataset.subrepo) + '&dockerfile=' + enc(c.dataset.dockerfile));
-          if (rr && rr.include) { if (!includes.includes(rr.include)) includes.push(rr.include); }
-          else if (rr && rr.yaml) {
-            services += rr.yaml.replace(/\s+$/, '') + '\n';
-            const nm = (rr.yaml.match(/^ {2}([A-Za-z0-9_-]+):/m) || [])[1];
-            const ba = parseKv(c.querySelector('.wiz-buildargs').value);
-            if (nm && Object.keys(ba).length) buildArgs[nm] = ba;
-          }
-        } catch (e) { wizErr(String(e.message || e)); return false; }
-      }
-      wiz.servicesYaml = (services ? 'services:\n' + services : '');
-      wiz.includes = includes; wiz.buildArgs = buildArgs;
-      return true;
-    }
-    function parseKv(text) { const o = {}; (text || '').split('\n').forEach(ln => { const i = ln.indexOf('='); if (i > 0) { const k = ln.slice(0, i).trim(), v = ln.slice(i + 1).trim(); if (k) o[k] = v; } }); return o; }
-    // 스텝2: 파일(opt-in links) — deps/config/build 3분류
-    function renderWizFiles() {
-      const body = document.getElementById('wizBody'); body.innerHTML = '';
-      const mk = (title, desc) => { const h = document.createElement('div'); h.style='font-weight:600;font-size:13px;margin:8px 0 2px'; h.textContent=title; body.appendChild(h); const d=document.createElement('div'); d.style='font-size:11px;color:var(--muted);margin-bottom:4px'; d.textContent=desc; body.appendChild(d); };
-      mk('의존성 (심링크 공유)', 'node_modules·.venv — 워크트리 간 공유해 재설치 회피');
-      for (const dep of ['node_modules', '.venv']) {
-        const l = document.createElement('label'); l.className='register-check';
-        l.innerHTML = `<input type="checkbox" class="wiz-dep" value="${dep}" ${wiz.links.symlink.includes(dep)?'checked':''}/> ${dep}`;
-        body.appendChild(l);
-      }
-      mk('Config (gitignore)', '*local.yml·.env*.local — 공유(심링크) 또는 독립 편집(복제)');
-      const modeRow = document.createElement('div'); modeRow.style='display:flex;gap:12px;font-size:12px';
-      for (const [val, lab] of [['symlink','심링크(공유)'],['copy','복제(독립)'],['none','안 가져옴']]) {
-        const l=document.createElement('label'); l.className='register-check';
-        l.innerHTML = `<input type="radio" name="wizCfgMode" value="${val}" ${wiz.configMode===val?'checked':''}/> ${lab}`;
-        modeRow.appendChild(l);
-      }
-      body.appendChild(modeRow);
-      mk('빌드 출력 (제외)', 'build·dist·out·target·.next·*.jar — 워크트리별 독립 빌드 (가져오지 않음)');
-      const note=document.createElement('div'); note.style='font-size:11px;color:var(--muted);opacity:.7'; note.textContent='✗ 자동 제외 — docker 빌드는 워크트리에서 독립 수행';
-      body.appendChild(note);
-      const custom=document.createElement('div'); custom.style='margin-top:10px';
-      custom.innerHTML='<div style="font-size:12px;color:var(--muted)">추가 심링크 (선택, 쉼표 구분)</div>';
-      const inp=document.createElement('input'); inp.id='wizCustomLinks'; inp.placeholder='예: .gradle, packages/shared/dist';
-      inp.style='width:100%;font-size:12px;height:30px'; inp.value=(wiz.links.symlink.filter(s=>!['node_modules','.venv'].includes(s)).join(', '));
-      custom.appendChild(inp); body.appendChild(custom);
-    }
-    function wizCommitFiles() {
-      const deps = [...document.querySelectorAll('.wiz-dep:checked')].map(c => c.value);
-      const extra = (document.getElementById('wizCustomLinks').value || '').split(',').map(s=>s.trim()).filter(Boolean);
-      const mode = (document.querySelector('input[name=wizCfgMode]:checked') || {}).value || 'symlink';
-      wiz.configMode = mode;
-      const sym = [...deps, ...extra], copy = [];
-      if (mode === 'symlink') sym.push('**/*local.yml', '.env*.local');
-      else if (mode === 'copy') copy.push('**/*local.yml', '.env*.local');
-      wiz.links = { symlink: sym, copy };
-      return true;
-    }
-    // 스텝3: 연결 — host 백킹 forward + 게이트웨이
-    function renderWizConnect() {
-      const body = document.getElementById('wizBody'); body.innerHTML = '';
-      const h=document.createElement('div'); h.style='font-weight:600;font-size:13px;margin-bottom:2px'; h.textContent='호스트 백킹 연결 (엮기)'; body.appendChild(h);
-      const d=document.createElement('div'); d.style='font-size:11px;color:var(--muted);margin-bottom:6px'; d.textContent='컨테이너의 localhost:포트 → 호스트의 redis/db 로 중계 (앱 수정 0)'; body.appendChild(d);
-      for (const [port, name] of [['6379','Redis (6379)'],['3306','MySQL (3306)'],['5432','PostgreSQL (5432)']]) {
-        const l=document.createElement('label'); l.className='register-check';
-        l.innerHTML=`<input type="checkbox" class="wiz-fwd" value="${port}" ${wiz.forward[port]?'checked':''}/> ${name}`;
-        body.appendChild(l);
-      }
-      const gh=document.createElement('div'); gh.style='font-weight:600;font-size:13px;margin:10px 0 2px'; gh.textContent='게이트웨이 (호스트 브라우저 진입)'; body.appendChild(gh);
-      const gd=document.createElement('div'); gd.style='font-size:11px;color:var(--muted);margin-bottom:6px'; gd.textContent='체크한 서비스를 <wt>.<proj>.localhost 대표 도메인에 노출 (경로 / )'; body.appendChild(gd);
-      const names = wizServiceNames();
-      if (!names.length) { const e=document.createElement('div'); e.className='register-empty'; e.textContent='서비스 없음 (스텝1에서 추가)'; body.appendChild(e); }
-      for (const nm of names) {
-        const l=document.createElement('label'); l.className='register-check';
-        l.innerHTML=`<input type="checkbox" class="wiz-gw" value="${escapeHtml(nm)}" ${wiz.gateway.routes[nm]?'checked':''}/> ${escapeHtml(nm)}`;
-        body.appendChild(l);
-      }
-    }
-    function wizCommitConnect() {
-      const fwd = {}; [...document.querySelectorAll('.wiz-fwd:checked')].forEach(c => { fwd[c.value] = { target: 'host' }; });
-      wiz.forward = fwd;
-      const routes = {}; [...document.querySelectorAll('.wiz-gw:checked')].forEach(c => { routes[c.value] = ['/']; });
-      wiz.gateway = { routes };
-      return true;
-    }
-    function wizXmarina() {
-      const xm = {};
-      if (wiz.links.symlink.length || wiz.links.copy.length) xm.links = { symlink: wiz.links.symlink, copy: wiz.links.copy };
-      if (Object.keys(wiz.forward).length) xm.forward = wiz.forward;
-      if (Object.keys(wiz.gateway.routes).length) xm.gateway = wiz.gateway;
-      return xm;
-    }
-    function wizServicesText() {
-      const inc = wiz.includes.length ? ('include:\n' + wiz.includes.map(p => '  - ' + p).join('\n') + '\n') : '';
-      return inc + (wiz.servicesYaml || '');
-    }
-    // 스텝4: 검토 — config → compose YAML(serialize) 미리보기(편집 가능) → 등록
-    async function renderWizReview() {
-      const body = document.getElementById('wizBody'); body.innerHTML = '';
-      const info=document.createElement('div'); info.style='font-size:12px;color:var(--muted);margin-bottom:6px'; info.textContent='최종 compose 미리보기 — 수정 후 등록할 수 있어요.'; body.appendChild(info);
-      const ta=document.createElement('textarea'); ta.id='wizReviewYaml'; ta.spellcheck=false;
-      ta.style='width:100%;min-height:240px;font-family:ui-monospace,Menlo,monospace;white-space:pre;font-size:12px';
-      ta.value='직렬화 중…'; body.appendChild(ta);
-      try {
-        const r = await api('/api/compose-serialize', { method:'POST', headers:{'content-type':'application/json'},
-          body: JSON.stringify({ yaml: wizServicesText(), xmarina: wizXmarina(), buildArgs: wiz.buildArgs }) });
-        wiz.mergedYaml = (r && r.yaml) || ''; ta.value = wiz.mergedYaml;
-      } catch (e) { ta.value=''; wizErr(String(e.message || e)); }
-    }
-    async function wizRegister() {
-      const root = document.getElementById('registerPath').value.trim();
-      const yaml = document.getElementById('wizReviewYaml').value;
-      if (!root) { wizErr('프로젝트 경로가 필요합니다'); return; }
-      if (!yaml.trim()) { wizErr('compose 내용이 비어있습니다'); return; }
-      const btn=document.getElementById('wizNext'); const label=btn.textContent; btn.disabled=true; btn.innerHTML=BUSY_DOTS;
-      let res;
-      try {
-        res = await api('/api/compose-register', { method:'POST', headers:{'content-type':'application/json'},
-          body: JSON.stringify({ path: root, yaml, apply: false }) });
-      } catch (e) { wizErr(String(e.message || e)); btn.disabled=false; btn.textContent=label; return; }
-      if (res && res.ok === false) { wizErr('검증 실패: ' + ((res.errors && res.errors.join(' / ')) || '')); btn.disabled=false; btn.textContent=label; return; }
-      showRegisterPanel(false); await loadWorktrees(true); await load({ force: true });
-      btn.disabled=false; btn.textContent=label;
-      if (res && res.id && [...new Set(worktreeData.map(w => w.projectId))].includes(res.id)) setSelectedProject(res.id); else render();
-      alert('등록 완료 — 카드에서 ▶로 시작하세요.' + ((res && res.warnings && res.warnings.length) ? ('\n경고: ' + res.warnings.join(' / ')) : ''));
-    }
-    document.getElementById('wizPrev').onclick = () => { if (wiz.step > 0) { wiz.step--; renderWiz(); } };
-    document.getElementById('wizNext').onclick = async () => {
-      const commit = [wizCommitScan, wizCommitFiles, wizCommitConnect, null][wiz.step];
-      if (commit) { const ok = await commit(); if (!ok) return; }
-      if (wiz.step === WIZ_STEPS.length - 1) { await wizRegister(); return; }
-      wiz.step++; renderWiz();
-    };
-    document.getElementById('wizAdvanced').onclick = async () => {   // 고급: 같은 config → raw compose YAML 폼으로(파워유저)
-      // 현재까지 입력 커밋(가능한 스텝만) 후 직렬화
-      const root = document.getElementById('registerPath').value.trim();
-      try { if (wiz.step === 0) await wizCommitScan(); else if (wiz.step === 1) wizCommitFiles(); else if (wiz.step === 2) wizCommitConnect(); } catch {}
-      let yaml = wiz.mergedYaml;
-      try {
-        const r = await api('/api/compose-serialize', { method:'POST', headers:{'content-type':'application/json'},
-          body: JSON.stringify({ yaml: wizServicesText(), xmarina: wizXmarina(), buildArgs: wiz.buildArgs }) });
-        yaml = (r && r.yaml) || yaml;
-      } catch {}
-      openComposeRegister();
-      document.getElementById('registerPath').value = root;  // 경로 유지
-      setComposeYaml(yaml || '');
-      if (root) renderComposeSubrepos(root);
-    };
+    // (구 위저드 코드 제거됨 — R6. 신규 등록 진입은 레포 후보 → 워크벤치(app-2e-entry.js openCandidates/openWorkbench).
+    // 위저드가 쓰던 /api/compose-scan·scaffold 는 재료 서랍(app-2b-workbench.js)이 그대로 재사용한다.)
 
     async function openSubrepoEdit(sum) {
       switcherOpen = false;
@@ -453,7 +265,7 @@
     async function shareProject(sum) {   // 공유용 복사 — '하나의 정규 설정'(compose+x-marina) 클립보드로
       try {
         const r = await api('/api/compose-export?root=' + enc(sum.root));
-        if (!r || r.ok === false || !r.yaml) { alert('공유 블록 생성 실패: ' + ((r && r.error) || '알 수 없음')); return; }
+        if (!r || r.ok === false || !r.yaml) { showToast('공유 블록 생성 실패: ' + ((r && r.error) || '알 수 없음'), 'err'); return; }
         let copied = false;
         try { await navigator.clipboard.writeText(r.yaml); copied = true; } catch {}
         if (!copied) {   // clipboard API 불가(비보안 컨텍스트 등) → 폴백 textarea
@@ -462,9 +274,9 @@
           try { copied = document.execCommand('copy'); } catch {}
           document.body.removeChild(ta);
         }
-        alert(copied ? ('공유 블록을 클립보드에 복사했어요 — 팀원이 [📋 팀원 설정 붙여넣기]로 재현합니다.\n(시크릿 .env 값은 포함 안 됨)')
-                     : ('복사 실패 — 아래 블록을 직접 복사하세요:\n\n' + r.yaml));
-      } catch (e) { alert('공유 실패: ' + String(e.message || e)); }
+        showToast(copied ? '공유 블록을 클립보드에 복사했어요 — 팀원이 [팀원 설정 받았어요]로 재현합니다(시크릿 .env 값은 포함 안 됨)'
+                          : '복사 실패 — 브라우저 클립보드 권한을 확인하세요', copied ? 'ok' : 'err');
+      } catch (e) { showToast('공유 실패: ' + String(e.message || e), 'err'); }
     }
 
     async function removeProject(sum) {
@@ -475,7 +287,7 @@
           body: JSON.stringify({ id: sum.id }),
         });
       } catch (e) {
-        alert(`등록 해제 실패: ${e.message || e}`);
+        showToast(`등록 해제 실패: ${e.message || e}`, 'err');
         return;
       }
       if (selectedProjectId === sum.id) setSelectedProject(null);

@@ -23,6 +23,29 @@ from marina_paths import log_run_payload, service_log, session_id
 def _docker_cmd(*args: str) -> list[str]:
     return [_bin("docker"), *args]
 
+_LOG_TAIL_CACHE: dict[str, tuple[float, int, str]] = {}   # path → (mtime, size, line). 5s 폴링에 stat 만으로 재사용.
+
+def _log_tail_line(path: str):
+    """로그 파일의 마지막 비어있지 않은 1줄(+mtime) — 카드 미리보기·상대시간용(콘솔 카드 질감).
+    끝 2KB 만 seek 해 읽고 (mtime,size) 캐시로 매 폴링 재파싱을 피한다. ANSI 는 제거."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None, None
+    cached = _LOG_TAIL_CACHE.get(path)
+    if cached and cached[0] == st.st_mtime and cached[1] == st.st_size:
+        return cached[2], st.st_mtime
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, st.st_size - 2048))
+            chunk = f.read().decode("utf-8", "replace")
+    except OSError:
+        return None, None
+    line = next((l for l in reversed(chunk.splitlines()) if l.strip()), "")
+    line = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line).strip()[:200]
+    _LOG_TAIL_CACHE[path] = (st.st_mtime, st.st_size, line)
+    return line, st.st_mtime
+
 def _service_host_ports(svc_cfg: Any) -> dict[str, list[int]]:
     """compose config(서비스) → {pub: publish된 호스트포트, tgt: 컨테이너(앱) 포트}. 포트 기반 liveness 용.
     pub 은 어느 세션에서나 격리 호스트포트라 안전. tgt 는 직접 실행(npm/node) 시 앱이 host 에 바인딩하는 포트 — main 에서만 fallback."""
@@ -145,11 +168,16 @@ def build_compose_services(ps_rows: list) -> list:
                 except (TypeError, ValueError):
                     pass
         health = compose_health(r.get("State") or "", r.get("Health") or "")
+        try:   # exited 컨테이너의 종료 코드 — 크래시(비정상 종료)를 '정지'와 구분해 표면화
+            exit_code = int(r.get("ExitCode")) if str(r.get("State") or "").lower() == "exited" else None
+        except (TypeError, ValueError):
+            exit_code = None
         out.append({
             "service": svc,
             "port": str(min(pubs)) if pubs else None,
             "running": health is not None,
             "health": health,
+            "exitCode": exit_code,
             "external": False,
             "trackedPid": None,
             "trackedAlive": False,
@@ -314,6 +342,71 @@ def _service_profile(arg_names, marina_build_args, stored_build_args) -> dict:
     return {"profileVar": var, "profileValue": "" if val is None else str(val)}
 
 
+def _docker_compose_config_json(sp: Path, root: Path) -> tuple[dict | None, str]:
+    """보관 compose(sp) → `docker compose config --format json` 해석 결과(raw dict) 또는 (None, error).
+    compose_resolved_view·weave_map(연결 탭 P3) 공유 — 같은 docker 호출 규약(중복 회피). 컨테이너를 안 띄우는
+    '설정 해석' 1회 호출이라 가볍다(up/ps 아님) — daemon 이 꺼져 있어도 대체로 동작."""
+    try:   # stdout/stderr 분리 — docker 경고(version obsolete 등)가 JSON 에 섞이면 안 됨
+        proc = subprocess.run(
+            _docker_cmd("compose", "-f", str(sp), "--project-directory", str(root),
+                        "config", "--format", "json"),
+            capture_output=True, text=True, timeout=12)
+    except FileNotFoundError:
+        return None, "docker 미설치"
+    except subprocess.TimeoutExpired:
+        return None, "docker compose config 시간 초과"
+    if proc.returncode != 0:
+        return None, ((proc.stderr or proc.stdout or "").strip()[:800] or "docker compose config 실패")
+    try:
+        return json.loads(proc.stdout), ""
+    except json.JSONDecodeError:
+        return None, "config json 파싱 실패"
+
+
+def weave_map(root: Path, project: dict) -> dict:
+    """엮기(forward) 최종 맵 — `marina up` 과 동일한 병합 우선순위(legacy hostForward < 자동 서비스타겟 < 명시
+    forward(backing.json < x-marina))를 marina-compose.py 순수 함수로 재계산(연결 탭 P3 데이터 소스). docker 는
+    config 해석 1회만(가볍게 — up/ps 안 돌림, 컨테이너 기동 없음). 실패 → {ok:False, error}."""
+    try:
+        sp = MARINA_HOME / str(project["id"]) / project.get("composeFile", "docker-compose.yml")
+    except KeyError:
+        return {"ok": False, "error": "project id 없음"}
+    if not sp.exists():
+        return {"ok": False, "error": f"보관 compose 없음: {sp}"}
+    cfg, err = _docker_compose_config_json(sp, root)
+    if cfg is None:
+        return {"ok": False, "error": err}
+    warnings: list[str] = []
+    conn: dict = {}
+    conn_path = MARINA_HOME / str(project["id"]) / "backing.json"   # cmd_up 과 동일 경로 관례(marina-lib-compose.sh --connectivity)
+    if conn_path.exists():
+        try:
+            conn = json.loads(conn_path.read_text(encoding="utf-8"))
+        except Exception as exc:
+            warnings.append(f"connectivity(backing.json) 읽기 실패 — 엮기 선언 건너뜀: {exc}")
+    mc = _mc()
+    xm = mc.xmarina_for_stored(str(sp))
+    try:   # cmd_up(marina-compose.py) 과 동일 순서 — legacy hostForward < 자동 서비스타겟 < 명시(backing.json < x-marina)
+        forward = {**mc._legacy_host_forward(conn), **mc._legacy_host_forward(xm),
+                   **mc._auto_service_forward(cfg),
+                   **mc._normalize_forward(conn), **mc._normalize_forward(xm)}
+    except ValueError as exc:   # _port_targets 포트범위 파싱 실패 등(marina-compose.py 코덱스 리뷰 P3 와 동일 가드)
+        return {"ok": False, "error": str(exc)}
+    services_cfg = cfg.get("services") or {}
+    applied: dict[str, list] = {}
+    for name in sorted(services_cfg):
+        svc = services_cfg.get(name) or {}
+        if not svc.get("build"):
+            continue   # image-only 서비스는 사이드카 없음(_applied_forward 와 동일 규칙 — _forward_for_service 재사용)
+        pairs = mc._forward_for_service(forward, name, mc._served_ports(svc))
+        if pairs:
+            applied[name] = [list(p) for p in pairs]
+    # 보관(stored) compose 가 정의한 실제 앱 서비스명 — 런타임에만 존재하는 `<svc>-bind` 엮기 사이드카(marina 가 build_overlay
+    # 로 주입, docker compose ps 에는 보임)를 연결 탭이 서비스 노드에서 걸러낼 수 있게(코덱스/셀프 리뷰: 플러밍을 앱 서비스처럼 그리면 혼란).
+    return {"ok": True, "forward": forward, "applied": applied, "warnings": warnings,
+            "appServices": sorted(services_cfg)}
+
+
 def compose_resolved_view(root: Path, project: dict) -> dict:
     """읽기전용 구성 뷰 — `docker compose config` 로 해석한 서비스별 구성: 빌드 컨텍스트·Dockerfile(내용 포함)·
     포트·env 키(값은 비밀 우려로 숨김)·command·출처(직접/ include). config 실패 → {ok:False, error}."""
@@ -323,21 +416,9 @@ def compose_resolved_view(root: Path, project: dict) -> dict:
         return {"ok": False, "error": "project id 없음"}
     if not sp.exists():
         return {"ok": False, "error": f"보관 compose 없음: {sp}"}
-    try:   # stdout/stderr 분리 — docker 경고(version obsolete 등)가 JSON 에 섞이면 안 됨
-        proc = subprocess.run(
-            _docker_cmd("compose", "-f", str(sp), "--project-directory", str(root),
-                        "config", "--format", "json"),
-            capture_output=True, text=True, timeout=12)
-    except FileNotFoundError:
-        return {"ok": False, "error": "docker 미설치"}
-    except subprocess.TimeoutExpired:
-        return {"ok": False, "error": "docker compose config 시간 초과"}
-    if proc.returncode != 0:
-        return {"ok": False, "error": ((proc.stderr or proc.stdout or "").strip()[:800] or "docker compose config 실패")}
-    try:
-        cfg = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return {"ok": False, "error": "config json 파싱 실패"}
+    cfg, err = _docker_compose_config_json(sp, root)
+    if cfg is None:
+        return {"ok": False, "error": err}
     direct = set(_compose_defined_services(project))   # 보관 compose 직접 정의 — 나머지는 include 출처
     try:   # marina 가 주입할 build args(레지스트리=각자 로컬) — ⓘ 모달에서 편집
         ba_all = json.loads((MARINA_HOME / str(project["id"]) / "build-args.json").read_text(encoding="utf-8"))
@@ -426,11 +507,28 @@ def _compose_services(root: Path, project: dict) -> list:
         ba_all = _read_marina_json(project.get("id", ""), "build-args.json")   # 명시 설정된 profile(글랜스 칩용)
         if not isinstance(ba_all, dict):
             ba_all = {}
+        # x-marina.startGroup — 선언 시 '시작 그룹' 밖 서비스는 옵션(카드 집계 분모에서 제외, 꺼져 있는 동안)
+        sp = MARINA_HOME / str(project.get("id", "")) / project.get("composeFile", "docker-compose.yml")
+        try:
+            _raw = (_mc().xmarina_for_stored(str(sp)) or {}).get("startGroup")
+            _auto = [str(x) for x in _raw if isinstance(x, (str, int))] if isinstance(_raw, (list, tuple)) else []
+        except Exception:
+            _auto = []
         for s in svcs:
+            base = s["service"][:-5] if s["service"].endswith("-bind") else s["service"]   # 엮기 사이드카는 본체를 따라감
+            s["inStartGroup"] = (not _auto) or (base in _auto)
             s["subrepo"] = submap.get(s["service"], "")
             s["degraded"] = s["service"] in degraded   # Dockerfile 없음 → 기동 시 건너뜀(대시보드 '비활성' 배지)
+            if s["degraded"]:                          # 원인 경로를 UI 까지 — '조용한 무시 금지'(콘솔 스펙)
+                s["degradedReason"] = f"{degraded[s['service']]} 없음"
+            _tgt = (port_map.get(s["service"]) or {}).get("tgt") or []   # 컨테이너 내부 포트 — '내부→호스트' 표기용(콘솔 스펙 D6)
+            if _tgt:
+                s["targetPort"] = str(min(_tgt))
             s["log"] = str(service_log(root, s["service"]))
             s["logRuns"] = log_run_payload(root, s["service"])
+            tail, ts = _log_tail_line(s["log"])                    # 카드 미리보기 1줄 + 상대시간(콘솔 카드 질감)
+            if tail:
+                s["logTail"], s["logTs"] = tail, ts
             _svc_ba = ba_all.get(s["service"]) if isinstance(ba_all.get(s["service"]), dict) else {}
             s["profile"] = _profile_value(_svc_ba)
             if not s["running"] and not s["degraded"]:   # compose 컨테이너로는 안 도는데 그 서비스 포트를 누가 listen → 외부/직접 실행으로 점등(예: main 에서 node 로 직접 dev)
@@ -451,6 +549,99 @@ def _read_marina_json(pid, name):
         return json.loads((MARINA_HOME / str(pid) / name).read_text(encoding="utf-8"))
     except Exception:
         return None
+
+# ${VAR} · ${VAR:?err} · ${VAR?err}(기본값 없음 — required) vs ${VAR:-x} · ${VAR-x}(기본값 있음 — docker compose 자체 해결) 구분.
+# 선행 `(?<!\$)` 로 `$${VAR}`(compose 리터럴 이스케이프)는 인터폴레이션이 아니므로 제외.
+_ENV_VAR_RE = re.compile(r"(?<!\$)\$\{\s*([A-Za-z_][A-Za-z0-9_]*)\s*(:-|-|:\?|\?)?[^}]*\}")
+
+def _required_env_vars(compose_text: str) -> list[str]:
+    """compose 텍스트의 ${VAR}·${VAR:?err}(기본값 없는 인터폴레이션만) → 등장 순서로 dedup 한 이름 목록.
+    ${VAR:-x}·${VAR-x} 는 기본값이 있어 docker compose 가 스스로 해결 — '누락'이 아니므로 제외(A2 스펙)."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _ENV_VAR_RE.finditer(compose_text or ""):
+        name, op = m.group(1), m.group(2)
+        if op in ("-", ":-"):        # 기본값 있음 → 제외
+            continue
+        if name in seen:
+            continue
+        seen.add(name)
+        out.append(name)
+    return out
+
+def _env_file_vars(path: Path) -> set[str]:
+    """.env 파일에서 설정된 변수명 집합(값은 안 봄) — 주석(#)·빈 줄 무시, `export FOO=` 허용, 따옴표 유무 무관.
+    파일 없으면 빈 집합(정상 — 대부분 프로젝트엔 .env 가 없다)."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    names: set[str] = set()
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        m = re.match(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if m:
+            names.add(m.group(1))
+    return names
+
+_MISSING_ENV_CACHE: dict[tuple, tuple[tuple, list]] = {}   # (sp,wtEnv,projEnv) → ((mtimes...), 결과) — 5s 폴링마다 재파싱 방지
+
+def missing_env_vars(root: Path, project: dict) -> list:
+    """A2 — 보관 compose 의 필수 ${VAR}(기본값 없음) 중 어디서도 안 채워지는 것 → [{name, hint}].
+    '설정됨' 판정 우선순위: ①프로세스 env(os.environ) ②워크트리 root/.env ③프로젝트 root/.env
+    ④marina 자체 주입(build-args.json 의 키들 — build-arg 로 채움 · project.composeEnvVar — start 시 --env= 로 항상 주입).
+    시작을 막지 않는다(경고만 — 카드 원인줄). compose mtime + 두 .env mtime 캐시(_compose_config_maps 캐시 패턴과 동일 취지)."""
+    try:
+        pid = str(project["id"])
+        sp = MARINA_HOME / pid / project.get("composeFile", "docker-compose.yml")
+        compose_mtime = sp.stat().st_mtime
+    except (OSError, KeyError):
+        return []
+    wt_env_path = root / ".env"
+    try:
+        proj_root = Path(project["root"])
+    except KeyError:
+        proj_root = root
+    proj_env_path = proj_root / ".env"
+
+    def _mtime(p: Path) -> float:
+        try:
+            return p.stat().st_mtime
+        except OSError:
+            return -1.0
+
+    key = (str(sp), str(wt_env_path), str(proj_env_path))
+    cache_stamp = (compose_mtime, _mtime(wt_env_path), _mtime(proj_env_path))
+    hit = _MISSING_ENV_CACHE.get(key)
+    if hit and hit[0] == cache_stamp:
+        return hit[1]
+    try:
+        compose_text = sp.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    required = _required_env_vars(compose_text)
+    if not required:
+        _MISSING_ENV_CACHE[key] = (cache_stamp, [])
+        return []
+    configured = set(os.environ.keys())
+    configured |= _env_file_vars(wt_env_path)
+    if proj_env_path != wt_env_path:
+        configured |= _env_file_vars(proj_env_path)
+    ba_all = _read_marina_json(pid, "build-args.json")            # marina 가 build-arg 로 주입 — host env 불요(코덱스 감사 대비: 오탐 배제)
+    if isinstance(ba_all, dict):
+        for svc_args in ba_all.values():
+            if isinstance(svc_args, dict):
+                configured |= {str(k) for k in svc_args.keys()}
+    env_var = str(project.get("composeEnvVar") or "")             # marina-lib-compose.sh 가 start 때 --env=$envvar=... 로 항상 주입
+    if env_var:
+        configured.add(env_var)
+    result = [{"name": n, "hint": f"{wt_env_path} 에 {n}= 추가"} for n in required if n not in configured]
+    _MISSING_ENV_CACHE[key] = (cache_stamp, result)
+    return result
 
 def _migrate_to_xmarina(pid) -> dict:
     """흩어진 레거시 JSON(~/.marina/<id>/{prebuild,links,backing}.json) → x-marina dict.

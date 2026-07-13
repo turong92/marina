@@ -121,6 +121,7 @@ def invalidate_registry_caches() -> None:
     _source_root_cache.clear()
     _session_id_cache.clear()
     _worktree_info_cache.clear()
+    _worktree_du_cache.clear()
 
 _total_mem_mb_cache: list[int] = []
 
@@ -130,9 +131,18 @@ _SUBREPO_MAP_CACHE: dict = {}   # (stored compose path, root realpath) → (mtim
 
 _worktree_info_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
+# du 분리 캐시 — root 당 (ts, diskMb, cacheCats). worktree_info(깃 배지, 짧은 TTL)와 신선도 분리:
+# du 는 root 당 ~1.5s 라 장수 TTL + 백그라운드 갱신 (marina_sessions._du_info)
+_worktree_du_cache: dict[str, tuple[float, Any, dict[str, int]]] = {}
+
 _session_titles_cache: tuple[float, dict[str, dict[str, str]]] = (0.0, {})
 
 _codex_titles_cache: tuple[float, dict[str, str]] = (0.0, {})
+
+# A1 — 카드 AGENTS 섹션(워크트리별 Claude/Codex 세션 목록). titles 캐시와 같은 리듬(20s/60s) — 별개 캐시(원시 목록, root 당 1개로 축약 안 함).
+_claude_agents_cache: tuple[float, dict[str, list[dict[str, Any]]]] = (0.0, {})
+
+_codex_agents_cache: tuple[float, dict[str, list[dict[str, Any]]]] = (0.0, {})
 
 # 서비스 기동/재시작 진행 상태 — "root::svc"(전체는 "root::--all") → 진행중 {"op","ts"} | 최근 실패 {"op","error","endedTs"}.
 # start 는 prebuild(gradle)+이미지 빌드로 몇 분 걸릴 수 있어 백그라운드로 돌리고, 폴링 payload 가

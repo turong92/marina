@@ -198,6 +198,37 @@ def _marina_cli(root: Path, *args: str, timeout: float = 120) -> str:
         stderr=subprocess.STDOUT, env=marina_env(root), timeout=timeout,
     )
 
+def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: dict | None = None) -> None:
+    """_marina_cli 의 build-log 스트리밍판 — prebuild·docker build 진행 출력이 메모리 버퍼(성공 시 폐기,
+    실패 시 500자)로 사라지지 않고 per-session 'build' 로그 run 에 실린다(대시보드 /api/logs 재사용).
+    실패 시 CalledProcessError(output=파일 끝 4KB) — busyError 500자 계약 유지."""
+    from marina_paths import next_log_path
+    log_path = next_log_path(root, "build")
+    env = marina_env(root)
+    if extra_env:
+        env.update(extra_env)
+    argv = [str(script(root)), *args]
+    with open(log_path, "a", encoding="utf-8") as fh:
+        fh.write(f"$ marina {' '.join(args)}\n")
+        fh.flush()
+        proc = subprocess.Popen(argv, cwd=str(root), env=env, stdout=fh, stderr=subprocess.STDOUT, text=True)
+        try:
+            rc = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(5)
+            raise
+    if rc != 0:
+        tail = ""
+        try:
+            size = os.path.getsize(log_path)
+            with open(log_path, "rb") as f:
+                f.seek(max(0, size - 4096))
+                tail = f.read().decode("utf-8", "replace")
+        except OSError:
+            pass
+        raise subprocess.CalledProcessError(rc, argv, output=tail)
+
 def _direct_cli_root(cwd: Path | None = None) -> Path:
     if os.environ.get("ROOT"):
         return Path(os.environ["ROOT"]).expanduser().resolve()

@@ -155,6 +155,8 @@ def update_codex() -> dict[str, Any]:
         raise ValueError(f"codex 스냅샷 git pull 실패: {(exc.output or '').strip()[-200:]}")
     except Exception as exc:
         raise ValueError(f"codex 갱신 실패: {exc}")
+    # 무효화는 완료 "후" — 진행 중(수십 초) 폴링이 옛 SHA 로 캐시를 재충전하는 레이스 차단(코덱스 P3)
+    _status_cache.clear()
     return {"ok": True, "harness": "codex", "installed": _git_head(src), "output": out.strip()[-160:]}
 
 def update_claude() -> dict[str, Any]:
@@ -183,11 +185,20 @@ def update_claude() -> dict[str, Any]:
     except Exception as exc:
         raise ValueError(f"claude 플러그인 업데이트 실패: {exc}")
     combined = (out1.strip() + "\n" + out2.strip()).strip()[-160:]
+    # 무효화는 완료 "후" — 진행 중(최대 2분) 폴링이 옛 SHA 로 캐시를 재충전하는 레이스 차단(코덱스 P3)
+    _status_cache.clear()
     return {"ok": True, "harness": "claude", "installed": _installed_sha(), "output": combined}
 
+_status_cache: dict[str, Any] = {}   # 전체 payload 캐시 — 파일 읽기·git rev-parse 를 폴링마다 반복하지 않게
+
 def update_status() -> dict[str, Any]:
+    # UPDATE_TTL(기본 60s) 캐시 — 상태는 분 단위로만 변하고, update_claude/codex 가 성공 경로에서 무효화.
+    # 외부에서 직접 plugin update 를 돌린 경우도 최대 TTL 안에 반영.
+    now = time.time()
+    if _status_cache and now - _status_cache.get("ts", 0) < float(_env("UPDATE_TTL", "60")):
+        return _status_cache["payload"]
     serving, installed, origin = _serving_sha(), _installed_sha(), _origin_sha()
-    return {
+    payload = {
         "serving": serving,
         "installed": installed,
         "origin": origin,
@@ -195,3 +206,5 @@ def update_status() -> dict[str, Any]:
         "harnesses": _harnesses(),
         "harnessStatus": _harness_status(),
     }
+    _status_cache.update({"ts": now, "payload": payload})
+    return payload

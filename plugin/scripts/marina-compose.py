@@ -280,6 +280,22 @@ def _depends_on(svc: dict) -> list:
     return []
 
 
+def start_group_requested(xm: dict, requested, services) -> tuple:
+    """전체 시작(requested 비어있음) + x-marina.startGroup 선언 → 시작 그룹만 기동 대상.
+    개별 서비스 지정(requested 있음)은 그대로(자율). 반환 (targets, unknown[선언됐지만 미정의]).
+    startGroup 전부 미정의면 ([], unknown) → 호출측이 전체 기동 폴백(경고와 함께)."""
+    if requested:
+        return list(requested), []
+    raw = xm.get("startGroup")
+    if not isinstance(raw, (list, tuple)):   # 스칼라(문자열) 선언은 문자 단위로 쪼개지는 함정 — 무시(방어)
+        return [], []
+    auto = [str(s) for s in raw if isinstance(s, (str, int))]
+    if not auto:
+        return [], []
+    known = [s for s in auto if s in (services or {})]
+    return known, [s for s in auto if s not in (services or {})]
+
+
 def startable_services(config: dict, requested) -> tuple:
     """기동할 서비스 = (요청 또는 전체) − Dockerfile 없는 build 서비스 − 그걸 depends_on 으로 (간접) 의존하는 서비스.
     depends_on 으로 끌려온 degraded 가 `docker compose up` 을 통째로 실패시키지 않게 closure 까지 제외(코덱스 리뷰 #3).
@@ -691,7 +707,12 @@ def cmd_up(a):
         except OSError:
             pass
         op = None
-    startable, skipped = startable_services(config, a.service)     # degraded(+그걸 의존하는) 서비스 제외(부분 기동: 하나 깨져도 나머지는 뜬다)
+    requested, unknown_auto = start_group_requested(xm, list(a.service or []), config.get("services") or {})  # 전체 시작 + startGroup 선언 → 시작 그룹만
+    if unknown_auto:
+        sys.stderr.write(f"warning: x-marina.startGroup 의 미정의 서비스 무시: {', '.join(unknown_auto)}\n")
+    if requested and not a.service:
+        print("startGroup: 시작 그룹만 기동 — " + ", ".join(requested) + " (그 외는 대시보드/CLI 에서 개별 시작)")
+    startable, skipped = startable_services(config, requested)     # degraded(+그걸 의존하는) 서비스 제외(부분 기동: 하나 깨져도 나머지는 뜬다)
     for s, why in skipped.items():
         sys.stderr.write(f"skip: 서비스 '{s}' 건너뜀 — {why}. 나머지는 기동합니다.\n")
     if not startable:

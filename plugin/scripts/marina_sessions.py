@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,12 +17,12 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import CODEX_HOME, LIFECYCLE_BUSY, PORT, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_info_cache, busy_key
+from marina_state import CODEX_HOME, LIFECYCLE_BUSY, PORT, _claude_agents_cache, _codex_agents_cache, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_du_cache, _worktree_info_cache, busy_key
 from marina_logtext import redact_text
 from marina_cache import cache_category_mb, disk_usage_mb
 from marina_registry import default_attach_of, discover_all_roots, discover_roots, is_source_checkout, project_for, project_label, root_source, subrepos_of
-from marina_paths import ensure_current_log, log_run_payload, read_config, read_meta, session_dir, session_id
-from marina_compose_svc import _compose_services, compose_service_names, compose_service_subrepos
+from marina_paths import ensure_current_log, log_run_payload, read_config, read_meta, service_log, session_dir, session_id
+from marina_compose_svc import _compose_services, _log_tail_line, compose_service_names, compose_service_subrepos, missing_env_vars
 
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(["git", *args], cwd=str(cwd), text=True, stderr=subprocess.STDOUT)
@@ -123,8 +124,34 @@ def worktree_status_cached(root: Path, ttl: float = 15.0) -> dict[str, Any]:
 def log_targets_for(root: Path) -> tuple[str, ...]:
     project = project_for(root)
     if project and project.get("kind") == "compose":
-        return (*compose_service_names(root, project), "console")
-    return ("console",)
+        return (*compose_service_names(root, project), "console", "build")   # build = 가상 서비스(lifecycle 출력 run — console 선례)
+    return ("console", "build")
+
+def svc_state(s: dict):
+    """서비스 dict → (state, reason). state ∈ running|starting|error|stopped|external|degraded.
+    UI 가 busy/health/external/degraded 불리언 조합을 추측하지 않게 백엔드가 한 곳에서 판정한다(콘솔 스펙 D5·상태모델).
+    우선순위: busyError > busy > degraded > external > health(bad→error, starting) > running > stopped."""
+    if s.get("busyError"):
+        return "error", s["busyError"]
+    if s.get("busy"):
+        return "starting", None
+    if s.get("degraded"):
+        return "degraded", s.get("degradedReason") or "Dockerfile 없음"
+    if s.get("external"):
+        return "external", None
+    h = s.get("health")
+    if h == "bad":
+        return "error", "unhealthy"
+    if h == "starting":
+        return "starting", None
+    if s.get("running"):
+        return "running", None
+    # 비정상 종료(크래시·OOM)를 '정지'와 구분 — 0/130(SIGINT)/143(SIGTERM=정상 stop)은 의도된 정지로 본다
+    code = s.get("exitCode")
+    if code not in (None, 0, 130, 143):
+        return "error", f"비정상 종료 (exit {code})"
+    return "stopped", None
+
 
 def session_payload(root: Path) -> dict[str, Any]:
     project = project_for(root)
@@ -134,15 +161,26 @@ def session_payload(root: Path) -> dict[str, Any]:
     all_busy = LIFECYCLE_BUSY.get(busy_key(root, "--all"))
     for s in services:
         own = LIFECYCLE_BUSY.get(busy_key(root, s.get("service") or ""))
-        b = own or all_busy
-        if not b:
-            continue
-        if "error" in b:
-            s["busyError"] = b["error"]
-        elif own or not s.get("running"):
-            # 자기 서비스 op 는 항상 표시(restart 중엔 구 컨테이너가 아직 running) —
-            # --all 폴백만 미기동 서비스에 한정(부분 완료된 스택에서 이미 뜬 건 running 표시 우선)
-            s["busy"] = b.get("op") or "start"
+        # --all busy 는 시작 그룹 멤버에만 — startGroup 밖(옵션) 서비스까지 '기동중' 스핀을 돌리면
+        # 실제론 안 띄우는데 전부 띄우는 것처럼 보인다(형 실사용 오인 사례)
+        b = own or (all_busy if s.get("inStartGroup") is not False else None)
+        if b:
+            if "error" in b:
+                s["busyError"] = b["error"]
+            elif own or not s.get("running"):
+                # 자기 서비스 op 는 항상 표시(restart 중엔 구 컨테이너가 아직 running) —
+                # --all 폴백만 미기동 서비스에 한정(부분 완료된 스택에서 이미 뜬 건 running 표시 우선)
+                s["busy"] = b.get("op") or "start"
+        if s.get("busy"):                             # 기동/재시작 중엔 미리보기를 build 로그 tail 로 — 빌드 진행이 카드에 보이게
+            bt, bts = _log_tail_line(str(service_log(root, "build")))
+            if bt:
+                s["logTail"], s["logTs"] = bt, bts
+        s["state"], s["stateReason"] = svc_state(s)   # 정규화 상태 — UI 는 이것만 본다(콘솔 스펙)
+    # A2 — env 누락 '시작 전' 감지. 세션 전체(보관 compose) 단위 — 카드 원인줄 경고(시작은 막지 않음).
+    try:
+        missing_env = missing_env_vars(root, project) if (kind == "compose" and project) else []
+    except Exception:
+        missing_env = []
     return {
         "id": session_id(root),
         "alias": read_meta(root).get("alias", ""),
@@ -154,7 +192,9 @@ def session_payload(root: Path) -> dict[str, Any]:
         "config": read_config(root),
         "worktreeStatus": worktree_status_cached(root),
         "services": services,
+        "missingEnv": missing_env,
         "consoleLogRuns": log_run_payload(root, "console"),
+        "buildLogRuns": log_run_payload(root, "build"),
     }
 
 def safe_root(root_text: str) -> Path:
@@ -214,7 +254,43 @@ def append_console_log(payload: dict[str, Any]) -> dict[str, Any]:
 
     return {"ok": True}
 
-WORKTREE_INFO_TTL = 600.0
+# 신선도 분리(실측): 깃 배지(dirty/ahead/branch)는 root 당 ~0.1s 로 싸서 짧게,
+# du(diskMb/cacheCats)는 root 당 ~1.5s 라 장수 캐시 + 만료 시 백그라운드 갱신.
+WORKTREE_INFO_TTL = 15.0
+WORKTREE_DU_TTL = 600.0
+_du_inflight: set[str] = set()
+_du_lock = threading.Lock()
+
+def _compute_du(root: Path, is_main: bool) -> tuple[float, Any, dict[str, int]]:
+    # main 체크아웃 전체 du 는 수백 GB 라 비싸고 UI 에서도 안 씀 → 스킵
+    return (time.time(), None if is_main else disk_usage_mb(root), cache_category_mb(root))
+
+def _du_info(root: Path, is_main: bool, refresh: bool) -> tuple[Any, dict[str, int]]:
+    """(diskMb, cacheCats) — 있던 값은 즉시 주고 갱신은 백그라운드. 응답을 du 가 못 막게.
+    동기 계산은 캐시가 아예 없는 refresh(=캐시 정리 직후 loadWorktrees(true) 가 새 용량을 기대) 뿐."""
+    key = str(root)
+    cached = _worktree_du_cache.get(key)
+    if cached and not refresh and time.time() - cached[0] < WORKTREE_DU_TTL:
+        return cached[1], cached[2]
+    if cached is None and refresh:
+        info = _compute_du(root, is_main)
+        _worktree_du_cache[key] = info
+        return info[1], info[2]
+    with _du_lock:
+        spawn = key not in _du_inflight
+        if spawn:
+            _du_inflight.add(key)
+    if spawn:
+        def _calc() -> None:
+            try:
+                _worktree_du_cache[key] = _compute_du(root, is_main)
+            finally:
+                with _du_lock:
+                    _du_inflight.discard(key)
+        threading.Thread(target=_calc, daemon=True).start()
+    if cached:
+        return cached[1], cached[2]   # 만료된 값이라도 공백보단 낫다 — 다음 폴이 새 값을 집어감
+    return None, {}
 
 # Claude 데스크톱 앱의 세션 타이틀 — worktree 정체성으로 사용 (LLM 자동생성, 유저 수정 가능).
 # CLI(터미널 claude)는 이 파일을 안 만들므로 비어 있으면 headSubject→해시 폴백.
@@ -307,6 +383,225 @@ def codex_session_titles(refresh: bool = False) -> dict[str, str]:
     titles = {cwd: names[sid] for cwd, (ts, sid) in best.items() if sid in names}
     _codex_titles_cache = (now, titles)
     return titles
+
+# A1 — 카드 AGENTS 섹션: 워크트리에서 도는 Claude/Codex 세션 가시화(Orca 의 "이 안에서 뭐가 도는지" 를 서비스뿐 아니라 에이전트에도).
+# CLI 트랜스크립트(~/.claude/projects/<슬러그>/<cliSessionId>.jsonl) — Claude Code 가 절대경로의 '/'·'.'을 '-'로 치환해 만드는 디렉토리명.
+CLAUDE_PROJECTS_DIR = Path(os.environ.get("CLAUDE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
+
+AGENTS_MAX_PER_ROOT = 3
+
+AGENTS_MAX_AGE = 7 * 86400   # 7일↑ 미활동 세션은 카드에서 제외
+
+AGENT_PREVIEW_TAIL_BYTES = 16 * 1024   # preview 는 파일 끝만 읽는다 — 전체 파싱 금지(폴링 비용 상한)
+
+AGENT_PREVIEW_LEN = 80
+
+def _claude_project_slug(root: Path) -> str:
+    return re.sub(r"[/.]", "-", str(root))
+
+def _jsonl_last_assistant_preview(path: Path) -> str:
+    # 파일 끝 16KB 만 읽어 마지막 유효 assistant 텍스트를 역방향으로 찾는다. 경계에서 잘린 첫 줄은
+    # json.loads 가 실패해 자연히 건너뛴다(부분 파싱 크래시 없음).
+    try:
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > AGENT_PREVIEW_TAIL_BYTES:
+                fh.seek(size - AGENT_PREVIEW_TAIL_BYTES)
+            raw = fh.read()
+    except Exception:
+        return ""
+    text = raw.decode("utf-8", errors="ignore")
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if obj.get("type") != "assistant":
+            continue
+        content = ((obj.get("message") or {}).get("content")) or []
+        if not isinstance(content, list):
+            continue
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
+                snippet = " ".join(str(item["text"]).split())
+                if snippet:
+                    return snippet[:AGENT_PREVIEW_LEN]
+    return ""
+
+def claude_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
+    # worktreePath → [{"source":"claude","title","ts"(파일 mtime),"cliSessionId"}] — claude_session_titles 와 같은 소스·캐시 리듬(20s)
+    # 이나, root 당 최신 1개로 축약하지 않고 전부 보존(AGENTS 섹션이 상위 최대 3개를 다시 고른다).
+    global _claude_agents_cache
+    now = time.time()
+    if not refresh and now - _claude_agents_cache[0] < SESSION_TITLES_TTL:
+        return _claude_agents_cache[1]
+    by_root: dict[str, list[dict[str, Any]]] = {}
+    cutoff = now - AGENTS_MAX_AGE
+    if CLAUDE_SESSIONS_DIR.is_dir():
+        for path in glob.iglob(str(CLAUDE_SESSIONS_DIR / "**" / "local_*.json"), recursive=True):
+            try:
+                mtime = os.path.getmtime(path)
+                if mtime < cutoff:
+                    continue
+                data = json.loads(Path(path).read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            wt = data.get("worktreePath")
+            title = (data.get("title") or "").strip()
+            if not wt or not title:
+                continue
+            by_root.setdefault(wt, []).append({
+                "source": "claude", "title": title, "ts": mtime,
+                "cliSessionId": data.get("cliSessionId") or "",
+            })
+    _claude_agents_cache = (now, by_root)
+    return by_root
+
+def codex_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
+    # cwd → [{"source":"codex","title","ts"(rollout 파일 mtime)}] — codex_session_titles 와 같은 소스·캐시 리듬(60s),
+    # root 당 전부 보존. preview 는 codex rollout 파싱 비용이 커 title+ts 만(스펙 — "가능한 만큼").
+    global _codex_agents_cache
+    now = time.time()
+    if not refresh and now - _codex_agents_cache[0] < CODEX_TITLES_TTL:
+        return _codex_agents_cache[1]
+    names: dict[str, str] = {}
+    try:
+        with CODEX_SESSION_INDEX.open(encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                tid, tn = o.get("id"), (o.get("thread_name") or "").strip()
+                if tid and tn:
+                    names[tid] = tn[:120]
+    except Exception:
+        pass
+    by_root: dict[str, list[dict[str, Any]]] = {}
+    cutoff = now - AGENTS_MAX_AGE
+    for base in CODEX_ROLLOUT_DIRS:
+        if not base.is_dir():
+            continue
+        for path in glob.iglob(str(base / "**" / "rollout-*.jsonl"), recursive=True):
+            try:
+                mtime = os.path.getmtime(path)
+                if mtime < cutoff:
+                    continue
+                with open(path, encoding="utf-8") as fh:
+                    o = json.loads(fh.readline())
+            except Exception:
+                continue
+            if o.get("type") != "session_meta":
+                continue
+            p = o.get("payload") or {}
+            cwd, sid = p.get("cwd"), p.get("id")
+            title = names.get(sid) if sid else None
+            if not cwd or not title:
+                continue
+            by_root.setdefault(cwd, []).append({"source": "codex", "title": title, "ts": mtime,
+                                                "sid": sid or "", "path": path})   # path 는 서버 내부용(payload 미노출)
+    _codex_agents_cache = (now, by_root)
+    return by_root
+
+def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
+    # 카드 AGENTS 섹션 — 워크트리당 최대 3개(ts 내림차순), Claude 만 preview(마지막 assistant 텍스트 80자) 부여.
+    claude_by_root = claude_agent_sessions(refresh)
+    codex_by_root = codex_agent_sessions(refresh)
+    key = str(root)
+    entries = [*claude_by_root.get(key, []), *codex_by_root.get(key, [])]
+    entries.sort(key=lambda e: e["ts"], reverse=True)
+    agents: list[dict[str, Any]] = []
+    for e in entries[:AGENTS_MAX_PER_ROOT]:
+        item: dict[str, Any] = {"source": e["source"], "title": e["title"], "ts": int(e["ts"])}
+        cli_sid = e.get("cliSessionId")
+        if e["source"] == "claude" and cli_sid:
+            item["sid"] = cli_sid   # 행 클릭=대화 열기 (agent-transcript) 식별자
+            jpath = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{cli_sid}.jsonl"
+            if jpath.is_file():
+                preview = _jsonl_last_assistant_preview(jpath)
+                if preview:
+                    from marina_logtext import redact_text   # 카드 payload 도 로그와 같은 마스킹(codex P2)
+                    item["preview"] = redact_text(preview)
+        elif e["source"] == "codex" and e.get("sid"):
+            item["sid"] = e["sid"]
+        agents.append(item)
+    return agents
+
+
+AGENT_TRANSCRIPT_TAIL_BYTES = 256 * 1024
+AGENT_TRANSCRIPT_MAX_TURNS = 60
+AGENT_TURN_MAX_CHARS = 4000
+
+def _texts_of(content: Any) -> list[str]:
+    # message.content — 문자열이거나 [{type:text|input_text|output_text, text}] 리스트. 텍스트 블록만 수집.
+    if isinstance(content, str):
+        return [content] if content.strip() else []
+    out: list[str] = []
+    if isinstance(content, list):
+        for item in content:
+            if isinstance(item, dict) and item.get("type") in ("text", "input_text", "output_text"):
+                t = str(item.get("text") or "")
+                if t.strip():
+                    out.append(t)
+    return out
+
+def _tail_lines(path: Path) -> list[str]:
+    size = path.stat().st_size
+    with path.open("rb") as fh:
+        if size > AGENT_TRANSCRIPT_TAIL_BYTES:
+            fh.seek(size - AGENT_TRANSCRIPT_TAIL_BYTES)
+        raw = fh.read()
+    return raw.decode("utf-8", errors="ignore").splitlines()
+
+def agent_transcript(root: Path, source: str, sid: str) -> dict[str, Any]:
+    # AGENTS 행 클릭 뷰어 — 끝 256KB 에서 user/assistant 텍스트 턴만 추출(도구 호출·결과는 생략), 로그처럼 마스킹.
+    from marina_logtext import redact_text   # 지역 import — 순환 의존 예방
+    if not re.fullmatch(r"[A-Za-z0-9_-]{4,64}", sid or ""):
+        raise ValueError("invalid session id")
+    turns: list[dict[str, str]] = []
+    if source == "claude":
+        jpath = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{sid}.jsonl"
+        if not jpath.is_file():
+            raise ValueError("transcript 파일이 없어요 (세션 만료/이동)")
+        for line in _tail_lines(jpath):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            role = obj.get("type")
+            if role not in ("user", "assistant"):
+                continue
+            for t in _texts_of((obj.get("message") or {}).get("content")):
+                turns.append({"role": role, "text": t[:AGENT_TURN_MAX_CHARS]})
+    elif source == "codex":
+        entry = next((e for e in codex_agent_sessions().get(str(root), []) if e.get("sid") == sid), None)
+        if not entry or not Path(entry["path"]).is_file():
+            raise ValueError("codex rollout 을 못 찾았어요 (세션 만료)")
+        for line in _tail_lines(Path(entry["path"])):
+            line = line.strip()
+            if not line.startswith("{"):
+                continue
+            try:
+                obj = json.loads(line)
+            except Exception:
+                continue
+            p = obj.get("payload") or {}
+            if p.get("type") != "message" or p.get("role") not in ("user", "assistant"):
+                continue
+            for t in _texts_of(p.get("content")):
+                turns.append({"role": p["role"], "text": t[:AGENT_TURN_MAX_CHARS]})
+    else:
+        raise ValueError("unknown source")
+    turns = turns[-AGENT_TRANSCRIPT_MAX_TURNS:]
+    for t in turns:
+        t["text"] = redact_text(t["text"])
+    return {"turns": turns, "source": source}
 
 def repo_head_subject(repo: Path) -> str:
     # 최신 커밋 제목 — 세션 타이틀 없을 때(CLI/codex) 카드 식별 폴백.
@@ -421,7 +716,7 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
     else:
         verdict = "active"
 
-    cache_by_cat = cache_category_mb(root)
+    disk_mb, cache_by_cat = _du_info(root, is_main, refresh)   # du 는 별도 장수 캐시 — 여기서 안 기다림
     project = project_for(root)
     info = {
         "id": session_id(root),
@@ -442,12 +737,12 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
         "defaultAttach": default_explicit if default_explicit is not None else list(subs),
         "isMain": is_main,
         "clean": status["clean"],
-        # main 체크아웃 전체 du 는 수백 GB 라 비싸고 UI 에서도 안 씀 → 스킵
-        "diskMb": None if is_main else disk_usage_mb(root),
-        # 캐시는 후보 경로 한정 du(실측 ~0.1s) + TTL 600s — main 도 계산해 Clear cache 노출
+        # du 2종은 _du_info 캐시 산 — 콜드 직후엔 None/0 이었다가 다음 폴(≤15s)에 채워짐
+        "diskMb": disk_mb,
         "cacheMb": sum(cache_by_cat.values()),
         "cacheCats": cache_by_cat,
         "idleDays": idle_days,
+        "lastTs": last_ts,   # 최근 활동(커밋·세션 mtime) — 좌측 카드 최근순 정렬용
         "ahead": ahead,
         "aheadTotal": ahead_total,
         "branches": branches,

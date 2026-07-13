@@ -337,6 +337,8 @@
       updateOlderBar();
       openStream(null);
       fetchMatches().catch(console.error);  // 필터 활성 시 새 대상 재스캔, 아니면 클리어
+      // 워크스페이스 탭 컨텍스트 추종 (콘솔 스펙 D2) — 로그 선택은 로그 탭으로 복귀. app-6 이 나중에 로드되므로 typeof 가드.
+      if (typeof setWsTab === 'function') { setWsTab('logs'); updateWsCtx(); }
     }
 
     // SSE tail 연결 — from 이 있으면 그 오프셋부터 이어받아 forward 페이징과 갭 없이 연결
@@ -361,10 +363,18 @@
         if (matchView) appendLiveMatchLine(item.line, item.end);
         else appendLogLine(item.line, item.end);
       };
+      source.addEventListener('rotated', () => {   // 서버가 run rotation 감지 — 새 run 파일로 재선택(옛 inode tail 이 '로그 안 뜸' 원인이었다)
+        source.close();
+        if (selected) selectLog(selected.root, selected.service, 'current', selected.mode);
+      });
       source.onerror = () => {
-        appendLogLine('[log stream disconnected]');
         source.close();
         logWindow.live = false;
+        appendLogLine('[log stream disconnected — 3s 후 재연결]');
+        const key = selectedServiceKey();            // 재선택으로 대상이 바뀌면 재연결 포기(구버전은 영구 정지였다)
+        setTimeout(() => {
+          if (selected && selectedServiceKey() === key) openStream(logWindow.bottom || null);
+        }, 3000);
       };
     }
 
@@ -511,7 +521,9 @@
       select.innerHTML = '';
       const runs = mode === 'console'
         ? session?.consoleLogRuns
-        : session?.services.find(item => item.service === service)?.logRuns;
+        : service === 'build'
+          ? session?.buildLogRuns
+          : session?.services.find(item => item.service === service)?.logRuns;
       const current = document.createElement('option');
       current.value = 'current';
       current.textContent = 'current';
@@ -529,6 +541,9 @@
       const key = selectedServiceKey();
       for (const row of document.querySelectorAll('[data-service-key]')) {
         row.classList.toggle('selected', row.dataset.serviceKey === key);
+      }
+      for (const card of document.querySelectorAll('.session[data-root]')) {   // 선택 카드 승격 — hover 없이도 액션 상시(콘솔 스펙 D7 발견성)
+        card.classList.toggle('selected-card', !!selected && card.dataset.root === selected.root);
       }
     }
 

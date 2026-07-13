@@ -155,7 +155,15 @@ def read_log_chunk(path: Path, before: int | None = None, after: int | None = No
         "atEnd": end >= size,
     }
 
+# SENSITIVE_*_RE 3종이 공유하는 키워드 — 프리필터용 (패턴 수정 시 여기도 동기화)
+_SENSITIVE_HINTS = ("key", "secret", "token", "password", "access", "webhook", "credential", "private")
+
 def redact_text(value: str) -> str:
+    # 프리필터 — 민감 키워드가 아예 없는 라인(로그 대부분)은 치환 3종을 스킵.
+    # 전 라인 무조건 sub 가 매치 스캔·다운로드의 병목이었음 (실측 19MB 4.8s → 0.2s)
+    low = value.lower()
+    if not any(k in low for k in _SENSITIVE_HINTS):
+        return value
     redacted = SENSITIVE_ASSIGNMENT_RE.sub(r"\1<redacted>", value)
     redacted = SENSITIVE_JSON_RE.sub(r'\1"<redacted>"', redacted)
     redacted = SENSITIVE_PY_OBJECT_RE.sub(r"\1'<redacted>'", redacted)
