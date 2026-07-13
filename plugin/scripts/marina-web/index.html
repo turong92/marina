@@ -6,6 +6,7 @@
   <title>Marina</title>
   <meta name="marina-build" content="{{MARINA_BUILD}}" />
   <link rel="stylesheet" href="/web/styles.css" />
+  <link rel="stylesheet" href="/web/vendor-xterm.css" />
 </head>
 <body>
   <header>
@@ -46,7 +47,7 @@
         <button data-ws-tab="logs" class="on" title="서비스 로그 뷰어">로그</button>
         <button data-ws-tab="git" title="깃 그래프 — worktree 브랜치·커밋·diff">깃</button>
         <button data-ws-tab="conn" title="연결 — 게이트웨이 진입(in)·엮기 아웃바운드(out) 흐름도">연결</button>
-        <button data-ws-tab="term" disabled title="추후 — worktree 터미널">터미널</button>
+        <button data-ws-tab="term" title="터미널 — 선택한 워크트리에서 셸(세션·스크롤백 유지)">터미널</button>
         <span class="ws-ctx" id="wsCtx"></span>
       </div>
       <div class="ws-pane" id="tab-logs">
@@ -224,6 +225,9 @@
   <script src="/web/app-8-git.js"></script>
   <script src="/web/app-8b-git-commit.js"></script>
   <script src="/web/app-9-connections.js"></script>
+  <script src="/web/vendor-xterm.js"></script>
+  <script src="/web/vendor-xterm-fit.js"></script>
+  <script src="/web/app-10-term.js"></script>
   <script src="/web/app-7-init.js"></script>
 </body>
 </html>

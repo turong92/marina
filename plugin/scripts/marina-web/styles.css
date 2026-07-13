@@ -540,6 +540,11 @@
     .svc.agent-row:hover { background: transparent; }
     .svc.agent-row { cursor: default; }   /* 표시용 행 — 클릭 대상 아님(.svc 보다 특이성 높여 override) */
     .svc.agent-row:hover { background: transparent; }
+    /* 터미널 탭 — xterm 컨테이너가 pane 을 꽉 채움 */
+    #tab-term { position: relative; }
+    .term-wrap { position: absolute; inset: 0; padding: 4px 2px 4px 8px; }
+    .term-wrap .xterm { height: 100%; }
+
     /* AGENTS 대화 뷰어 — 행 클릭(서비스 행=로그 문법 통일) */
     .agent-modal { display: flex; flex-direction: column; overflow: hidden; }
     .agent-turns { flex: 1; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; }

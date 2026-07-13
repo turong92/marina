@@ -37,6 +37,7 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_sessions import agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_term import term_input, term_kill, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_graph, git_merge, git_pull, git_push, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 
@@ -387,6 +388,17 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(result)
             return
 
+        if parsed.path == "/api/term-stream":   # 터미널 SSE — POST 쪽과 같은 로컬 전용 가드
+            if self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host"):
+                self.send_json({"error": "터미널은 로컬 대시보드에서만 쓸 수 있어요"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                term_stream(self, query.get("tid", [""])[0])
+            except ValueError as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+
         if parsed.path == "/api/agent-transcript":   # AGENTS 행 클릭 — user/assistant 텍스트 턴(마스킹 적용)
             query = urllib.parse.parse_qs(parsed.query)
             try:
@@ -510,6 +522,22 @@ class Handler(BaseHTTPRequestHandler):
             body = self.read_json()
             if self.path == "/api/console":
                 self.send_json(append_console_log(body))
+                return
+
+            # ── 터미널 탭 — PTY 셸 = 원격 코드 실행. 로컬 대시보드 전용: 게이트웨이/프록시 경유(X-Forwarded-*) 거부 ──
+            if self.path in ("/api/term-open", "/api/term-input", "/api/term-resize", "/api/term-kill"):
+                if self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host"):
+                    self.send_json({"error": "터미널은 로컬 대시보드에서만 쓸 수 있어요"}, 403)
+                    return
+                if self.path == "/api/term-open":
+                    self.send_json(term_open(safe_root(str(body.get("root", ""))),
+                                             int(body.get("cols") or 80), int(body.get("rows") or 24)))
+                elif self.path == "/api/term-input":
+                    self.send_json(term_input(str(body.get("tid", "")), str(body.get("data", ""))))
+                elif self.path == "/api/term-resize":
+                    self.send_json(term_resize(str(body.get("tid", "")), int(body.get("cols") or 80), int(body.get("rows") or 24)))
+                else:
+                    self.send_json(term_kill(str(body.get("tid", ""))))
                 return
 
             if self.path == "/api/compose-service-args":   # ⓘ 모달에서 build args 저장 → ~/.marina/<id>/build-args.json
