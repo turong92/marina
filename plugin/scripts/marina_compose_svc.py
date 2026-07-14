@@ -403,8 +403,12 @@ def weave_map(root: Path, project: dict) -> dict:
             applied[name] = [list(p) for p in pairs]
     # 보관(stored) compose 가 정의한 실제 앱 서비스명 — 런타임에만 존재하는 `<svc>-bind` 엮기 사이드카(marina 가 build_overlay
     # 로 주입, docker compose ps 에는 보임)를 연결 탭이 서비스 노드에서 걸러낼 수 있게(코덱스/셀프 리뷰: 플러밍을 앱 서비스처럼 그리면 혼란).
+    # gateway(routes·expose·primary) 원문 — 연결 탭이 서비스↔서비스(expose) 엣지를 그리고 편집하는 데 씀.
+    # expose={consumer:{ENV:'gateway:target'|'origin:target'}} = 타겟 서비스 URL 을 consumer 의 env 로 주입(진짜 per-pair 관계).
+    gw_raw = xm.get("gateway")
     return {"ok": True, "forward": forward, "applied": applied, "warnings": warnings,
-            "appServices": sorted(services_cfg)}
+            "appServices": sorted(services_cfg),
+            "gateway": gw_raw if isinstance(gw_raw, dict) else {}}
 
 
 def compose_resolved_view(root: Path, project: dict) -> dict:

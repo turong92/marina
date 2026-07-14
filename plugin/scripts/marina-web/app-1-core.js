@@ -61,6 +61,7 @@
       else localStorage.removeItem('marinaSelectedProject');
       switcherOpen = false;
       render();
+      if (typeof connFollowProject === 'function') connFollowProject();   // 연결 탭이 새 프로젝트를 따라가게(app-9)
     }
 
     function chipHtml(sum) {

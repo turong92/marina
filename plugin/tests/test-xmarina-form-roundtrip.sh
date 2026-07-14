@@ -52,7 +52,7 @@ function deepCanon(v) {
 
 // ── 지원 키 왕복(6종 전부) — parse(serialize(xm)) 가 원래 xm 과 구조적으로 동일 ─────────────
 const xmFull = {
-  links: { symlink: ['node_modules', '.venv'], copy: ["**/*local.yml"] },
+  links: { symlink: ['node_modules', '.venv'], copy: ["**/*local.yml"], subs: {} },
   forward: { '6379': 'host', '3306': 'host' },
   gateway: { routes: { 'user-api': ['/v1.0'], 'web': [] } },
   prebuild: { 'be-api': './gradlew assemble' },
@@ -66,6 +66,38 @@ const parsedFull = wbParseXmarina(fullDoc);
 check('풀 xm 파싱 ok', parsedFull.ok === true, parsedFull);
 check('풀 xm 왕복 동일(구조)', deepCanon(parsedFull.xm) === deepCanon(xmFull), { got: parsedFull.xm, want: xmFull });
 check('풀 xm 왕복 — otherKeys 없음', parsedFull.otherKeys.length === 0, parsedFull.otherKeys);
+
+// ── links 서브레포별(per-subrepo) 왕복 — 실프로젝트(mdc-main) 형태 ─────────────────
+const xmPerSub = {
+  links: { symlink: [], copy: [], subs: {
+    'be-api': { symlink: [], copy: ['**/*local.yml', '**/Dockerfile.local'] },
+    'ai-api': { symlink: ['.venv'], copy: ['**/*local.yml'] },
+  } },
+};
+const perSubDoc = 'services:\n  be-api:\n    build: ./be-api\n' + wbSerializeXmarina(xmPerSub, []);
+const parsedPerSub = wbParseXmarina(perSubDoc);
+check('서브레포별 파싱 ok', parsedPerSub.ok === true, parsedPerSub);
+check('서브레포별 otherKeys 없음(잠금·유실 X)', parsedPerSub.otherKeys.length === 0, parsedPerSub.otherKeys);
+check('서브레포별 왕복 동일', deepCanon(parsedPerSub.xm) === deepCanon(xmPerSub), { got: parsedPerSub.xm, want: xmPerSub });
+// links: 블록이 문서에 딱 하나(중복 방지 — 편집 시 손상 회귀 가드)
+check('links 블록 1개(중복 없음)', (perSubDoc.match(/^  links:/gm) || []).length === 1, perSubDoc);
+
+// ── links 전역+서브레포 혼합 왕복 — 단일 links 블록에 공존(백엔드는 전역 우선이지만 폼은 둘 다 보존) ──
+const xmMixed = {
+  links: { symlink: ['node_modules'], copy: [], subs: { 'web': { symlink: [], copy: ['dist'] } } },
+};
+const mixedDoc = 'services:\n  web:\n    build: ./web\n' + wbSerializeXmarina(xmMixed, []);
+const parsedMixed = wbParseXmarina(mixedDoc);
+check('혼합 파싱 ok', parsedMixed.ok === true, parsedMixed);
+check('혼합 왕복 동일', deepCanon(parsedMixed.xm) === deepCanon(xmMixed), { got: parsedMixed.xm, want: xmMixed });
+check('혼합 links 블록 1개', (mixedDoc.match(/^  links:/gm) || []).length === 1, mixedDoc);
+
+// ── malformed links(서브레포 노드가 리스트) → 폼이 못 읽으니 otherKeys 로 원문 보존(유실 X, 폼은 카드에서 편집 차단) ──
+const badLinksDoc = 'services:\n  web:\n    build: ./web\nx-marina:\n  links:\n    web:\n    - not-a-map\n';
+const parsedBad = wbParseXmarina(badLinksDoc);
+check('malformed links 파싱 자체는 ok(잠금 X)', parsedBad.ok === true, parsedBad);
+check('malformed links 는 otherKeys 로 보존', parsedBad.otherKeys.some(o => o.key === 'links'), parsedBad.otherKeys);
+check('malformed links 는 xm.links 에 안 들어감', parsedBad.xm.links === undefined, parsedBad.xm);
 
 // 재직렬화(re-serialize) 도 동일 텍스트를 만드는지(정성적 안정성 — 최소한 재파싱하면 다시 같은 구조)
 const reBlock = wbSerializeXmarina(parsedFull.xm, parsedFull.otherKeys);
@@ -147,7 +179,7 @@ console.log('node 왕복 테스트 통과');
 JSEOF
 
 # ── ② 폼 UI grep 불변식 — R4 라벨·잠금 문구·innerHTML 미사용 ──────────────────────────────
-grep -q 'node_modules 재사용' "$J" || { echo "FAIL: R4 라벨(node_modules 재사용) 없음"; exit 1; }
+grep -q '무거운 폴더 공유' "$J" || { echo "FAIL: R4 라벨(무거운 폴더 공유) 없음"; exit 1; }
 grep -q '내 컴퓨터의 DB/Redis 쓰기' "$J" || { echo "FAIL: R4 라벨(내 컴퓨터의 DB/Redis 쓰기) 없음"; exit 1; }
 grep -q '브라우저 주소 자동 발급' "$J" || { echo "FAIL: R4 라벨(브라우저 주소 자동 발급) 없음"; exit 1; }
 grep -q '이미지 빌드 전에 미리 빌드' "$J" || { echo "FAIL: R4 라벨(이미지 빌드 전에 미리 빌드) 없음"; exit 1; }

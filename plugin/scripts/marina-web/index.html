@@ -187,11 +187,12 @@
               <div class="wb-mat-list" id="wbMatExisting"></div>
               <div class="wb-mat-list" id="wbMatScan"></div>
             </div>
-            <!-- marina 옵션 폼(M4) — app-2c-xmarina-form.js 의 wbFormRender 가 채운다. 정적 플레이스홀더는 첫 렌더 전 짧게만 보임. -->
-            <div class="wb-placeholder" data-wb-form>⚙️ marina 옵션 — 불러오는 중…</div>
           </div>
+          <!-- 우측 = compose 에디터(중앙, 넓게) + marina 옵션 칼럼(오른쪽). 옵션은 좁은 좌측 서랍이 아니라 에디터 옆에 둔다
+               — x-marina 는 YAML 과 직접 동기화되는 설정이라 개념적으로 에디터에 붙는 게 맞고, 예전엔 240px 좌측에 옵션을
+               통째로 밀어 넣어 답답했다(코덱스 UX — 재배치). -->
           <div class="wb-right" id="wbRight">
-            <!-- 작업공간: compose 에디터(세로 풀높이) — 하이라이트·키핸들러(app-2 의 yamlEditor*) 는 이 DOM 그대로 동작.
+            <!-- 작업공간: compose 에디터 — 하이라이트·키핸들러(app-2 의 yamlEditor*) 는 이 DOM 그대로 동작.
                  구 .compose-rail(서브레포 스캐폴드·레포에서 찾기)은 제거 — 기능은 좌측 재료 서랍(data-wb-materials)으로 흡수(app-2b M3). -->
             <div class="compose-section" id="composeSection" hidden>
               <div class="svc-modal-field compose-editor">
@@ -212,6 +213,11 @@
                 <!-- R3 해석 패널(M5) — '해석' 선택 시 .yaml-wrap 을 덮는다(숨김만, 편집 상태 보존). app-2d-explain.js 가 채운다. -->
                 <div class="wb-explain-panel" id="wbExplainPanel" hidden></div>
               </div>
+            </div>
+            <!-- marina 옵션 폼(M4) — app-2c-xmarina-form.js 의 wbFormRender 가 [data-wb-form] 을 채운다(위치 무관, 셀렉터로 찾음).
+                 정적 플레이스홀더는 첫 렌더 전 짧게만 보임. -->
+            <div class="wb-optcol" id="wbOptCol">
+              <div class="wb-placeholder" data-wb-form>⚙️ marina 옵션 — 불러오는 중…</div>
             </div>
           </div>
         </div>

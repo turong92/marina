@@ -944,6 +944,42 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": True})
                 return
 
+            if self.path == "/api/forward-set":   # 연결 탭에서 x-marina.forward(호스트 인프라 localhost 맵) 편집. 재시작해야 적용(컨테이너 기동 때 세팅).
+                port = str(body.get("port", "")).strip()
+                target = str(body.get("target", "host")).strip() or "host"
+                op = str(body.get("op", "")).strip()   # 'set' | 'remove'
+                if not port.isdigit() or op not in ("set", "remove"):
+                    raise ValueError("port(숫자)·op(set|remove) 필요")
+                proj = project_for(root)
+                if not proj:
+                    raise ValueError("프로젝트 미등록 — forward 저장 불가")
+                cdir = MARINA_HOME / str(proj["id"]); cdir.mkdir(parents=True, exist_ok=True)
+                stored = cdir / proj.get("composeFile", "docker-compose.yml")
+                ok = _mc().set_xmarina_forward(str(stored), port, target, remove=(op == "remove"))
+                self.send_json({"ok": bool(ok), "needsRestart": True})
+                return
+
+            if self.path == "/api/expose-set":   # 연결 탭에서 x-marina.gateway.expose(서비스↔서비스 URL env 주입) 편집. env 라 재시작해야 적용.
+                consumer = str(body.get("consumer", "")).strip()
+                var = str(body.get("var", "")).strip()
+                target = str(body.get("target", "")).strip()
+                mode = str(body.get("mode", "gateway")).strip() or "gateway"
+                op = str(body.get("op", "")).strip()   # 'set' | 'remove'
+                if not consumer or not var or op not in ("set", "remove"):
+                    raise ValueError("consumer·var·op(set|remove) 필요")
+                if op == "set" and not target:
+                    raise ValueError("set 은 target(서비스명) 필요")
+                if mode not in ("gateway", "origin"):
+                    raise ValueError("mode 는 gateway|origin")
+                proj = project_for(root)
+                if not proj:
+                    raise ValueError("프로젝트 미등록 — expose 저장 불가")
+                cdir = MARINA_HOME / str(proj["id"]); cdir.mkdir(parents=True, exist_ok=True)
+                stored = cdir / proj.get("composeFile", "docker-compose.yml")
+                ok = _mc().set_xmarina_expose(str(stored), consumer, var, target, mode, remove=(op == "remove"))
+                self.send_json({"ok": bool(ok), "needsRestart": True})
+                return
+
             if self.path == "/api/meta":
                 meta_body = body.get("meta")
                 if not isinstance(meta_body, dict):
