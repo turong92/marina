@@ -46,7 +46,7 @@
 - Modify `/Users/sumin/.marina/mdc-main/docker-compose.yml`: BE artifact restart, service prebuild, AI source sync/rebuild.
 - Modify `/Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/ai-api/index_api/Dockerfile.local`: dependency 뒤 bootstrap source copy.
 - Modify `/Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/ai-api/search_api/Dockerfile.local`: pip 뒤 optional Node 설치와 bootstrap source copy.
-- Create `/Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/ai-api/tests/test_local_dockerfiles.py`: local Dockerfile cache boundary 회귀 테스트.
+- Create `/Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/ai-api/tests_e2e/test_local_dockerfiles.py`: local Dockerfile cache boundary 회귀 테스트.
 - Modify `/Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/tasks/dev-build-cache/design.md`: web 전용 설계를 capability mapping으로 확장.
 - Modify `/Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/tasks/dev-build-cache/implementation-plan.md`: BE/AI 검증 결과와 benchmark 기록.
 - Modify `docs/superpowers/specs/2026-07-14-orca-comparison-and-roadmap-design.md`: 프로젝트 설정 체크리스트 결과 갱신.
@@ -63,7 +63,7 @@
 - Consumes: canonical Compose config, `x-marina.prebuild`, optional legacy `prebuild.json`, selected service names, worktree root.
 - Produces: `PrebuildJob(id, services, cwd, command, java_key, legacy)` and `plan_prebuild_jobs(...) -> list[PrebuildJob]`.
 
-- [ ] **Step 1: Write the failing pure planner test**
+- [x] **Step 1: Write the failing pure planner test**
 
 Create `plugin/tests/test-prebuild-jobs.sh` with a Python block that imports `marina_prebuild.py` and asserts the public contract:
 
@@ -137,13 +137,13 @@ else:
     raise AssertionError("symlink escape accepted")
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `bash plugin/tests/test-prebuild-jobs.sh`
 
 Expected: FAIL because `plugin/scripts/marina_prebuild.py` does not exist.
 
-- [ ] **Step 3: Implement the planner and validation boundary**
+- [x] **Step 3: Implement the planner and validation boundary**
 
 Create `plugin/scripts/marina_prebuild.py` with these exact public types and responsibilities:
 
@@ -250,13 +250,13 @@ def plan_prebuild_jobs(
 
 Keep legacy string filtering based on the selected services' canonical build context. Validate every object entry's type/service/keys, but resolve and require the `cwd` directory only for selected jobs so an optional stopped service cannot block an unrelated start.
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
+- [x] **Step 4: Run the focused test and verify GREEN**
 
 Run: `bash plugin/tests/test-prebuild-jobs.sh`
 
 Expected: `PASS test-prebuild-jobs`.
 
-- [ ] **Step 5: Commit the planner**
+- [x] **Step 5: Commit the planner**
 
 ```bash
 git add plugin/scripts/marina_prebuild.py plugin/tests/test-prebuild-jobs.sh
@@ -280,7 +280,7 @@ git commit -m "feat(compose): add service-scoped prebuild planner"
 - Consumes: `plan_prebuild_jobs`, resolved start targets, `MARINA_JAVA_HOMES`, lifecycle environment.
 - Produces: `marina-compose.py prebuild-run ...`, `MARINA_PREBUILD_EVENT <json>` log records, language-neutral timeline steps.
 
-- [ ] **Step 1: Write failing runtime selection and failure tests**
+- [x] **Step 1: Write failing runtime selection and failure tests**
 
 Create a fake Compose project in `plugin/tests/test-prebuild-runtime.sh` with `startGroup: [web, user-api]` and these declarations:
 
@@ -310,7 +310,7 @@ grep -q '"status": "failed"' "$TMP/fail.log"
 
 Add a legacy string fixture and assert it still executes only when a selected service's build context belongs to that subrepo. Keep `test-entrypoint-lifecycle-env.sh` asserting that the selected job receives Dockerfile-derived `JAVA_HOME`.
 
-- [ ] **Step 2: Run runtime tests and verify RED**
+- [x] **Step 2: Run runtime tests and verify RED**
 
 Run:
 
@@ -321,7 +321,7 @@ bash plugin/tests/test-entrypoint-lifecycle-env.sh
 
 Expected: the new runtime test fails because `prebuild-run` and object jobs are unsupported; the legacy environment test remains green.
 
-- [ ] **Step 3: Add execution and structured events**
+- [x] **Step 3: Add execution and structured events**
 
 Extend `marina_prebuild.py` with:
 
@@ -371,7 +371,7 @@ def run_prebuild_jobs(jobs: Sequence[PrebuildJob], root: Path, environ: Mapping[
 
 Do not infer the command's language or parse its stdout in the runner.
 
-- [ ] **Step 4: Add shared target resolution and `prebuild-run` CLI**
+- [x] **Step 4: Add shared target resolution and `prebuild-run` CLI**
 
 In `marina-compose.py`, import `marina_prebuild` with the same sibling fallback pattern as `marina_dockerfile`. Extract the existing target logic from `cmd_up`:
 
@@ -411,7 +411,7 @@ def cmd_prebuild_run(a):
 
 Register `prebuild-run` with `--stored`, `--project-dir`, `--project-id`, `--session`, repeatable `--service`, repeatable `--env`, and `--legacy-prebuild` arguments.
 
-- [ ] **Step 5: Replace the Bash inline parser**
+- [x] **Step 5: Replace the Bash inline parser**
 
 Replace `run_prebuild_hooks` with a thin wrapper that preserves all lifecycle environment and selected service args:
 
@@ -427,7 +427,7 @@ run_prebuild_hooks() {
 
 Build one `prebuild_args` array from the same `svcs` and `envargs` passed to `cmd_up`. Call the wrapper after `ensure_external_worktrees` and before links/Compose `up`. Remove the embedded Python map parser and the legacy “missing subrepo means skip” behavior; selected invalid cwd now fails.
 
-- [ ] **Step 6: Parse structured events in the timeline**
+- [x] **Step 6: Parse structured events in the timeline**
 
 In `marina_build.py`, add `_PREBUILD = re.compile(r"^MARINA_PREBUILD_EVENT (?P<payload>\{.*\})$")`. Pair `started` and terminal records by `id`, producing:
 
@@ -444,7 +444,7 @@ In `marina_build.py`, add `_PREBUILD = re.compile(r"^MARINA_PREBUILD_EVENT (?P<p
 
 Keep the old Gradle regex as fallback only when no structured prebuild terminal event appears, preventing duplicate timeline steps while preserving old logs.
 
-- [ ] **Step 7: Verify runtime and timeline GREEN**
+- [x] **Step 7: Verify runtime and timeline GREEN**
 
 Run:
 
@@ -458,7 +458,7 @@ bash plugin/tests/test-compose-dispatch.sh
 
 Expected: every script prints `PASS`; the failed job test proves Compose `up` was not called.
 
-- [ ] **Step 8: Commit runtime integration**
+- [x] **Step 8: Commit runtime integration**
 
 ```bash
 git add plugin/scripts/marina_prebuild.py plugin/scripts/marina-compose.py \
@@ -482,7 +482,7 @@ git commit -m "feat(compose): run service prebuilds with structured timing"
 - Consumes: canonical service Watch rules, selected start targets, current Compose version.
 - Produces: `watch_version_errors(config, services, version) -> list[str]` and a prebuild-before-command capability gate.
 
-- [ ] **Step 1: Write failing action/version matrix tests**
+- [x] **Step 1: Write failing action/version matrix tests**
 
 Create `plugin/tests/test-compose-watch-version.sh` and directly test the pure function:
 
@@ -504,13 +504,13 @@ assert mc.watch_version_errors(config, ["web"], "v2.40.3-desktop.1") == []
 
 Add a fake lifecycle assertion that Compose 2.31.9 rejects `worker` before prebuild/up, while starting only `web` succeeds even when an unselected worker uses `restart`.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `bash plugin/tests/test-compose-watch-version.sh`
 
 Expected: FAIL because the version helper and lifecycle gate are absent.
 
-- [ ] **Step 3: Implement semantic version and capability checks**
+- [x] **Step 3: Implement semantic version and capability checks**
 
 Add to `marina-compose.py`:
 
@@ -549,7 +549,7 @@ def watch_version_errors(config: dict, selected: list[str], version: str) -> lis
 
 Do not rewrite unsupported actions.
 
-- [ ] **Step 4: Gate the existing prebuild pass before command execution**
+- [x] **Step 4: Gate the existing prebuild pass before command execution**
 
 Add required `--compose-version` to `prebuild-run`. After it loads canonical config and resolves actual start targets with `resolved_start_targets`, call `watch_version_errors`, print every error, and return 2 before planning or running a prebuild job.
 
@@ -562,7 +562,7 @@ run_prebuild_hooks "$stored" "$cp" "$MARINA_HOME/$pid/prebuild.json" "$ver" \
 
 This keeps capability validation before host commands without adding a third `docker compose config` pass to every start.
 
-- [ ] **Step 5: Verify focused and lifecycle tests GREEN**
+- [x] **Step 5: Verify focused and lifecycle tests GREEN**
 
 Run:
 
@@ -575,7 +575,7 @@ bash plugin/tests/test-prebuild-runtime.sh
 
 Expected: all PASS and fake Compose 2.24 continues to support ordinary sync/rebuild projects.
 
-- [ ] **Step 6: Commit the capability gate**
+- [x] **Step 6: Commit the capability gate**
 
 ```bash
 git add plugin/scripts/marina-compose.py plugin/scripts/marina-lib-compose.sh \
@@ -599,7 +599,7 @@ git commit -m "feat(compose): gate Watch actions by Compose capability"
 - Consumes: mixed legacy/object `x-marina.prebuild` maps.
 - Produces: lossless Workbench YAML roundtrip and per-service `{mode, cwd, command}` display payload.
 
-- [ ] **Step 1: Extend failing Workbench roundtrip tests**
+- [x] **Step 1: Extend failing Workbench roundtrip tests**
 
 Change the test fixture to:
 
@@ -618,7 +618,7 @@ check('object prebuild yaml', /  user-api:\n    cwd: be-api\n    command:/.test(
 
 Extend `test-compose-dash-api.sh` with a stored object entry for one service and a legacy entry for a sibling, asserting normalized payloads.
 
-- [ ] **Step 2: Run tests and verify RED**
+- [x] **Step 2: Run tests and verify RED**
 
 Run:
 
@@ -629,7 +629,7 @@ bash plugin/tests/test-compose-dash-api.sh
 
 Expected: object prebuild is relegated to unsupported raw content or rendered as `[object Object]`, and payload assertions fail.
 
-- [ ] **Step 3: Support both shapes in the Workbench parser/serializer**
+- [x] **Step 3: Support both shapes in the Workbench parser/serializer**
 
 Replace `xmCoercePrebuild` with validation that accepts either a command string or an object with exactly `cwd` and `command` string fields. Add:
 
@@ -652,7 +652,7 @@ function xmDumpPrebuild(prebuild) {
 
 Use `xmDumpPrebuild` from `wbSerializeXmarina`.
 
-- [ ] **Step 4: Render legacy and service rows without data loss**
+- [x] **Step 4: Render legacy and service rows without data loss**
 
 In `wbRenderPrebuildCard`, each row gets a two-option segmented mode (`서비스` / `레거시`), key input, optional cwd input, command input, and remove icon. New rows default to service object:
 
@@ -662,7 +662,7 @@ xm.prebuild[key] = { cwd: '.', command: '' };
 
 Switching mode converts only that row. Keep field dimensions stable in CSS with grid tracks `96px minmax(90px, 1fr) minmax(120px, 2fr) 28px`; at narrow widths use one column so text never overlaps.
 
-- [ ] **Step 5: Normalize service configuration payload**
+- [x] **Step 5: Normalize service configuration payload**
 
 In `compose_resolved_view`, select object by service name first; otherwise select legacy by subrepo:
 
@@ -677,7 +677,7 @@ else:
 
 Return this object as `prebuild`. In `app-5c-config.js`, display the mode, cwd, and command read-only and remove the ineffective per-subrepo save button from this modal. Editing remains in the Compose Workbench, which preserves the complete shared `x-marina` block.
 
-- [ ] **Step 6: Verify tests and browser behavior**
+- [x] **Step 6: Verify tests and browser behavior**
 
 Run:
 
@@ -690,7 +690,7 @@ node --check plugin/scripts/marina-web/app-5c-config.js
 
 Then use Aside against `http://127.0.0.1:3900`: open the project Compose editor, confirm a service object row shows service/cwd/command without overlap, switch to advanced YAML and back, and verify the nested object remains byte-equivalent after canonical parsing. Open service configuration and confirm the same command is displayed, not `[object Object]`.
 
-- [ ] **Step 7: Commit configuration support**
+- [x] **Step 7: Commit configuration support**
 
 ```bash
 git add plugin/scripts/marina_compose_svc.py \
@@ -712,7 +712,7 @@ git commit -m "feat(config): support service-scoped prebuild settings"
 - Consumes: verified core behavior from Tasks 1-4.
 - Produces: user-facing generic configuration contract and a clean Marina test baseline.
 
-- [ ] **Step 1: Document the three development loops**
+- [x] **Step 1: Document the three development loops**
 
 Add a compact table to README:
 
@@ -724,7 +724,7 @@ Add a compact table to README:
 
 Document the object example, legacy string compatibility, startGroup selection, dedupe by resolved cwd+command, and Watch capability versions. Replace statements that prebuild is always stored in `prebuild.json` or always subrepo-wide.
 
-- [ ] **Step 2: Run static checks**
+- [x] **Step 2: Run static checks**
 
 ```bash
 bash -n plugin/scripts/marina-lib-compose.sh
@@ -737,7 +737,7 @@ git diff --check
 
 Expected: every command exits 0.
 
-- [ ] **Step 3: Run all Marina tests**
+- [x] **Step 3: Run all Marina tests**
 
 ```bash
 set -e
@@ -748,7 +748,7 @@ done
 
 Expected: every test prints PASS or an explicit environment-based SKIP; no `.watch.pid` points to a live test process afterward.
 
-- [ ] **Step 4: Review genericity and compatibility**
+- [x] **Step 4: Review genericity and compatibility**
 
 Search and inspect:
 
@@ -760,7 +760,7 @@ rg -n "prebuild" README.md plugin/scripts/marina-web/app-2c-xmarina-form.js
 
 The first command must find no new project/language-specific runtime branch. Confirm legacy tests, `start --all` startGroup behavior, and Watch-free projects remain unchanged.
 
-- [ ] **Step 5: Commit docs**
+- [x] **Step 5: Commit docs**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-07-14-capability-based-dev-loops-design.md
@@ -780,7 +780,7 @@ Omit the spec path from `git add` when no verified behavior required a spec corr
 - Consumes: Marina service object prebuild and Compose `restart` action.
 - Produces: independent `user-api`/`batch` host builds and artifact-triggered service restart.
 
-- [ ] **Step 1: Back up and validate the current stored Compose**
+- [x] **Step 1: Back up and validate the current stored Compose**
 
 ```bash
 cp /Users/sumin/.marina/mdc-main/docker-compose.yml \
@@ -792,7 +792,7 @@ docker compose -f /Users/sumin/.marina/mdc-main/docker-compose.yml \
 
 Expected: config exits 0. The backup is local rollback material and must not be committed.
 
-- [ ] **Step 2: Replace the shared BE prebuild and add artifact Watch**
+- [x] **Step 2: Replace the shared BE prebuild and add artifact Watch**
 
 Use:
 
@@ -820,7 +820,7 @@ x-marina:
 
 Keep both existing JAR directory mounts and all unrelated Compose/x-marina keys unchanged.
 
-- [ ] **Step 3: Validate the rendered BE contract**
+- [x] **Step 3: Validate the rendered BE contract**
 
 ```bash
 docker compose -f /Users/sumin/.marina/mdc-main/docker-compose.yml \
@@ -835,13 +835,13 @@ for svc in ("user-api", "batch"):
 PY
 ```
 
-- [ ] **Step 4: Verify service-scoped build selection**
+- [x] **Step 4: Verify service-scoped build selection**
 
 From the MDC worktree, run `marina restart --user-api` and inspect the current build log. Assert it contains `:user-api:bootJar` and does not contain `:batch:bootJar`. Repeat inversely for `batch`.
 
 Expected: each command builds only its selected artifact; both services can still start from their mounted JAR.
 
-- [ ] **Step 5: Verify external artifact restart**
+- [x] **Step 5: Verify external artifact restart**
 
 Start `user-api`, record container ID and `StartedAt`, then run:
 
@@ -852,7 +852,7 @@ cd /Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/be
 
 Wait for `/Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/.workspace/marina/dev-build-cache/user-api.watch.log` to report the restart. Assert container ID remains associated with `user-api`, `StartedAt` advances, and `batch` does not restart.
 
-- [ ] **Step 6: Roll back on instability**
+- [x] **Step 6: Roll back on instability**
 
 If Gradle's multi-file replacement causes repeated restart loops, remove only the two `restart` rules and retain service-scoped prebuild. Record the observed event sequence before changing the design; do not add a Marina file debounce or language-specific watcher in this task.
 
@@ -869,7 +869,7 @@ If Gradle's multi-file replacement causes repeated restart loops, remove only th
 - Consumes: both local Dockerfile texts.
 - Produces: runnable bootstrap images whose dependency layers are not invalidated by source or optional Node changes.
 
-- [ ] **Step 1: Write the failing Dockerfile source test**
+- [x] **Step 1: Write the failing Dockerfile source test**
 
 Create a stdlib `unittest` that asserts:
 
@@ -896,19 +896,19 @@ class LocalDockerfileTest(unittest.TestCase):
             self.assertGreater(text.index("COPY . ."), text.rindex("RUN "))
 ```
 
-- [ ] **Step 2: Run the test and verify RED**
+- [x] **Step 2: Run the test and verify RED**
 
 Run from the AI repository: `python3 tests/test_local_dockerfiles.py`
 
 Expected: FAIL because neither Dockerfile copies source and search installs optional Node before pip.
 
-- [ ] **Step 3: Reorder search dependencies and add source bootstrap**
+- [x] **Step 3: Reorder search dependencies and add source bootstrap**
 
 In `search_api/Dockerfile.local`, keep apt first, then requirements copy/pip install, then the existing optional Node block, then the existing optional Chromium block, then `COPY . .`. In `index_api/Dockerfile.local`, add `COPY . .` immediately after pip install. Update comments from “source is runtime bind mount” to “image source is startup bootstrap; Compose Watch sync owns live edits.”
 
 Do not change ffmpeg, Node/Chromium default args, requirements, CMD, ports, or production Dockerfiles.
 
-- [ ] **Step 4: Verify static and BuildKit checks**
+- [x] **Step 4: Verify static and BuildKit checks**
 
 ```bash
 python3 tests/test_local_dockerfiles.py
@@ -919,7 +919,7 @@ git diff --check
 
 Expected: unittest OK and both Dockerfile checks exit 0.
 
-- [ ] **Step 5: Commit the AI Dockerfiles**
+- [x] **Step 5: Commit the AI Dockerfiles**
 
 ```bash
 git add index_api/Dockerfile.local search_api/Dockerfile.local tests/test_local_dockerfiles.py
@@ -937,7 +937,7 @@ git commit -m "perf(local): preserve AI dependency layers for source sync"
 - Consumes: bootstrap AI images from Task 7 and Marina watcher lifecycle.
 - Produces: source sync/reload and service-specific dependency rebuild without full source bind mounts.
 
-- [ ] **Step 1: Replace AI source binds with Watch declarations**
+- [x] **Step 1: Replace AI source binds with Watch declarations**
 
 Remove `./ai-api:/ai-api` from both AI services. Add a full-root source sync to `/ai-api` with `initial_sync: true`. Declare this standard YAML anchor once at top level:
 
@@ -989,7 +989,7 @@ search-api:
         path: ./ai-api/search_api/Dockerfile.local
 ```
 
-- [ ] **Step 2: Validate canonical Compose paths/actions/mounts**
+- [x] **Step 2: Validate canonical Compose paths/actions/mounts**
 
 Render config JSON and assert for each AI service:
 
@@ -1002,23 +1002,23 @@ assert service["develop"]["watch"][0]["initial_sync"] is True
 
 Also assert web Watch and BE artifact rules are still present.
 
-- [ ] **Step 3: Rebuild and verify bootstrap startup**
+- [x] **Step 3: Rebuild and verify bootstrap startup**
 
 Run `marina rebuild --index-api` and `marina rebuild --search-api`. Confirm each Uvicorn process reaches ready state before relying on a source sync event. Verify `/ai-api/index_api/app.py` or `/ai-api/search_api/app.py` exists inside the corresponding image/container without a source bind.
 
-- [ ] **Step 4: Verify source sync without Docker build**
+- [x] **Step 4: Verify source sync without Docker build**
 
 Create `index_api/.marina-watch-probe.py`, wait for the index watcher log to show sync, and assert the file appears in `/ai-api/index_api/` inside the container. Confirm no `Building`/BuildKit step appears in that watcher event. Delete the probe and verify container deletion sync. Repeat for search.
 
-- [ ] **Step 5: Verify dependency event isolation**
+- [x] **Step 5: Verify dependency event isolation**
 
 Touch `index_api/requirements_local.txt` without changing content, wait for the index watcher to rebuild/recreate, and assert the search watcher did not rebuild. Record whether all dependency layers are cached. Repeat with `search_api/requirements.txt` only if the index check proves the event path is stable and the expected cached build cost is acceptable.
 
-- [ ] **Step 6: Verify API health and clean probes**
+- [x] **Step 6: Verify API health and clean probes**
 
 Resolve dynamic ports with `marina ports`, then use `curl` against each FastAPI `/docs` endpoint. Expected: HTTP 200. Confirm the AI repository is clean except for Task 7's committed changes and no probe remains.
 
-- [ ] **Step 7: Apply the per-service rollback criteria**
+- [x] **Step 7: Apply the per-service rollback criteria**
 
 If initial sync, Uvicorn reload, or ignored local configuration fails for one service, restore that service's source bind and remove only its Watch rules. Keep the other verified service and record the exact ignored path or startup failure; do not introduce a Marina-specific sync engine.
 
@@ -1036,7 +1036,7 @@ If initial sync, Uvicorn reload, or ignored local configuration fails for one se
 - Consumes: Marina core, MDC BE/AI runtime, build logs, Watch logs.
 - Produces: measured cold/warm/edit evidence, checked roadmap, clean repository states.
 
-- [ ] **Step 1: Capture comparable timings without global cache deletion**
+- [x] **Step 1: Capture comparable timings without global cache deletion**
 
 Measure and record:
 
@@ -1052,15 +1052,15 @@ Measure and record:
 
 Do not run `docker builder prune`, delete unrelated images/volumes, or print environment values.
 
-- [ ] **Step 2: Update MDC task documentation**
+- [x] **Step 2: Update MDC task documentation**
 
 Expand the design from web-only cache boundaries to the three capability paths and mark completed Task 6-8 checks in `implementation-plan.md`. Include actual numbers and any rollback used; do not write estimated values.
 
-- [ ] **Step 3: Update Marina roadmap and design verification**
+- [x] **Step 3: Update Marina roadmap and design verification**
 
 Check off search optional Node layer reordering only after Task 7 passes. Keep runtime profiles and registry cache unchecked. Append a verification table to the capability design with Compose version, service selection, source sync, artifact restart, and measured timings.
 
-- [ ] **Step 4: Run final Marina verification**
+- [x] **Step 4: Run final Marina verification**
 
 ```bash
 set -e
@@ -1074,10 +1074,10 @@ git status --short
 
 Expected: static checks exit 0, every test PASS/SKIP, no leaked watcher process, and only Task 9 docs are uncommitted.
 
-- [ ] **Step 5: Run final MDC verification**
+- [x] **Step 5: Run final MDC verification**
 
 ```bash
-python3 /Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/ai-api/tests/test_local_dockerfiles.py
+python3 /Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/ai-api/tests_e2e/test_local_dockerfiles.py
 docker compose -f /Users/sumin/.marina/mdc-main/docker-compose.yml \
   --project-directory /Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache config >/dev/null
 git -C /Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cache/ai-api diff --check
@@ -1088,7 +1088,7 @@ git -C /Users/sumin/IdeaProjects/crabs/mdc-main/.claude/worktrees/dev-build-cach
 
 Expected: Dockerfile tests/config pass; AI and BE nested repos have no uncommitted task changes; MDC root shows only known nested repository entries plus Task 9 docs before commit.
 
-- [ ] **Step 6: Commit documentation in each owning repository**
+- [x] **Step 6: Commit documentation in each owning repository**
 
 In the MDC root:
 

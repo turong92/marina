@@ -144,6 +144,24 @@ Compose Watch와 빠른 Start를 통합한 뒤 같은 feature worktree에서 측
 앱의 `node_modules` named volume은 제거했고 이미지의 pnpm symlink를 직접 사용한다. `.next` volume은
 worktree별 build cache로 유지한다. source 반영은 Aside에서 임시 DOM 문자열로 확인한 뒤 원복했다.
 
+capability 기반 루프를 BE/AI까지 확장한 뒤 측정한 결과:
+
+| 경로 | 첫 실행 | warm/변경 경로 | 해석 |
+|---|---:|---:|---|
+| `index-api` rebuild | 259.9초 | 14.6초 | pip 183.3초, export/unpack 62.1초 |
+| `search-api` rebuild | 235.8초 | 14.9초 | pip 160.4초, Node 11.8초, export/unpack 50.7초 |
+| AI source 변경 | build 0회 | 약 3초 내 sync | Uvicorn reload, 컨테이너 유지 |
+| index requirements 변경 | index만 rebuild | 모든 layer `CACHED` | search 컨테이너 유지 |
+| BE user prebuild | 45.4초 | 5.0초 | 38 up-to-date, 6 from cache |
+| BE JAR 변경 | build 0회 | 약 2.1초 내 restart | 소유 서비스 컨테이너만 재시작 |
+
+AI 첫 rebuild에서도 ffmpeg/apt는 cache hit였고 Chromium build arg는 `false`였다. 반복 지연의 핵심은
+ffmpeg나 Playwright 설치가 아니라 Python dependency resolver/install과 최초 image export였다. source bind를
+제거한 AI image는 dependency 뒤 bootstrap source를 포함하고, 실행 후 Compose Watch `sync`로 갱신한다.
+
+실세션 검증 중 Compose Watch가 같은 프로젝트에 watcher lock 하나만 허용한다는 제약도 확인했다. Marina는
+서비스별 watcher를 여러 개 띄우지 않고, 실행 중인 watchable 서비스를 하나의 project watcher로 묶도록 수정했다.
+
 ### 원인
 
 1. web Dockerfile이 `COPY . .` 다음에 `pnpm install --filter "web..."`을 실행한다.
@@ -162,7 +180,11 @@ worktree별 build cache로 유지한다. source 반영은 Aside에서 임시 DOM
 - [x] `turbo prune --docker` 또는 동등한 manifest-only install을 검증한다.
 - [x] 전체 source bind와 app `node_modules` runtime volume을 Compose Watch로 대체한다.
 - [x] source는 `sync`, manifest·lockfile·Dockerfile은 `rebuild`로 선언한다.
-- [ ] search-api의 optional Node 설치를 pip dependency layer 뒤로 이동한다.
+- [x] search-api의 optional Node 설치를 pip dependency layer 뒤로 이동한다.
+- [x] AI image에 bootstrap source를 포함하고 source bind를 Compose Watch sync로 대체한다.
+- [x] AI requirements·Dockerfile 변경을 소유 서비스 rebuild로 격리한다.
+- [x] BE prebuild를 서비스 단위로 분리하고 JAR 변경을 소유 서비스 restart로 연결한다.
+- [x] Compose 프로젝트당 watcher를 하나만 유지한다.
 - [ ] ffmpeg·Node·Chromium을 `lite/media/browser/full` runtime profile로 나눌지 검증한다.
 - [ ] registry cache가 cold-start를 실제로 줄이는지 측정한다.
 
