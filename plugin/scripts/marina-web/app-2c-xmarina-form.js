@@ -206,8 +206,13 @@
       if (!val || typeof val !== 'object' || Array.isArray(val)) throw new Error('prebuild 는 매핑이어야 함');
       const out = {};
       for (const [k, v] of Object.entries(val)) {
-        if (typeof v !== 'string') throw new Error('prebuild.' + k + ' 은 명령 문자열이어야 함');
-        out[k] = v;
+        if (typeof v === 'string') { out[k] = v; continue; }
+        if (!v || typeof v !== 'object' || Array.isArray(v)) throw new Error('prebuild.' + k + ' 은 명령 문자열 또는 {cwd, command} 여야 함');
+        if (Object.keys(v).some(n => n !== 'cwd' && n !== 'command') || !Object.prototype.hasOwnProperty.call(v, 'cwd') || !Object.prototype.hasOwnProperty.call(v, 'command')) {
+          throw new Error('prebuild.' + k + ' 객체에는 cwd, command 만 필요함');
+        }
+        if (typeof v.cwd !== 'string' || typeof v.command !== 'string') throw new Error('prebuild.' + k + ' 의 cwd, command 는 문자열이어야 함');
+        out[k] = { cwd: v.cwd, command: v.command };
       }
       return out;
     }
@@ -316,6 +321,21 @@
       return lines;
     }
 
+    function xmDumpPrebuild(prebuild) {
+      const lines = ['  prebuild:'];
+      for (const key of Object.keys(prebuild)) {
+        const value = prebuild[key];
+        if (typeof value === 'string') {
+          lines.push('    ' + xmQuoteKeyIfNeeded(key) + ': ' + xmQuoteIfNeeded(value));
+          continue;
+        }
+        lines.push('    ' + xmQuoteKeyIfNeeded(key) + ':');
+        lines.push('      cwd: ' + xmQuoteIfNeeded(value.cwd));
+        lines.push('      command: ' + xmQuoteIfNeeded(value.command));
+      }
+      return lines;
+    }
+
     function xmDumpStartGroup(arr) {
       return ['  startGroup:', ...arr.map(v => '  - ' + xmQuoteIfNeeded(v))];
     }
@@ -329,7 +349,7 @@
       if (has('links') && ((xm.links.symlink && xm.links.symlink.length) || (xm.links.copy && xm.links.copy.length))) out.push(...xmDumpLinks(xm.links));
       if (has('forward') && Object.keys(xm.forward).length) out.push(...xmDumpMapOfScalars('forward', xm.forward));
       if (has('gateway') && xm.gateway.routes && Object.keys(xm.gateway.routes).length) out.push(...xmDumpGateway(xm.gateway));
-      if (has('prebuild') && Object.keys(xm.prebuild).length) out.push(...xmDumpMapOfScalars('prebuild', xm.prebuild));
+      if (has('prebuild') && Object.keys(xm.prebuild).length) out.push(...xmDumpPrebuild(xm.prebuild));
       if (has('java') && String(xm.java).trim() !== '') out.push('  java: ' + xmQuoteIfNeeded(String(xm.java)));
       if (has('build') && xm.build.args && Object.keys(xm.build.args).length) out.push(...xmDumpBuildArgs(xm.build));
       for (const o of (otherKeys || [])) out.push(o.raw);
@@ -374,7 +394,11 @@
       if (xm.links) { out.links.symlink = xm.links.symlink || []; out.links.copy = xm.links.copy || []; }
       if (xm.forward) out.forward = { ...xm.forward };
       if (xm.gateway) out.gateway = { routes: { ...(xm.gateway.routes || {}) } };
-      if (xm.prebuild) out.prebuild = { ...xm.prebuild };
+      if (xm.prebuild) {
+        for (const [key, value] of Object.entries(xm.prebuild)) {
+          out.prebuild[key] = (typeof value === 'string') ? value : { cwd: value.cwd, command: value.command };
+        }
+      }
       if (xm.java != null) out.java = xm.java;
       if (xm.build) out.build = { args: { ...(xm.build.args || {}) } };
       return out;
@@ -556,30 +580,44 @@
       const { card, body } = wbCardShell('prebuild');
       const pb = wbFormXm.prebuild;
       const rows = wbMk('div', 'wb-row-list');
-      Object.keys(pb).forEach(sub => {
-        const row = wbMk('div', 'wb-row');
-        const subInput = wbMk('input', 'wb-prebuild-sub'); subInput.value = sub; subInput.placeholder = '서브레포';
-        const cmdInput = wbMk('input', 'wb-prebuild-cmd'); cmdInput.value = pb[sub]; cmdInput.placeholder = '명령';
+      Object.keys(pb).forEach(key => {
+        const value = pb[key];
+        const serviceMode = typeof value !== 'string';
+        const row = wbMk('div', 'wb-prebuild-row');
+        const modeInput = wbMk('select', 'wb-prebuild-mode');
+        [['service', '서비스'], ['legacy', '레거시']].forEach(([optionValue, label]) => {
+          const option = document.createElement('option'); option.value = optionValue; option.textContent = label; modeInput.appendChild(option);
+        });
+        modeInput.value = serviceMode ? 'service' : 'legacy';
+        const keyInput = wbMk('input', 'wb-prebuild-key'); keyInput.value = key; keyInput.placeholder = serviceMode ? '서비스' : '서브레포';
+        const cwdInput = wbMk('input', 'wb-prebuild-cwd'); cwdInput.value = serviceMode ? value.cwd : ''; cwdInput.placeholder = '작업 경로'; cwdInput.disabled = !serviceMode;
+        const cmdInput = wbMk('input', 'wb-prebuild-cmd'); cmdInput.value = serviceMode ? value.command : value; cmdInput.placeholder = '명령';
         const commit = () => {
-          const newSub = subInput.value.trim(), cmd = cmdInput.value.trim();
+          const newKey = keyInput.value.trim(), cmd = cmdInput.value.trim();
           wbFormMutate(xm => {
-            delete xm.prebuild[sub];
-            if (newSub && cmd) xm.prebuild[newSub] = cmd;
+            delete xm.prebuild[key];
+            if (!newKey) return;
+            xm.prebuild[newKey] = modeInput.value === 'service'
+              ? { cwd: cwdInput.value.trim() || '.', command: cmd }
+              : cmd;
           });
         };
-        subInput.addEventListener('change', commit);
+        modeInput.addEventListener('change', commit);
+        keyInput.addEventListener('change', commit);
+        cwdInput.addEventListener('change', commit);
         cmdInput.addEventListener('change', commit);
-        row.appendChild(subInput);
-        row.appendChild(wbMkText('span', 'wb-row-arrow', '→'));
+        row.appendChild(modeInput);
+        row.appendChild(keyInput);
+        row.appendChild(cwdInput);
         row.appendChild(cmdInput);
-        row.appendChild(wbMkBtn('✕', 'wb-row-x', () => wbFormMutate(xm => { delete xm.prebuild[sub]; })));
+        row.appendChild(wbMkBtn('✕', 'wb-row-x', () => wbFormMutate(xm => { delete xm.prebuild[key]; })));
         rows.appendChild(row);
       });
       body.appendChild(rows);
       body.appendChild(wbMkBtn('+ 추가', 'wb-add-row', () => wbFormMutate(xm => {
-        let n = 1, key = 'sub' + n;
-        while (Object.prototype.hasOwnProperty.call(xm.prebuild, key)) key = 'sub' + (++n);
-        xm.prebuild[key] = '';
+        let n = 1, key = 'service' + n;
+        while (Object.prototype.hasOwnProperty.call(xm.prebuild, key)) key = 'service' + (++n);
+        xm.prebuild[key] = { cwd: '.', command: '' };
       })));
       return card;
     }

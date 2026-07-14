@@ -424,7 +424,7 @@ def compose_resolved_view(root: Path, project: dict) -> dict:
         ba_all = json.loads((MARINA_HOME / str(project["id"]) / "build-args.json").read_text(encoding="utf-8"))
     except Exception:
         ba_all = {}
-    try:   # pre-build 명령(서브레포별, B) — x-marina.prebuild(보관 compose=SoT, 실행되는 것) 우선,
+    try:   # pre-build 명령 — x-marina.prebuild(보관 compose=SoT, 실행되는 것) 우선,
            # 없으면 레거시 prebuild.json. 표시=실행 일치(레거시 stale 표시 드리프트 제거).
         _stored = MARINA_HOME / str(project["id"]) / (project.get("composeFile") or "docker-compose.yml")
         _xpb = (_mc().xmarina_for_stored(str(_stored)) or {}).get("prebuild")
@@ -472,6 +472,17 @@ def compose_resolved_view(root: Path, project: dict) -> dict:
         _inj = _detect_injections(df_text or "")
         _mba = (ba_all.get(name) if isinstance(ba_all.get(name), dict) else {})
         _stored_ba = (b.get("args") if isinstance(b, dict) and isinstance(b.get("args"), dict) else {})
+        _service_pb = pb_all.get(name) if isinstance(pb_all, dict) else None
+        if isinstance(_service_pb, dict):
+            prebuild = {
+                "mode": "service",
+                "cwd": str(_service_pb.get("cwd") or ""),
+                "command": str(_service_pb.get("command") or ""),
+            }
+        else:
+            _legacy_pb = pb_all.get(sub_label) if isinstance(pb_all, dict) and sub_label else None
+            prebuild = ({"mode": "legacy", "cwd": sub_label, "command": _legacy_pb}
+                        if isinstance(_legacy_pb, str) else None)
         services.append({
             "service": name,
             "subrepo": sub_label,
@@ -484,7 +495,7 @@ def compose_resolved_view(root: Path, project: dict) -> dict:
             "source": ("직접 정의/스캐폴드" if name in direct else "include (서브레포 compose)"),
             "marinaBuildArgs": _mba,
             "injections": _inj,
-            "prebuild": (pb_all.get(sub_label, "") if sub_label else ""),
+            "prebuild": prebuild,
             "prebuildSuggest": (_prebuild_suggest(pb_dir) if (pb_dir and pb_dir.is_dir()) else ""),
             **_service_profile(_inj["args"], _mba, _stored_ba),
         })

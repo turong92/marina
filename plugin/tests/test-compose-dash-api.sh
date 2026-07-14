@@ -6,10 +6,19 @@ SH="$HERE/../scripts/marina.sh"; CTRL="$HERE/../scripts/marina-control.py"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-compose-dash-api (docker 데몬 미가용)"; exit 0; }
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"
 export MARINA_GATEWAY=off   # 게이트웨이 auto-spawn 차단(이 테스트는 게이트웨이 대상 아님 → caddy leak 방지)
-P="$TMP/proj-$$"; mkdir -p "$P"; P="$(cd "$P" && pwd -P)"   # 고유 basename — 실제 'proj' 프로젝트(-p proj-main)와 충돌 방지
+P="$TMP/proj-$$"; mkdir -p "$P/be-api" "$P/legacy-api"; P="$(cd "$P" && pwd -P)"   # 고유 basename — 실제 'proj' 프로젝트(-p proj-main)와 충돌 방지
 cat > "$P/docker-compose.yml" <<'YML'
 services:
   web: { image: "python:3-alpine", command: ["python","-m","http.server","8000"], ports: ["8000:8000"] }
+  user-api: { image: "busybox", build: ./be-api, command: ["sleep", "infinity"] }
+  legacy-api: { image: "busybox", build: ./legacy-api, command: ["sleep", "infinity"] }
+x-marina:
+  startGroup: [web]
+  prebuild:
+    user-api:
+      cwd: be-api
+      command: ./gradlew :user-api:bootJar
+    legacy-api: ./gradlew assemble
 YML
 bash "$SH" project add "$P" --compose "$P/docker-compose.yml" >/dev/null
 (cd "$P" && MARINA_HOME="$MARINA_HOME" bash "$SH" start --all >/dev/null)
@@ -29,6 +38,16 @@ assert cs, "no compose session"
 web=next((sv for s in cs for sv in s["services"] if sv["service"]=="web"), None)
 assert web and str(web["port"]).isdigit() and web["running"] and web["health"]=="ok", web
 print("ok sessions web", web["port"])
+'
+# 상세 구성 API는 서비스 객체형과 레거시 서브레포형 prebuild를 같은 공개 shape로 정규화한다.
+printf '%s' "$(curl -sf $H "http://127.0.0.1:$PORT/api/compose-config?root=$P")" | python3 -c '
+import json,sys
+d=json.load(sys.stdin)
+services={s["service"]:s for s in d["services"]}
+assert services["user-api"]["prebuild"] == {"mode":"service", "cwd":"be-api", "command":"./gradlew :user-api:bootJar"}, services["user-api"]
+assert services["legacy-api"]["prebuild"] == {"mode":"legacy", "cwd":"legacy-api", "command":"./gradlew assemble"}, services["legacy-api"]
+assert services["web"]["prebuild"] is None, services["web"]
+print("ok normalized prebuild config")
 '
 # /api/start 가 compose 서비스명 수락 (unknown service 400 아님)
 code="$(curl -s -o /dev/null -w '%{http_code}' $H -X POST -H 'Content-Type: application/json' \

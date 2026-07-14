@@ -1,5 +1,5 @@
     // app-5c-config.js — 서비스/프로젝트 구성 읽기전용 모달(P4 분할 3/3): openServiceConfig/openProjectConfig
-    // /renderServiceConfig/highlightVars + build args·pre-build·profile 저장 배선(wireBuildArgsSave).
+    // /renderServiceConfig/highlightVars + build args·profile 저장 배선(wireBuildArgsSave).
     // app-5b-actions.js 다음 로드.
 
 
@@ -37,7 +37,7 @@
       back.id = 'svcConfigBack'; back.className = 'modal-backdrop'; back.style.zIndex = '200';
       back.innerHTML = `<div class="svc-config-modal wide">
         <div class="svc-config-head">
-          <span class="svc-config-title">구성 — 전체 서비스 <span class="sub">(profile·build args·pre-build 편집 가능)</span></span>
+          <span class="svc-config-title">구성 — 전체 서비스 <span class="sub">(profile·build args 편집 가능)</span></span>
           <button id="svcCfgClose" class="links-modal-x">✕</button>
         </div>
         <div id="svcCfgBody" class="svc-config-body scroll">불러오는 중…</div>
@@ -116,13 +116,14 @@
       html += `<div style="margin:0 0 12px"><div style="color:${muted};margin-bottom:4px">⚙️ build args <span title="marina 가 overlay 로 주입 — app 레포·compose 안 건드림. profile 은 위 전용 칸에서. 다음 시작/재시작 때 적용.">(편집 가능 · 한 줄당 KEY=VALUE · profile 제외)</span></div>
         <textarea id="${baId}" spellcheck="false" placeholder="BUILD_VERSION=1.2.3" style="width:100%;min-height:52px;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px;background:var(--sys-bg-base);color:var(--sys-cont-neutral-default);border:1px solid var(--sys-style-neutral-light);border-radius:6px;padding:6px">${escapeHtml(baLines)}</textarea>
         <button class="svc-llm-go ba-save" data-service="${escapeHtml(s.service)}" data-target="${baId}" style="margin-top:6px">💾 저장</button></div>`;
-      if (s.subrepo && (s.build || s.prebuild)) {   // pre-build(B): 서브레포 공통, up 전 실행
-        const pbId = 'pb-' + s.service.replace(/[^a-z0-9_-]/gi, '_');
-        const sug = s.prebuildSuggest || '';
-        const sugBtn = (sug && !s.prebuild) ? `<button class="svc-llm-go pb-suggest" data-target="${pbId}" data-cmd="${escapeHtml(sug)}" style="margin-left:6px">제안: ${escapeHtml(sug)}</button>` : '';
-        html += `<div style="margin:0 0 12px"><div style="color:${muted};margin-bottom:4px">🔨 pre-build (서브레포 <b>${escapeHtml(s.subrepo)}</b> 공통 · up 전 실행)</div>
-          <input id="${pbId}" value="${escapeHtml(s.prebuild || '')}" placeholder="${escapeHtml(sug ? ('예: ' + sug) : '예: ./gradlew build')}" style="width:100%;box-sizing:border-box;font-family:ui-monospace,monospace;font-size:12px;background:var(--sys-bg-base);color:var(--sys-cont-neutral-default);border:1px solid var(--sys-style-neutral-light);border-radius:6px;padding:6px">
-          <div style="margin-top:6px"><button class="svc-llm-go pb-save" data-subrepo="${escapeHtml(s.subrepo)}" data-target="${pbId}">💾 pre-build 저장</button>${sugBtn}</div></div>`;
+      if (s.prebuild) {
+        const pb = s.prebuild;
+        const mode = pb.mode === 'service' ? '서비스 단위' : '레거시 서브레포';
+        html += `<div style="margin:0 0 12px"><div style="color:${muted};margin-bottom:4px">pre-build <span title="Compose Workbench의 x-marina.prebuild에서 편집합니다.">(읽기 전용 · ${escapeHtml(mode)})</span></div>
+          <div style="border:1px solid var(--sys-style-neutral-light);border-radius:6px;padding:7px 9px;font-family:ui-monospace,monospace;font-size:12px;line-height:1.6">
+            <div><span style="color:${muted}">cwd</span> ${escapeHtml(pb.cwd || '.')}</div>
+            <div><span style="color:${muted}">command</span> ${escapeHtml(pb.command || '')}</div>
+          </div></div>`;
       }
       const dfPath = (s.build && s.build.dockerfile) ? String(s.build.dockerfile) : '';
       const dfPathHtml = dfPath ? ` <code style="color:var(--sys-cont-neutral-default)">${escapeHtml(dfPath)}</code>` : '';
@@ -140,14 +141,10 @@
       h = h.replace(/^(\s*(?:ARG|ENV)\s+)([A-Za-z_][A-Za-z0-9_]*)/gm, '$1<span style="color:var(--sys-cont-primary-default);font-weight:600">$2</span>');
       return h;
     }
-    function wireBuildArgsSave(container, root) {   // ⓘ 모달 저장 — build args/pre-build. 변경 없으면 저장 버튼 비활성(형 제안)
+    function wireBuildArgsSave(container, root) {   // ⓘ 모달 저장 — build args. 변경 없으면 저장 버튼 비활성
       const wireDirty = (btn) => {   // 초기 비활성(저장할 변경 없음) — 대상 편집하면 활성
         const ta = document.getElementById(btn.dataset.target);
         if (ta) { btn.disabled = true; ta.addEventListener('input', () => { btn.disabled = false; }); }
-      };
-      const enableSave = (sel, targetId) => {   // 제안/후보 클릭 등 프로그램적 변경 후 해당 저장 버튼 활성화
-        const sb = container.querySelector(sel + '[data-target="' + targetId + '"]');
-        if (sb) sb.disabled = false;
       };
       container.querySelectorAll('.ba-save').forEach(btn => {
         wireDirty(btn);
@@ -167,25 +164,6 @@
             btn.textContent = ok ? '✓ 저장됨 (다음 시작/재시작 적용)' : ('실패: ' + ((r && r.error) || '?'));
           } catch (e) { btn.textContent = '실패: ' + String((e && e.message) || e); }
           setTimeout(() => { btn.textContent = orig; btn.disabled = ok; }, 2600);   // 성공=깨끗(비활성)·실패=재시도(활성)
-        };
-      });
-      container.querySelectorAll('.pb-suggest').forEach(btn => {
-        btn.onclick = () => { const inp = document.getElementById(btn.dataset.target); if (inp) { inp.value = btn.dataset.cmd; enableSave('.pb-save', btn.dataset.target); } };
-      });
-      container.querySelectorAll('.pb-save').forEach(btn => {
-        wireDirty(btn);
-        btn.onclick = async () => {
-          const subrepo = btn.dataset.subrepo;
-          const inp = document.getElementById(btn.dataset.target);
-          const command = ((inp && inp.value) || '').trim();
-          const orig = btn.textContent; btn.disabled = true; btn.textContent = '저장 중…';
-          let ok = false;
-          try {
-            const resp = await fetch('/api/compose-prebuild', {method: 'POST', headers: {'content-type': 'application/json'}, body: JSON.stringify({root, subrepo, command})});
-            const r = await resp.json(); ok = !!(r && r.ok);
-            btn.textContent = ok ? '✓ 저장됨 (다음 시작 시 up 전 실행)' : ('실패: ' + ((r && r.error) || '?'));
-          } catch (e) { btn.textContent = '실패: ' + String((e && e.message) || e); }
-          setTimeout(() => { btn.textContent = orig; btn.disabled = ok; }, 2600);
         };
       });
       container.querySelectorAll('.pv-save').forEach(btn => {   // ⚙️ profile 저장 → /api/compose-service-profile
