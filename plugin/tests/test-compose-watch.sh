@@ -212,4 +212,19 @@ while IFS= read -r p; do
   [[ -z "$p" ]] || ! kill -0 "$p" 2>/dev/null || { echo "FAIL: late watcher survived concurrent stop --all"; exit 1; }
 done < "$WATCH_PIDS"
 
+# A service stop also supersedes an older start before it can replace the project watcher.
+rm -f "$WATCH_UP_BARRIER"
+: > "$WATCH_PIDS"
+WATCH_DELAY_UP=1 mrun start --web >/dev/null &
+slow_service_start_job=$!
+for _ in $(seq 1 50); do [[ -e "$WATCH_UP_BARRIER" ]] && break; sleep 0.1; done
+[[ -e "$WATCH_UP_BARRIER" ]] || { echo "FAIL: service-stop barrier not reached"; exit 1; }
+DOCKER_RUNNING_SERVICES=be mrun stop --web >/dev/null
+wait "$slow_service_start_job"
+sleep 0.2
+[[ ! -e "$WATCH_PID_FILE" ]] || { echo "FAIL: start spawned watcher after concurrent service stop"; exit 1; }
+while IFS= read -r p; do
+  [[ -z "$p" ]] || ! kill -0 "$p" 2>/dev/null || { echo "FAIL: late watcher survived concurrent service stop"; exit 1; }
+done < "$WATCH_PIDS"
+
 echo "PASS test-compose-watch"
