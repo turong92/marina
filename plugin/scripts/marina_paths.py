@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from marina_state import CONFIG_DEFAULTS, _env, _session_id_cache
 from marina_registry import is_source_checkout, project_for
 
 _log_allocation_lock = threading.Lock()
+_active_log_fds: dict[str, int] = {}
 
 def session_id(root: Path) -> str:
     # marina.sh session_id() 와 동일 규칙. codex 레이아웃은 <id>/<projectBasename> → 부모명,
@@ -130,10 +132,57 @@ def log_run_payload(root: Path, service: str) -> list[dict[str, str]]:
         runs.append({"id": path.name, "label": label})
     return runs
 
-def next_log_path(root: Path, service: str) -> Path:
-    directory = log_dir(root, service)
-    directory.mkdir(parents=True, exist_ok=True)
+def _active_log_path(path: Path) -> Path:
+    return path.with_suffix(".active")
+
+
+def _active_log_key(path: Path) -> str:
+    return str(path.absolute())
+
+
+def _log_is_active(path: Path) -> bool:
+    marker = _active_log_path(path)
+    if _active_log_key(path) in _active_log_fds:
+        return True
+    try:
+        fd = os.open(marker, os.O_RDWR)
+    except FileNotFoundError:
+        return False
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        marker.unlink(missing_ok=True)
+        return False
+    finally:
+        os.close(fd)
+
+
+def _prune_log_runs(directory: Path, keep: int, preserve: Path | None = None) -> None:
+    if keep <= 0:
+        return
+
+    def run_seq(path: Path) -> int:
+        match = re.search(r"run-(\d+)\.log", path.name)
+        return int(match.group(1)) if match else 0
+
+    runs = sorted(directory.glob("run-*.log"), key=run_seq)
+    excess = max(0, len(runs) - keep)
+    for old in runs:
+        if excess <= 0:
+            break
+        if old == preserve or _log_is_active(old):
+            continue
+        old.unlink(missing_ok=True)
+        old.with_suffix(".meta.json").unlink(missing_ok=True)
+        excess -= 1
+
+
+@contextmanager
+def _locked_log_sequence(root: Path, service: str):
     seq_path = session_dir(root) / f"{service}.seq"
+    seq_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = seq_path.with_suffix(seq_path.suffix + ".lock")
     lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
@@ -141,49 +190,70 @@ def next_log_path(root: Path, service: str) -> Path:
         with _log_allocation_lock:
             fcntl.flock(lock_fd, fcntl.LOCK_EX)
             try:
-                try:
-                    seq = int(seq_path.read_text().strip())
-                except Exception:
-                    seq = 0
-                while True:
-                    seq += 1
-                    path = directory / f"run-{seq:03d}.log"
-                    try:
-                        path.touch(exist_ok=False)
-                        break
-                    except FileExistsError:
-                        continue
-                seq_tmp = seq_path.with_name(f".{seq_path.name}.{os.getpid()}.{time.time_ns()}")
-                try:
-                    seq_tmp.write_text(f"{seq:03d}\n", encoding="utf-8")
-                    os.replace(seq_tmp, seq_path)
-                finally:
-                    seq_tmp.unlink(missing_ok=True)
-
-                current = service_log(root, service)
-                current_tmp = current.with_name(f".{current.name}.{os.getpid()}.{time.time_ns()}")
-                try:
-                    current_tmp.symlink_to(path)
-                    os.replace(current_tmp, current)
-                finally:
-                    current_tmp.unlink(missing_ok=True)
-
-                keep = int(_env("LOG_KEEP", "10"))
-                if keep > 0:
-                    # 사전순은 run-1000 < run-999 로 역전 → 숫자 키 정렬
-                    def run_seq(p: Path) -> int:
-                        match = re.search(r"run-(\d+)\.log", p.name)
-                        return int(match.group(1)) if match else 0
-
-                    for old in sorted(directory.glob("run-*.log"), key=run_seq)[:-keep]:
-                        if old != path:
-                            old.unlink(missing_ok=True)
-                            old.with_suffix(".meta.json").unlink(missing_ok=True)
-                return path
+                yield seq_path
             finally:
                 fcntl.flock(lock_fd, fcntl.LOCK_UN)
     finally:
         os.close(lock_fd)
+
+
+def next_log_path(root: Path, service: str, active: bool = False) -> Path:
+    directory = log_dir(root, service)
+    directory.mkdir(parents=True, exist_ok=True)
+    with _locked_log_sequence(root, service) as seq_path:
+        try:
+            seq = int(seq_path.read_text().strip())
+        except Exception:
+            seq = 0
+        while True:
+            seq += 1
+            path = directory / f"run-{seq:03d}.log"
+            try:
+                path.touch(exist_ok=False)
+                break
+            except FileExistsError:
+                continue
+        seq_tmp = seq_path.with_name(f".{seq_path.name}.{os.getpid()}.{time.time_ns()}")
+        try:
+            seq_tmp.write_text(f"{seq:03d}\n", encoding="utf-8")
+            os.replace(seq_tmp, seq_path)
+        finally:
+            seq_tmp.unlink(missing_ok=True)
+
+        current = service_log(root, service)
+        current_tmp = current.with_name(f".{current.name}.{os.getpid()}.{time.time_ns()}")
+        try:
+            current_tmp.symlink_to(path)
+            os.replace(current_tmp, current)
+        finally:
+            current_tmp.unlink(missing_ok=True)
+
+        _prune_log_runs(directory, int(_env("LOG_KEEP", "10")), preserve=path)
+        if active:
+            marker = _active_log_path(path)
+            active_fd = os.open(marker, os.O_CREAT | os.O_RDWR, 0o600)
+            try:
+                os.chmod(marker, 0o600)
+                fcntl.flock(active_fd, fcntl.LOCK_EX)
+                _active_log_fds[_active_log_key(path)] = active_fd
+            except Exception:
+                os.close(active_fd)
+                marker.unlink(missing_ok=True)
+                raise
+        return path
+
+
+def finish_log_path(root: Path, service: str, path: Path) -> None:
+    path = Path(path)
+    with _locked_log_sequence(root, service):
+        active_fd = _active_log_fds.pop(_active_log_key(path), None)
+        if active_fd is not None:
+            try:
+                fcntl.flock(active_fd, fcntl.LOCK_UN)
+            finally:
+                os.close(active_fd)
+            _active_log_path(path).unlink(missing_ok=True)
+        _prune_log_runs(log_dir(root, service), int(_env("LOG_KEEP", "10")), preserve=path)
 
 def ensure_current_log(root: Path, service: str) -> Path:
     current = service_log(root, service)

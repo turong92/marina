@@ -78,8 +78,9 @@ Run: `bash plugin/tests/test-build-log.sh && bash plugin/tests/test-build-summar
 Write `pending` in the running meta. After external attach, prebuild, and links are prepared, have `marina-compose.py` write
 the snapshot immediately before its Compose `up` subprocess using the already resolved config and effective build args.
 Run collection in a child with a 500ms deadline so a stalled directory walk cannot block Compose submission. Atomically
-allocate concurrent build run/handoff paths. The parent consumes and removes the 0600 handoff file; missing, timed-out,
-or failed handoff becomes only `{version: 1, status: "unknown"}`.
+allocate concurrent build run/handoff paths and hold an active file lock until each lifecycle ends so retention never
+deletes an open run. The parent consumes and removes the 0600 handoff file; missing, timed-out, or failed handoff becomes
+only `{version: 1, status: "unknown"}`.
 
 - [x] **Step 4: Compare nearest previous run**
 

@@ -204,9 +204,9 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
     실패 시 500자)로 사라지지 않고 per-session 'build' 로그 run 에 실린다(대시보드 /api/logs 재사용).
     실패 시 CalledProcessError(output=파일 끝 4KB) — busyError 500자 계약 유지."""
     from marina_build import write_build_meta
-    from marina_paths import next_log_path
+    from marina_paths import finish_log_path, next_log_path
 
-    log_path = next_log_path(root, "build")
+    log_path = next_log_path(root, "build", active=True)
     env = marina_env(root)
     if extra_env:
         env.update(extra_env)
@@ -225,10 +225,10 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
         "startedAt": started_at,
         "inputs": {"version": 1, "status": "pending"},
     }
-    write_build_meta(log_path, meta)
     rc = None
     timed_out = False
     try:
+        write_build_meta(log_path, meta)
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(f"$ marina {' '.join(args)}\n")
             fh.flush()
@@ -263,7 +263,10 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
         }
         if rc is not None:
             final["exitCode"] = rc
-        write_build_meta(log_path, final)
+        try:
+            write_build_meta(log_path, final)
+        finally:
+            finish_log_path(root, "build", log_path)
     if rc != 0:
         tail = ""
         try:

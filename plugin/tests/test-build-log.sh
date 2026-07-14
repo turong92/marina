@@ -64,8 +64,13 @@ assert not mb.build_meta_path(success_log).exists(), mb.build_meta_path(success_
 concurrent_root = Path(sys.argv[2]) / "concurrent"; concurrent_root.mkdir()
 mp._session_id_cache[str(concurrent_root)] = "main"
 with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
-    allocated = list(pool.map(lambda _: mp.next_log_path(concurrent_root, "build"), range(32)))
+    allocated = list(pool.map(lambda _: mp.next_log_path(concurrent_root, "build", active=True), range(32)))
 assert len(set(allocated)) == len(allocated), allocated
+assert all(path.exists() for path in allocated), allocated
+for path in allocated:
+    mp.finish_log_path(concurrent_root, "build", path)
+assert len(list(mp.log_dir(concurrent_root, "build").glob("run-*.log"))) == 1
+assert not list(mp.log_dir(concurrent_root, "build").glob("run-*.active"))
 # log_targets_for 에 build 포함 (비 compose 폴백 경로)
 import marina_sessions as ms
 ms.project_for = lambda r: None

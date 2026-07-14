@@ -22,7 +22,8 @@ Build Timeline이 시간과 cache hit/miss뿐 아니라 이전 Marina build run 
 이미 해석한 Compose config와 실제 `--build-arg`를 재사용해 config를 중복 조회하지 않으며, 0600 임시 handoff
 파일을 통해 build run `.meta.json`에 저장한다. 실행 중 meta에는 `pending`만 둔다. 수집은 별도 자식
 프로세스에서 최대 500ms만 수행하며, 제한을 넘으면 `unknown`으로 기록하고 Compose 제출을 계속한다.
-동시 lifecycle 요청의 build run과 handoff 경로는 프로세스 내부 mutex와 파일 락으로 원자 할당한다.
+동시 lifecycle 요청의 build run과 handoff 경로는 프로세스 내부 mutex와 파일 락으로 원자 할당한다. 실행 중
+run은 OS가 소유한 active 파일 락으로 표시해 보존 개수가 작아도 완료 전에는 정리하지 않는다.
 
 - Compose `services.<name>.build.dockerfile`
 - Compose `services.<name>.develop.watch` 중 `action: rebuild`인 path
@@ -61,6 +62,7 @@ build arg 원문은 로그, meta, API 어디에도 저장하지 않는다. `~/.m
 
 - 순수 단위 테스트: Dockerfile, rebuild path, build arg의 added/changed/removed와 secret 비노출.
 - build log 테스트: run meta에 입력이 기록되고 이전 run 이유가 summary에 합쳐짐.
-- 동시성/시간 제한 테스트: 병렬 lifecycle run 경로는 고유하고 정체된 입력 순회는 Compose 제출을 막지 않음.
+- 동시성/시간 제한 테스트: 병렬 lifecycle run 경로는 고유하고 실행 중에는 보존되며, 정체된 입력 순회는
+  Compose 제출을 막지 않음.
 - API 테스트: 이유만 반환하고 digest, HMAC, secret은 반환하지 않음.
 - UI 정적 테스트와 Aside: build 로그 선택 시 요약/접기, 좁은 viewport, light/dark 확인.
