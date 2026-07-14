@@ -18,7 +18,7 @@ import importlib.util as _ilu
 
 from marina_state import MARINA_SCRIPT, MARINA_HOME, _mc
 from marina_registry import external_repos_for, source_root_for, subrepos_of, project_for
-from marina_build_inputs import capture_build_inputs
+from marina_build_inputs import read_build_input_snapshot
 
 def script(root: Path) -> Path:
     # 런처는 이 레포의 전역 marina.sh — worktree 위치와 무관 (구 SCRIPT_REL = 워크스페이스 내부 사본 탐색 제거).
@@ -210,6 +210,12 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
     env = marina_env(root)
     if extra_env:
         env.update(extra_env)
+    snapshot_path = log_path.with_suffix(".inputs.json")
+    try:
+        snapshot_path.unlink()
+    except FileNotFoundError:
+        pass
+    env["MARINA_BUILD_INPUT_SNAPSHOT"] = str(snapshot_path)
     argv = [str(script(root)), *args]
     started_at = time.time()
     op = args[0] if args else ""
@@ -243,10 +249,11 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
                 raise
     finally:
         ended_at = time.time()
+        inputs = read_build_input_snapshot(snapshot_path)
         try:
-            inputs = capture_build_inputs(root, tuple(args), env)
-        except Exception:
-            inputs = {"version": 1, "status": "unknown"}
+            snapshot_path.unlink()
+        except FileNotFoundError:
+            pass
         final = {
             **meta,
             "status": "timeout" if timed_out else ("success" if rc == 0 else "failed"),

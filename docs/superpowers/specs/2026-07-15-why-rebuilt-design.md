@@ -17,9 +17,10 @@ Build Timeline이 시간과 cache hit/miss뿐 아니라 이전 Marina build run 
 
 ## 입력 모델
 
-대시보드가 `start`, `restart`, `rebuild` lifecycle을 실행한 직후 선택 서비스의 입력 스냅샷을 build run
-`.meta.json`에 저장한다. lifecycle이 먼저 external worktree attach와 link/prebuild 준비를 적용하므로 실제 build가
-본 입력을 기록하며, snapshot 계산은 서비스 기동의 시작을 지연하지 않는다. 실행 중 meta에는 `pending`만 둔다.
+대시보드가 `start`, `restart`, `rebuild` lifecycle을 실행할 때 external worktree attach와 link/prebuild 준비가
+끝난 뒤, `marina-compose.py`가 `docker compose up`을 호출하기 직전에 선택 서비스의 입력 스냅샷을 만든다.
+이미 해석한 Compose config와 실제 `--build-arg`를 재사용해 config를 중복 조회하지 않으며, 0600 임시 handoff
+파일을 통해 build run `.meta.json`에 저장한다. 실행 중 meta에는 `pending`만 둔다.
 
 - Compose `services.<name>.build.dockerfile`
 - Compose `services.<name>.develop.watch` 중 `action: rebuild`인 path

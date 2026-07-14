@@ -16,7 +16,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
-from marina_build_inputs import _load_key, build_input_snapshot, compare_build_inputs
+from marina_build_inputs import build_input_snapshot, compare_build_inputs, load_build_input_key
 
 root = Path(sys.argv[2])
 config = {
@@ -87,7 +87,7 @@ assert same == [{
 
 key_home = root / "key-home"
 with ThreadPoolExecutor(max_workers=8) as executor:
-    keys = list(executor.map(lambda _index: _load_key(key_home), range(8)))
+    keys = list(executor.map(lambda _index: load_build_input_key(key_home), range(8)))
 assert len(set(keys)) == 1, "concurrent key readers returned different keys"
 assert (key_home / "build-input.key.lock").is_file(), "key creation must use a process lock"
 print("build input assertions ok")

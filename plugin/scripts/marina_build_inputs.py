@@ -6,7 +6,6 @@ import hashlib
 import hmac
 import json
 import os
-import subprocess
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -165,7 +164,7 @@ def compare_build_inputs(
     return reasons
 
 
-def _load_key(home: Path) -> bytes:
+def load_build_input_key(home: Path) -> bytes:
     home.mkdir(parents=True, exist_ok=True)
     path = home / "build-input.key"
     lock_path = home / "build-input.key.lock"
@@ -198,79 +197,29 @@ def _load_key(home: Path) -> bytes:
         os.close(lock_fd)
 
 
-def _read_json(path: Path) -> dict[str, Any]:
+def write_build_input_snapshot(path: Path, payload: dict[str, Any]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def _env_file_args(root: Path, source: Path, mapping: Any) -> dict[str, dict[str, str]]:
-    result: dict[str, dict[str, str]] = {}
-    if not isinstance(mapping, dict):
-        return result
-    for service, rel in mapping.items():
-        if not service or not isinstance(rel, str) or not rel.strip():
-            continue
-        path = next((base / rel for base in (root, source) if (base / rel).is_file()), None)
-        if path is None:
-            continue
-        values: dict[str, str] = {}
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+        os.replace(tmp, path)
+        os.chmod(path, 0o600)
+    finally:
         try:
-            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        except OSError:
-            continue
-        for line in lines:
-            text = line.strip()
-            if not text or text.startswith("#"):
-                continue
-            if text.startswith("export "):
-                text = text[7:].strip()
-            name, separator, value = text.partition("=")
-            name = name.strip()
-            value = value.strip().strip('"').strip("'")
-            if separator and name and not value.startswith("$"):
-                values[name] = value
-        if values:
-            result[str(service)] = values
-    return result
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
-def capture_build_inputs(root: Path, args: tuple[str, ...], env: dict[str, str]) -> dict[str, Any]:
-    """Resolve the same project Compose inputs used by a dashboard lifecycle run."""
-    from marina_registry import project_for, source_root_for
-    from marina_state import MARINA_HOME, _bin, _mc
-
-    root = Path(root).resolve()
-    project = project_for(root)
-    if not project:
-        raise ValueError("registered project not found")
-    project_id = str(project["id"])
-    stored = MARINA_HOME / project_id / project.get("composeFile", "docker-compose.yml")
-    compose_env = dict(env)
-    env_name = str(project.get("composeEnvVar") or "")
-    if env_name:
-        compose_env[env_name] = env.get("MARINA_COMPOSE_ENV", str(project.get("composeEnvDefault") or "local"))
-    proc = subprocess.run(
-        [_bin("docker"), "compose", "-f", str(stored), "--project-directory", str(root),
-         "config", "--format", "json"],
-        capture_output=True,
-        text=True,
-        env=compose_env,
-        timeout=15,
-    )
-    if proc.returncode != 0:
-        raise ValueError((proc.stderr or proc.stdout or "docker compose config failed")[:500])
-    config = json.loads(proc.stdout)
-    mc = _mc()
-    xmarina = mc.xmarina_for_stored(str(stored))
-    requested = [token[2:] for token in args[1:] if token.startswith("--") and token != "--all"]
-    selected, _skipped, _unknown = mc.resolved_start_targets(config, xmarina, requested)
-    local_args = _read_json(MARINA_HOME / project_id / "build-args.json")
-    source = source_root_for(root).resolve()
-    for service, values in _env_file_args(root, source, xmarina.get("buildArgsFrom")).items():
-        existing = local_args.setdefault(service, {})
-        if isinstance(existing, dict):
-            existing.update(values)
-    return build_input_snapshot(root, config, selected, local_args, _load_key(MARINA_HOME))
+def read_build_input_snapshot(path: Path) -> dict[str, Any]:
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {"version": 1, "status": "unknown"}
+    if not isinstance(value, dict) or value.get("status") != "ok" or not isinstance(value.get("services"), dict):
+        return {"version": 1, "status": "unknown"}
+    return {"version": 1, "status": "ok", "services": value["services"]}

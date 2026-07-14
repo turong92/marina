@@ -20,10 +20,12 @@ from pathlib import Path
 
 try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로드(테스트)에서도 sibling 해석되게.
     from marina_dockerfile import is_profile_var
+    from marina_build_inputs import build_input_snapshot, load_build_input_key, write_build_input_snapshot
     import marina_prebuild
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from marina_dockerfile import is_profile_var
+    from marina_build_inputs import build_input_snapshot, load_build_input_key, write_build_input_snapshot
     import marina_prebuild
 
 
@@ -799,6 +801,23 @@ def _show_ports(project_name):
             print("  " + svc + "=" + ",".join(str(p) for p in ports[svc]))
 
 
+def _capture_build_input_handoff(a, config, requested, build_args):
+    path = os.environ.get("MARINA_BUILD_INPUT_SNAPSHOT", "").strip()
+    if not path:
+        return
+    try:
+        home = Path(os.environ.get("MARINA_HOME") or (Path.home() / ".marina"))
+        payload = build_input_snapshot(
+            Path(a.project_dir), config, requested, build_args, load_build_input_key(home)
+        )
+    except Exception:
+        payload = {"version": 1, "status": "unknown"}
+    try:
+        write_build_input_snapshot(Path(path), payload)
+    except OSError:
+        pass
+
+
 def cmd_up(a):
     env = _env_with(a.env)                                          # P1: env first
     name = compose_project_name(a.project_id, a.session)
@@ -855,7 +874,8 @@ def cmd_up(a):
                              for k, sv in (config.get("services") or {}).items() if (sv or {}).get("ports")]
             exp_env = resolve_expose_env(gw_gateway.get("expose") or {}, a.session, a.project_id, gwport,
                                          snap_services, gw_mod, primary=str(gw_gateway.get("primary") or ""))
-        overlay_text = build_overlay(config, build_args=_parse_build_args(getattr(a, "build_arg", [])),
+        build_args = _parse_build_args(getattr(a, "build_arg", []))
+        overlay_text = build_overlay(config, build_args=build_args,
                                      connectivity=overlay_conn, expose_env=exp_env)  # P2/P3/P4 + build args + 엮기 + expose
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
@@ -892,6 +912,7 @@ def cmd_up(a):
                 for svc in requested
                 if (svc_cfg.get(svc) or {}).get("build") and _forward_for_service(forward, svc, _served_ports(svc_cfg.get(svc) or {}))]
     argv = up_argv(a.stored, op, a.project_dir, name, requested + sidecars, build=bool(a.build))
+    _capture_build_input_handoff(a, config, requested, build_args)
     print("compose: " + " ".join(argv))
     rc = subprocess.call(argv, env=env)                            # P1: same env to up
     if rc == 0:

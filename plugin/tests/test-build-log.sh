@@ -16,20 +16,16 @@ import marina_paths as mp
 marker = root / "lifecycle-finished"
 runner = root / "fake-marina.sh"
 runner.write_text(
-    '#!/bin/sh\ntouch "$PWD/lifecycle-finished"\nprintf "%s\\n" "$*"\n',
+    """#!/bin/sh
+printf '%s\\n' '{"version":1,"status":"ok","services":{"api":{"dockerfile":{"api/Dockerfile":"file:one"},"rebuild":{},"buildArgs":{}}}}' > "$MARINA_BUILD_INPUT_SNAPSHOT"
+touch "$PWD/lifecycle-finished"
+printf '%s\\n' "$*"
+""",
     encoding="utf-8",
 )
 runner.chmod(0o755)
 mc.script = lambda r: runner
 mc.marina_env = lambda r: os.environ.copy()
-def capture_after_lifecycle(r, args, env):
-    assert marker.exists(), "snapshot must run after lifecycle preparation and execution"
-    return {
-        "version": 1,
-        "status": "ok",
-        "services": {"api": {"dockerfile": {"api/Dockerfile": "file:one"}, "rebuild": {}, "buildArgs": {}}},
-    }
-mc.capture_build_inputs = capture_after_lifecycle
 mc._marina_cli_logged(root, "start", "--all", timeout=30)
 log = mp.service_log(root, "build")
 text = Path(log).read_text()
@@ -45,10 +41,8 @@ assert success_meta["exitCode"] == 0, success_meta
 assert success_meta["endedAt"] >= success_meta["startedAt"], success_meta
 assert success_meta["durationSec"] >= 0, success_meta
 assert success_meta["inputs"]["services"]["api"]["dockerfile"], success_meta
-# Snapshot failures are best-effort, but their raw stderr may contain secrets.
-mc.capture_build_inputs = lambda r, args, env: (_ for _ in ()).throw(
-    ValueError("TOKEN=must-not-reach-build-meta")
-)
+assert marker.exists(), marker
+assert not success_log.with_suffix(".inputs.json").exists(), "snapshot handoff file must be removed"
 # 실패 경로 — rc!=0 → CalledProcessError(output=파일 끝) → busyError 500자 계약 유지 가능
 os.environ["MARINA_LOG_KEEP"] = "1"
 mc.script = lambda r: Path("/usr/bin/false")
@@ -63,7 +57,7 @@ assert failure_meta["status"] == "failed", failure_meta
 assert failure_meta["op"] == "start", failure_meta
 assert failure_meta["exitCode"] != 0, failure_meta
 assert failure_meta["inputs"] == {"version": 1, "status": "unknown"}, failure_meta
-assert "must-not-reach-build-meta" not in str(failure_meta), failure_meta
+assert not failure_log.with_suffix(".inputs.json").exists(), "failed snapshot handoff file must be removed"
 assert not success_log.exists(), success_log
 assert not mb.build_meta_path(success_log).exists(), mb.build_meta_path(success_log)
 # log_targets_for 에 build 포함 (비 compose 폴백 경로)

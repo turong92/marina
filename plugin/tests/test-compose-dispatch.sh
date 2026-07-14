@@ -15,11 +15,15 @@ case "$*" in
   info) exit 0 ;;
   *"config --format json"*) echo "APP_ENV_AT_CONFIG=${APP_ENV:-MISSING}" >> "$DOCKER_LOG"; cat "$DOCKER_CONFIG_FIXTURE" ;;
   *"ps --format json"*) cat "$DOCKER_PS_FIXTURE" ;;
+  *"up -d"*)
+    [[ -s "${MARINA_BUILD_INPUT_SNAPSHOT:-}" ]] || { echo "snapshot missing before compose up" >&2; exit 23; }
+    rm -f "$MARINA_BUILD_INPUT_SNAPSHOT" ;;
   *) exit 0 ;;
 esac
 EOF
 chmod +x "$TMP/bin/docker"
 export PATH="$TMP/bin:$PATH" DOCKER_LOG="$TMP/docker.log" DOCKER_CONFIG_FIXTURE="$TMP/cfg.json" DOCKER_PS_FIXTURE="$TMP/ps.json"; : > "$DOCKER_LOG"
+export MARINA_BUILD_INPUT_SNAPSHOT="$TMP/build-inputs.json"
 cat > "$TMP/cfg.json" <<'JSON'
 {"services":{
   "web":{"image":"nginx","ports":[{"target":80,"published":"3000","protocol":"tcp"}]},
