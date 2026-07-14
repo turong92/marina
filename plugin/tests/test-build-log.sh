@@ -6,7 +6,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export MARINA_HOME="$TMP/home"
 python3 - "$HERE/../scripts" "$TMP" <<'PY'
-import os, subprocess, sys
+import concurrent.futures, os, subprocess, sys
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
 root = Path(sys.argv[2]) / "proj"; root.mkdir()
@@ -60,6 +60,12 @@ assert failure_meta["inputs"] == {"version": 1, "status": "unknown"}, failure_me
 assert not failure_log.with_suffix(".inputs.json").exists(), "failed snapshot handoff file must be removed"
 assert not success_log.exists(), success_log
 assert not mb.build_meta_path(success_log).exists(), mb.build_meta_path(success_log)
+# Concurrent lifecycle requests must receive distinct build runs and handoff paths.
+concurrent_root = Path(sys.argv[2]) / "concurrent"; concurrent_root.mkdir()
+mp._session_id_cache[str(concurrent_root)] = "main"
+with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+    allocated = list(pool.map(lambda _: mp.next_log_path(concurrent_root, "build"), range(32)))
+assert len(set(allocated)) == len(allocated), allocated
 # log_targets_for 에 build 포함 (비 compose 폴백 경로)
 import marina_sessions as ms
 ms.project_for = lambda r: None

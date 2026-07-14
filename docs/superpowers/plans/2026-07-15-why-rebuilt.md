@@ -6,6 +6,7 @@
 
 **Architecture:** `marina_build_inputs.py`가 Compose 기반 입력 snapshot과 순수 비교를 소유한다. `marina-compose.py`가
 준비 완료 후 `docker compose up` 직전에 이미 해석한 config로 snapshot을 만들고 lifecycle logger에 handoff한다.
+수집은 500ms 제한 자식 프로세스에서 best-effort로 수행하고 build run/handoff 경로는 동시 요청에도 원자 할당한다.
 `marina_build.py`는 서비스별 가장 가까운 과거 snapshot과 비교해 reasons만 summary에 추가한다.
 API는 기존 redaction 경계에서 reasons를 전달하고 UI는 한 줄 요약과 접이식 상세를 렌더한다.
 
@@ -76,7 +77,9 @@ Run: `bash plugin/tests/test-build-log.sh && bash plugin/tests/test-build-summar
 
 Write `pending` in the running meta. After external attach, prebuild, and links are prepared, have `marina-compose.py` write
 the snapshot immediately before its Compose `up` subprocess using the already resolved config and effective build args.
-The parent consumes and removes the 0600 handoff file; missing/failed handoff becomes only `{version: 1, status: "unknown"}`.
+Run collection in a child with a 500ms deadline so a stalled directory walk cannot block Compose submission. Atomically
+allocate concurrent build run/handoff paths. The parent consumes and removes the 0600 handoff file; missing, timed-out,
+or failed handoff becomes only `{version: 1, status: "unknown"}`.
 
 - [x] **Step 4: Compare nearest previous run**
 

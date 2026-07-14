@@ -1,5 +1,6 @@
 """marina_paths.py — marina-control.py 에서 분리(레이어드). 동작 변경 0."""
 from __future__ import annotations
+import fcntl
 import glob
 import json
 import os
@@ -9,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -18,6 +20,8 @@ import importlib.util as _ilu
 
 from marina_state import CONFIG_DEFAULTS, _env, _session_id_cache
 from marina_registry import is_source_checkout, project_for
+
+_log_allocation_lock = threading.Lock()
 
 def session_id(root: Path) -> str:
     # marina.sh session_id() 와 동일 규칙. codex 레이아웃은 <id>/<projectBasename> → 부모명,
@@ -130,31 +134,56 @@ def next_log_path(root: Path, service: str) -> Path:
     directory = log_dir(root, service)
     directory.mkdir(parents=True, exist_ok=True)
     seq_path = session_dir(root) / f"{service}.seq"
+    lock_path = seq_path.with_suffix(seq_path.suffix + ".lock")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        seq = int(seq_path.read_text().strip())
-    except Exception:
-        seq = 0
-    seq += 1
-    seq_path.write_text(f"{seq:03d}\n", encoding="utf-8")
-    path = directory / f"run-{seq:03d}.log"
-    path.write_text("", encoding="utf-8")
+        os.chmod(lock_path, 0o600)
+        with _log_allocation_lock:
+            fcntl.flock(lock_fd, fcntl.LOCK_EX)
+            try:
+                try:
+                    seq = int(seq_path.read_text().strip())
+                except Exception:
+                    seq = 0
+                while True:
+                    seq += 1
+                    path = directory / f"run-{seq:03d}.log"
+                    try:
+                        path.touch(exist_ok=False)
+                        break
+                    except FileExistsError:
+                        continue
+                seq_tmp = seq_path.with_name(f".{seq_path.name}.{os.getpid()}.{time.time_ns()}")
+                try:
+                    seq_tmp.write_text(f"{seq:03d}\n", encoding="utf-8")
+                    os.replace(seq_tmp, seq_path)
+                finally:
+                    seq_tmp.unlink(missing_ok=True)
 
-    current = service_log(root, service)
-    current.unlink(missing_ok=True)
-    current.symlink_to(path)
+                current = service_log(root, service)
+                current_tmp = current.with_name(f".{current.name}.{os.getpid()}.{time.time_ns()}")
+                try:
+                    current_tmp.symlink_to(path)
+                    os.replace(current_tmp, current)
+                finally:
+                    current_tmp.unlink(missing_ok=True)
 
-    keep = int(_env("LOG_KEEP", "10"))
-    if keep > 0:
-        # 사전순은 run-1000 < run-999 로 역전 → 숫자 키 정렬
-        def run_seq(p: Path) -> int:
-            match = re.search(r"run-(\d+)\.log", p.name)
-            return int(match.group(1)) if match else 0
+                keep = int(_env("LOG_KEEP", "10"))
+                if keep > 0:
+                    # 사전순은 run-1000 < run-999 로 역전 → 숫자 키 정렬
+                    def run_seq(p: Path) -> int:
+                        match = re.search(r"run-(\d+)\.log", p.name)
+                        return int(match.group(1)) if match else 0
 
-        for old in sorted(directory.glob("run-*.log"), key=run_seq)[:-keep]:
-            if old != path:
-                old.unlink(missing_ok=True)
-                old.with_suffix(".meta.json").unlink(missing_ok=True)
-    return path
+                    for old in sorted(directory.glob("run-*.log"), key=run_seq)[:-keep]:
+                        if old != path:
+                            old.unlink(missing_ok=True)
+                            old.with_suffix(".meta.json").unlink(missing_ok=True)
+                return path
+            finally:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+    finally:
+        os.close(lock_fd)
 
 def ensure_current_log(root: Path, service: str) -> Path:
     current = service_log(root, service)

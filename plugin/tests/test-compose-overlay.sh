@@ -29,7 +29,7 @@ echo '{"services":{"a":{"ports":[{"target":"8080-8090","published":"8080"}]}}}' 
 
 # isolation breakers + build_overlay 중화 + ps parse — 함수 직접
 python3 - "$CP" "$TMP" <<'PY'
-import importlib.util, sys, os, json
+import importlib.util, sys, os, json, time
 from types import SimpleNamespace
 spec=importlib.util.spec_from_file_location("mc", sys.argv[1]); mc=importlib.util.module_from_spec(spec); spec.loader.exec_module(mc)
 T=sys.argv[2]
@@ -67,6 +67,20 @@ raw=open(handoff,encoding="utf-8").read(); captured=json.loads(raw)
 assert "must-not-reach-handoff" not in raw, raw
 assert captured["services"]["web"]["buildArgs"]["TOKEN"], captured
 assert os.stat(handoff).st_mode & 0o777 == 0o600, oct(os.stat(handoff).st_mode)
+# A stalled rebuild-path scan is best-effort: bound it and let Compose proceed
+# with an unknown snapshot rather than consuming the lifecycle timeout.
+original_snapshot=mc.build_input_snapshot
+mc.BUILD_INPUT_CAPTURE_TIMEOUT_SEC=0.05
+def stalled_snapshot(*args, **kwargs):
+    time.sleep(0.75)
+    return {"version":1,"status":"ok","services":{}}
+mc.build_input_snapshot=stalled_snapshot
+started=time.monotonic(); mc._capture_build_input_handoff(
+    SimpleNamespace(project_dir=T), {"services":{}}, [], {}
+); elapsed=time.monotonic()-started
+mc.build_input_snapshot=original_snapshot
+assert elapsed < 0.5, elapsed
+assert json.load(open(handoff,encoding="utf-8")) == {"version":1,"status":"unknown"}
 ps='[{"Service":"web","Publishers":[{"URL":"127.0.0.1","TargetPort":80,"PublishedPort":55001,"Protocol":"tcp"},{"PublishedPort":0}]},{"Service":"be","Publishers":[{"PublishedPort":55002}]}]'
 assert mc.parse_ps_ports(ps)=={"web":[55001],"be":[55002]}, mc.parse_ps_ports(ps)
 # 엮기 — _normalize_forward/_legacy_host_forward 상세는 test-compose-forward.sh 소관(중복 유지비 제거)

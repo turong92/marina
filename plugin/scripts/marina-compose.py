@@ -14,8 +14,10 @@ import argparse
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로드(테스트)에서도 sibling 해석되게.
@@ -801,14 +803,21 @@ def _show_ports(project_name):
             print("  " + svc + "=" + ",".join(str(p) for p in ports[svc]))
 
 
-def _capture_build_input_handoff(a, config, requested, build_args):
-    path = os.environ.get("MARINA_BUILD_INPUT_SNAPSHOT", "").strip()
-    if not path:
-        return
+BUILD_INPUT_CAPTURE_TIMEOUT_SEC = 0.5
+
+
+def _write_unknown_build_input_handoff(path):
+    try:
+        write_build_input_snapshot(Path(path), {"version": 1, "status": "unknown"})
+    except OSError:
+        pass
+
+
+def _write_build_input_handoff(path, project_dir, config, requested, build_args):
     try:
         home = Path(os.environ.get("MARINA_HOME") or (Path.home() / ".marina"))
         payload = build_input_snapshot(
-            Path(a.project_dir), config, requested, build_args, load_build_input_key(home)
+            Path(project_dir), config, requested, build_args, load_build_input_key(home)
         )
     except Exception:
         payload = {"version": 1, "status": "unknown"}
@@ -816,6 +825,50 @@ def _capture_build_input_handoff(a, config, requested, build_args):
         write_build_input_snapshot(Path(path), payload)
     except OSError:
         pass
+
+
+def _capture_build_input_handoff(a, config, requested, build_args):
+    path = os.environ.get("MARINA_BUILD_INPUT_SNAPSHOT", "").strip()
+    if not path:
+        return
+    try:
+        pid = os.fork()
+    except (AttributeError, OSError):
+        _write_unknown_build_input_handoff(path)
+        return
+    if pid == 0:
+        try:
+            _write_build_input_handoff(path, a.project_dir, config, requested, build_args)
+        finally:
+            os._exit(0)
+
+    deadline = time.monotonic() + BUILD_INPUT_CAPTURE_TIMEOUT_SEC
+    reaped = False
+    status = 1
+    try:
+        while time.monotonic() < deadline:
+            try:
+                waited, status = os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                reaped = True
+                status = 0 if Path(path).is_file() else 1
+                break
+            if waited == pid:
+                reaped = True
+                break
+            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+    finally:
+        if not reaped:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                _, status = os.waitpid(pid, 0)
+            except OSError:
+                pass
+    if not reaped or status != 0 or not Path(path).is_file():
+        _write_unknown_build_input_handoff(path)
 
 
 def cmd_up(a):

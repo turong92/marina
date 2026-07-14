@@ -20,7 +20,9 @@ Build Timeline이 시간과 cache hit/miss뿐 아니라 이전 Marina build run 
 대시보드가 `start`, `restart`, `rebuild` lifecycle을 실행할 때 external worktree attach와 link/prebuild 준비가
 끝난 뒤, `marina-compose.py`가 `docker compose up`을 호출하기 직전에 선택 서비스의 입력 스냅샷을 만든다.
 이미 해석한 Compose config와 실제 `--build-arg`를 재사용해 config를 중복 조회하지 않으며, 0600 임시 handoff
-파일을 통해 build run `.meta.json`에 저장한다. 실행 중 meta에는 `pending`만 둔다.
+파일을 통해 build run `.meta.json`에 저장한다. 실행 중 meta에는 `pending`만 둔다. 수집은 별도 자식
+프로세스에서 최대 500ms만 수행하며, 제한을 넘으면 `unknown`으로 기록하고 Compose 제출을 계속한다.
+동시 lifecycle 요청의 build run과 handoff 경로는 프로세스 내부 mutex와 파일 락으로 원자 할당한다.
 
 - Compose `services.<name>.build.dockerfile`
 - Compose `services.<name>.develop.watch` 중 `action: rebuild`인 path
@@ -50,7 +52,8 @@ build arg 원문은 로그, meta, API 어디에도 저장하지 않는다. `~/.m
 - automatic Compose Watch rebuild 로그 통합은 이번 범위 밖이다. 이 기능은 Marina 대시보드 lifecycle run을
   비교한다.
 - snapshot 수집은 best-effort다. Docker/Compose config 실패가 실제 lifecycle의 기존 오류 처리보다 먼저
-  빌드를 중단해서는 안 되며 오류 원문도 meta에 저장하지 않는다.
+  빌드를 중단해서는 안 되며, 디렉터리 순회가 500ms를 넘겨도 자식 수집 프로세스를 종료하고 오류 원문을
+  meta에 저장하지 않는다.
 - 선택 서비스와 `startGroup`, Compose dependency closure는 Marina lifecycle과 같은 해석 함수를 사용한다.
 - 이전 버전 meta에는 inputs가 없으므로 first-run으로 자연스럽게 호환한다.
 
@@ -58,5 +61,6 @@ build arg 원문은 로그, meta, API 어디에도 저장하지 않는다. `~/.m
 
 - 순수 단위 테스트: Dockerfile, rebuild path, build arg의 added/changed/removed와 secret 비노출.
 - build log 테스트: run meta에 입력이 기록되고 이전 run 이유가 summary에 합쳐짐.
+- 동시성/시간 제한 테스트: 병렬 lifecycle run 경로는 고유하고 정체된 입력 순회는 Compose 제출을 막지 않음.
 - API 테스트: 이유만 반환하고 digest, HMAC, secret은 반환하지 않음.
 - UI 정적 테스트와 Aside: build 로그 선택 시 요약/접기, 좁은 viewport, light/dark 확인.
