@@ -96,7 +96,8 @@
     /* Orca 문법 — 얇은 테두리(카드와 같은 톤) + 절제된 그림자(act-menu 와 동일 강도) */
     .register-panel { width: 680px; max-width: calc(100vw - 32px); max-height: calc(100vh - 48px); overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 12px; border: 1px solid var(--sys-style-neutral-light); border-radius: 12px; background: var(--sys-bg-surface); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
     /* compose 등록/편집 = 워크벤치 모드: 넓고 높이 고정, 패널은 스크롤 안 함(내부 좌 자리·우 rail·에디터만) */
-    .register-panel.workbench { width: min(1480px, calc(100vw - 32px)); height: min(90vh, 920px); max-height: none; overflow: hidden; }
+    /* 워크벤치 = 거의 전체화면(형 지시) — 위아래 12px만 남기고 꽉. 큰 모니터에선 cap 2000px 로 '섬' 방지, 형 1440 화면에선 이미 가로 max라 세로만 커짐. */
+    .register-panel.workbench { width: min(2000px, calc(100vw - 24px)); height: calc(100vh - 24px); max-height: none; overflow: hidden; }
     .register-panel.workbench .compose-section { flex: 1 1 auto; min-height: 0; margin-top: 0; }
     .compose-section { display: flex; flex-direction: row; gap: 16px; margin-top: 8px; align-items: stretch; }
     .compose-rail { flex: 0 0 300px; min-width: 0; display: flex; flex-direction: column; gap: 8px; min-height: 0; }
@@ -154,9 +155,27 @@
     /* 등록 워크벤치(M2 골격, R2) — 좌: 재료(M3)/marina 옵션(M4) 자리 · 우: 기존 compose 에디터(그대로 이동) · 하단: 검증+등록 바. 무테두리 Orca 톤. */
     .register-workbench { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; }
     .wb-body { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: row; gap: 16px; margin-top: 8px; }
-    .wb-left { flex: 0 0 240px; min-width: 0; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
+    /* 좌 = 재료/스캔(YAML 작성 보조)만 · 중앙 = compose 에디터 · 우 = marina 옵션 칼럼. 예전엔 좌 240px 에 옵션까지 다 욱여넣어 답답했다. */
+    .wb-left { flex: 0 0 280px; min-width: 0; display: flex; flex-direction: column; gap: 10px; overflow-y: auto; }
     .wb-placeholder { font-size: 12px; line-height: 1.5; color: var(--sys-cont-neutral-light); background: var(--sys-bg-base); border-radius: 8px; padding: 10px; }
-    .wb-right { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+    .wb-right { flex: 1 1 auto; min-width: 0; min-height: 0; display: flex; flex-direction: row; gap: 16px; }
+    .wb-right .compose-section { flex: 1 1 auto; min-width: 360px; }
+    /* 옵션 칼럼 — 넓은 화면에선 살짝 넓혀(clamp) 에디터가 과하게 넓어져 빈 공간이 나는 걸 완화 */
+    .wb-optcol { flex: 0 0 clamp(380px, 26vw, 560px); min-width: 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
+    /* 좁은 뷰포트(모달 ≈ 100vw-32) — 옵션 칼럼을 에디터 아래로 접어 세로 스택 */
+    @media (max-width: 1200px) {
+      .wb-right { flex-direction: column; }
+      .wb-right .compose-section { min-width: 0; }
+      .wb-optcol { flex: 0 0 auto; max-height: 42%; }
+    }
+    /* 더 좁으면(작은 창) 3영역 전체를 세로 스택 — 재료·에디터·옵션. 옆으로 눌린 에디터 방지(코덱스 리뷰 P2) */
+    @media (max-width: 900px) {
+      .wb-body { flex-direction: column; overflow-y: auto; }
+      .wb-left { flex: 0 0 auto; overflow: visible; }
+      .wb-right { flex: 0 0 auto; }
+      .wb-right .compose-section { min-height: 320px; }
+      .wb-optcol { max-height: none; }
+    }
     .wb-footer { display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-top: 10px; }
     .wb-footer .compose-footer-btn { margin: 0; align-self: center; }
     .wb-lint { flex: 1; min-width: 0; font-size: 12px; color: var(--sys-cont-neutral-light); }
@@ -225,6 +244,23 @@
     .wb-row-arrow { font-size: 11px; color: var(--sys-cont-neutral-lightest); flex: none; }
     .wb-row-target { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 11px; color: var(--sys-cont-neutral-default); }
     .wb-check-row { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--sys-cont-neutral-default); cursor: pointer; }
+    /* 서비스 토글칩 — 세로 체크박스行 대체(가로 wrap). on = primary 외곽선 */
+    .wb-chip-toggles { display: flex; flex-wrap: wrap; gap: 6px; }
+    .wb-chip-toggle { height: 26px; padding: 0 11px; border-radius: 999px; border: 1px solid var(--sys-style-neutral-default); background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); font-size: 12px; cursor: pointer; transition: background .12s ease, border-color .12s ease, color .12s ease; }
+    .wb-chip-toggle:hover { background: var(--sys-bg-surface-hover); }
+    .wb-chip-toggle.on { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); font-weight: 600; }
+    /* links 카드 — 🌐 전역 / 📦 서비스별 두 스코프, 각 스코프 안에 🔗 symlink / ⧉ copy 버킷. 헤더에 아이콘·라벨·YAML 키 병기 */
+    .wb-links-warn { font-size: 11px; line-height: 1.4; padding: 5px 8px; border-radius: 6px; background: var(--sys-bg-warning-light, var(--sys-bg-base)); color: var(--sys-cont-warning-default, var(--sys-cont-negative-default)); }
+    .wb-links-scope { display: flex; flex-direction: column; gap: 5px; }
+    .wb-links-scope-head { font-size: 11px; font-weight: 700; color: var(--sys-cont-neutral-light); margin-top: 6px; }
+    .wb-links-bucket { display: flex; flex-direction: column; gap: 4px; }
+    .wb-links-sec-head { display: flex; align-items: baseline; gap: 6px; }
+    .wb-links-sec-ic { font-size: 12px; }
+    .wb-links-sec-title { font-size: 12.5px; font-weight: 600; color: var(--sys-cont-neutral-default); }
+    .wb-links-svc { border-radius: 6px; background: var(--sys-bg-base); padding: 4px 8px; }
+    .wb-links-svc > summary { cursor: pointer; font-size: 12px; font-weight: 600; color: var(--sys-cont-neutral-default); padding: 2px 0; list-style-position: inside; }
+    .wb-links-svc[open] > summary { margin-bottom: 4px; }
+    .wb-links-svc .wb-links-bucket + .wb-links-bucket { margin-top: 4px; }
     .register-head { display: flex; align-items: center; justify-content: space-between; }
     /* 제목 위계 2단 — 진한 제목(흰/검, 테마 따라) + 옅은 라벨(회) — .register-label·.compose-hint 등 전부 2단의 "회" 축 */
     .register-title { font-size: 15px; font-weight: 700; color: var(--sys-cont-neutral-default); }
@@ -982,27 +1018,54 @@
     .git-commit-actions button { height: 28px; font-size: 12px; padding: 0 10px; }
     .git-commit-err { flex-basis: 100%; font-size: 11.5px; color: var(--sys-cont-negative-default); }
     .git-commit-err:empty { display: none; }
-    /* P3 — 연결 탭(app-9-connections.js): 게이트웨이 in + 엮기 out 흐름도. --st-* 상태 토큰 재사용(카드와 같은 언어). */
-    .conn-head [data-conn-refresh] { margin-left: 0; height: 24px; min-width: 28px; border-radius: 6px; border: 1px solid var(--sys-style-neutral-light); background: transparent; color: inherit; cursor: pointer; }
-    .conn-ctx { font-size: 12px; font-weight: 600; color: var(--sys-cont-neutral-default); }
-    .conn-panel { overflow: auto; }
-    .conn-graph-wrap svg { display: block; }
+    /* P3 — 연결 탭(app-9-connections.js): 두 구역 노드-엣지. 좌=💻 내 컴퓨터(브라우저+인프라 노드) · 우=📦 Docker(격리, 서비스 노드). A안=도커망→인프라 엣지. */
+    .conn-proj { font-size: 12px; font-weight: 700; color: var(--sys-cont-neutral-default); padding: 0 8px 0 2px; }
+    .conn-head [data-conn-wt] { height: 26px; max-width: 260px; font-size: 12px; border: 1px solid var(--sys-style-neutral-light); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); padding: 0 6px; }
+    .conn-head [data-conn-refresh] { margin-left: 0; height: 26px; min-width: 30px; border-radius: 6px; border: 1px solid var(--sys-style-neutral-light); background: transparent; color: inherit; cursor: pointer; }
+    .conn-panel { overflow: auto; padding: 16px; }
+    .conn-graph-wrap svg { display: block; margin: 8px auto; }
+    /* 존 박스 — 호스트=실선, Docker=점선(격리 경계) */
+    .conn-zone-box { fill: none; stroke-width: 1.5; }
+    .conn-zone-host { stroke: var(--sys-style-neutral-default); }
+    .conn-zone-docker { stroke: var(--sys-style-neutral-default); stroke-dasharray: 6 4; }
+    .conn-zone-label { font-size: 12px; font-weight: 700; fill: var(--sys-cont-neutral-light); }
+    /* 노드 — 중립 배경 + 상태색 닷(서비스). 다크모드 가시성: neutral-default 는 테마별로 뒤집힌다. */
     .conn-node { fill: var(--sys-bg-surface); stroke: var(--sys-style-neutral-light); stroke-width: 1.5; }
     .conn-node-browser { stroke: var(--sys-cont-primary-default); }
-    .conn-node-host { stroke: var(--sys-cont-neutral-default); stroke-dasharray: 3 3; }
-    .conn-node-title { font-size: 12px; font-weight: 600; fill: var(--sys-cont-neutral-strong, inherit); }
-    .conn-node-sub { font-size: 10.5px; fill: var(--sys-cont-neutral-default); font-family: ui-monospace, Menlo, monospace; }
-    .conn-svc-node { cursor: pointer; }
-    .conn-svc-node:hover rect { filter: brightness(1.08); }
-    .conn-edge { fill: none; stroke: var(--sys-cont-primary-default); stroke-width: 1.5; }
-    .conn-edge.dashed { stroke: var(--sys-style-neutral-light); stroke-dasharray: 4 3; }
-    .conn-edge-out-host { stroke: var(--st-boot); }
-    .conn-edge-out-svc { stroke: var(--st-ext); }
-    .conn-edge-out-host.dashed, .conn-edge-out-svc.dashed { opacity: .35; stroke-dasharray: 4 3; }   /* 정지 서비스 — 옅은 화살표(스펙) */
-    .conn-edge-label { font-size: 9.5px; fill: var(--sys-cont-neutral-default); font-family: ui-monospace, Menlo, monospace; }
-    .conn-domain-label { cursor: pointer; fill: var(--sys-cont-primary-default); text-decoration: underline; }
-    .conn-note { font-size: 10px; fill: var(--sys-cont-neutral-default); font-style: italic; }
-    .conn-warn { font-size: 11.5px; color: var(--sys-cont-negative-default); padding: 6px 12px; }
+    .conn-node-infra { stroke: var(--st-boot); }
+    .conn-node-add { stroke: var(--sys-style-neutral-default); stroke-dasharray: 5 3; fill: transparent; cursor: pointer; }
+    .conn-fwd-add:hover .conn-node-add { fill: var(--sys-bg-surface-hover); }
+    .conn-add-label { font-size: 12.5px; font-weight: 600; fill: var(--sys-cont-neutral-light); }
+    .conn-fwd-add { cursor: pointer; }
+    .conn-fwd-x { font-size: 12px; fill: var(--sys-cont-neutral-lightest); cursor: pointer; opacity: 0; }
+    [data-conn-node="host"]:hover .conn-fwd-x { opacity: 1; }
+    /* expose 배선 ✕ — 그래프에 hover 하면 노출(엣지가 얇아 상시 표시 대신) */
+    .conn-graph-wrap:hover .conn-ex-x { opacity: 1; }
+    .conn-fwd-x:hover { fill: var(--sys-cont-negative-default); }
+    /* 엮기 편집 후 재시작 안내 배너 */
+    .conn-restart-note { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 12.5px; padding: 8px 12px; margin: 0 0 8px; border-radius: 8px; background: var(--sys-bg-warning-light, var(--sys-bg-base)); color: var(--sys-cont-warning-default, var(--sys-cont-neutral-default)); }
+    .conn-restart-note button { height: 26px; padding: 0 12px; border: 1px solid var(--sys-cont-primary-default); border-radius: 7px; background: var(--sys-bg-surface); color: var(--sys-cont-primary-default); font-size: 12px; cursor: pointer; }
+    .conn-node-title { font-size: 14px; font-weight: 600; fill: var(--sys-cont-neutral-default); }
+    .conn-node-sub { font-size: 12px; fill: var(--sys-cont-neutral-lightest); font-family: ui-monospace, Menlo, monospace; }
+    /* 서비스 노드 3번째 줄 — 고정 도메인(클릭=열기) / 없으면 힌트 */
+    .conn-node-dom { font-size: 11.5px; fill: var(--sys-cont-primary-default); font-family: ui-monospace, Menlo, monospace; text-decoration: underline; }
+    .conn-node-hint { font-size: 11px; fill: var(--sys-cont-neutral-lightest); font-style: italic; }
+    .conn-copy { cursor: copy; }
+    .conn-copy:hover { fill: var(--sys-cont-neutral-default); }
+    .conn-svc-node, .conn-open { cursor: pointer; }
+    .conn-svc-node:hover rect, .conn-open:hover rect { filter: brightness(1.08); }
+    /* 엣지 — in=파랑(브라우저→서비스) · out=주황(도커망→인프라) */
+    .conn-edge { fill: none; stroke-width: 1.75; }
+    .conn-edge-in { stroke: var(--sys-cont-primary-default); }
+    .conn-edge-out { stroke: var(--st-boot); }
+    /* expose — 서비스↔서비스 URL env 주입(per-pair). env 라 재시작해야 적용 → 점선으로 "아직 선언" 뉘앙스 */
+    .conn-edge-expose { stroke: hsl(265, 55%, 58%); stroke-dasharray: 5 3; }
+    .conn-graph-wrap svg.conn-hovering .conn-edge { opacity: .15; }
+    .conn-graph-wrap svg .conn-edge.conn-hi { opacity: 1; stroke-width: 2.75; }
+    .conn-warn { font-size: 12px; color: var(--sys-cont-negative-default); padding: 6px 12px; }
+    .conn-empty { padding: 28px 20px; display: flex; flex-direction: column; gap: 8px; }
+    .conn-empty-title { font-size: 15px; font-weight: 700; color: var(--sys-cont-neutral-default); }
+    .conn-empty-sub { font-size: 13px; color: var(--sys-cont-neutral-light); line-height: 1.6; }
     .dl { white-space: pre; padding: 0 12px; }
     /* 코드 라인 = [구번호][신번호][±마커][본문] 거터 구조 — 번호·마커는 선택 안 되게(복사 오염 방지) */
     .dl.code { display: flex; padding: 0 12px 0 0; }

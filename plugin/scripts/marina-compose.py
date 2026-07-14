@@ -214,6 +214,70 @@ def set_xmarina_link(stored: str, subrepo: str, glob: str, mode: str = "symlink"
     return _edit_xmarina_block(stored, _m)
 
 
+def set_xmarina_forward(stored: str, port: str, target: str = "host", remove: bool = False) -> bool:
+    """x-marina.forward 편집(SoT) — 대시보드 연결 탭에서 호스트 인프라(localhost:<port> → host) 추가/삭제.
+      remove=True → 그 포트 항목 제거  ·  그 외 → forward[port]=target(기본 'host'). 서비스↔서비스 포트는 자동(여기 안 건드림).
+    forward 변경은 컨테이너 기동 때 세팅되므로 재시작해야 적용된다(호출측이 안내)."""
+    port = str(port or "").strip()
+    if not port.isdigit():
+        return False
+    tgt = (target or "host").strip() or "host"
+
+    def _m(xm):
+        fwd = xm.get("forward")
+        if not isinstance(fwd, dict):
+            fwd = xm["forward"] = {}
+        if remove:
+            fwd.pop(port, None)
+            fwd.pop(int(port), None)   # 파서가 정수 키로 뒀을 수도
+            if not fwd:
+                xm.pop("forward", None)
+        else:
+            for k in list(fwd.keys()):   # 같은 포트 중복 키(str/int) 정리
+                if str(k) == port:
+                    fwd.pop(k, None)
+            fwd[port] = tgt
+    return _edit_xmarina_block(stored, _m)
+
+
+def set_xmarina_expose(stored: str, consumer: str, var: str, target: str = "", mode: str = "gateway",
+                       remove: bool = False) -> bool:
+    """x-marina.gateway.expose 편집(SoT) — 연결 탭의 서비스↔서비스 배선.
+      expose={consumer:{ENV:'gateway:target'|'origin:target'}} — 타겟 서비스 URL 을 consumer 컨테이너의 env 로 주입.
+      remove=True → consumer.ENV 제거(비면 consumer/expose/gateway 도 정리)  ·  그 외 → consumer[ENV]='<mode>:<target>'.
+    env 는 컨테이너 기동 때 주입되므로 재시작해야 적용된다(호출측이 안내). mode: gateway=타겟 게이트웨이 URL · origin=''(상대경로)."""
+    consumer, var = (consumer or "").strip(), (var or "").strip()
+    if not consumer or not var:
+        return False
+    if not remove:
+        target = (target or "").strip()
+        mode = "origin" if mode == "origin" else "gateway"
+        if not target:
+            return False
+
+    def _m(xm):
+        gw = xm.get("gateway")
+        if not isinstance(gw, dict):
+            gw = xm["gateway"] = {}
+        exp = gw.get("expose")
+        if not isinstance(exp, dict):
+            exp = gw["expose"] = {}
+        node = exp.get(consumer)
+        if not isinstance(node, dict):
+            node = exp[consumer] = {}
+        if remove:
+            node.pop(var, None)
+            if not node:
+                exp.pop(consumer, None)
+            if not exp:
+                gw.pop("expose", None)
+            if not gw:
+                xm.pop("gateway", None)
+        else:
+            node[var] = f"{mode}:{target}"
+    return _edit_xmarina_block(stored, _m)
+
+
 def xmarina_for_stored(stored: str) -> dict:
     """보관 compose 파일 경로 → x-marina dict. forward·prebuild·gateway 소비처가 이걸로 읽는다.
     best-effort — 어떤 실패든(파일 없음·PyYAML 없음·YAML 파싱 에러·compose 커스텀 태그 !reset/!override

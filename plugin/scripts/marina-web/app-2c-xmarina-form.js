@@ -12,7 +12,7 @@
     // ── R4 사전 — 노출 지점 공용(재료 스니펫·해석 패널과 같은 문구를 여기서도 사용) ─────────────────
     const WB_XM_DICT = {
       startGroup: { label: '시작 그룹',                 mono: 'x-marina.startGroup', desc: '▶ 전체시작이 켜는 그룹 — 비우면 전부. 나머지는 필요할 때 개별 ▶ (쓸데없는 것 같이 안 뜸)' },
-      links:    { label: 'node_modules 재사용',        mono: 'x-marina.links',    desc: '워크트리를 새로 만들어도 의존성 재설치를 안 함' },
+      links:    { label: '무거운 폴더 공유',            mono: 'x-marina.links',    desc: '워크트리를 새로 만들어도 node_modules·빌드 폴더를 재설치·재빌드 없이 재사용 — 🔗 링크(실시간 공유) 또는 ⧉ 복사(독립본) 중 선택' },
       forward:  { label: '내 컴퓨터의 DB/Redis 쓰기',    mono: 'x-marina.forward',  desc: '컨테이너 안 localhost 가 내 컴퓨터의 Redis/DB 로 연결됨' },
       gateway:  { label: '브라우저 주소 자동 발급',       mono: 'x-marina.gateway',  desc: '워크트리마다 이름.프로젝트.localhost 주소가 생겨요 — 포트 몰라도 됨' },
       prebuild: { label: '이미지 빌드 전에 미리 빌드',     mono: 'x-marina.prebuild', desc: 'jar 처럼 먼저 구워야 하는 산출물을 자동으로' },
@@ -166,13 +166,31 @@
     }
 
     // ── 지원 키별 구조 검증/정규화 — 모양이 안 맞으면 던져서(호출측이) otherKeys 로 내린다 ──────────
+    // x-marina.links 는 두 형태를 지원한다(백엔드 apply_glob_links _xm_sub 와 동일):
+    //   · 전역   : links: { symlink: [...], copy: [...] }            → 모든 서비스/서브레포 공통
+    //   · 서브레포별: links: { <svc>: { symlink, copy }, ... }         → 그 서브레포만 (실프로젝트 mdc-main 형태)
+    // 둘을 {symlink, copy, subs:{<svc>:{symlink,copy}}} 하나로 정규화(전역=최상위 symlink/copy, 서브레포별=subs).
+    // 예전엔 전역만 받고 서브레포별은 던져 otherKeys 로 내려갔다 — 카드에 안 보이고 편집 시 links: 블록 중복(손상).
     function xmCoerceLinks(val) {
       if (!val || typeof val !== 'object' || Array.isArray(val)) throw new Error('links 는 매핑이어야 함');
-      const out = {};
+      const out = { symlink: [], copy: [], subs: {} };
+      const coerceList = (arr, where) => {
+        if (!Array.isArray(arr)) throw new Error(where + ' 은 리스트여야 함');
+        return arr.map(String);
+      };
       for (const k of Object.keys(val)) {
-        if (k !== 'symlink' && k !== 'copy') throw new Error('links 의 미지원 하위키: ' + k);
-        if (!Array.isArray(val[k])) throw new Error('links.' + k + ' 은 리스트여야 함');
-        out[k] = val[k].map(String);
+        if (k === 'symlink' || k === 'copy') {
+          out[k] = coerceList(val[k], 'links.' + k);
+        } else {
+          const node = val[k];
+          if (!node || typeof node !== 'object' || Array.isArray(node)) throw new Error('links.' + k + ' 은 매핑이어야 함');
+          const sub = { symlink: [], copy: [] };
+          for (const kk of Object.keys(node)) {
+            if (kk !== 'symlink' && kk !== 'copy') throw new Error('links.' + k + ' 의 미지원 하위키: ' + kk);
+            sub[kk] = coerceList(node[kk], 'links.' + k + '.' + kk);
+          }
+          out.subs[k] = sub;
+        }
       }
       return out;
     }
@@ -295,13 +313,35 @@
       for (const k of Object.keys(obj)) lines.push('    ' + xmQuoteKeyIfNeeded(k) + ': ' + xmQuoteIfNeeded(obj[k]));
       return lines;
     }
+    function xmLinksNonEmpty(links) {   // 전역 심링크/복사 또는 서브레포별 노드 중 하나라도 항목이 있으면 true
+      if (!links) return false;
+      if ((links.symlink && links.symlink.length) || (links.copy && links.copy.length)) return true;
+      const subs = links.subs || {};
+      return Object.keys(subs).some(s => {
+        const n = subs[s] || {};
+        return (n.symlink && n.symlink.length) || (n.copy && n.copy.length);
+      });
+    }
     function xmDumpLinks(links) {
       const lines = ['  links:'];
-      for (const k of ['symlink', 'copy']) {
+      for (const k of ['symlink', 'copy']) {   // 전역 — 최상위 symlink/copy
         const arr = links[k];
         if (!arr || !arr.length) continue;
         lines.push('    ' + k + ':');
         for (const item of arr) lines.push('    - ' + xmQuoteIfNeeded(item));
+      }
+      const subs = links.subs || {};   // 서브레포별 — links.<svc>.{symlink,copy}
+      for (const sub of Object.keys(subs)) {
+        const node = subs[sub] || {};
+        const hasAny = (node.symlink && node.symlink.length) || (node.copy && node.copy.length);
+        if (!hasAny) continue;
+        lines.push('    ' + xmQuoteKeyIfNeeded(sub) + ':');
+        for (const k of ['symlink', 'copy']) {
+          const arr = node[k];
+          if (!arr || !arr.length) continue;
+          lines.push('      ' + k + ':');
+          for (const item of arr) lines.push('      - ' + xmQuoteIfNeeded(item));
+        }
       }
       return lines;
     }
@@ -346,7 +386,7 @@
       const out = ['x-marina:'];
       const has = (k) => xm && xm[k] != null;
       if (has('startGroup') && xm.startGroup.length) out.push(...xmDumpStartGroup(xm.startGroup));
-      if (has('links') && ((xm.links.symlink && xm.links.symlink.length) || (xm.links.copy && xm.links.copy.length))) out.push(...xmDumpLinks(xm.links));
+      if (has('links') && xmLinksNonEmpty(xm.links)) out.push(...xmDumpLinks(xm.links));
       if (has('forward') && Object.keys(xm.forward).length) out.push(...xmDumpMapOfScalars('forward', xm.forward));
       if (has('gateway') && xm.gateway.routes && Object.keys(xm.gateway.routes).length) out.push(...xmDumpGateway(xm.gateway));
       if (has('prebuild') && Object.keys(xm.prebuild).length) out.push(...xmDumpPrebuild(xm.prebuild));
@@ -389,9 +429,14 @@
     // 6개 컨테이너가 항상 존재해야 하므로, 편집용 사본에서만 빈 컨테이너로 채워 넣는다(직렬화는 여전히
     // 빈 컨테이너를 생략하므로 손대지 않은 필드는 왕복해도 문서에 흔적을 안 남긴다).
     function wbFormNormalize(xm) {
-      const out = { startGroup: [], links: { symlink: [], copy: [] }, forward: {}, gateway: { routes: {} }, prebuild: {}, java: '', build: { args: {} } };
+      const out = { startGroup: [], links: { symlink: [], copy: [], subs: {} }, forward: {}, gateway: { routes: {} }, prebuild: {}, java: '', build: { args: {} } };
       if (xm.startGroup) out.startGroup = xm.startGroup.map(String);
-      if (xm.links) { out.links.symlink = xm.links.symlink || []; out.links.copy = xm.links.copy || []; }
+      if (xm.links) {
+        out.links.symlink = (xm.links.symlink || []).slice();
+        out.links.copy = (xm.links.copy || []).slice();
+        const subs = xm.links.subs || {};
+        for (const s of Object.keys(subs)) out.links.subs[s] = { symlink: (subs[s].symlink || []).slice(), copy: (subs[s].copy || []).slice() };
+      }
       if (xm.forward) out.forward = { ...xm.forward };
       if (xm.gateway) out.gateway = { routes: { ...(xm.gateway.routes || {}) } };
       if (xm.prebuild) {
@@ -447,6 +492,7 @@
     function wbMkText(tag, cls, text) { const el = wbMk(tag, cls); el.textContent = text; return el; }
     function wbMkBtn(label, cls, onclick) { const b = wbMk('button', cls); b.type = 'button'; b.textContent = label; b.onclick = onclick; return b; }
 
+    // 카드 머리 = 라벨 + 모노표기 + (?) 툴팁. 장황한 설명(desc)은 항상 노출 대신 툴팁으로 접어 세로 밀도를 줄인다(코덱스 UX #3).
     function wbCardShell(key) {
       const dict = WB_XM_DICT[key];
       const card = wbMk('div', 'wb-opt-card');
@@ -454,40 +500,120 @@
       const head = wbMk('div', 'wb-opt-card-head');
       head.appendChild(wbMkText('span', 'wb-opt-label', dict.label));
       head.appendChild(wbMkText('span', 'wb-opt-mono', dict.mono));
+      if (dict.desc) {
+        const q = wbMkText('span', 'help-q', '?');
+        q.title = dict.desc;
+        head.appendChild(q);
+      }
       card.appendChild(head);
-      card.appendChild(wbMkText('div', 'wb-opt-desc', dict.desc));
       const body = wbMk('div', 'wb-opt-body');
       card.appendChild(body);
       return { card, body };
     }
 
+    // 서비스 선택을 세로 체크박스行 대신 가로 wrap 토글칩으로 — startGroup·gateway 공용(세로 낭비 제거, 코덱스 UX #3).
+    function wbToggleChips(services, isOn, onToggle, groupLabel) {
+      const list = wbMk('div', 'wb-chip-toggles');
+      list.setAttribute('role', 'group');
+      if (groupLabel) list.setAttribute('aria-label', groupLabel);
+      services.forEach(svc => {
+        const chip = wbMk('button', 'wb-chip-toggle' + (isOn(svc) ? ' on' : ''));
+        chip.type = 'button';
+        chip.textContent = svc;
+        chip.setAttribute('aria-pressed', isOn(svc) ? 'true' : 'false');
+        chip.onclick = () => onToggle(svc, !isOn(svc));
+        list.appendChild(chip);
+      });
+      return list;
+    }
+
+    // links 카드는 x-marina.links 의 두 형태를 그대로 반영한다:
+    //   · 🌐 모든 서비스(전역) = links.{symlink,copy}   · 📦 서비스별 = links.<svc>.{symlink,copy}
+    // 각 스코프 안에서 🔗 링크(symlink) / ⧉ 복사(copy) 두 버킷 — YAML 키 병기로 카드↔YAML 연결. 실프로젝트(mdc-main)는 서비스별.
+    // 예전엔 전역만 다뤄 서비스별이 카드에 안 보이고 편집 시 links 블록 중복(손상). 백엔드는 전역이 있으면 서비스별을 무시(전역 우선).
     function wbRenderLinksCard() {
       const { card, body } = wbCardShell('links');
-      const globs = wbFormXm.links.symlink;
-      const tags = wbMk('div', 'wb-tag-list');
-      globs.forEach((g, idx) => {
-        const chip = wbMk('span', 'wb-tag');
-        chip.appendChild(document.createTextNode(g + ' '));
-        chip.appendChild(wbMkBtn('✕', 'wb-tag-x', () => wbFormMutate(xm => { xm.links.symlink.splice(idx, 1); })));
-        tags.appendChild(chip);
-      });
-      body.appendChild(tags);
-      const addRow = wbMk('div', 'wb-tag-add');
-      ['node_modules', '.venv'].forEach(sug => {
-        if (globs.includes(sug)) return;
-        addRow.appendChild(wbMkBtn('+ ' + sug, 'wb-quick', () => wbFormMutate(xm => xm.links.symlink.push(sug))));
-      });
-      const input = wbMk('input', 'wb-tag-input');
-      input.placeholder = '글롭 직접 입력 (예: .env.local)';
-      addRow.appendChild(input);
-      const addGlob = () => {
-        const v = input.value.trim();
-        if (!v || globs.includes(v)) return;
-        wbFormMutate(xm => xm.links.symlink.push(v));
+      // links 가 폼이 못 읽는 형태(malformed)면 원문이 otherKeys 로 보존된다 — 이때 카드로 편집하면 지원블록+원문블록이 겹쳐
+      // links: 가 중복될 수 있으므로 편집을 막고 YAML 로 안내(코덱스 리뷰 P3).
+      if (wbFormOtherKeys.some(o => o.key === 'links')) {
+        body.appendChild(wbMkText('div', 'wb-links-warn', '이 links 는 폼이 읽을 수 없는 형태예요 — 오른쪽 YAML 에서 직접 편집하세요'));
+        return card;
+      }
+      const links = wbFormXm.links;
+      const subHasEntries = (s) => links.subs[s] && ((links.subs[s].symlink || []).length || (links.subs[s].copy || []).length);
+      const globalHas = (links.symlink || []).length || (links.copy || []).length;
+
+      if (globalHas && Object.keys(links.subs).some(subHasEntries)) {
+        body.appendChild(wbMkText('div', 'wb-links-warn', '⚠ 전역(모든 서비스)이 설정돼 있어 서비스별 규칙은 무시돼요 — 둘 중 하나만 쓰세요'));
+      }
+
+      // 한 버킷(symlink|copy) — svc=null 이면 전역(links 루트), svc 이름이면 links.subs[svc]
+      const renderBucket = (svc, key, icon, label, suggests) => {
+        const node = (svc == null) ? links : (links.subs[svc] || { symlink: [], copy: [] });
+        const arr = node[key] || [];
+        const inScope = (v) => (node.symlink || []).includes(v) || (node.copy || []).includes(v);
+        const mut = (fn) => wbFormMutate(xm => {
+          const n = (svc == null) ? xm.links : (xm.links.subs[svc] = xm.links.subs[svc] || { symlink: [], copy: [] });
+          if (!Array.isArray(n[key])) n[key] = [];
+          fn(n[key]);
+          if (svc != null) {   // 빈 서브레포 노드는 제거(YAML 에 빈 svc: {} 안 남김)
+            const sn = xm.links.subs[svc];
+            if (!(sn.symlink && sn.symlink.length) && !(sn.copy && sn.copy.length)) delete xm.links.subs[svc];
+          }
+        });
+        const sec = wbMk('div', 'wb-links-bucket');
+        const head = wbMk('div', 'wb-links-sec-head');
+        head.appendChild(wbMkText('span', 'wb-links-sec-ic', icon));
+        head.appendChild(wbMkText('span', 'wb-links-sec-title', label));
+        head.appendChild(wbMkText('span', 'wb-opt-mono', key));
+        sec.appendChild(head);
+        const row = wbMk('div', 'wb-tag-add');
+        arr.forEach((g, idx) => {
+          const chip = wbMk('span', 'wb-tag');
+          chip.appendChild(document.createTextNode(g + ' '));
+          chip.appendChild(wbMkBtn('✕', 'wb-tag-x', () => mut(a => a.splice(idx, 1))));
+          row.appendChild(chip);
+        });
+        suggests.forEach(sug => { if (inScope(sug)) return; row.appendChild(wbMkBtn('+ ' + sug, 'wb-quick', () => mut(a => a.push(sug)))); });
+        const input = wbMk('input', 'wb-tag-input');
+        input.placeholder = '폴더/글롭';
+        row.appendChild(input);
+        const add = () => { const v = input.value.trim(); if (!v || inScope(v)) return; mut(a => a.push(v)); };
+        row.appendChild(wbMkBtn('추가', 'wb-tag-go', add));
+        input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); add(); } });
+        sec.appendChild(row);
+        return sec;
       };
-      addRow.appendChild(wbMkBtn('추가', 'wb-tag-go', addGlob));
-      input.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); addGlob(); } });
-      body.appendChild(addRow);
+      const scopeBuckets = (svc) => {
+        const frag = document.createDocumentFragment();
+        frag.appendChild(renderBucket(svc, 'symlink', '🔗', '링크', ['node_modules', '.venv']));
+        frag.appendChild(renderBucket(svc, 'copy', '⧉', '복사', ['dist', '.gradle', 'build']));
+        return frag;
+      };
+
+      // 🌐 전역
+      const gsec = wbMk('div', 'wb-links-scope');
+      gsec.appendChild(wbMkText('div', 'wb-links-scope-head', '🌐 모든 서비스 (전역)'));
+      gsec.appendChild(scopeBuckets(null));
+      body.appendChild(gsec);
+
+      // 📦 서비스별 — compose 서비스 ∪ 이미 정의된 서브레포 키
+      const services = typeof wbUsedServiceNames === 'function' ? [...wbUsedServiceNames()] : [];
+      const allSubs = [...new Set([...services, ...Object.keys(links.subs)])].sort();
+      if (allSubs.length) {
+        body.appendChild(wbMkText('div', 'wb-links-scope-head', '📦 서비스별 (그 서비스만)'));
+        allSubs.forEach(svc => {
+          const det = document.createElement('details');
+          det.className = 'wb-links-svc';
+          if (subHasEntries(svc)) det.open = true;
+          const sm = document.createElement('summary');
+          const cnt = links.subs[svc] ? ((links.subs[svc].symlink || []).length + (links.subs[svc].copy || []).length) : 0;
+          sm.textContent = svc + (cnt ? ' · ' + cnt : '');
+          det.appendChild(sm);
+          det.appendChild(scopeBuckets(svc));
+          body.appendChild(det);
+        });
+      }
       return card;
     }
 
@@ -532,22 +658,11 @@
       }
       const auto = wbFormXm.startGroup;
       body.appendChild(wbMkText('div', 'wb-opt-note',
-        auto.length ? '▶ 전체시작 = 체크된 서비스만. 나머지는 옵션(개별 시작).' : '선언 없음 — 전체시작이 전부 켭니다. 체크하면 그것만 켜요.'));
-      const list = wbMk('div', 'wb-check-list');
-      services.forEach(svc => {
-        const row = wbMk('label', 'wb-check-row');
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = auto.includes(svc);
-        cb.onchange = () => wbFormMutate(xm => {
-          if (cb.checked) { if (!xm.startGroup.includes(svc)) xm.startGroup.push(svc); }
-          else xm.startGroup = xm.startGroup.filter(s => s !== svc);
-        });
-        row.appendChild(cb);
-        row.appendChild(document.createTextNode(' ' + svc));
-        list.appendChild(row);
-      });
-      body.appendChild(list);
+        auto.length ? '▶ 전체시작 = 켠 서비스만. 나머지는 개별 시작.' : '선언 없음 — 전체시작이 전부 켭니다. 고르면 그것만.'));
+      body.appendChild(wbToggleChips(services, svc => auto.includes(svc), (svc, on) => wbFormMutate(xm => {
+        if (on) { if (!xm.startGroup.includes(svc)) xm.startGroup.push(svc); }
+        else xm.startGroup = xm.startGroup.filter(s => s !== svc);
+      }), '전체시작에 포함할 서비스'));
       return card;
     }
 
@@ -558,21 +673,12 @@
         body.appendChild(wbMkText('div', 'wb-opt-empty', '우측 YAML 에 services 를 먼저 추가하세요'));
         return card;
       }
-      const list = wbMk('div', 'wb-check-list');
-      services.forEach(svc => {
-        const row = wbMk('label', 'wb-check-row');
-        const cb = document.createElement('input');
-        cb.type = 'checkbox';
-        cb.checked = Object.prototype.hasOwnProperty.call(wbFormXm.gateway.routes, svc);
-        cb.onchange = () => wbFormMutate(xm => {
-          if (cb.checked) xm.gateway.routes[svc] = xm.gateway.routes[svc] || [];
+      body.appendChild(wbToggleChips(services,
+        svc => Object.prototype.hasOwnProperty.call(wbFormXm.gateway.routes, svc),
+        (svc, on) => wbFormMutate(xm => {
+          if (on) xm.gateway.routes[svc] = xm.gateway.routes[svc] || [];
           else delete xm.gateway.routes[svc];
-        });
-        row.appendChild(cb);
-        row.appendChild(document.createTextNode(' ' + svc));
-        list.appendChild(row);
-      });
-      body.appendChild(list);
+        }), '브라우저 주소를 발급할 서비스'));
       return card;
     }
 
