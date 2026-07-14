@@ -210,10 +210,18 @@ Claude 세션 안에서는 슬래시 명령도 된다: `/marina:project add`, `/
 등)은 앱 레포에 있으니 `git pull` 로 따라온다.
 
 받는 팀원:
-1. `git pull` — 코드 자산(Dockerfile 등)
-2. `marina project add <path> --compose <compose파일>` — 등록
-3. 본인 로컬 시크릿(`.env.ssm.local` 등) + 호스트 백킹(redis 등) 준비 — **각자 환경, 공유 안 함**
-4. `marina start --all`
+1. `git pull` — 코드 자산(Dockerfile 등)을 먼저 받는다.
+2. marina 를 최신 `main`으로 업데이트한다(Claude: `/plugin marketplace update`, Codex:
+   `codex plugin marketplace upgrade`).
+3. `marina project add <path> --compose <compose파일>` — 신규 등록. 이미 등록한 프로젝트는 대시보드
+   Compose Workbench에서 같은 공유 블록을 적용한다.
+4. 본인 로컬 시크릿(`.env.ssm.local` 등) + 호스트 백킹(redis 등) 준비 — **각자 환경, 공유 안 함**.
+5. Watch로 source bind를 대체한 첫 적용만 `marina rebuild --all`, 이후에는 `marina start --all`.
+
+적용 순서는 중요하다. `develop.watch`의 `sync`는 컨테이너가 뜬 다음 붙으므로, source bind를 제거한 서비스의
+dev 이미지는 watcher 없이도 시작할 수 있게 dependency 설치 뒤 bootstrap source를 `COPY`해야 한다.
+Dockerfile이 배포되기 전에 Compose에서 source bind부터 제거하면 이미지 안에 앱 소스가 없어 기동에 실패한다.
+따라서 **앱 코드/Dockerfile → marina → 공유 Compose → 최초 rebuild** 순서로 맞춘다.
 
 > overlay·호스트 포트·게이트웨이는 받는 쪽에서 **워크트리별로 자동 생성**된다(공유 대상 아님).
 
@@ -265,6 +273,67 @@ x-marina:
 | **reload** | 소스 `sync`, manifest/Dockerfile `rebuild` | 없음 | 소스 수정은 이미지 빌드 없이 런타임 reload |
 | **artifact** | 산출물 mount + 산출물 경로 `restart` | 서비스별 `{cwd, command}` | 호스트 빌드 후 소유 서비스만 재시작 |
 | **image** | dependency/Dockerfile 경로 `rebuild` | 필요할 때만 pre-build | 이미지 입력이 바뀔 때만 Docker build |
+
+#### reload 서비스 표준 예제
+
+reload 가능한 런타임은 전체 source bind 대신 Compose Watch `sync`를 쓴다. dependency 입력은 sync 대상에서
+제외하고 별도 `rebuild` 규칙으로 선언한다. 아래 패턴은 Python 예시지만 Node, Go 등에도 같은 경계를 적용한다.
+
+```dockerfile
+FROM python:3.11-slim
+WORKDIR /app
+
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -r requirements.txt
+
+# Watcher가 붙기 전 최초 기동용. dependency layer 뒤에 둬 소스 수정이 install cache를 깨지 않게 한다.
+COPY . .
+CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--reload"]
+```
+
+```yaml
+x-api-watch-ignore: &api-watch-ignore
+  - .git/
+  - .venv/
+  - '**/__pycache__/'
+  - requirements.txt
+  - Dockerfile.local
+
+services:
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile.local
+    develop:
+      watch:
+        - action: sync
+          path: ./api
+          target: /app
+          initial_sync: true
+          ignore: *api-watch-ignore
+        - action: rebuild
+          path: ./api/requirements.txt
+        - action: rebuild
+          path: ./api/Dockerfile.local
+```
+
+이 구성의 실행 경계는 다음과 같다.
+
+| 변경/명령 | 동작 |
+|---|---|
+| 일반 source 저장 | 컨테이너로 sync, 런타임 reload. Docker build 없음 |
+| dependency manifest 또는 Dockerfile 저장 | 해당 서비스 이미지만 rebuild |
+| `marina start <svc>` | 기존 이미지로 빠르게 기동. 이미지가 없을 때만 최초 build |
+| `marina rebuild <svc>` | Watch가 꺼진 동안 이미지 입력이 바뀌었거나 명시적으로 새 이미지가 필요할 때 build |
+
+BuildKit layer/cache mount는 `x-marina` 저장소가 아니라 **호스트 Docker daemon의 캐시**다. 같은 dependency 입력과
+Dockerfile 단계를 쓰면 worktree가 달라도 재사용할 수 있다. 반대로 `COPY . .` 뒤에서 package install을 하거나
+dependency 파일과 일반 source를 같은 `COPY`에 섞으면 소스 수정만으로 install layer가 무효화된다.
+
+전체 source bind와 같은 target의 Watch `sync`를 동시에 쓰지 않는다. bind가 파일을 가려 sync 결과와 이미지
+bootstrap 경계가 불명확해진다. `.venv`, `node_modules`, 빌드 출력과 로그도 sync에서 제외해 불필요한 전송과
+reload를 막는다.
 
 Compose가 호스트 명령을 실행할 수 없는 빈칸만 서비스 단위 pre-build로 선언한다. `start user-api`는
 `user-api`의 명령만, `start --all`은 `startGroup`에 포함된 서비스의 명령만 실행한다. 같은 실제 작업 경로와
