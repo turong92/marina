@@ -26,7 +26,7 @@
 ### Marina repository
 
 - Create `plugin/scripts/marina_prebuild.py`: prebuild schema 검증, legacy 해석, 서비스 선택 후 job 계획, cwd 격리, host command 실행, 구조화 이벤트 출력.
-- Modify `plugin/scripts/marina-compose.py`: start target 해석 재사용, `prebuild-run`/`preflight` CLI, Watch action 버전 검증.
+- Modify `plugin/scripts/marina-compose.py`: start target 해석 재사용, `prebuild-run` CLI, Watch action 버전 검증.
 - Modify `plugin/scripts/marina-lib-compose.sh`: inline prebuild 파서를 제거하고 Python CLI를 lifecycle에 연결.
 - Modify `plugin/scripts/marina_build.py`: 언어 중립적인 prebuild event를 build timeline step으로 파싱.
 - Modify `plugin/scripts/marina_compose_svc.py`: service object와 legacy prebuild를 서비스 구성 payload로 정규화.
@@ -480,7 +480,7 @@ git commit -m "feat(compose): run service prebuilds with structured timing"
 
 **Interfaces:**
 - Consumes: canonical service Watch rules, selected start targets, current Compose version.
-- Produces: `watch_version_errors(config, services, version) -> list[str]` and `preflight` CLI.
+- Produces: `watch_version_errors(config, services, version) -> list[str]` and a prebuild-before-command capability gate.
 
 - [ ] **Step 1: Write failing action/version matrix tests**
 
@@ -508,7 +508,7 @@ Add a fake lifecycle assertion that Compose 2.31.9 rejects `worker` before prebu
 
 Run: `bash plugin/tests/test-compose-watch-version.sh`
 
-Expected: FAIL because the version helpers and preflight command are absent.
+Expected: FAIL because the version helper and lifecycle gate are absent.
 
 - [ ] **Step 3: Implement semantic version and capability checks**
 
@@ -549,16 +549,18 @@ def watch_version_errors(config: dict, selected: list[str], version: str) -> lis
 
 Do not rewrite unsupported actions.
 
-- [ ] **Step 4: Add and wire `preflight`**
+- [ ] **Step 4: Gate the existing prebuild pass before command execution**
 
-`cmd_preflight` must load canonical config, resolve actual start targets with `resolved_start_targets`, print every version error, and return 2 on any error. Register arguments matching `prebuild-run` plus `--compose-version`.
+Add required `--compose-version` to `prebuild-run`. After it loads canonical config and resolves actual start targets with `resolved_start_targets`, call `watch_version_errors`, print every error, and return 2 before planning or running a prebuild job.
 
-In `marina-lib-compose.sh`, call preflight after external worktrees are prepared but before `run_prebuild_hooks`:
+In `marina-lib-compose.sh`, pass the already-read Compose version into the existing prebuild call:
 
 ```bash
-python3 "$cp" preflight --stored "$stored" --project-dir "$ROOT" \
-  "${nameargs[@]}" "${svcs[@]}" "${envargs[@]}" --compose-version "$ver" || return 1
+run_prebuild_hooks "$stored" "$cp" "$MARINA_HOME/$pid/prebuild.json" "$ver" \
+  "${svcs[@]}" "${envargs[@]}" || return 1
 ```
+
+This keeps capability validation before host commands without adding a third `docker compose config` pass to every start.
 
 - [ ] **Step 5: Verify focused and lifecycle tests GREEN**
 
@@ -1111,6 +1113,6 @@ Review all task commits for accidental project-specific branches in Marina, secr
 
 - Spec coverage: sync/reload, artifact/restart, image/rebuild, object/legacy prebuild, startGroup selection, dedupe, cwd isolation, version gate, structured logging, UI roundtrip, MDC BE/AI mapping, benchmarks, rollback are each assigned to a task.
 - Scope: one sequential feature across Marina core and its reference fixture; every MDC task depends on the generic core and remains independently reversible.
-- Type consistency: `PrebuildJob`, `plan_prebuild_jobs`, `run_prebuild_jobs`, `resolved_start_targets`, `watch_version_errors`, `prebuild-run`, `preflight`, and `MARINA_PREBUILD_EVENT` names are consistent across producer and consumer tasks.
+- Type consistency: `PrebuildJob`, `plan_prebuild_jobs`, `run_prebuild_jobs`, `resolved_start_targets`, `watch_version_errors`, `prebuild-run`, and `MARINA_PREBUILD_EVENT` names are consistent across producer and consumer tasks.
 - Backward compatibility: legacy string maps, `prebuild.json`, Gradle log fallback, Watch-free projects, and the global Compose 2.24.4 floor all have explicit tests.
 - Placeholder scan: all implementation steps name files, commands, expected results, schema, and rollback behavior; measurement fields are explicitly produced by Task 9 rather than prefilled.

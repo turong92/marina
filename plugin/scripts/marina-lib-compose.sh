@@ -38,10 +38,11 @@ for e in (json.load(sys.stdin).get("externalRepos") or []):
 
 run_prebuild_hooks() {
   # Compose가 실행할 수 없는 host build만 Python의 언어 중립 planner/runner에 위임한다.
-  local stored="${1:-}" cp="${2:-}" legacy="${3:-}"
-  shift 3 || true
+  local stored="${1:-}" cp="${2:-}" legacy="${3:-}" compose_version="${4:-}"
+  shift 4 || true
   python3 "$cp" prebuild-run --stored "$stored" --project-dir "$ROOT" \
-    --project-id "$pid" --session "$(session_id)" --legacy-prebuild "$legacy" "$@"
+    --project-id "$pid" --session "$(session_id)" --legacy-prebuild "$legacy" \
+    --compose-version "$compose_version" "$@"
 }
 
 compose_main() {
@@ -98,7 +99,8 @@ compose_main() {
       fi
       [[ "$command" == "stop" ]] || ensure_external_worktrees || return 1   # 외부 레포 마운트 보장(up 전) — 실패 시 중단(빌드컨텍스트 없음)
       [[ "$command" == "stop" ]] || run_prebuild_hooks "$stored" "$cp" \
-        "$MARINA_HOME/$pid/prebuild.json" ${svcs[@]+"${svcs[@]}"} ${envargs[@]+"${envargs[@]}"} || return 1
+        "$MARINA_HOME/$pid/prebuild.json" "$ver" \
+        ${svcs[@]+"${svcs[@]}"} ${envargs[@]+"${envargs[@]}"} || return 1
 	      [[ "$command" == "stop" ]] || apply_glob_links "" "$stored" "$cp"   # opt-in 링크(x-marina.links 우선) — 호스트 deps/config, 빌드출력 제외.
       local -a bargs=(); local _ba                              # 서비스별 build args(build-args.json) → overlay 주입
       while IFS= read -r _ba; do [[ -n "$_ba" ]] && bargs+=("--build-arg=$_ba"); done < <(

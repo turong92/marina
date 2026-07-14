@@ -624,6 +624,44 @@ def watchable_services(config: dict, requested: list[str]) -> list[str]:
     return sorted(set(out))
 
 
+WATCH_ACTION_MIN = {
+    "sync": (2, 22, 0),
+    "rebuild": (2, 22, 0),
+    "sync+restart": (2, 23, 0),
+    "restart": (2, 32, 0),
+    "sync+exec": (2, 32, 0),
+}
+
+
+def compose_version_tuple(value: str) -> tuple[int, int, int]:
+    numbers = [int(part) for part in re.findall(r"\d+", value or "")[:3]]
+    return tuple((numbers + [0, 0, 0])[:3])
+
+
+def watch_version_errors(config: dict, selected: list[str], version: str) -> list[str]:
+    current = compose_version_tuple(version)
+    services = config.get("services") if isinstance(config.get("services"), dict) else {}
+    errors = []
+    for name in selected:
+        service = services.get(name)
+        develop = service.get("develop") if isinstance(service, dict) else None
+        rules = develop.get("watch") if isinstance(develop, dict) else None
+        for rule in rules if isinstance(rules, list) else []:
+            if not isinstance(rule, dict):
+                continue
+            action = str(rule.get("action") or "")
+            required = WATCH_ACTION_MIN.get(action)
+            if action == "sync+exec" and "exec" in rule:
+                required = max(required or (0, 0, 0), (2, 32, 2))
+            if required and current < required:
+                minimum = ".".join(str(part) for part in required)
+                errors.append(
+                    f"service '{name}' Watch action '{action}' requires Compose "
+                    f"{minimum}+; current {version}"
+                )
+    return errors
+
+
 def watch_argv(stored, overlay, project_dir, project_name, service):
     """기존 up과 같은 Compose model로 service 하나를 watch한다."""
     argv = ["docker", "compose", "-f", stored]
@@ -798,6 +836,11 @@ def cmd_prebuild_run(a):
             + ", ".join(unknown)
             + "\n"
         )
+    version_errors = watch_version_errors(config, targets, a.compose_version)
+    if version_errors:
+        for error in version_errors:
+            sys.stderr.write(f"error: {error}\n")
+        return 2
     raw = xm.get("prebuild")
     if not raw and a.legacy_prebuild and os.path.isfile(a.legacy_prebuild):
         try:
@@ -918,7 +961,7 @@ def main(argv=None):
     p = sub.add_parser("psports"); p.set_defaults(fn=cmd_psports)
     p = sub.add_parser("xmarina"); p.add_argument("--stored", required=True); p.add_argument("--key"); p.set_defaults(fn=cmd_xmarina)
     p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.set_defaults(fn=cmd_up)
-    p = sub.add_parser("prebuild-run"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--legacy-prebuild"); p.set_defaults(fn=cmd_prebuild_run)
+    p = sub.add_parser("prebuild-run"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--legacy-prebuild"); p.add_argument("--compose-version", required=True); p.set_defaults(fn=cmd_prebuild_run)
     p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
     p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("down"); name_args(p); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
