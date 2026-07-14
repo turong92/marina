@@ -113,7 +113,7 @@ Docker Compose 2.40.3에서 `up -d --watch`는 허용되지 않는다. Marina는
 1. 컨테이너 기동: `docker compose ... up -d`
 2. Watch 시작: `docker compose ... watch --no-up <services>`
 
-Watch는 foreground 장기 실행 프로세스이므로 Marina가 서비스별로 `watch-<service>.pid`와 로그를 session
+Watch는 foreground 장기 실행 프로세스이므로 Marina가 서비스별로 `<service>.watch.pid`와 로그를 session
 directory에 기록한다. 같은 worktree·서비스에 살아 있는 watcher가 있으면 중복 실행하지 않는다. 서비스
 stop/restart와 전체 down에서는 해당 watcher를 종료하고, restart 뒤 다시 시작한다. Watch가 비정상 종료해도
 실행 중인 컨테이너는 유지하며 로그와 상태에 실패 원인을 노출한다.
@@ -170,3 +170,22 @@ pre-start 판정을 추가하려면 fingerprint가 필요하므로 이번 표준
 - source-only 개발 루프에서 Docker build가 발생하지 않는다.
 - Marina가 Watch 선언 프로젝트의 watcher를 누수 없이 관리한다.
 - 프로젝트별 dependency hash나 Marina 전용 cache schema가 없다.
+
+## 검증 결과
+
+2026-07-14 `mdc-main`의 격리된 `feature/dev-build-cache` worktree에서 검증했다.
+
+| 항목 | 결과 |
+|---|---|
+| Compose config | `sync` 1개, `rebuild` 5개 해석 |
+| runtime mount | app `node_modules` volume 없음, `.next` volume 유지 |
+| app dependency | app symlink가 이미지 `/app/node_modules/.pnpm`을 참조 |
+| 첫 Ready | Next `235ms` |
+| 동일 이미지 Start | 8.4초, Docker build 0회 |
+| source 변경 | Watch `Syncing`, Docker build 0회, Aside DOM 반영 확인 |
+| manifest 이벤트 | web만 rebuild, 모든 Docker 단계 cache hit, build context 4.6초 |
+| 명시적 Rebuild | `up -d --build`, 18.2초 |
+| Stop | watcher PID 파일 제거 및 프로세스 종료 |
+
+처음 실행한 root 기준 `require.resolve('next/package.json')` 검사는 실패했지만 앱 작업 디렉터리
+`/app/apps/web`에서는 정상 해석됐다. 모노레포 dependency 검증 기준의 문제였으며 런타임 결함은 아니었다.

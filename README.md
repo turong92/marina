@@ -39,11 +39,13 @@ compose 와 설정은 전부 `~/.marina` 에 보관된다.
     marina 격리개발은 **개발 서버**(가볍고 hot reload).
 
   둘은 독립이라 **"로컬" ≠ "개발 서버"** — 개발 서버를 local 프로필로 띄우는 것뿐(`MODE=local next dev`).
-  compose `build` 를 **dev용 Dockerfile**(예: `Dockerfile.local`)로 가리켜 개발 서버 + **소스 마운트**(hot reload).
+  compose `build` 를 **dev용 Dockerfile**(예: `Dockerfile.local`)로 가리켜 개발 서버 + **소스 마운트 또는
+  `develop.watch`**(hot reload).
   프로덕션 빌드는 무겁고(메모리·시간) CI/배포용이라 로컬 격리개발엔 부적합하다.
   CI 이미지가 다른 아키텍처(예: x86 전용 `+cpu` wheel)에 맞춰져 있으면 로컬(arm64 등)에선 에뮬레이션으로
   느려지므로, **로컬용 Dockerfile 은 네이티브 아키텍처**로 둔다(arch 는 이미지 빌드 시 결정 — 재빌드 필요,
-  런타임 변환 불가). 코드 변경은 마운트로 즉시, **의존성·Dockerfile 변경은 `marina restart <svc>`**(증분 재빌드).
+  런타임 변환 불가). `develop.watch` 프로젝트는 코드 변경을 `sync`, 실행 중 의존성·Dockerfile 변경을
+  Compose `rebuild`로 처리한다. Watch가 꺼진 동안 의존성 입력이 바뀌었으면 **`marina rebuild <svc>`**를 쓴다.
 - **워크트리 브랜치 = 서브레포 브랜치 (미러)**. SessionStart attach 는 워크트리의 브랜치명을 **전체 미러**해
   서브레포에 건다. 그래서 **`marina worktree create feature/{task}`**(= 작업 시작)로 워크트리를 만들면
   서브레포도 모두 `feature/{task}` 로 정렬된다(브랜치명은 마리나 안 쓰던 때와 동일, 격리만 추가). Claude 자동
@@ -222,12 +224,17 @@ Claude 세션 안에서는 슬래시 명령도 된다: `/marina:project add`, `/
 등록 후, 현재 worktree 의 스택을 띄우고 내린다(대시보드 카드의 ▶/■/↻ 로도 동일):
 
 ```bash
-marina start  <svc> | --all      # 한 서비스(+의존) | 스택 전체 (docker compose up -d --build)
+marina start  <svc> | --all      # 기존 이미지로 빠르게 시작 (이미지가 없으면 최초 build)
 marina stop   <svc> | --all      # 한 서비스 정지 | --all = down(teardown)
-marina restart <svc> | --all     # 정의 변경분 재적용 (selected = up --build 재적용)
+marina restart <svc> | --all     # 기존 이미지로 컨테이너 정의 재적용
+marina rebuild <svc> | --all     # docker compose up -d --build 후 시작
 marina status | ports            # 상태 · 라이브 호스트 포트
 marina logs [svc]                # docker 로그 follow (대시보드 로그 뷰어로도 봄)
 ```
+
+서비스에 Compose 표준 `develop.watch`가 선언되어 있으면 marina가 worktree별
+`docker compose watch --no-up` 프로세스를 함께 시작하고 stop/restart/down 때 정리한다. 소스와 dependency
+입력의 `sync`/`rebuild` 구분은 프로젝트 Compose가 소유하며 marina 전용 hash나 cache schema를 추가하지 않는다.
 
 `marina start web` 처럼 서비스명을 그대로 쓴다(전역 `marina` 래퍼). 무인자 `marina start` 는
 전체를 안 띄우고 안내만 한다 — 워크트리마다 모든 서비스를 무심코 올려 메모리를 잡아먹는 사고 방지.
@@ -390,6 +397,7 @@ x-marina:
 - 카드 헤더 `▶ Start all` / `■ Stop all`, 서비스별 ▶/■/↻, web 열기 `↗`.
 - 서비스 ⓘ — 빌드 컨텍스트·Dockerfile·포트·env + 위 자동 주입(build args·pre-build·mounts) 편집.
 - 로그 뷰어 — run 히스토리·검색·실시간 스트리밍(start 때 `docker compose logs -f` 를 `run-NNN.log` 로 캡처).
+- 빌드 로그 — run별 총 시간, BuildKit·Gradle 단계, cache hit 수, 가장 오래 걸린 단계를 원문 로그 위에서 요약.
 
 ---
 
@@ -431,7 +439,7 @@ x-marina:
 - **python3**(표준 라이브러리만)·**bash**·**git** — 별도 pip 설치 없음.
 - 단일 포트만 지원(포트 **범위**는 거부). `network_mode: host` 는 격리를 깨므로 **거부**된다(명확한 에러).
   `container_name` 은 격리를 위해 overlay 에서 **자동 제거**된다(`!reset`, 경고). `external` 네트워크·볼륨은 경고만.
-- `restart --<svc>` 는 `up --build` 재적용(변경 반영). 컨테이너 단순 재시작이 아니다.
+- `restart --<svc>` 는 기존 이미지로 `up`을 재적용하고, `rebuild --<svc>`만 `up --build`를 실행한다.
 - 등록 검증(위저드 검토·`--compose`)은 `docker compose config` + 격리 검사까지다(이미지 빌드 실행까지는 아님).
 
 ---
