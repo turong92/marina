@@ -220,29 +220,55 @@ PY
             while IFS= read -r x; do [[ -n "$x" ]] && tail_svcs+=("$x"); done \
               < <(docker compose -p "$cname" ps --all --services 2>/dev/null)
           fi
-          for x in ${tail_svcs[@]+"${tail_svcs[@]}"}; do _compose_logtail_start "$cname" "$x"; done ;;
+          for x in ${tail_svcs[@]+"${tail_svcs[@]}"}; do _compose_logtail_start "$cname" "$x"; done
+          local -a watch_args=()
+          for x in ${tail_svcs[@]+"${tail_svcs[@]}"}; do watch_args+=("--service=$x"); done
+          while IFS= read -r x; do
+            [[ -n "$x" ]] && _compose_watch_start "$x" python3 "$cp" watch --stored "$stored" \
+              --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} --service="$x"
+          done < <(python3 "$cp" watchable --stored "$stored" --project-dir "$ROOT" \
+            "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${watch_args[@]+"${watch_args[@]}"}) ;;
         stop)
           if [[ ${#svcs[@]} -gt 0 ]]; then
-            for x in "${svcs[@]}"; do _compose_logtail_stop "${x#--service=}"; done
+            for x in "${svcs[@]}"; do _compose_watch_stop "${x#--service=}"; _compose_logtail_stop "${x#--service=}"; done
             python3 "$cp" stop "${nameargs[@]}" "${svcs[@]}"
           else
+            _compose_watch_stop
             _compose_logtail_stop
             python3 "$cp" down "${nameargs[@]}"
           fi ;;
         restart)
           if [[ ${#svcs[@]} -gt 0 ]]; then
+            for x in "${svcs[@]}"; do _compose_watch_stop "${x#--service=}"; done
             # bounce 가 아니라 up 재적용 — build args/Dockerfile 보정/overlay 변경이 반영되게(--build). config 바뀌면 recreate.
             python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" \
               "${svcs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || return $?
             cname="$(python3 "$cp" name "${nameargs[@]}")"
-            for x in "${svcs[@]}"; do _compose_logtail_start "$cname" "${x#--service=}"; done
+            for x in "${svcs[@]}"; do
+              _compose_logtail_start "$cname" "${x#--service=}"
+              while IFS= read -r _watch_svc; do
+                [[ -n "$_watch_svc" ]] && _compose_watch_start "$_watch_svc" python3 "$cp" watch --stored "$stored" \
+                  --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} --service="$_watch_svc"
+              done < <(python3 "$cp" watchable --stored "$stored" --project-dir "$ROOT" \
+                "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} "--service=${x#--service=}")
+            done
           else
+            _compose_watch_stop
             _compose_logtail_stop
             python3 "$cp" down "${nameargs[@]}"
             python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || return $?
             cname="$(python3 "$cp" name "${nameargs[@]}")"
-            while IFS= read -r x; do [[ -n "$x" ]] && _compose_logtail_start "$cname" "$x"; done \
-              < <(docker compose -p "$cname" ps --all --services 2>/dev/null)
+            local -a restart_svcs=()
+            while IFS= read -r x; do
+              if [[ -n "$x" ]]; then restart_svcs+=("$x"); _compose_logtail_start "$cname" "$x"; fi
+            done < <(docker compose -p "$cname" ps --all --services 2>/dev/null)
+            local -a restart_watch_args=()
+            for x in ${restart_svcs[@]+"${restart_svcs[@]}"}; do restart_watch_args+=("--service=$x"); done
+            while IFS= read -r x; do
+              [[ -n "$x" ]] && _compose_watch_start "$x" python3 "$cp" watch --stored "$stored" \
+                --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} --service="$x"
+            done < <(python3 "$cp" watchable --stored "$stored" --project-dir "$ROOT" \
+              "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${restart_watch_args[@]+"${restart_watch_args[@]}"})
           fi ;;
       esac ;;
     status)  python3 "$cp" status "${nameargs[@]}" ;;

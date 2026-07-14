@@ -596,6 +596,29 @@ def up_argv(stored, overlay, project_dir, project_name, services):
     return a + list(services)
 
 
+def watchable_services(config: dict, requested: list[str]) -> list[str]:
+    """Compose develop.watch가 선언된 요청 서비스만 결정적으로 반환한다."""
+    services = config.get("services") if isinstance(config.get("services"), dict) else {}
+    names = requested or list(services)
+    out = []
+    for name in names:
+        service = services.get(name)
+        develop = service.get("develop") if isinstance(service, dict) else None
+        watch = develop.get("watch") if isinstance(develop, dict) else None
+        if isinstance(watch, list) and watch:
+            out.append(name)
+    return sorted(set(out))
+
+
+def watch_argv(stored, overlay, project_dir, project_name, service):
+    """기존 up과 같은 Compose model로 service 하나를 watch한다."""
+    argv = ["docker", "compose", "-f", stored]
+    if overlay and os.path.exists(overlay) and os.path.getsize(overlay) > 0:
+        argv += ["-f", overlay]
+    return argv + ["--project-directory", project_dir, "-p", project_name,
+                   "watch", "--no-up", service]
+
+
 def label_argv(project_name, verb_args):
     """파일 없이 -p 라벨로 동작하는 lifecycle 명령 (down/stop/restart/ps/logs)."""
     return ["docker", "compose", "-p", project_name] + list(verb_args)
@@ -734,6 +757,31 @@ def cmd_up(a):
     return rc
 
 
+def cmd_watchable(a):
+    env = _env_with(a.env)
+    name = compose_project_name(a.project_id, a.session)
+    try:
+        config = docker_config_json(a.stored, a.project_dir, name, env)
+    except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"error: Compose Watch 서비스 판정 실패: {exc}\n")
+        return 2
+    for service in watchable_services(config, list(a.service or [])):
+        print(service)
+    return 0
+
+
+def cmd_watch(a):
+    env = _env_with(a.env)
+    name = compose_project_name(a.project_id, a.session)
+    argv = watch_argv(a.stored, _overlay_path(a.session_dir), a.project_dir, name, a.service)
+    print("compose watch: " + " ".join(argv), flush=True)
+    try:
+        os.execvpe(argv[0], argv, env)
+    except FileNotFoundError:
+        sys.stderr.write("error: docker 미설치 — Compose Watch를 시작할 수 없습니다.\n")
+        return 2
+
+
 def cmd_down(a):  # 전체 teardown (stop --all). --volumes 요청 시 compose named volume 도 제거
     name = compose_project_name(a.project_id, a.session)
     verb = ["down", "--remove-orphans"] + (["--volumes"] if getattr(a, "volumes", False) else [])
@@ -811,6 +859,8 @@ def main(argv=None):
     p = sub.add_parser("psports"); p.set_defaults(fn=cmd_psports)
     p = sub.add_parser("xmarina"); p.add_argument("--stored", required=True); p.add_argument("--key"); p.set_defaults(fn=cmd_xmarina)
     p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.set_defaults(fn=cmd_up)
+    p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
+    p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("down"); name_args(p); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
     p = sub.add_parser("stop"); name_args(p); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_stop)
     p = sub.add_parser("restart"); name_args(p); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_restart)
