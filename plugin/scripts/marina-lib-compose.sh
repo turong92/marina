@@ -45,6 +45,40 @@ run_prebuild_hooks() {
     --compose-version "$compose_version" "$@"
 }
 
+refresh_compose_watch() {
+  # Compose는 프로젝트별 watch lock 하나만 허용한다. 현재 실행 중인 watchable 서비스를
+  # 한 명령으로 묶어 기존 watcher를 원자적으로 교체한다.
+  local stored="$1" cp="$2" project_root="$3" sd="$4" project_id="$5" sid="$6" cname="$7"
+  shift 7
+  local -a envargs=("$@") running_args=() watch_services=() watch_cmd=()
+  local service legacy_pid legacy_service
+  shopt -s nullglob
+  for legacy_pid in "$sd"/*.watch.pid; do
+    [[ "$legacy_pid" == "$sd/compose.watch.pid" ]] && continue
+    legacy_service="${legacy_pid##*/}"
+    _compose_watch_stop "${legacy_service%.watch.pid}"
+  done
+  shopt -u nullglob
+  while IFS= read -r service; do
+    [[ -n "$service" ]] && running_args+=("--service=$service")
+  done < <(docker compose -p "$cname" ps --services --status running 2>/dev/null)
+  while IFS= read -r service; do
+    [[ -n "$service" ]] && watch_services+=("$service")
+  done < <(python3 "$cp" watchable --stored "$stored" --project-dir "$project_root" \
+    --project-id "$project_id" --session "$sid" \
+    ${envargs[@]+"${envargs[@]}"} ${running_args[@]+"${running_args[@]}"})
+
+  if [[ ${#watch_services[@]} -eq 0 ]]; then
+    _compose_watch_stop compose
+    return 0
+  fi
+  watch_cmd=(python3 "$cp" watch --stored "$stored" --project-dir "$project_root" \
+    --session-dir "$sd" --project-id "$project_id" --session "$sid")
+  watch_cmd+=(${envargs[@]+"${envargs[@]}"})
+  for service in "${watch_services[@]}"; do watch_cmd+=("--service=$service"); done
+  _compose_watch_start compose "${watch_cmd[@]}"
+}
+
 compose_main() {
   local command="$1"; shift || true
 
@@ -179,17 +213,15 @@ PY
               < <(docker compose -p "$cname" ps --services --status running 2>/dev/null)
           fi
           for x in ${tail_svcs[@]+"${tail_svcs[@]}"}; do _compose_logtail_start "$cname" "$x"; done
-          local -a watch_args=()
-          for x in ${tail_svcs[@]+"${tail_svcs[@]}"}; do watch_args+=("--service=$x"); done
-          while IFS= read -r x; do
-            [[ -n "$x" ]] && _compose_watch_start "$x" python3 "$cp" watch --stored "$stored" \
-              --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} --service="$x"
-          done < <(python3 "$cp" watchable --stored "$stored" --project-dir "$ROOT" \
-            "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${watch_args[@]+"${watch_args[@]}"}) ;;
+          refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+            ${envargs[@]+"${envargs[@]}"} ;;
         stop)
           if [[ ${#svcs[@]} -gt 0 ]]; then
-            for x in "${svcs[@]}"; do _compose_watch_stop "${x#--service=}"; _compose_logtail_stop "${x#--service=}"; done
-            python3 "$cp" stop "${nameargs[@]}" "${svcs[@]}"
+            for x in "${svcs[@]}"; do _compose_logtail_stop "${x#--service=}"; done
+            python3 "$cp" stop "${nameargs[@]}" "${svcs[@]}" || return $?
+            cname="$(python3 "$cp" name "${nameargs[@]}")"
+            refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+              ${envargs[@]+"${envargs[@]}"}
           else
             _compose_watch_stop
             _compose_logtail_stop
@@ -197,19 +229,15 @@ PY
           fi ;;
         restart)
           if [[ ${#svcs[@]} -gt 0 ]]; then
-            for x in "${svcs[@]}"; do _compose_watch_stop "${x#--service=}"; done
             # bounce 대신 up 재적용 — build 없이 빠르게 설정 변경·컨테이너 상태를 반영한다.
             python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" \
               "${svcs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || return $?
             cname="$(python3 "$cp" name "${nameargs[@]}")"
             for x in "${svcs[@]}"; do
               _compose_logtail_start "$cname" "${x#--service=}"
-              while IFS= read -r _watch_svc; do
-                [[ -n "$_watch_svc" ]] && _compose_watch_start "$_watch_svc" python3 "$cp" watch --stored "$stored" \
-                  --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} --service="$_watch_svc"
-              done < <(python3 "$cp" watchable --stored "$stored" --project-dir "$ROOT" \
-                "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} "--service=${x#--service=}")
             done
+            refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+              ${envargs[@]+"${envargs[@]}"}
           else
             _compose_watch_stop
             _compose_logtail_stop
@@ -220,13 +248,8 @@ PY
             while IFS= read -r x; do
               if [[ -n "$x" ]]; then restart_svcs+=("$x"); _compose_logtail_start "$cname" "$x"; fi
             done < <(docker compose -p "$cname" ps --services --status running 2>/dev/null)
-            local -a restart_watch_args=()
-            for x in ${restart_svcs[@]+"${restart_svcs[@]}"}; do restart_watch_args+=("--service=$x"); done
-            while IFS= read -r x; do
-              [[ -n "$x" ]] && _compose_watch_start "$x" python3 "$cp" watch --stored "$stored" \
-                --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} --service="$x"
-            done < <(python3 "$cp" watchable --stored "$stored" --project-dir "$ROOT" \
-              "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${restart_watch_args[@]+"${restart_watch_args[@]}"})
+            refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+              ${envargs[@]+"${envargs[@]}"}
           fi ;;
       esac ;;
     status)  python3 "$cp" status "${nameargs[@]}" ;;

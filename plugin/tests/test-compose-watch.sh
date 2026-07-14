@@ -26,7 +26,8 @@ case "$*" in
   "compose version --short") echo "2.40.3" ;;
   info) exit 0 ;;
   *"config --format json"*) cat "$DOCKER_CONFIG_FIXTURE" ;;
-  *"ps --services --status running"*) printf 'web\nbe\n' ;;
+  *"ps --services --status running"*) printf '%s\n' "${DOCKER_RUNNING_SERVICES:-web
+be}" ;;
   *"ps --all --services"*) printf 'web\noptional\nbe\n' ;;
   *"ps --format json"*) echo '[]' ;;
   *"logs -f"*) exec sleep 30 ;;
@@ -111,37 +112,46 @@ wait_for_pid() {
 
 mrun start --all >/dev/null
 SD="$P/.workspace/marina/main"
-WEB_PID_FILE="$SD/web.watch.pid"
-BE_PID_FILE="$SD/be.watch.pid"
-OPTIONAL_PID_FILE="$SD/optional.watch.pid"
-wait_for_pid "$WEB_PID_FILE" || { echo "FAIL: web watcher not running"; exit 1; }
-[[ ! -e "$BE_PID_FILE" ]] || { echo "FAIL: non-watch service has watcher"; exit 1; }
-[[ ! -e "$OPTIONAL_PID_FILE" ]] || { echo "FAIL: stopped optional service has watcher"; exit 1; }
+WATCH_PID_FILE="$SD/compose.watch.pid"
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: project watcher not running"; exit 1; }
+watch_pid_count="$(find "$SD" -name '*.watch.pid' -type f | wc -l | tr -d ' ')"
+[[ "$watch_pid_count" == "1" ]] || { echo "FAIL: expected one project watcher, found $watch_pid_count"; exit 1; }
 grep -q "watch --no-up web" "$DOCKER_LOG" || { echo "FAIL: compose watch command missing"; cat "$DOCKER_LOG"; exit 1; }
-first_pid="$(head -n 1 "$WEB_PID_FILE")"
+first_pid="$(head -n 1 "$WATCH_PID_FILE")"
 
 mrun start --all >/dev/null
-wait_for_pid "$WEB_PID_FILE" || { echo "FAIL: replacement watcher not running"; exit 1; }
-second_pid="$(head -n 1 "$WEB_PID_FILE")"
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: replacement watcher not running"; exit 1; }
+second_pid="$(head -n 1 "$WATCH_PID_FILE")"
 [[ "$first_pid" != "$second_pid" ]] || { echo "FAIL: watcher pid not replaced"; exit 1; }
 kill -0 "$first_pid" 2>/dev/null && { echo "FAIL: old watcher still alive"; exit 1; } || true
 
-mrun stop --web >/dev/null
-[[ ! -e "$WEB_PID_FILE" ]] || { echo "FAIL: service stop left watcher pid"; exit 1; }
+DOCKER_RUNNING_SERVICES=$'web\noptional\nbe' mrun start --optional >/dev/null
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: multi-service watcher not running"; exit 1; }
+multi_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$multi_pid" != "$second_pid" ]] || { echo "FAIL: multi-service watcher pid not replaced"; exit 1; }
+grep -Eq "watch --no-up (web optional|optional web)" "$DOCKER_LOG" || {
+  echo "FAIL: running watchable services were not grouped into one command"
+  cat "$DOCKER_LOG"
+  exit 1
+}
+second_pid="$multi_pid"
+
+DOCKER_RUNNING_SERVICES=be mrun stop --web >/dev/null
+[[ ! -e "$WATCH_PID_FILE" ]] || { echo "FAIL: last watchable service stop left watcher pid"; exit 1; }
 kill -0 "$second_pid" 2>/dev/null && { echo "FAIL: watcher alive after service stop"; exit 1; } || true
 
 mrun restart --web >/dev/null
-wait_for_pid "$WEB_PID_FILE" || { echo "FAIL: restart did not start watcher"; exit 1; }
-restart_pid="$(head -n 1 "$WEB_PID_FILE")"
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: restart did not start watcher"; exit 1; }
+restart_pid="$(head -n 1 "$WATCH_PID_FILE")"
 
 mrun stop --all >/dev/null
-[[ ! -e "$WEB_PID_FILE" ]] || { echo "FAIL: stop all left watcher pid"; exit 1; }
+[[ ! -e "$WATCH_PID_FILE" ]] || { echo "FAIL: stop all left watcher pid"; exit 1; }
 kill -0 "$restart_pid" 2>/dev/null && { echo "FAIL: watcher alive after stop all"; exit 1; } || true
 
 # A stale legacy PID must not kill an unrelated process after PID reuse.
 sleep 30 &
 unrelated_pid=$!
-printf '%s\n' "$unrelated_pid" > "$WEB_PID_FILE"
+printf '%s\n' "$unrelated_pid" > "$WATCH_PID_FILE"
 mrun stop --web >/dev/null
 kill -0 "$unrelated_pid" 2>/dev/null || { echo "FAIL: stale watcher PID killed an unrelated process"; exit 1; }
 kill "$unrelated_pid" 2>/dev/null || true
@@ -149,8 +159,8 @@ wait "$unrelated_pid" 2>/dev/null || true
 
 # Stop waits for a watcher that ignores SIGTERM and escalates instead of orphaning it.
 WATCH_IGNORE_TERM=1 mrun start --web >/dev/null
-wait_for_pid "$WEB_PID_FILE" || { echo "FAIL: stubborn watcher not running"; exit 1; }
-stubborn_pid="$(head -n 1 "$WEB_PID_FILE")"
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: stubborn watcher not running"; exit 1; }
+stubborn_pid="$(head -n 1 "$WATCH_PID_FILE")"
 mrun stop --web >/dev/null
 if kill -0 "$stubborn_pid" 2>/dev/null; then
   kill -9 "$stubborn_pid" 2>/dev/null || true
@@ -166,7 +176,7 @@ for _ in 1 2 3 4; do
   jobs+=("$!")
 done
 for job in "${jobs[@]}"; do wait "$job"; done
-wait_for_pid "$WEB_PID_FILE" || { echo "FAIL: concurrent starts left no watcher"; exit 1; }
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: concurrent starts left no watcher"; exit 1; }
 alive=0
 while IFS= read -r p; do
   [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && alive=$((alive + 1))
@@ -197,7 +207,7 @@ for _ in $(seq 1 50); do [[ -e "$WATCH_UP_BARRIER" ]] && break; sleep 0.1; done
 mrun stop --all >/dev/null
 wait "$slow_start_job"
 sleep 0.2
-[[ ! -e "$WEB_PID_FILE" ]] || { echo "FAIL: start spawned watcher after concurrent stop --all"; exit 1; }
+[[ ! -e "$WATCH_PID_FILE" ]] || { echo "FAIL: start spawned watcher after concurrent stop --all"; exit 1; }
 while IFS= read -r p; do
   [[ -z "$p" ]] || ! kill -0 "$p" 2>/dev/null || { echo "FAIL: late watcher survived concurrent stop --all"; exit 1; }
 done < "$WATCH_PIDS"

@@ -662,13 +662,13 @@ def watch_version_errors(config: dict, selected: list[str], version: str) -> lis
     return errors
 
 
-def watch_argv(stored, overlay, project_dir, project_name, service):
-    """기존 up과 같은 Compose model로 service 하나를 watch한다."""
+def watch_argv(stored, overlay, project_dir, project_name, services):
+    """기존 up과 같은 Compose model로 여러 service를 단일 watcher로 감시한다."""
     argv = ["docker", "compose", "-f", stored]
     if overlay and os.path.exists(overlay) and os.path.getsize(overlay) > 0:
         argv += ["-f", overlay]
     return argv + ["--project-directory", project_dir, "-p", project_name,
-                   "watch", "--no-up", service]
+                   "watch", "--no-up", *services]
 
 
 def label_argv(project_name, verb_args):
@@ -963,7 +963,7 @@ def main(argv=None):
     p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.set_defaults(fn=cmd_up)
     p = sub.add_parser("prebuild-run"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--legacy-prebuild"); p.add_argument("--compose-version", required=True); p.set_defaults(fn=cmd_prebuild_run)
     p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
-    p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
+    p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("down"); name_args(p); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
     p = sub.add_parser("stop"); name_args(p); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_stop)
     p = sub.add_parser("restart"); name_args(p); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_restart)
