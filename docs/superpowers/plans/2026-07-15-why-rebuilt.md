@@ -31,23 +31,23 @@ API는 기존 redaction 경계에서 reasons를 전달하고 UI는 한 줄 요�
 - Produces: `capture_build_inputs(root: Path, args: tuple[str, ...], env: dict[str, str]) -> dict[str, Any]`
 - Produces: `compare_build_inputs(current: dict, previous: dict | None, op: str) -> list[dict[str, str]]`
 
-- [ ] **Step 1: Write failing pure-function tests**
+- [x] **Step 1: Write failing pure-function tests**
 
 Create fixtures with two services and assert Dockerfile, rebuild path, and build arg added/changed/removed reasons. Assert
 the serialized snapshot contains neither `hunter2` nor `local-secret`.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `bash plugin/tests/test-build-inputs.sh`  
 Expected: FAIL because `marina_build_inputs` does not exist.
 
-- [ ] **Step 3: Implement snapshot collection**
+- [x] **Step 3: Implement snapshot collection**
 
 Use `hashlib.sha256` for declared files, a deterministic metadata walk for directories, and
 `hmac.new(local_key, canonical_json, hashlib.sha256)` for build arg values. Resolve selected services with
 `marina-compose.py`'s `resolved_start_targets` and merge local `build-args.json`/`buildArgsFrom` over Compose args.
 
-- [ ] **Step 4: Implement comparison and verify GREEN**
+- [x] **Step 4: Implement comparison and verify GREEN**
 
 Return only `{kind, service, label, change}` objects. Run `bash plugin/tests/test-build-inputs.sh`; expected PASS.
 
@@ -63,27 +63,27 @@ Return only `{kind, service, label, change}` objects. Run `bash plugin/tests/tes
 - Consumes: Task 1 snapshot/comparison functions.
 - Produces: `build_summary(log_path)` response with `reasons` and no `inputs` field.
 
-- [ ] **Step 1: Add failing lifecycle/meta tests**
+- [x] **Step 1: Add failing lifecycle/meta tests**
 
 Stub `capture_build_inputs`, run two logged lifecycle calls, and assert each `.meta.json` preserves its snapshot while
 the summary of the second run returns changed reasons.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run: `bash plugin/tests/test-build-log.sh && bash plugin/tests/test-build-summary.sh`; expected FAIL on missing inputs/reasons.
 
-- [ ] **Step 3: Capture inputs without blocking lifecycle**
+- [x] **Step 3: Capture inputs without blocking lifecycle**
 
 Write `pending` in the running meta, then call `capture_build_inputs` after the lifecycle child exits so external attach and
 link preparation are reflected without delaying service startup. Catch every exception and store only
 `{version: 1, status: "unknown"}` in final success/failure metadata.
 
-- [ ] **Step 4: Compare nearest previous run**
+- [x] **Step 4: Compare nearest previous run**
 
 Find the numerically closest earlier `run-*.meta.json` containing `inputs`, call `compare_build_inputs`, and include only
 the resulting reasons in the public summary.
 
-- [ ] **Step 5: Verify GREEN**
+- [x] **Step 5: Verify GREEN**
 
 Run both tests; expected PASS.
 
@@ -100,25 +100,25 @@ Run both tests; expected PASS.
 - Consumes: `reasons` from Task 2.
 - Produces: Build Timeline reason summary and native `<details>` disclosure.
 
-- [ ] **Step 1: Add failing API/UI tests**
+- [x] **Step 1: Add failing API/UI tests**
 
 Assert API JSON contains redacted reason labels without `inputs`, `digest`, `hmac`, or fixture secrets. Assert UI has
 `data-build-reasons`, a `<details>` disclosure, and CSS that wraps long labels on a 560px viewport.
 
-- [ ] **Step 2: Verify RED**
+- [x] **Step 2: Verify RED**
 
 Run API/UI tests; expected FAIL.
 
-- [ ] **Step 3: Implement safe API projection**
+- [x] **Step 3: Implement safe API projection**
 
 Redact each reason `label`, keep only `kind`, `service`, `label`, `change`, and return no snapshot data.
 
-- [ ] **Step 4: Render summary and details**
+- [x] **Step 4: Render summary and details**
 
 Show at most three labels in the closed summary. Use Korean labels for first-run, explicit rebuild, Dockerfile,
 dependency input, and build arg. Escape every dynamic field.
 
-- [ ] **Step 5: Verify GREEN and browser layout**
+- [x] **Step 5: Verify GREEN and browser layout**
 
 Run API/UI tests, then use Aside on desktop and narrow viewport with light/dark themes. Expected: no overlap, details
 opens, and raw log remains visible below.
@@ -132,14 +132,14 @@ opens, and raw log remains visible below.
 - Consumes: completed backend/API/UI behavior.
 - Produces: checked P0.2 milestone and verified release commit.
 
-- [ ] **Step 1: Run focused tests**
+- [x] **Step 1: Run focused tests**
 
 Run all five build input/summary tests. Expected: all PASS.
 
-- [ ] **Step 2: Run full suite**
+- [x] **Step 2: Run full suite**
 
 Run `for test_file in plugin/tests/test-*.sh; do bash "$test_file"; done`. Expected: zero failures.
 
-- [ ] **Step 3: Update roadmap and commit**
+- [x] **Step 3: Update roadmap and commit**
 
 Check P0.2 and record that comparisons are Compose-declared, secret-safe, and scoped to Marina lifecycle runs.

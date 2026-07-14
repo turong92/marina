@@ -101,6 +101,8 @@ def compare_build_inputs(
     previous: dict[str, Any] | None,
     op: str,
 ) -> list[dict[str, str]]:
+    if current.get("status") == "pending":
+        return []
     if current.get("status") != "ok":
         return [{
             "kind": "unknown",

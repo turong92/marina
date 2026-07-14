@@ -45,6 +45,7 @@ assert before["version"] == 1, before
 empty = build_input_snapshot(root, config, [], {}, key)
 assert empty["services"] == {}, empty
 assert compare_build_inputs(empty, None, "start") == [], empty
+assert compare_build_inputs({"version": 1, "status": "pending"}, before, "start") == []
 
 (root / "api" / "Dockerfile.local").write_text(
     "FROM python:3.12-slim\nCOPY . .\n", encoding="utf-8"
