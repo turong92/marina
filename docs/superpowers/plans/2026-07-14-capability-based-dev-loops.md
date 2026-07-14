@@ -1105,7 +1105,7 @@ git add docs/superpowers/specs/2026-07-14-orca-comparison-and-roadmap-design.md 
 git commit -m "docs(build): record multi-service dev loop verification"
 ```
 
-- [ ] **Step 7: Final review**
+- [x] **Step 7: Final review**
 
 Review all task commits for accidental project-specific branches in Marina, secret leakage, unrelated metadata churn, Watch process leaks, stale local backups in git, and multi-repository ownership. Do not push or merge any branch without a separate explicit request.
 
