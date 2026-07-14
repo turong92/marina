@@ -324,6 +324,7 @@
       renderRunSelect(session, service, mode, run);
       render();
       renderSelection();
+      if (typeof loadBuildSummary === 'function') loadBuildSummary(root, run);
 
       if (source) source.close();
       matchView = false;  // 필터가 살아 있으면 fetchMatches 가 새 대상 스캔 후 다시 진입

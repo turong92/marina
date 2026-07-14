@@ -678,6 +678,26 @@
     .gauge-window { position: absolute; top: 1px; bottom: 1px; background: var(--sys-cont-primary-default); opacity: 0.75; border-radius: 4px; min-width: 3px; pointer-events: none; }
     .gauge-tick { position: absolute; top: 1px; bottom: 1px; width: 2px; background: var(--sys-cont-negative-default); pointer-events: none; }
     .log-body { flex: 1; min-height: 0; margin: 0; padding: 10px 0; overflow: auto; overscroll-behavior: contain; background: var(--sys-code-bg); color: var(--sys-code-fg); font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; line-height: 1.55; scrollbar-gutter: stable; }
+    .build-summary { padding: 8px 16px 10px; border-bottom: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); font-size: 12px; }
+    .build-summary-head { display: flex; align-items: center; gap: 8px 12px; flex-wrap: wrap; color: var(--sys-cont-neutral-default); }
+    .build-summary-head > span:not(.build-summary-status) { color: var(--sys-cont-neutral-light); }
+    .build-summary-status { font-weight: 600; }
+    .build-summary-status[data-state="success"] { color: var(--st-run); }
+    .build-summary-status[data-state="failed"], .build-summary-status[data-state="timeout"] { color: var(--st-err); }
+    .build-summary-status[data-state="running"] { color: var(--st-boot); }
+    .build-summary-cache { margin-left: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .build-steps { display: grid; gap: 4px; max-height: 180px; margin-top: 8px; overflow: auto; padding-right: 4px; scrollbar-gutter: stable; }
+    .build-step { display: grid; grid-template-columns: minmax(110px, 220px) minmax(80px, 1fr) 54px; gap: 8px; align-items: center; min-width: 0; }
+    .build-step-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .build-step-track { height: 4px; background: var(--sys-style-neutral-light); overflow: hidden; }
+    .build-step-track > span { display: block; height: 100%; background: var(--st-boot); }
+    .build-step[data-state="cache"] .build-step-track > span { background: var(--st-run); }
+    .build-step[data-state="failed"] .build-step-track > span { background: var(--st-err); }
+    .build-step-time { text-align: right; color: var(--sys-cont-neutral-light); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    @media (max-width: 560px) {
+      .build-summary-cache { margin-left: 0; }
+      .build-step { grid-template-columns: minmax(90px, 1fr) 72px 48px; }
+    }
     .log-line { padding: 1px 16px; white-space: pre-wrap; word-break: break-word; }
     .log-line:hover { background: hsla(0, 0%, 100%, 0.05); }
     .log-line.err { color: hsl(358, 85%, 72%); background: hsla(358, 70%, 50%, 0.08); border-left: 2px solid hsl(358, 75%, 55%); padding-left: 14px; }

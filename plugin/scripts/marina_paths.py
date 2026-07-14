@@ -153,6 +153,7 @@ def next_log_path(root: Path, service: str) -> Path:
         for old in sorted(directory.glob("run-*.log"), key=run_seq)[:-keep]:
             if old != path:
                 old.unlink(missing_ok=True)
+                old.with_suffix(".meta.json").unlink(missing_ok=True)
     return path
 
 def ensure_current_log(root: Path, service: str) -> Path:

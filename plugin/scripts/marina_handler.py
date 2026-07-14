@@ -23,6 +23,7 @@ from marina_logtext import read_log_chunk, redact_text, scan_log_matches
 from marina_registry import containing_project_for, discover_all_roots, discover_roots, external_repos_for, is_source_checkout, load_projects, project_for, source_root_for, subrepos_of
 from marina_paths import selected_log, session_dir, session_id, write_config, write_meta
 from marina_cli import _marina_cli, run_marina, run_marina_registry
+from marina_build import build_summary
 
 
 def _apply_now(root: Path, service: str = "") -> None:
@@ -467,6 +468,28 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, 400)
                 return
             self.send_json({"links": links})
+            return
+
+        if parsed.path == "/api/build-summary":
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                safe_service("build", root)
+                run = query.get("run", ["current"])[0]
+                summary = build_summary(selected_log(root, "build", run))
+                steps = [
+                    {**step, "label": redact_text(str(step.get("label", "")))}
+                    for step in summary.get("steps", [])
+                ]
+                bottleneck = summary.get("bottleneck")
+                if bottleneck:
+                    bottleneck = {
+                        **bottleneck,
+                        "label": redact_text(str(bottleneck.get("label", ""))),
+                    }
+                self.send_json({**summary, "steps": steps, "bottleneck": bottleneck})
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
             return
 
         if parsed.path in ("/api/logs", "/api/logs/chunk", "/api/logs/download", "/api/logs/matches"):

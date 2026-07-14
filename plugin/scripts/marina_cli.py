@@ -202,22 +202,50 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
     """_marina_cli 의 build-log 스트리밍판 — prebuild·docker build 진행 출력이 메모리 버퍼(성공 시 폐기,
     실패 시 500자)로 사라지지 않고 per-session 'build' 로그 run 에 실린다(대시보드 /api/logs 재사용).
     실패 시 CalledProcessError(output=파일 끝 4KB) — busyError 500자 계약 유지."""
+    from marina_build import write_build_meta
     from marina_paths import next_log_path
+
     log_path = next_log_path(root, "build")
     env = marina_env(root)
     if extra_env:
         env.update(extra_env)
     argv = [str(script(root)), *args]
-    with open(log_path, "a", encoding="utf-8") as fh:
-        fh.write(f"$ marina {' '.join(args)}\n")
-        fh.flush()
-        proc = subprocess.Popen(argv, cwd=str(root), env=env, stdout=fh, stderr=subprocess.STDOUT, text=True)
-        try:
-            rc = proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(5)
-            raise
+    started_at = time.time()
+    op = args[0] if args else ""
+    meta = {"status": "running", "op": op, "startedAt": started_at}
+    write_build_meta(log_path, meta)
+    rc = None
+    timed_out = False
+    try:
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(f"$ marina {' '.join(args)}\n")
+            fh.flush()
+            proc = subprocess.Popen(
+                argv,
+                cwd=str(root),
+                env=env,
+                stdout=fh,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                rc = proc.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                proc.kill()
+                proc.wait(5)
+                raise
+    finally:
+        ended_at = time.time()
+        final = {
+            **meta,
+            "status": "timeout" if timed_out else ("success" if rc == 0 else "failed"),
+            "endedAt": ended_at,
+            "durationSec": round(max(0.0, ended_at - started_at), 3),
+        }
+        if rc is not None:
+            final["exitCode"] = rc
+        write_build_meta(log_path, final)
     if rc != 0:
         tail = ""
         try:

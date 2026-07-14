@@ -20,7 +20,7 @@ from marina_state import LOG_CHUNK_BYTES
 
 SENSITIVE_ASSIGNMENT_RE = re.compile(
     r"([A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|ACCESS|WEBHOOK|CREDENTIAL|PRIVATE)"
-    r"[A-Z0-9_]*\s*=\s*)([^\s│]+)",
+    r"[A-Z0-9_]*\s*=\s*)(\"[^\"]*\"|'[^']*'|[^\s│]+)",
     re.IGNORECASE,
 )
 
@@ -31,6 +31,22 @@ SENSITIVE_JSON_RE = re.compile(
 
 SENSITIVE_PY_OBJECT_RE = re.compile(
     r"('(?:[^']*(?:key|secret|token|password|access|webhook|credential|private)[^']*)'\s*:\s*)'[^']*'",
+    re.IGNORECASE,
+)
+
+SENSITIVE_ENV_SPACE_RE = re.compile(
+    r"(\b[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASSWORD|ACCESS|WEBHOOK|CREDENTIAL|PRIVATE)"
+    r"[A-Z0-9_]*[ \t]+)(\"[^\"]*\"|'[^']*'|[^\s│'\";,]+)"
+)
+
+SENSITIVE_FLAG_RE = re.compile(
+    r"((?:--)(?:api[-_]?key|secret|token|password|access[-_]?token|webhook|credential|private[-_]?key)"
+    r"[ \t]+)(\"[^\"]*\"|'[^']*'|[^\s│'\";,]+)",
+    re.IGNORECASE,
+)
+
+SENSITIVE_AUTHORIZATION_RE = re.compile(
+    r"(\bAuthorization\s*:\s*(?:(?:Bearer|Basic)\s+)?)(\"[^\"]*\"|'[^']*'|[^\s│'\";,]+)",
     re.IGNORECASE,
 )
 
@@ -156,7 +172,7 @@ def read_log_chunk(path: Path, before: int | None = None, after: int | None = No
     }
 
 # SENSITIVE_*_RE 3종이 공유하는 키워드 — 프리필터용 (패턴 수정 시 여기도 동기화)
-_SENSITIVE_HINTS = ("key", "secret", "token", "password", "access", "webhook", "credential", "private")
+_SENSITIVE_HINTS = ("key", "secret", "token", "password", "access", "webhook", "credential", "private", "authorization")
 
 def redact_text(value: str) -> str:
     # 프리필터 — 민감 키워드가 아예 없는 라인(로그 대부분)은 치환 3종을 스킵.
@@ -167,4 +183,7 @@ def redact_text(value: str) -> str:
     redacted = SENSITIVE_ASSIGNMENT_RE.sub(r"\1<redacted>", value)
     redacted = SENSITIVE_JSON_RE.sub(r'\1"<redacted>"', redacted)
     redacted = SENSITIVE_PY_OBJECT_RE.sub(r"\1'<redacted>'", redacted)
+    redacted = SENSITIVE_ENV_SPACE_RE.sub(r"\1<redacted>", redacted)
+    redacted = SENSITIVE_FLAG_RE.sub(r"\1<redacted>", redacted)
+    redacted = SENSITIVE_AUTHORIZATION_RE.sub(r"\1<redacted>", redacted)
     return redacted
