@@ -23,6 +23,7 @@ from marina_cache import cache_items_by_category, disk_usage_mb, docker_volume_r
 from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
+from marina_logtext import redact_text
 from marina_sessions import git_output, session_payload, system_memory, worktree_status
 
 def stop_external(root: Path, service: str, port: int) -> dict[str, Any]:
@@ -117,11 +118,12 @@ def _spawn_lifecycle(key: str, op: str, fn) -> dict[str, Any]:
             LIFECYCLE_BUSY.pop(key, None)
             refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh 훅의 gateway-ensure 가 단일 처리 — CLI·대시보드 공통)
         except subprocess.CalledProcessError as exc:
-            LIFECYCLE_BUSY[key] = {"op": op, "error": f"{op} failed: {(exc.output or '')[-500:]}", "endedTs": time.time()}
+            detail = redact_text(str(exc.output or "")[-500:])
+            LIFECYCLE_BUSY[key] = {"op": op, "error": f"{op} failed: {detail}", "endedTs": time.time()}
         except subprocess.TimeoutExpired:
             LIFECYCLE_BUSY[key] = {"op": op, "error": f"{op} timed out ({LIFECYCLE_TIMEOUT}s)", "endedTs": time.time()}
         except Exception as exc:
-            LIFECYCLE_BUSY[key] = {"op": op, "error": str(exc)[-500:], "endedTs": time.time()}
+            LIFECYCLE_BUSY[key] = {"op": op, "error": redact_text(str(exc)[-500:]), "endedTs": time.time()}
 
     threading.Thread(target=_run, daemon=True, name=f"lifecycle-{op}").start()
     return {"starting": True, "op": op}

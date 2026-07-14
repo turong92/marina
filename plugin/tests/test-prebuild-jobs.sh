@@ -10,11 +10,18 @@ mkdir -p "$TMP/root/be-api/user-api" "$TMP/root/be-api/batch" \
   "$TMP/root/web" "$TMP/root/.workspace/external/ext-api/app"
 
 python3 - "$HERE/../scripts" "$TMP/root" <<'PY'
+import importlib.util
 import sys
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
 from marina_prebuild import PrebuildConfigError, plan_prebuild_jobs
+
+compose_spec = importlib.util.spec_from_file_location(
+    "marina_compose", Path(sys.argv[1]) / "marina-compose.py"
+)
+marina_compose = importlib.util.module_from_spec(compose_spec)
+compose_spec.loader.exec_module(marina_compose)
 
 root = Path(sys.argv[2]).resolve()
 config = {
@@ -101,6 +108,22 @@ optional = plan_prebuild_jobs(
     root,
 )
 assert optional == [], optional
+
+dependency_config = {"services": {
+    "frontend": {"image": "frontend", "depends_on": {"worker": {"condition": "service_started"}}},
+    "worker": {"image": "worker"},
+}}
+dependency_targets, _, _ = marina_compose.resolved_start_targets(
+    dependency_config, {}, ["frontend"]
+)
+dependency_jobs = plan_prebuild_jobs(
+    {"worker": {"cwd": "be-api", "command": "make worker"}},
+    dependency_config,
+    dependency_targets,
+    root,
+)
+assert dependency_targets == ["frontend", "worker"], dependency_targets
+assert [job.services for job in dependency_jobs] == [("worker",)], dependency_jobs
 
 print("planner assertions ok")
 PY

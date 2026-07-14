@@ -28,6 +28,14 @@ assert mc.watch_version_errors(config, ["worker"], "2.32.0") == []
 assert mc.watch_version_errors(config, ["tool"], "2.32.1")
 assert mc.watch_version_errors(config, ["tool"], "2.32.2") == []
 assert mc.watch_version_errors(config, ["web"], "v2.40.3-desktop.1") == []
+
+dependency_config = {"services": {
+    "frontend": {"image": "frontend", "depends_on": ["worker"]},
+    "worker": {"image": "worker", "develop": {"watch": [{"action": "restart", "path": "./build"}]}},
+}}
+dependency_targets, _, _ = mc.resolved_start_targets(dependency_config, {}, ["frontend"])
+assert dependency_targets == ["frontend", "worker"], dependency_targets
+assert mc.watch_version_errors(dependency_config, dependency_targets, "2.31.9")
 print("version matrix ok")
 PY
 

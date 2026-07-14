@@ -168,7 +168,9 @@ def _event(
         "id": job.id,
         "services": list(job.services),
         "cwd": job.cwd,
-        "command": job.command if status == "started" else "",
+        # Commands are trusted project configuration but may contain literal credentials.
+        # Timeline consumers only need the stable job id/service/cwd metadata.
+        "command": "",
         "status": status,
     }
     if duration is not None:

@@ -101,7 +101,7 @@ import sys, yaml
 path = sys.argv[1]
 data = yaml.safe_load(open(path, encoding="utf-8"))
 data["x-marina"]["prebuild"] = {
-    "user-api": {"cwd": "be-api", "command": "exit 9"},
+    "user-api": {"cwd": "be-api", "command": "API_TOKEN=prebuild-secret-value; exit 9"},
 }
 open(path, "w", encoding="utf-8").write(yaml.safe_dump(data, sort_keys=False))
 PY
@@ -112,6 +112,9 @@ fi
 grep -q '"status": "failed"' "$TMP/fail.log" || {
   echo "FAIL: structured failure event"; cat "$TMP/fail.log"; exit 1;
 }
+if grep -q 'prebuild-secret-value' "$TMP/fail.log"; then
+  echo "FAIL: structured prebuild event exposed command secret"; cat "$TMP/fail.log"; exit 1
+fi
 if grep -q ' up -d ' "$DOCKER_LOG"; then
   echo "FAIL: compose up ran after prebuild failure"; cat "$DOCKER_LOG"; exit 1
 fi

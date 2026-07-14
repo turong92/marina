@@ -160,6 +160,7 @@ _compose_watch_owned() {  # $1=pid, $2=service, $3=recorded process stamp
   fi
   # Upgrade compatibility for legacy one-line PID files: only kill a process whose command is still our watcher.
   cmd="$(ps -p "$p" -o command= 2>/dev/null || true)"
+  [[ -n "${ROOT:-}" && "$cmd" == *"$ROOT"* ]] || return 1
   [[ "$cmd" == *"marina-compose.py watch"* \
     || "$cmd" == *"docker compose"*"watch --no-up"* ]]
 }
@@ -187,7 +188,7 @@ _compose_watch_now_ns() {
 }
 
 _compose_watch_mark_stop() {  # $1=service, empty means stop --all
-  local service="${1:-}" sd lock target project_target now tmp
+  local service="${1:-}" sd lock target now tmp
   sd="$(session_dir)"
   lock="$sd/.watch.intent.lock"
   _compose_watch_lock "$lock" || return 1
@@ -198,10 +199,6 @@ _compose_watch_mark_stop() {  # $1=service, empty means stop --all
   tmp="$target.tmp.$$"
   printf '%s\n' "$now" > "$tmp"
   mv "$tmp" "$target"
-  project_target="$sd/.watch.stop.project"
-  tmp="$project_target.tmp.$$"
-  printf '%s\n' "$now" > "$tmp"
-  mv "$tmp" "$project_target"
   rm -rf "$lock"
 }
 
@@ -227,7 +224,7 @@ _compose_watch_stop_unlocked() {  # $1=service
 
 _compose_watch_start() {  # $1=service, $2...=foreground watch command
   local service="$1"; shift
-  local sd tpf log_path lock intent_lock all_stop project_stop service_stop rc=0
+  local sd tpf log_path lock intent_lock all_stop service_stop rc=0
   sd="$(session_dir)"
   tpf="$sd/${service}.watch.pid"
   log_path="$sd/${service}.watch.log"
@@ -235,11 +232,9 @@ _compose_watch_start() {  # $1=service, $2...=foreground watch command
   intent_lock="$sd/.watch.intent.lock"
   _compose_watch_lock "$intent_lock" || return 1
   all_stop="$(cat "$sd/.watch.stop.all" 2>/dev/null || echo 0)"
-  project_stop="$(cat "$sd/.watch.stop.project" 2>/dev/null || echo 0)"
   service_stop="$(cat "$sd/${service}.watch.stop" 2>/dev/null || echo 0)"
   if [[ "${MARINA_WATCH_STARTED_NS:-}" =~ ^[0-9]+$ ]] \
     && { [[ "$all_stop" =~ ^[0-9]+$ && "$all_stop" -gt "$MARINA_WATCH_STARTED_NS" ]] \
-      || [[ "$project_stop" =~ ^[0-9]+$ && "$project_stop" -gt "$MARINA_WATCH_STARTED_NS" ]] \
       || [[ "$service_stop" =~ ^[0-9]+$ && "$service_stop" -gt "$MARINA_WATCH_STARTED_NS" ]]; }; then
     rm -rf "$intent_lock"
     return 0

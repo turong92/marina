@@ -25,13 +25,19 @@ echo "docker $*" >> "$DOCKER_LOG"
 case "$*" in
   "compose version --short") echo "2.40.3" ;;
   info) exit 0 ;;
-  *"config --format json"*) cat "$DOCKER_CONFIG_FIXTURE" ;;
-  *"ps --services --status running"*) printf '%s\n' "${DOCKER_RUNNING_SERVICES:-web
+  *"config --format json"*)
+    if [[ "${WATCH_CONFIG_FAIL_AFTER_UP:-}" == "1" && -e "$WATCH_UP_DONE" ]]; then exit 9; fi
+    cat "$DOCKER_CONFIG_FIXTURE"
+    ;;
+  *"ps --services --status running"*)
+    [[ "${WATCH_PS_FAIL:-}" == "1" ]] && exit 9
+    printf '%s\n' "${DOCKER_RUNNING_SERVICES-web
 be}" ;;
   *"ps --all --services"*) printf 'web\noptional\nbe\n' ;;
   *"ps --format json"*) echo '[]' ;;
   *"logs -f"*) exec sleep 30 ;;
   *"up -d"*)
+    : > "$WATCH_UP_DONE"
     if [[ "${WATCH_DELAY_UP:-}" == "1" ]]; then
       : > "$WATCH_UP_BARRIER"
       sleep 1
@@ -58,6 +64,7 @@ export DOCKER_LOG="$TMP/docker.log"
 export WATCH_PIDS="$TMP/watch-pids.log"
 export WATCH_CHILD_PIDS="$TMP/watch-child-pids.log"
 export WATCH_UP_BARRIER="$TMP/watch-up.barrier"
+export WATCH_UP_DONE="$TMP/watch-up.done"
 export DOCKER_CONFIG_FIXTURE="$TMP/config.json"
 : > "$DOCKER_LOG"
 : > "$WATCH_PIDS"
@@ -94,7 +101,7 @@ cp "$DOCKER_CONFIG_FIXTURE" "$P/docker-compose.yml"
 bash "$SH" project add "$P" --compose "$P/docker-compose.yml" >/dev/null
 mrun() {
   (cd "$P" && MARINA_HOME="$MARINA_HOME" PATH="$TMP/bin:$PATH" \
-    DOCKER_LOG="$DOCKER_LOG" DOCKER_CONFIG_FIXTURE="$DOCKER_CONFIG_FIXTURE" \
+    DOCKER_LOG="$DOCKER_LOG" DOCKER_CONFIG_FIXTURE="$DOCKER_CONFIG_FIXTURE" WATCH_UP_DONE="$WATCH_UP_DONE" \
     bash "$SH" "$@")
 }
 
@@ -125,6 +132,16 @@ second_pid="$(head -n 1 "$WATCH_PID_FILE")"
 [[ "$first_pid" != "$second_pid" ]] || { echo "FAIL: watcher pid not replaced"; exit 1; }
 kill -0 "$first_pid" 2>/dev/null && { echo "FAIL: old watcher still alive"; exit 1; } || true
 
+rm -f "$WATCH_UP_DONE"
+WATCH_PS_FAIL=1 mrun start --web >/dev/null
+[[ "$(head -n 1 "$WATCH_PID_FILE")" == "$second_pid" ]] || { echo "FAIL: ps failure replaced project watcher"; exit 1; }
+kill -0 "$second_pid" 2>/dev/null || { echo "FAIL: ps failure killed project watcher"; exit 1; }
+
+rm -f "$WATCH_UP_DONE"
+WATCH_CONFIG_FAIL_AFTER_UP=1 mrun start --web >/dev/null
+[[ "$(head -n 1 "$WATCH_PID_FILE")" == "$second_pid" ]] || { echo "FAIL: config failure replaced project watcher"; exit 1; }
+kill -0 "$second_pid" 2>/dev/null || { echo "FAIL: config failure killed project watcher"; exit 1; }
+
 DOCKER_RUNNING_SERVICES=$'web\noptional\nbe' mrun start --optional >/dev/null
 wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: multi-service watcher not running"; exit 1; }
 multi_pid="$(head -n 1 "$WATCH_PID_FILE")"
@@ -136,7 +153,7 @@ grep -Eq "watch --no-up (web optional|optional web)" "$DOCKER_LOG" || {
 }
 second_pid="$multi_pid"
 
-DOCKER_RUNNING_SERVICES=be mrun stop --web >/dev/null
+DOCKER_RUNNING_SERVICES="" mrun stop --web >/dev/null
 [[ ! -e "$WATCH_PID_FILE" ]] || { echo "FAIL: last watchable service stop left watcher pid"; exit 1; }
 kill -0 "$second_pid" 2>/dev/null && { echo "FAIL: watcher alive after service stop"; exit 1; } || true
 
@@ -226,5 +243,17 @@ sleep 0.2
 while IFS= read -r p; do
   [[ -z "$p" ]] || ! kill -0 "$p" 2>/dev/null || { echo "FAIL: late watcher survived concurrent service stop"; exit 1; }
 done < "$WATCH_PIDS"
+
+# A stop for another service must not suppress the watcher from an older independent start.
+rm -f "$WATCH_UP_BARRIER" "$WATCH_UP_DONE"
+WATCH_DELAY_UP=1 mrun start --web >/dev/null &
+cross_service_start_job=$!
+for _ in $(seq 1 50); do [[ -e "$WATCH_UP_BARRIER" ]] && break; sleep 0.1; done
+[[ -e "$WATCH_UP_BARRIER" ]] || { echo "FAIL: cross-service barrier not reached"; exit 1; }
+DOCKER_RUNNING_SERVICES=be mrun stop --optional >/dev/null
+wait "$cross_service_start_job"
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: unrelated service stop suppressed web watcher"; exit 1; }
+grep -q "watch --no-up web" "$DOCKER_LOG" || { echo "FAIL: web watcher missing after unrelated stop"; exit 1; }
+mrun stop --all >/dev/null
 
 echo "PASS test-compose-watch"

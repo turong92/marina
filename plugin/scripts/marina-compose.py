@@ -323,12 +323,37 @@ def startable_services(config: dict, requested) -> tuple:
     return startable, skipped
 
 
+def service_dependency_closure(config: dict, requested: list[str]) -> list[str]:
+    """Return requested services plus their transitive Compose dependencies."""
+    services = (config or {}).get("services") or {}
+    seeds = list(requested) if requested else sorted(services)
+    seen: set[str] = set()
+    closure: list[str] = []
+
+    def visit(name: str) -> None:
+        if name in seen:
+            return
+        seen.add(name)
+        closure.append(name)
+        service = services.get(name)
+        if not isinstance(service, dict):
+            return
+        for dependency in _depends_on(service):
+            if dependency in services:
+                visit(dependency)
+
+    for seed in seeds:
+        visit(seed)
+    return closure
+
+
 def resolved_start_targets(config: dict, xm: dict, requested: list[str]) -> tuple:
-    """Resolve explicit or startGroup services through the shared startable filter."""
+    """Resolve explicit/startGroup services and implicit dependencies."""
     grouped, unknown = start_group_requested(
         xm, requested, config.get("services") or {}
     )
-    startable, skipped = startable_services(config, grouped)
+    expanded = service_dependency_closure(config, grouped)
+    startable, skipped = startable_services(config, expanded)
     return startable, skipped, unknown
 
 
