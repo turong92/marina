@@ -37,67 +37,11 @@ for e in (json.load(sys.stdin).get("externalRepos") or []):
 }
 
 run_prebuild_hooks() {
-  # pre-build(B): 서브레포별 빌드 명령을 up 전에 실행(아티팩트 선빌드 — be-api gradle 등).
-  # portable: 명령은 상대(예 ./gradlew build), 서브레포 dir(내부 ./<sub> 또는 외부 마운트)에서 실행 → 동료 머신서도 동작.
-  # 소스: x-marina.prebuild(보관 compose, 새 SoT) 우선, 없으면 레거시 prebuild.json (전환기 backward-compat).
-  local stored="${1:-}" cp="${2:-}" tgtsvcs="${3:-}"
-  local pf="$MARINA_HOME/$pid/prebuild.json" _sub _cmd _dir _xm="" _allowed=""
-  [[ -n "$stored" && -n "$cp" && -f "$stored" ]] && _xm="$(python3 "$cp" xmarina --stored "$stored" --key prebuild 2>/dev/null)"
-  # 부분 start/restart(특정 --service): 그 서비스들이 빌드하는 서브레포의 prebuild 만 실행.
-  # (예: web restart 가 be-api gradle 을 돌리지 않게 — web 은 web-app-monorepo 서브레포). --all 이면 tgtsvcs 빈값 → 전체.
-  if [[ -n "$tgtsvcs" && -n "$stored" && -f "$stored" ]]; then
-    _allowed="$(python3 - "$stored" "$tgtsvcs" <<'PY'
-import sys
-try:
-    import yaml
-    d = yaml.safe_load(open(sys.argv[1], encoding="utf-8")) or {}
-except Exception:
-    sys.exit(0)
-subs = set()
-for name in sys.argv[2].split():
-    svc = (d.get("services") or {}).get(name) or {}
-    b = svc.get("build")
-    ctx = b.get("context") if isinstance(b, dict) else (b if isinstance(b, str) else ".")
-    ctx = (ctx or ".").lstrip("./")
-    subs.add(ctx.split("/")[0] if ctx and ctx != "." else ".")
-print(" ".join(sorted(s for s in subs if s)))
-PY
-)"
-  fi
-  while IFS=$'\t' read -r _sub _cmd; do
-    [[ -n "$_sub" && -n "$_cmd" ]] || continue
-    if [[ -n "$tgtsvcs" && " $_allowed " != *" $_sub "* ]]; then echo "pre-build skip(대상 서비스와 무관한 서브레포): $_sub" >&2; continue; fi
-    if [[ -d "$ROOT/.workspace/external/$_sub" ]]; then _dir="$ROOT/.workspace/external/$_sub"
-    elif [[ -d "$ROOT/$_sub" ]]; then _dir="$ROOT/$_sub"
-    else echo "pre-build skip(서브레포 폴더 없음): $_sub" >&2; continue; fi
-    # 서브레포별 JAVA_HOME — 그 서브레포 Dockerfile 의 JDK(SoT)로 호스트 빌드도 맞춤(marina_env 가 MARINA_JAVA_HOMES 로 전달).
-    local _jh=""
-    [[ -n "${MARINA_JAVA_HOMES:-}" ]] && _jh="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1] or "{}"); print(d.get(sys.argv[2]) or d.get("default") or "")' "$MARINA_JAVA_HOMES" "$_sub" 2>/dev/null)"
-    echo "pre-build [$_sub]: $_cmd  (in ${_dir#$ROOT/})${_jh:+  [JAVA_HOME=${_jh##*/}]}" >&2
-    ( cd "$_dir"; [[ -n "$_jh" ]] && export JAVA_HOME="$_jh"; bash -c "$_cmd" ) || { echo "pre-build 실패: $_sub ($_cmd)" >&2; return 1; }
-  done < <(python3 - "$pf" "$_xm" <<'PY'
-import json, sys
-pf = sys.argv[1]; xm_raw = sys.argv[2] if len(sys.argv) > 2 else ""
-d = {}
-try:                                          # x-marina.prebuild (있으면 SoT)
-    xm = json.loads(xm_raw) if xm_raw.strip() else {}
-    if isinstance(xm, dict):
-        d = xm
-except Exception:
-    d = {}
-if not d:                                     # 레거시 prebuild.json fallback
-    try:
-        d = json.load(open(pf))
-    except FileNotFoundError:                 # 없는 게 정상(대부분) — 조용히
-        d = {}
-    except Exception as e:                     # 손상 JSON 을 조용히 무시하지 않음 — pre-build 누락을 알림(코덱스 감사 #6)
-        sys.stderr.write("warning: prebuild.json 읽기 실패 — pre-build 건너뜀: %s\n" % e)
-        sys.exit(0)
-for sub, cmd in (d or {}).items():
-    if sub and isinstance(cmd, str) and cmd.strip():
-        print(sub + "\t" + cmd.strip())
-PY
-)
+  # Compose가 실행할 수 없는 host build만 Python의 언어 중립 planner/runner에 위임한다.
+  local stored="${1:-}" cp="${2:-}" legacy="${3:-}"
+  shift 3 || true
+  python3 "$cp" prebuild-run --stored "$stored" --project-dir "$ROOT" \
+    --project-id "$pid" --session "$(session_id)" --legacy-prebuild "$legacy" "$@"
 }
 
 compose_main() {
@@ -132,15 +76,14 @@ compose_main() {
   case "$command" in
     start|stop|restart|rebuild)
       [[ -f "$stored" ]] || die "compose 파일 없음: $stored  (marina project add --compose <file> 로 등록)"
-      local -a svcs=() envargs=() a; local x cname _tgt="" _all=0
+      local -a svcs=() envargs=() a; local x cname
       for a in "$@"; do
         case "$a" in
-          --all) _all=1 ;;
-          --*)   svcs+=("--service=${a#--}"); _tgt="$_tgt ${a#--}" ;;
+          --all) ;;
+          --*)   svcs+=("--service=${a#--}") ;;
           *)     die "compose: 알 수 없는 인자 '$a' (서비스는 --<name>, 전체는 --all)" ;;
         esac
       done
-      [[ "$_all" == 1 ]] && _tgt=""   # --all 이면 prebuild 필터 해제(전체)
       [[ -n "$envvar" ]] && envargs+=("--env=$envvar=${MARINA_COMPOSE_ENV:-$envdef}")
       mkdir -p "$sd"
       local MARINA_WATCH_STARTED_NS=""
@@ -154,7 +97,8 @@ compose_main() {
         MARINA_WATCH_STARTED_NS="$(_compose_watch_now_ns)"
       fi
       [[ "$command" == "stop" ]] || ensure_external_worktrees || return 1   # 외부 레포 마운트 보장(up 전) — 실패 시 중단(빌드컨텍스트 없음)
-      [[ "$command" == "stop" ]] || run_prebuild_hooks "$stored" "$cp" "$_tgt" || return 1   # pre-build(B): 대상 서비스의 서브레포만(--all 이면 전체)
+      [[ "$command" == "stop" ]] || run_prebuild_hooks "$stored" "$cp" \
+        "$MARINA_HOME/$pid/prebuild.json" ${svcs[@]+"${svcs[@]}"} ${envargs[@]+"${envargs[@]}"} || return 1
 	      [[ "$command" == "stop" ]] || apply_glob_links "" "$stored" "$cp"   # opt-in 링크(x-marina.links 우선) — 호스트 deps/config, 빌드출력 제외.
       local -a bargs=(); local _ba                              # 서비스별 build args(build-args.json) → overlay 주입
       while IFS= read -r _ba; do [[ -n "$_ba" ]] && bargs+=("--build-arg=$_ba"); done < <(

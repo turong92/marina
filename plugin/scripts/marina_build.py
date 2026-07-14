@@ -13,6 +13,7 @@ _DEF = re.compile(r"^#(?P<id>\d+) \[(?P<label>[^]]+)](?: (?P<command>.+))?$")
 _DONE = re.compile(r"^#(?P<id>\d+) DONE (?P<seconds>\d+(?:\.\d+)?)s$")
 _CACHED = re.compile(r"^#(?P<id>\d+) CACHED$")
 _ERROR = re.compile(r"^#(?P<id>\d+) ERROR(?::.*)?$")
+_PREBUILD = re.compile(r"^MARINA_PREBUILD_EVENT (?P<payload>\{.*\})$")
 _GRADLE = re.compile(
     r"^BUILD (?P<status>SUCCESSFUL|FAILED) in "
     r"(?:(?P<minutes>\d+)m )?(?P<seconds>\d+(?:\.\d+)?)s$"
@@ -61,9 +62,24 @@ def _parse(text: str) -> list[dict[str, Any]]:
     terminal: dict[str, tuple[float, bool, bool]] = {}
     order: list[str] = []
     gradle: list[dict[str, Any]] = []
+    prebuild: dict[str, dict[str, Any]] = {}
+    prebuild_order: list[str] = []
 
     for raw in text.splitlines():
         line = raw.strip()
+        match = _PREBUILD.match(line)
+        if match:
+            try:
+                event = json.loads(match.group("payload"))
+            except (TypeError, ValueError):
+                event = {}
+            event_id = str(event.get("id") or "") if isinstance(event, dict) else ""
+            status = event.get("status") if isinstance(event, dict) else None
+            if event_id and status in ("success", "failed"):
+                if event_id not in prebuild:
+                    prebuild_order.append(event_id)
+                prebuild[event_id] = event
+            continue
         match = _DEF.match(line)
         if match:
             step_id = match.group("id")
@@ -95,7 +111,26 @@ def _parse(text: str) -> list[dict[str, Any]]:
                 "failed": match.group("status") == "FAILED",
             })
 
-    steps = list(gradle)
+    steps = []
+    if prebuild:
+        for event_id in prebuild_order:
+            event = prebuild[event_id]
+            raw_services = event.get("services")
+            services = [str(value) for value in raw_services] if isinstance(raw_services, list) else []
+            try:
+                duration = float(event.get("durationSec") or 0)
+            except (TypeError, ValueError):
+                duration = 0.0
+            steps.append({
+                "id": event_id,
+                "label": "Pre-build · " + (", ".join(services) or "host"),
+                "kind": "prebuild",
+                "durationSec": duration,
+                "cached": False,
+                "failed": event.get("status") == "failed",
+            })
+    else:
+        steps.extend(gradle)
     for step_id in order:
         if step_id not in terminal:
             continue

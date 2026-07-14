@@ -16,12 +16,15 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
 
 try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로드(테스트)에서도 sibling 해석되게.
     from marina_dockerfile import is_profile_var
+    import marina_prebuild
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from marina_dockerfile import is_profile_var
+    import marina_prebuild
 
 
 def compose_project_name(project_id: str, session: str) -> str:
@@ -318,6 +321,15 @@ def startable_services(config: dict, requested) -> tuple:
     startable = [s for s in req if s not in blocked]
     skipped = {s: blocked[s] for s in req if s in blocked}
     return startable, skipped
+
+
+def resolved_start_targets(config: dict, xm: dict, requested: list[str]) -> tuple:
+    """Resolve explicit or startGroup services through the shared startable filter."""
+    grouped, unknown = start_group_requested(
+        xm, requested, config.get("services") or {}
+    )
+    startable, skipped = startable_services(config, grouped)
+    return startable, skipped, unknown
 
 
 def _port_targets(svc: dict):
@@ -732,31 +744,76 @@ def cmd_up(a):
         except OSError:
             pass
         op = None
-    requested, unknown_auto = start_group_requested(xm, list(a.service or []), config.get("services") or {})  # 전체 시작 + startGroup 선언 → 시작 그룹만
+    grouped, _ = start_group_requested(
+        xm, list(a.service or []), config.get("services") or {}
+    )
+    requested, skipped, unknown_auto = resolved_start_targets(
+        config, xm, list(a.service or [])
+    )
     if unknown_auto:
         sys.stderr.write(f"warning: x-marina.startGroup 의 미정의 서비스 무시: {', '.join(unknown_auto)}\n")
-    if requested and not a.service:
+    if grouped and not a.service:
         print("startGroup: 시작 그룹만 기동 — " + ", ".join(requested) + " (그 외는 대시보드/CLI 에서 개별 시작)")
-    startable, skipped = startable_services(config, requested)     # degraded(+그걸 의존하는) 서비스 제외(부분 기동: 하나 깨져도 나머지는 뜬다)
     for s, why in skipped.items():
         sys.stderr.write(f"skip: 서비스 '{s}' 건너뜀 — {why}. 나머지는 기동합니다.\n")
-    if not startable:
+    if not requested:
         sys.stderr.write("error: 기동 가능한 서비스가 없습니다 — build 서비스의 Dockerfile 이 모두 없습니다.\n")
         return 2
     forward = overlay_conn.get("forward") or {}                   # {port: target} — 엮기
     svc_cfg = config.get("services") or {}
-    sidecars = [f"{svc}-bind"                                      # 엮기 사이드카는 overlay 에만 있어 startable 엔 없음 → up 대상에 명시 추가(코덱스 #1). 앱(build) 서비스마다 1개(받을 포트가 있을 때만).
-                for svc in startable
+    sidecars = [f"{svc}-bind"                                      # 엮기 사이드카는 overlay 에만 있어 requested 엔 없음 → up 대상에 명시 추가(코덱스 #1). 앱(build) 서비스마다 1개(받을 포트가 있을 때만).
+                for svc in requested
                 if (svc_cfg.get(svc) or {}).get("build") and _forward_for_service(forward, svc, _served_ports(svc_cfg.get(svc) or {}))]
-    argv = up_argv(a.stored, op, a.project_dir, name, startable + sidecars, build=bool(a.build))
+    argv = up_argv(a.stored, op, a.project_dir, name, requested + sidecars, build=bool(a.build))
     print("compose: " + " ".join(argv))
     rc = subprocess.call(argv, env=env)                            # P1: same env to up
     if rc == 0:
-        summary = _forward_summary(_applied_forward(svc_cfg, startable, forward))   # 사이드카가 실제 받는 것만
+        summary = _forward_summary(_applied_forward(svc_cfg, requested, forward))   # 사이드카가 실제 받는 것만
         if summary:
             print(summary)
         _show_ports(name)
     return rc
+
+
+def cmd_prebuild_run(a):
+    env = _env_with(a.env)
+    name = compose_project_name(a.project_id, a.session)
+    try:
+        config = docker_config_json(a.stored, a.project_dir, name, env)
+    except FileNotFoundError:
+        sys.stderr.write("error: docker 미설치 — prebuild 대상을 해석할 수 없습니다.\n")
+        return 2
+    except subprocess.CalledProcessError:
+        sys.stderr.write("error: docker compose config 실패 — prebuild 대상을 해석할 수 없습니다.\n")
+        return 2
+    except json.JSONDecodeError as exc:
+        sys.stderr.write(f"error: compose config 출력 파싱 실패: {exc}\n")
+        return 2
+
+    xm = xmarina_for_stored(a.stored)
+    targets, _, unknown = resolved_start_targets(config, xm, list(a.service or []))
+    if unknown:
+        sys.stderr.write(
+            "warning: x-marina.startGroup 의 미정의 서비스 무시: "
+            + ", ".join(unknown)
+            + "\n"
+        )
+    raw = xm.get("prebuild")
+    if not raw and a.legacy_prebuild and os.path.isfile(a.legacy_prebuild):
+        try:
+            with open(a.legacy_prebuild, encoding="utf-8") as handle:
+                raw = json.load(handle)
+        except (OSError, ValueError) as exc:
+            sys.stderr.write(f"error: legacy prebuild 설정 읽기 실패: {exc}\n")
+            return 2
+    try:
+        jobs = marina_prebuild.plan_prebuild_jobs(
+            raw, config, targets, Path(a.project_dir)
+        )
+    except marina_prebuild.PrebuildConfigError as exc:
+        sys.stderr.write(f"error: {exc}\n")
+        return 2
+    return marina_prebuild.run_prebuild_jobs(jobs, Path(a.project_dir), env)
 
 
 def cmd_watchable(a):
@@ -861,6 +918,7 @@ def main(argv=None):
     p = sub.add_parser("psports"); p.set_defaults(fn=cmd_psports)
     p = sub.add_parser("xmarina"); p.add_argument("--stored", required=True); p.add_argument("--key"); p.set_defaults(fn=cmd_xmarina)
     p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.set_defaults(fn=cmd_up)
+    p = sub.add_parser("prebuild-run"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--legacy-prebuild"); p.set_defaults(fn=cmd_prebuild_run)
     p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
     p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("down"); name_args(p); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)

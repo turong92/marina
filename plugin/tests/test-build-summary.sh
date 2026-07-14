@@ -7,7 +7,9 @@ trap 'rm -rf "$TMP"' EXIT
 
 cat > "$TMP/run-001.log" <<'LOG'
 $ marina start --all
+MARINA_PREBUILD_EVENT {"command":"./gradlew :user-api:bootJar","cwd":"be-api","id":"prebuild-1","services":["user-api"],"status":"started"}
 BUILD SUCCESSFUL in 13s
+MARINA_PREBUILD_EVENT {"command":"","cwd":"be-api","durationSec":13.2,"exitCode":0,"id":"prebuild-1","services":["user-api"],"status":"success"}
 #17 [search-api stage-0 3/8] RUN apt-get install ffmpeg
 #17 CACHED
 #29 [web internal] load build context
@@ -23,7 +25,9 @@ LOG
 
 cat > "$TMP/run-failed.log" <<'LOG'
 $ marina rebuild --web
+MARINA_PREBUILD_EVENT {"command":"make artifact","cwd":"api","id":"prebuild-1","services":["api"],"status":"started"}
 BUILD FAILED in 2m 13s
+MARINA_PREBUILD_EVENT {"command":"","cwd":"api","durationSec":133.0,"exitCode":9,"id":"prebuild-1","services":["api"],"status":"failed"}
 #41 [web 4/4] RUN pnpm build
 #41 ERROR: process "/bin/sh -c pnpm build" did not complete successfully: exit code: 1
 LOG
@@ -51,7 +55,8 @@ assert out["cacheHits"] == 1, out
 assert out["cacheMisses"] == 4, out
 assert out["bottleneck"]["durationSec"] == 68.5, out
 labels = [step["label"] for step in out["steps"]]
-assert "Gradle pre-build" in labels, labels
+assert "Pre-build · user-api" in labels, labels
+assert "Gradle pre-build" not in labels, labels
 assert any("pnpm install" in label for label in labels), labels
 assert "load build context" in labels, labels
 assert "exporting to image" in labels, labels
@@ -75,7 +80,7 @@ assert failed["status"] == "failed", failed
 assert len(failed["steps"]) == 2, failed
 assert failed["steps"][0]["durationSec"] == 133.0, failed
 assert all(step["failed"] for step in failed["steps"]), failed
-assert failed["bottleneck"]["label"] == "Gradle pre-build", failed
+assert failed["bottleneck"]["label"] == "Pre-build · api", failed
 print(json.dumps(third, ensure_ascii=False))
 PY
 

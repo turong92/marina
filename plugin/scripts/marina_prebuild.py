@@ -1,9 +1,15 @@
 """Language-neutral planning and execution primitives for host prebuild jobs."""
 from __future__ import annotations
 
+import json
+import subprocess
+import sys
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
+
+EVENT_PREFIX = "MARINA_PREBUILD_EVENT "
 
 
 class PrebuildConfigError(ValueError):
@@ -150,3 +156,64 @@ def plan_prebuild_jobs(
         replace(job, id=f"prebuild-{index}")
         for index, job in enumerate(deduped, 1)
     ]
+
+
+def _event(
+    job: PrebuildJob,
+    status: str,
+    duration: float | None = None,
+    exit_code: int | None = None,
+) -> None:
+    payload: dict[str, Any] = {
+        "id": job.id,
+        "services": list(job.services),
+        "cwd": job.cwd,
+        "command": job.command if status == "started" else "",
+        "status": status,
+    }
+    if duration is not None:
+        payload["durationSec"] = round(duration, 3)
+    if exit_code is not None:
+        payload["exitCode"] = exit_code
+    print(
+        EVENT_PREFIX + json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        flush=True,
+    )
+
+
+def run_prebuild_jobs(
+    jobs: Sequence[PrebuildJob],
+    root: Path,
+    environ: Mapping[str, str],
+) -> int:
+    """Run planned jobs serially and stop on the first non-zero command."""
+    try:
+        java_homes = json.loads(environ.get("MARINA_JAVA_HOMES", "{}") or "{}")
+    except (TypeError, ValueError):
+        java_homes = {}
+    if not isinstance(java_homes, dict):
+        java_homes = {}
+
+    for job in jobs:
+        env = dict(environ)
+        java_home = java_homes.get(job.java_key) or java_homes.get("default")
+        if java_home:
+            env["JAVA_HOME"] = str(java_home)
+        _event(job, "started")
+        started = time.monotonic()
+        try:
+            result = subprocess.run(
+                ["bash", "-c", job.command],
+                cwd=root / job.cwd,
+                env=env,
+                check=False,
+            )
+            exit_code = result.returncode
+        except OSError as exc:
+            print(f"prebuild execution failed: {exc}", file=sys.stderr)
+            exit_code = 127
+        elapsed = time.monotonic() - started
+        _event(job, "success" if exit_code == 0 else "failed", elapsed, exit_code)
+        if exit_code:
+            return exit_code
+    return 0
