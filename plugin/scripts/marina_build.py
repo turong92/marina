@@ -50,27 +50,50 @@ def read_build_meta(log_path: Path) -> dict[str, Any]:
         return {}
 
 
-def _previous_inputs(log_path: Path) -> tuple[dict[str, Any] | None, tuple[int, int]]:
+def _previous_inputs(
+    log_path: Path,
+    current_inputs: dict[str, Any],
+) -> tuple[dict[str, Any] | None, tuple[int, ...]]:
     match = re.fullmatch(r"run-(\d+)\.log", log_path.name)
     if not match:
-        return None, (0, 0)
+        return None, ()
     current = int(match.group(1))
+    current_services = current_inputs.get("services") or {}
+    wanted = set(current_services) if isinstance(current_services, dict) else set()
+    if not wanted:
+        return None, ()
     candidates = []
     for path in log_path.parent.glob("run-*.log"):
         item = re.fullmatch(r"run-(\d+)\.log", path.name)
         if item and int(item.group(1)) < current:
             candidates.append((int(item.group(1)), path))
-    for _sequence, path in sorted(candidates, reverse=True):
+    previous_services: dict[str, Any] = {}
+    signature: list[int] = []
+    for sequence, path in sorted(candidates, reverse=True):
         meta = read_build_meta(path)
         inputs = meta.get("inputs")
-        if isinstance(inputs, dict):
-            try:
-                stat = build_meta_path(path).stat()
-                signature = (stat.st_mtime_ns, stat.st_size)
-            except OSError:
-                signature = (0, 0)
-            return inputs, signature
-    return None, (0, 0)
+        if not isinstance(inputs, dict) or inputs.get("status") != "ok":
+            continue
+        try:
+            stat = build_meta_path(path).stat()
+            signature.extend((sequence, stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            signature.extend((sequence, 0, 0))
+        services = inputs.get("services") or {}
+        if isinstance(services, dict):
+            for service in wanted - set(previous_services):
+                value = services.get(service)
+                if isinstance(value, dict):
+                    previous_services[service] = value
+        if wanted <= set(previous_services):
+            break
+    if not previous_services:
+        return None, tuple(signature)
+    return {
+        "version": 1,
+        "status": "ok",
+        "services": previous_services,
+    }, tuple(signature)
 
 
 def _display_label(label: str, command: str) -> str:
@@ -182,14 +205,15 @@ def build_summary(log_path: Path) -> dict[str, Any]:
     except OSError:
         meta_sig = (0, 0)
 
-    previous_inputs, previous_sig = _previous_inputs(log_path)
+    meta = read_build_meta(log_path)
+    current_inputs = meta.get("inputs") if isinstance(meta.get("inputs"), dict) else {}
+    previous_inputs, previous_sig = _previous_inputs(log_path, current_inputs)
     signature = (
         log_stat.st_mtime_ns,
         log_stat.st_size,
         meta_sig[0],
         meta_sig[1],
-        previous_sig[0],
-        previous_sig[1],
+        *previous_sig,
     )
     key = str(log_path)
     cached = _CACHE.get(key)
@@ -197,7 +221,6 @@ def build_summary(log_path: Path) -> dict[str, Any]:
         return cached[1]
 
     text = log_path.read_text(encoding="utf-8", errors="replace")
-    meta = read_build_meta(log_path)
     steps = _parse(text)
     misses = [step for step in steps if not step["cached"]]
     bottleneck = max(misses, key=lambda step: step["durationSec"], default=None)

@@ -13,13 +13,23 @@ root = Path(sys.argv[2]) / "proj"; root.mkdir()
 import marina_cli as mc
 import marina_build as mb
 import marina_paths as mp
-mc.script = lambda r: Path("/bin/echo")               # 성공 경로 — echo 출력이 run 파일로
+marker = root / "lifecycle-finished"
+runner = root / "fake-marina.sh"
+runner.write_text(
+    '#!/bin/sh\ntouch "$PWD/lifecycle-finished"\nprintf "%s\\n" "$*"\n',
+    encoding="utf-8",
+)
+runner.chmod(0o755)
+mc.script = lambda r: runner
 mc.marina_env = lambda r: os.environ.copy()
-mc.capture_build_inputs = lambda r, args, env: {
-    "version": 1,
-    "status": "ok",
-    "services": {"api": {"dockerfile": {"api/Dockerfile": "file:one"}, "rebuild": {}, "buildArgs": {}}},
-}
+def capture_after_lifecycle(r, args, env):
+    assert marker.exists(), "snapshot must run after lifecycle preparation and execution"
+    return {
+        "version": 1,
+        "status": "ok",
+        "services": {"api": {"dockerfile": {"api/Dockerfile": "file:one"}, "rebuild": {}, "buildArgs": {}}},
+    }
+mc.capture_build_inputs = capture_after_lifecycle
 mc._marina_cli_logged(root, "start", "--all", timeout=30)
 log = mp.service_log(root, "build")
 text = Path(log).read_text()

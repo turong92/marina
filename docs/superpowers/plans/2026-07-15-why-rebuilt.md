@@ -5,7 +5,8 @@
 **Goal:** Build Timeline 아래에 이전 build run과 비교한 Dockerfile, declared rebuild path, build arg 변경 이유를 안전하게 표시한다.
 
 **Architecture:** `marina_build_inputs.py`가 Compose 기반 입력 snapshot과 순수 비교를 소유한다. lifecycle logger가
-snapshot을 run meta에 기록하고 `marina_build.py`가 직전 snapshot과 비교해 reasons만 summary에 추가한다.
+준비/실행 직후 snapshot을 run meta에 기록하고 `marina_build.py`가 서비스별 가장 가까운 과거 snapshot과 비교해
+reasons만 summary에 추가한다.
 API는 기존 redaction 경계에서 reasons를 전달하고 UI는 한 줄 요약과 접이식 상세를 렌더한다.
 
 **Tech Stack:** Python 3 표준 라이브러리, Docker Compose config JSON, vanilla JavaScript/CSS, bash tests.
@@ -73,8 +74,9 @@ Run: `bash plugin/tests/test-build-log.sh && bash plugin/tests/test-build-summar
 
 - [ ] **Step 3: Capture inputs without blocking lifecycle**
 
-Call `capture_build_inputs` before `write_build_meta`; catch every exception and store `{version: 1, status: "unknown"}`.
-Carry the same snapshot into final success/failure metadata.
+Write `pending` in the running meta, then call `capture_build_inputs` after the lifecycle child exits so external attach and
+link preparation are reflected without delaying service startup. Catch every exception and store only
+`{version: 1, status: "unknown"}` in final success/failure metadata.
 
 - [ ] **Step 4: Compare nearest previous run**
 
@@ -141,4 +143,3 @@ Run `for test_file in plugin/tests/test-*.sh; do bash "$test_file"; done`. Expec
 - [ ] **Step 3: Update roadmap and commit**
 
 Check P0.2 and record that comparisons are Compose-declared, secret-safe, and scoped to Marina lifecycle runs.
-

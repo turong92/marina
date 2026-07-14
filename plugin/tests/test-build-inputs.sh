@@ -12,10 +12,11 @@ printf 'fastapi==1.0\n' > "$TMP/api/requirements.txt"
 python3 - "$HERE/../scripts" "$TMP" <<'PY'
 import json
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
-from marina_build_inputs import build_input_snapshot, compare_build_inputs
+from marina_build_inputs import _load_key, build_input_snapshot, compare_build_inputs
 
 root = Path(sys.argv[2])
 config = {
@@ -41,6 +42,9 @@ before = build_input_snapshot(root, config, ["api"], {}, key)
 serialized = json.dumps(before, sort_keys=True)
 assert "hunter2" not in serialized, serialized
 assert before["version"] == 1, before
+empty = build_input_snapshot(root, config, [], {}, key)
+assert empty["services"] == {}, empty
+assert compare_build_inputs(empty, None, "start") == [], empty
 
 (root / "api" / "Dockerfile.local").write_text(
     "FROM python:3.12-slim\nCOPY . .\n", encoding="utf-8"
@@ -79,6 +83,12 @@ assert same == [{
     "label": "사용자가 Rebuild 실행",
     "change": "requested",
 }], same
+
+key_home = root / "key-home"
+with ThreadPoolExecutor(max_workers=8) as executor:
+    keys = list(executor.map(lambda _index: _load_key(key_home), range(8)))
+assert len(set(keys)) == 1, "concurrent key readers returned different keys"
+assert (key_home / "build-input.key.lock").is_file(), "key creation must use a process lock"
 print("build input assertions ok")
 PY
 

@@ -1,6 +1,7 @@
 """Secret-safe snapshots for explaining why a Marina build input changed."""
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import hmac
 import json
@@ -61,7 +62,7 @@ def build_input_snapshot(
 ) -> dict[str, Any]:
     root = Path(root).resolve()
     services = config.get("services") or {}
-    names = selected or sorted(services)
+    names = selected
     result: dict[str, Any] = {"version": 1, "status": "ok", "services": {}}
     for name in names:
         service = services.get(name)
@@ -107,6 +108,9 @@ def compare_build_inputs(
             "label": "build 입력 수집 실패",
             "change": "unknown",
         }]
+    current_services = current.get("services") or {}
+    if not current_services:
+        return []
     if not previous or previous.get("status") != "ok":
         return [{
             "kind": "first-run",
@@ -115,10 +119,17 @@ def compare_build_inputs(
             "change": "unknown",
         }]
     reasons: list[dict[str, str]] = []
-    current_services = current.get("services") or {}
     previous_services = previous.get("services") or {}
-    for service in sorted(set(current_services) | set(previous_services)):
+    for service in sorted(current_services):
         now = current_services.get(service) or {}
+        if service not in previous_services:
+            reasons.append({
+                "kind": "first-run",
+                "service": service,
+                "label": "서비스 이전 build 입력 기록 없음",
+                "change": "unknown",
+            })
+            continue
         before = previous_services.get(service) or {}
         for field, kind in (
             ("dockerfile", "dockerfile"),
@@ -153,28 +164,36 @@ def compare_build_inputs(
 
 
 def _load_key(home: Path) -> bytes:
-    path = home / "build-input.key"
-    try:
-        key = path.read_bytes()
-        if len(key) >= 32:
-            return key
-    except OSError:
-        pass
     home.mkdir(parents=True, exist_ok=True)
-    key = os.urandom(32)
-    fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(home))
+    path = home / "build-input.key"
+    lock_path = home / "build-input.key.lock"
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(key)
-        os.replace(tmp, path)
-        os.chmod(path, 0o600)
-    finally:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
         try:
-            os.unlink(tmp)
-        except FileNotFoundError:
+            key = path.read_bytes()
+            if len(key) >= 32:
+                os.chmod(path, 0o600)
+                return key
+        except OSError:
             pass
-    return key
+        key = os.urandom(32)
+        fd, tmp = tempfile.mkstemp(prefix=path.name + ".", dir=str(home))
+        try:
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(key)
+            os.replace(tmp, path)
+            os.chmod(path, 0o600)
+        finally:
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+        return key
+    finally:
+        os.close(lock_fd)
 
 
 def _read_json(path: Path) -> dict[str, Any]:

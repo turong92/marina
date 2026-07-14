@@ -50,6 +50,11 @@ write_build_meta(previous_log, {
         "version": 1,
         "status": "ok",
         "services": {
+            "api": {
+                "dockerfile": {"api/Dockerfile.local": "file:old-api"},
+                "rebuild": {},
+                "buildArgs": {},
+            },
             "web": {
                 "dockerfile": {"web/Dockerfile.local": "file:old"},
                 "rebuild": {"web/package.json": "file:same"},
@@ -93,6 +98,50 @@ reason_keys = {(reason["kind"], reason["label"], reason["change"]) for reason in
 assert ("dockerfile", "web/Dockerfile.local", "changed") in reason_keys, reason_keys
 assert ("build-arg", "PROFILE", "changed") in reason_keys, reason_keys
 assert "inputs" not in out, out
+
+# A service-specific run compares against that service's nearest prior snapshot,
+# not against an unrelated service in the immediately preceding run.
+unrelated_log = log.with_name("run-002.log")
+unrelated_log.write_text("", encoding="utf-8")
+write_build_meta(unrelated_log, {
+    "status": "success",
+    "op": "start",
+    "inputs": {
+        "version": 1,
+        "status": "ok",
+        "services": {
+            "web": {
+                "dockerfile": {"web/Dockerfile.local": "file:newer-web"},
+                "rebuild": {},
+                "buildArgs": {},
+            }
+        },
+    },
+})
+api_log = log.with_name("run-003.log")
+api_log.write_text("", encoding="utf-8")
+write_build_meta(api_log, {
+    "status": "success",
+    "op": "start",
+    "inputs": {
+        "version": 1,
+        "status": "ok",
+        "services": {
+            "api": {
+                "dockerfile": {"api/Dockerfile.local": "file:new-api"},
+                "rebuild": {},
+                "buildArgs": {},
+            }
+        },
+    },
+})
+api_summary = build_summary(api_log)
+assert api_summary["reasons"] == [{
+    "kind": "dockerfile",
+    "service": "api",
+    "label": "api/Dockerfile.local",
+    "change": "changed",
+}], api_summary
 
 first = build_summary(log)
 second = build_summary(log)

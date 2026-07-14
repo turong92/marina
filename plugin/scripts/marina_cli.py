@@ -213,11 +213,12 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
     argv = [str(script(root)), *args]
     started_at = time.time()
     op = args[0] if args else ""
-    try:
-        inputs = capture_build_inputs(root, tuple(args), env)
-    except Exception:
-        inputs = {"version": 1, "status": "unknown"}
-    meta = {"status": "running", "op": op, "startedAt": started_at, "inputs": inputs}
+    meta = {
+        "status": "running",
+        "op": op,
+        "startedAt": started_at,
+        "inputs": {"version": 1, "status": "pending"},
+    }
     write_build_meta(log_path, meta)
     rc = None
     timed_out = False
@@ -242,11 +243,16 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
                 raise
     finally:
         ended_at = time.time()
+        try:
+            inputs = capture_build_inputs(root, tuple(args), env)
+        except Exception:
+            inputs = {"version": 1, "status": "unknown"}
         final = {
             **meta,
             "status": "timeout" if timed_out else ("success" if rc == 0 else "failed"),
             "endedAt": ended_at,
             "durationSec": round(max(0.0, ended_at - started_at), 3),
+            "inputs": inputs,
         }
         if rc is not None:
             final["exitCode"] = rc
