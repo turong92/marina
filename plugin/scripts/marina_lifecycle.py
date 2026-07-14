@@ -118,12 +118,12 @@ def _spawn_lifecycle(key: str, op: str, fn) -> dict[str, Any]:
             LIFECYCLE_BUSY.pop(key, None)
             refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh 훅의 gateway-ensure 가 단일 처리 — CLI·대시보드 공통)
         except subprocess.CalledProcessError as exc:
-            detail = redact_text(str(exc.output or "")[-500:])
+            detail = redact_text(str(exc.output or ""))[-500:]
             LIFECYCLE_BUSY[key] = {"op": op, "error": f"{op} failed: {detail}", "endedTs": time.time()}
         except subprocess.TimeoutExpired:
             LIFECYCLE_BUSY[key] = {"op": op, "error": f"{op} timed out ({LIFECYCLE_TIMEOUT}s)", "endedTs": time.time()}
         except Exception as exc:
-            LIFECYCLE_BUSY[key] = {"op": op, "error": redact_text(str(exc)[-500:]), "endedTs": time.time()}
+            LIFECYCLE_BUSY[key] = {"op": op, "error": redact_text(str(exc))[-500:], "endedTs": time.time()}
 
     threading.Thread(target=_run, daemon=True, name=f"lifecycle-{op}").start()
     return {"starting": True, "op": op}

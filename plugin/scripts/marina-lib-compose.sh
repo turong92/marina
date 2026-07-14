@@ -52,6 +52,7 @@ refresh_compose_watch() {
   shift 7
   local -a envargs=("$@") running_args=() watch_services=() watch_cmd=()
   local service legacy_pid legacy_service running_output watchable_output stop_at
+  local MARINA_WATCH_SERVICES=""
   if ! running_output="$(docker compose -p "$cname" ps --services --status running 2>/dev/null)"; then
     echo "warning: Compose Watch 실행 서비스 조회 실패 — 기존 watcher 유지" >&2
     return 0
@@ -100,6 +101,7 @@ refresh_compose_watch() {
     --session-dir "$sd" --project-id "$project_id" --session "$sid")
   watch_cmd+=(${envargs[@]+"${envargs[@]}"})
   for service in "${watch_services[@]}"; do watch_cmd+=("--service=$service"); done
+  MARINA_WATCH_SERVICES="${watch_services[*]}"
   _compose_watch_start compose "${watch_cmd[@]}"
 }
 

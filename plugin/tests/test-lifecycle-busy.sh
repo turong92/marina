@@ -40,15 +40,16 @@ ml._clear_busy_error("k2")   # 정지 경로의 실패 마커 청소
 
 # 실패 출력은 sessions API의 busyError로 가기 전에 일반 로그와 같은 규칙으로 마스킹한다.
 def secret_boom():
+    secret = "s" * 700
     raise subprocess.CalledProcessError(
-        9, ["build"], output="API_TOKEN=busy-secret-value"
+        9, ["build"], output="API_TOKEN=" + secret
     )
 ml._spawn_lifecycle("k-secret", "start", secret_boom)
 for _ in range(50):
     if "error" in LIFECYCLE_BUSY.get("k-secret", {}): break
     time.sleep(0.1)
 secret_error = LIFECYCLE_BUSY["k-secret"]["error"]
-assert "busy-secret-value" not in secret_error, secret_error
+assert "s" * 100 not in secret_error, secret_error
 assert "<redacted>" in secret_error, secret_error
 
 # 4) payload 머지 규칙 — 자기 op 는 running 이어도 busy(restart 표시), --all 은 미기동만

@@ -111,19 +111,23 @@ assert optional == [], optional
 
 dependency_config = {"services": {
     "frontend": {"image": "frontend", "depends_on": {"worker": {"condition": "service_started"}}},
-    "worker": {"image": "worker"},
+    "worker": {"image": "worker", "depends_on": ["database"]},
+    "database": {"image": "database"},
 }}
 dependency_targets, _, _ = marina_compose.resolved_start_targets(
     dependency_config, {}, ["frontend"]
 )
 dependency_jobs = plan_prebuild_jobs(
-    {"worker": {"cwd": "be-api", "command": "make worker"}},
+    {
+        "worker": {"cwd": "be-api", "command": "make worker"},
+        "database": {"cwd": "be-api", "command": "make database"},
+    },
     dependency_config,
     dependency_targets,
     root,
 )
-assert dependency_targets == ["frontend", "worker"], dependency_targets
-assert [job.services for job in dependency_jobs] == [("worker",)], dependency_jobs
+assert dependency_targets == ["frontend", "worker", "database"], dependency_targets
+assert [job.services for job in dependency_jobs] == [("worker",), ("database",)], dependency_jobs
 
 print("planner assertions ok")
 PY

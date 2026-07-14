@@ -160,7 +160,11 @@ _compose_watch_owned() {  # $1=pid, $2=service, $3=recorded process stamp
   fi
   # Upgrade compatibility for legacy one-line PID files: only kill a process whose command is still our watcher.
   cmd="$(ps -p "$p" -o command= 2>/dev/null || true)"
-  [[ -n "${ROOT:-}" && "$cmd" == *"$ROOT"* ]] || return 1
+  [[ -n "${ROOT:-}" ]] || return 1
+  case " $cmd " in
+    *" --project-dir $ROOT "*|*" --project-directory $ROOT "*) ;;
+    *) return 1 ;;
+  esac
   [[ "$cmd" == *"marina-compose.py watch"* \
     || "$cmd" == *"docker compose"*"watch --no-up"* ]]
 }
@@ -224,7 +228,7 @@ _compose_watch_stop_unlocked() {  # $1=service
 
 _compose_watch_start() {  # $1=service, $2...=foreground watch command
   local service="$1"; shift
-  local sd tpf log_path lock intent_lock all_stop service_stop rc=0
+  local sd tpf log_path lock intent_lock all_stop service_stop watched watched_stop rc=0
   sd="$(session_dir)"
   tpf="$sd/${service}.watch.pid"
   log_path="$sd/${service}.watch.log"
@@ -238,6 +242,15 @@ _compose_watch_start() {  # $1=service, $2...=foreground watch command
       || [[ "$service_stop" =~ ^[0-9]+$ && "$service_stop" -gt "$MARINA_WATCH_STARTED_NS" ]]; }; then
     rm -rf "$intent_lock"
     return 0
+  fi
+  if [[ "${MARINA_WATCH_STARTED_NS:-}" =~ ^[0-9]+$ ]]; then
+    for watched in ${MARINA_WATCH_SERVICES:-}; do
+      watched_stop="$(cat "$sd/${watched}.watch.stop" 2>/dev/null || echo 0)"
+      if [[ "$watched_stop" =~ ^[0-9]+$ && "$watched_stop" -gt "$MARINA_WATCH_STARTED_NS" ]]; then
+        rm -rf "$intent_lock"
+        return 0
+      fi
+    done
   fi
   if ! _compose_watch_lock "$lock"; then
     rm -rf "$intent_lock"

@@ -27,6 +27,10 @@ case "$*" in
   info) exit 0 ;;
   *"config --format json"*)
     if [[ "${WATCH_CONFIG_FAIL_AFTER_UP:-}" == "1" && -e "$WATCH_UP_DONE" ]]; then exit 9; fi
+    if [[ "${WATCH_DELAY_CONFIG_AFTER_UP:-}" == "1" && -e "$WATCH_UP_DONE" ]]; then
+      : > "$WATCH_CONFIG_BARRIER"
+      sleep 1
+    fi
     cat "$DOCKER_CONFIG_FIXTURE"
     ;;
   *"ps --services --status running"*)
@@ -65,6 +69,7 @@ export WATCH_PIDS="$TMP/watch-pids.log"
 export WATCH_CHILD_PIDS="$TMP/watch-child-pids.log"
 export WATCH_UP_BARRIER="$TMP/watch-up.barrier"
 export WATCH_UP_DONE="$TMP/watch-up.done"
+export WATCH_CONFIG_BARRIER="$TMP/watch-config.barrier"
 export DOCKER_CONFIG_FIXTURE="$TMP/config.json"
 : > "$DOCKER_LOG"
 : > "$WATCH_PIDS"
@@ -102,6 +107,7 @@ bash "$SH" project add "$P" --compose "$P/docker-compose.yml" >/dev/null
 mrun() {
   (cd "$P" && MARINA_HOME="$MARINA_HOME" PATH="$TMP/bin:$PATH" \
     DOCKER_LOG="$DOCKER_LOG" DOCKER_CONFIG_FIXTURE="$DOCKER_CONFIG_FIXTURE" WATCH_UP_DONE="$WATCH_UP_DONE" \
+    WATCH_CONFIG_BARRIER="$WATCH_CONFIG_BARRIER" \
     bash "$SH" "$@")
 }
 
@@ -243,6 +249,17 @@ sleep 0.2
 while IFS= read -r p; do
   [[ -z "$p" ]] || ! kill -0 "$p" 2>/dev/null || { echo "FAIL: late watcher survived concurrent service stop"; exit 1; }
 done < "$WATCH_PIDS"
+
+# A same-service stop after the running-service snapshot still wins before PID replacement.
+rm -f "$WATCH_UP_DONE" "$WATCH_CONFIG_BARRIER"
+WATCH_DELAY_CONFIG_AFTER_UP=1 mrun start --web >/dev/null &
+post_snapshot_start_job=$!
+for _ in $(seq 1 50); do [[ -e "$WATCH_CONFIG_BARRIER" ]] && break; sleep 0.1; done
+[[ -e "$WATCH_CONFIG_BARRIER" ]] || { echo "FAIL: post-snapshot barrier not reached"; exit 1; }
+DOCKER_RUNNING_SERVICES="" mrun stop --web >/dev/null
+wait "$post_snapshot_start_job"
+sleep 0.2
+[[ ! -e "$WATCH_PID_FILE" ]] || { echo "FAIL: post-snapshot service stop allowed late watcher"; exit 1; }
 
 # A stop for another service must not suppress the watcher from an older independent start.
 rm -f "$WATCH_UP_BARRIER" "$WATCH_UP_DONE"
