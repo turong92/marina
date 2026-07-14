@@ -730,6 +730,14 @@
     .build-summary-status[data-state="failed"], .build-summary-status[data-state="timeout"] { color: var(--st-err); }
     .build-summary-status[data-state="running"] { color: var(--st-boot); }
     .build-summary-cache { margin-left: auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .build-reasons { margin-top: 8px; border-top: 1px solid var(--sys-style-neutral-light); color: var(--sys-cont-neutral-default); }
+    .build-reasons summary { display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 8px; padding: 7px 0 2px; cursor: pointer; list-style-position: inside; }
+    .build-reasons summary span { color: var(--sys-cont-neutral-light); }
+    .build-reasons summary strong { min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
+    .build-reason-list { display: grid; gap: 4px; padding: 6px 0 2px 112px; }
+    .build-reason-row { display: grid; grid-template-columns: minmax(0, 100px) minmax(0, 1fr); gap: 8px; }
+    .build-reason-row span { overflow: hidden; color: var(--sys-cont-neutral-light); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; text-overflow: ellipsis; white-space: nowrap; }
+    .build-reason-row strong { min-width: 0; font-weight: 500; overflow-wrap: anywhere; }
     .build-steps { display: grid; gap: 4px; max-height: 180px; margin-top: 8px; overflow: auto; padding-right: 4px; scrollbar-gutter: stable; }
     .build-step { display: grid; grid-template-columns: minmax(110px, 220px) minmax(80px, 1fr) 54px; gap: 8px; align-items: center; min-width: 0; }
     .build-step-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -740,6 +748,9 @@
     .build-step-time { text-align: right; color: var(--sys-cont-neutral-light); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
     @media (max-width: 560px) {
       .build-summary-cache { margin-left: 0; }
+      .build-reasons summary { grid-template-columns: 1fr; gap: 2px; }
+      .build-reason-list { padding-left: 0; }
+      .build-reason-row { grid-template-columns: minmax(0, 72px) minmax(0, 1fr); }
       .build-step { grid-template-columns: minmax(90px, 1fr) 72px 48px; }
     }
     .log-line { padding: 1px 16px; white-space: pre-wrap; word-break: break-word; }

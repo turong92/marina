@@ -487,7 +487,13 @@ class Handler(BaseHTTPRequestHandler):
                         **bottleneck,
                         "label": redact_text(str(bottleneck.get("label", ""))),
                     }
-                self.send_json({**summary, "steps": steps, "bottleneck": bottleneck})
+                reasons = [{
+                    "kind": str(reason.get("kind") or "unknown"),
+                    "service": redact_text(str(reason.get("service") or "")),
+                    "label": redact_text(str(reason.get("label") or "")),
+                    "change": str(reason.get("change") or "unknown"),
+                } for reason in summary.get("reasons", []) if isinstance(reason, dict)]
+                self.send_json({**summary, "steps": steps, "bottleneck": bottleneck, "reasons": reasons})
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
             return

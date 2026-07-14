@@ -8,6 +8,11 @@ export MARINA_HOME="$TMP/home"
 P="$TMP/proj"
 mkdir -p "$P/.workspace/marina/main/logs/build" "$MARINA_HOME"
 
+: > "$P/.workspace/marina/main/logs/build/run-000.log"
+cat > "$P/.workspace/marina/main/logs/build/run-000.meta.json" <<'JSON'
+{"status":"success","op":"rebuild","inputs":{"version":1,"status":"ok","services":{"web":{"dockerfile":{},"rebuild":{"API_TOKEN=super-secret":"file:old"},"buildArgs":{"TOKEN":"hmac:old"}}}}}
+JSON
+
 cat > "$P/.workspace/marina/main/logs/build/run-001.log" <<'LOG'
 #1 [web] RUN pnpm install
 #1 DONE 4.2s
@@ -28,6 +33,9 @@ cat > "$P/.workspace/marina/main/logs/build/run-001.log" <<'LOG'
 #9 [web] RUN API_TOKEN="alpha-secret beta-secret"
 #9 DONE 0.2s
 LOG
+cat > "$P/.workspace/marina/main/logs/build/run-001.meta.json" <<'JSON'
+{"status":"success","op":"rebuild","durationSec":4.2,"inputs":{"version":1,"status":"ok","services":{"web":{"dockerfile":{},"rebuild":{"API_TOKEN=super-secret":"file:new"},"buildArgs":{"TOKEN":"hmac:new"}}}}}
+JSON
 ln -s "logs/build/run-001.log" "$P/.workspace/marina/main/build.log"
 cat > "$MARINA_HOME/projects.json" <<JSON
 {"schemaVersion":1,"projects":[{"id":"proj","root":"$P","subrepos":[],"worktreeGlobs":[]}]}
@@ -52,7 +60,7 @@ code="$(curl -sG -o "$TMP/summary.json" -w '%{http_code}' \
   --data-urlencode "run=current" \
   "http://127.0.0.1:$PORT/api/build-summary")"
 [[ "$code" == "200" ]] || { echo "expected build summary HTTP 200, got $code"; exit 1; }
-python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); raw=json.dumps(d); assert d["run"] == "run-001.log", d; assert d["bottleneck"]["durationSec"] == 4.2, d; assert all(secret not in raw for secret in ("super-secret", "hunter2", "swordfish", "abc123", "quoted-secret", "flag-secret", "basic-secret", "alpha-secret", "beta-secret")), raw; assert raw.count("<redacted>") >= 8, raw' "$TMP/summary.json"
+python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); raw=json.dumps(d); assert d["run"] == "run-001.log", d; assert d["bottleneck"]["durationSec"] == 4.2, d; assert len(d["reasons"]) == 2, d; assert any(r["kind"] == "rebuild-input" and "<redacted>" in r["label"] for r in d["reasons"]), d; assert all(key not in raw for key in ("inputs", "digest", "hmac")), raw; assert all(secret not in raw for secret in ("super-secret", "hunter2", "swordfish", "abc123", "quoted-secret", "flag-secret", "basic-secret", "alpha-secret", "beta-secret")), raw; assert raw.count("<redacted>") >= 9, raw' "$TMP/summary.json"
 
 code="$(curl -sG -o /dev/null -w '%{http_code}' \
   --data-urlencode 'root=/tmp/not-registered' \

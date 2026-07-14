@@ -23,9 +23,44 @@
       </div>`;
     }
 
+    function buildReasonText(reason) {
+      const label = reason.label || '-';
+      const change = {
+        added: '추가',
+        removed: '제거',
+        changed: '변경',
+        requested: '요청',
+        unknown: '확인 불가',
+      }[reason.change] || reason.change || '변경';
+      const prefix = {
+        dockerfile: 'Dockerfile',
+        'rebuild-input': '이미지 입력',
+        'build-arg': 'build arg',
+        'first-run': '첫 실행',
+        'explicit-rebuild': '명시적 Rebuild',
+        unknown: '입력 상태',
+      }[reason.kind] || '입력';
+      return `${prefix} ${change} · ${label}`;
+    }
+
+    function buildReasonsHtml(reasons) {
+      if (!reasons.length) return '';
+      const preview = reasons.slice(0, 3).map(buildReasonText).join(' · ');
+      const overflow = reasons.length > 3 ? ` 외 ${reasons.length - 3}개` : '';
+      const rows = reasons.map(reason => {
+        const service = reason.service ? `<span>${escapeHtml(reason.service)}</span>` : '';
+        return `<div class="build-reason-row">${service}<strong>${escapeHtml(buildReasonText(reason))}</strong></div>`;
+      }).join('');
+      return `<details class="build-reasons" data-build-reasons>
+        <summary><span>재빌드 이유</span><strong>${escapeHtml(preview)}${escapeHtml(overflow)}</strong></summary>
+        <div class="build-reason-list">${rows}</div>
+      </details>`;
+    }
+
     function renderBuildSummary(data) {
       const el = document.getElementById('buildSummary');
       const steps = Array.isArray(data.steps) ? data.steps : [];
+      const reasons = Array.isArray(data.reasons) ? data.reasons : [];
       const maxSeconds = Math.max(
         0.1,
         ...steps.filter(step => !step.cached).map(step => Number(step.durationSec) || 0),
@@ -45,6 +80,7 @@
           <span>${bottleneck}</span>
           <span class="build-summary-cache">cache ${Number(data.cacheHits) || 0} · run ${Number(data.cacheMisses) || 0}</span>
         </div>
+        ${buildReasonsHtml(reasons)}
         <div class="build-steps">${steps.map(step => buildStepHtml(step, maxSeconds)).join('')}</div>`;
       el.hidden = false;
     }
