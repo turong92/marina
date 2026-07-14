@@ -79,7 +79,7 @@
       const st = svcState(svc);
       if (st === 'starting') return [{ act: 'stop', icon: '⟳', title: '기동 중 — 클릭하면 정지(취소)' }];
       if (st === 'external') return [{ act: 'stop-external', icon: '⏹', title: '외부 프로세스 정지 (SIGTERM) — marina 로 관리하려면 종료 후 ▶' }];
-      if (st === 'running') return [{ act: 'stop', icon: '⏹', title: '정지' }, { act: 'restart', icon: '↻', title: '재시작 — 변경분(빌드/설정) 반영해 재기동' }];
+      if (st === 'running') return [{ act: 'stop', icon: '⏹', title: '정지' }, { act: 'restart', icon: '↻', title: '재시작 — 기존 이미지로 빠르게 재기동' }];
       if (st === 'degraded') return [];
       return [{ act: 'start', icon: '▶', title: st === 'error' ? '재시도(시작)' : '시작 — 호스트 포트는 자동 격리' }];
     }
@@ -99,7 +99,7 @@
     }
     function portText(svc) {                 // 내부→호스트 표기 (콘솔 스펙 D6) — 상태별 대체 텍스트
       const st = svcState(svc);
-      if (st === 'starting') return svc.busy === 'restart' ? 'restarting…' : 'starting…';
+      if (st === 'starting') return svc.busy === 'rebuild' ? 'rebuilding…' : (svc.busy === 'restart' ? 'restarting…' : 'starting…');
       if (st === 'error') return svc.busyError ? 'failed' : (svc.exitCode ? `exit ${svc.exitCode}` : 'unhealthy');
       if (st === 'degraded') return '';
       if ((svc.port ?? '') === '') return '';

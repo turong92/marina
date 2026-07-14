@@ -39,7 +39,7 @@ from marina_compose_svc import compose_resolved_view, compose_validate, merge_xm
 from marina_sessions import agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
-from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
+from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
 
@@ -1054,6 +1054,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = stop_external(root, service, int(body.get("port") or 0))
             elif self.path == "/api/restart":
                 result = restart_service(root, service, force=force)
+            elif self.path == "/api/rebuild":
+                result = rebuild_service(root, service, force=force)
             else:
                 self.send_json({"error": "not found"}, 404)
                 return

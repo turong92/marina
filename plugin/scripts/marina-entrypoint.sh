@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # marina — 전역 dev 런처 + 관제 대시보드 진입점.
 #
-#   marina start|stop|restart <svc..>        # 현재 worktree(cwd) 의 서비스 (전체는 --all)
+#   marina start|stop|restart|rebuild <svc..> # 현재 worktree(cwd) 의 서비스 (전체는 --all)
 #   marina status | ports | logs [svc]       # 현재 worktree 상태/포트/로그
 #   marina project {add|rm|ls|default|infer} # 프로젝트 레지스트리 (~/.marina/projects.json)
 #   marina dashboard [start|stop|status|open]# 전역 대시보드(:3900). 무인자 marina = dashboard start
@@ -29,7 +29,7 @@ usage() {
   cat <<'EOF'
 usage (marina = 전역 CLI):
   실행 (현재 worktree — 서비스명 그대로, 전체는 --all):
-    marina start|stop|restart <svc>     # 예: marina start web   ·   전체: marina start --all
+    marina start|stop|restart|rebuild <svc> # 예: marina rebuild web · 전체: marina start --all
     marina status | ports | logs [svc]
   프로젝트 등록 (~/.marina/projects.json — 위치 무관):
     marina project add <path> --compose <file>      # 기존 docker-compose 로 등록 (또는 대시보드 위저드)
@@ -62,7 +62,7 @@ case "$command" in
     # worktree/gateway 누락이 "설치 shim 은 이 명령 없음" 증상의 원인이었음(도그푸드에서 발견)
     "$SESSION" "$command" "$@"
     ;;
-  start|stop|restart)
+  start|stop|restart|rebuild)
     # bare 서비스명(web)을 marina.sh 가 받는 --flag 로 변환. 이미 --(--all 등)는 그대로 패스.
     # 무인자는 변환 결과도 빈 인자 → marina.sh 무인자 가드(usage·exit 2)에 위임.
     lifecycle_args=()

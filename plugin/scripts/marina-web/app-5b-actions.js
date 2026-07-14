@@ -64,7 +64,10 @@
         items.push({ label: '⧉ 게이트웨이 주소 복사', run: () => navigator.clipboard.writeText(gwUrl) });
       }
       if (svc.running && svc.port) items.push({ label: `↗ 호스트포트로 열기 — 127.0.0.1:${svc.port}`, run: () => window.open(`http://127.0.0.1:${svc.port}`, '_blank') });
-      if (session.kind === 'compose') items.push({ label: 'ⓘ 구성 보기 — Dockerfile·포트·env·build args', run: () => openServiceConfig(session.root, svc.service) });
+      if (session.kind === 'compose') {
+        items.push({ label: 'Rebuild — Docker image 빌드 후 재기동', run: () => action('rebuild', session.root, svc.service) });
+        items.push({ label: 'ⓘ 구성 보기 — Dockerfile·포트·env·build args', run: () => openServiceConfig(session.root, svc.service) });
+      }
       return items;
     }
     function fillCardActs(el, session, services, group) {

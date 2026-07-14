@@ -90,7 +90,8 @@ usage() {
   cat <<'EOF'
 usage (marina.sh = 내부 launcher; 평소엔 `marina <명령>` 래퍼로 — 래퍼는 `marina start web` 처럼 서비스명을 그대로 받습니다):
   실행 (worktree 단위 — compose 프로젝트는 ~/.marina 의 docker-compose 정의에서 서비스가 옵니다):
-    marina.sh start   --<service> | --all     # 특정 서비스 | 전체 스택 (docker compose up -d --build, 워크트리별 포트 자동 격리)
+    marina.sh start   --<service> | --all     # 특정 서비스 | 전체 스택 (기존 이미지로 빠르게 시작)
+    marina.sh rebuild --<service> | --all     # Docker image build 후 시작
     marina.sh stop    --<service> | --all      # 특정 서비스 | 전체 (--all = down)
     marina.sh restart --<service> | --all      # 정의 변경분 재적용 (selected = up --build 재적용)
     marina.sh status | ports                   # 실행 상태·라이브 포트
@@ -186,7 +187,7 @@ main() {
   local command="${1:-status}"
   shift || true
   case "$command" in
-    start|stop|restart|status|logs|ports)
+    start|stop|restart|rebuild|status|logs|ports)
       if [[ "$(project_kind)" == "compose" ]]; then
         compose_main "$command" "$@"
         return $?

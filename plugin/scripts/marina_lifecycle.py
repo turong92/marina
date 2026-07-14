@@ -290,9 +290,15 @@ def start_service(root: Path, service: str, force: bool = False) -> dict[str, An
     return _spawn_lifecycle(busy_key(root, service), "start", _do_start)
 
 def restart_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
-    # restart 도 up --build 재적용이라 이미지 재빌드로 길어질 수 있다 — start 와 동일하게 백그라운드.
     return _spawn_lifecycle(busy_key(root, service), "restart",
                             lambda: _marina_cli_logged(root, "restart", f"--{service}", timeout=LIFECYCLE_TIMEOUT))
+
+def rebuild_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
+    block = memory_block(force)
+    if block:
+        return block
+    return _spawn_lifecycle(busy_key(root, service), "rebuild",
+                            lambda: _marina_cli_logged(root, "rebuild", f"--{service}", timeout=LIFECYCLE_TIMEOUT))
 
 def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
     by_category = cache_items_by_category(root)

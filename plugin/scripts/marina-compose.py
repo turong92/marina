@@ -587,12 +587,14 @@ def parse_ps_ports(ps_text: str):
     return {svc: sorted(ports) for svc, ports in out.items()}
 
 
-def up_argv(stored, overlay, project_dir, project_name, services):
+def up_argv(stored, overlay, project_dir, project_name, services, build=False):
     a = ["docker", "compose", "-f", stored]
     if overlay and os.path.exists(overlay) and os.path.getsize(overlay) > 0:   # 빈 overlay 는 -f 안 함(docker 실패 방지)
         a += ["-f", overlay]
-    # --build: 저장된 build args/pre-build/Dockerfile 보정이 실제 이미지에 반영되게(미반영 시 옛 이미지 재사용). 캐시로 무변경은 빠름.
-    a += ["--project-directory", project_dir, "-p", project_name, "up", "-d", "--build", "--remove-orphans"]
+    a += ["--project-directory", project_dir, "-p", project_name, "up", "-d"]
+    if build:
+        a.append("--build")
+    a.append("--remove-orphans")
     return a + list(services)
 
 
@@ -746,7 +748,7 @@ def cmd_up(a):
     sidecars = [f"{svc}-bind"                                      # 엮기 사이드카는 overlay 에만 있어 startable 엔 없음 → up 대상에 명시 추가(코덱스 #1). 앱(build) 서비스마다 1개(받을 포트가 있을 때만).
                 for svc in startable
                 if (svc_cfg.get(svc) or {}).get("build") and _forward_for_service(forward, svc, _served_ports(svc_cfg.get(svc) or {}))]
-    argv = up_argv(a.stored, op, a.project_dir, name, startable + sidecars)
+    argv = up_argv(a.stored, op, a.project_dir, name, startable + sidecars, build=bool(a.build))
     print("compose: " + " ".join(argv))
     rc = subprocess.call(argv, env=env)                            # P1: same env to up
     if rc == 0:
@@ -858,7 +860,7 @@ def main(argv=None):
     p = sub.add_parser("overlay"); p.set_defaults(fn=cmd_overlay)
     p = sub.add_parser("psports"); p.set_defaults(fn=cmd_psports)
     p = sub.add_parser("xmarina"); p.add_argument("--stored", required=True); p.add_argument("--key"); p.set_defaults(fn=cmd_xmarina)
-    p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.set_defaults(fn=cmd_up)
+    p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.set_defaults(fn=cmd_up)
     p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
     p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("down"); name_args(p); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)

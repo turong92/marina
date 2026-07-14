@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# compose-kind 라우팅: no-arg 가드, bare 인자 거부, config 단계 env 주입, -f overlay, 서비스별 stop, live ps 포트.
+# compose-kind 라우팅: no-arg 가드, fast start/explicit rebuild, config env, overlay, 서비스별 stop, live ps 포트.
 set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
@@ -43,9 +43,10 @@ if mrun start >/dev/null 2>&1; then echo "FAIL: no-arg start should guard"; exit
 if mrun start web >/dev/null 2>&1; then echo "FAIL: bare positional should error"; exit 1; fi
 grep -q "up -d" "$DOCKER_LOG" && { echo "FAIL: bad arg leaked to up"; exit 1; } || true
 
-# start --all → overlay 생성 + up + env at config
+# start --all → overlay 생성 + no-build up + env at config
 : > "$DOCKER_LOG"; mrun start --all >/dev/null
-grep -q "compose .*up -d --build --remove-orphans" "$DOCKER_LOG" || { echo "FAIL: up not routed (--build 포함)"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "compose .*up -d --remove-orphans" "$DOCKER_LOG" || { echo "FAIL: start up not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: start must not force --build"; cat "$DOCKER_LOG"; exit 1; } || true
 grep -q -- "-p proj-main" "$DOCKER_LOG" || { echo "FAIL: project name"; exit 1; }
 grep -q "APP_ENV_AT_CONFIG=local" "$DOCKER_LOG" || { echo "FAIL: env not at config (P1)"; cat "$DOCKER_LOG"; exit 1; }
 SD="$P/.workspace/marina/main"
@@ -53,8 +54,17 @@ grep -q '!override' "$SD/marina-overlay.yml" || { echo "FAIL: overlay missing !o
 grep -q '127.0.0.1::80' "$SD/marina-overlay.yml" || { echo "FAIL: overlay localhost target"; exit 1; }
 grep -q -- "-f $SD/marina-overlay.yml" "$DOCKER_LOG" || { echo "FAIL: overlay not passed to up"; exit 1; }
 
+# rebuild --all → 같은 up 경로에서 명시적으로 --build
+: > "$DOCKER_LOG"; mrun rebuild --all >/dev/null
+grep -q "compose .*up -d --build --remove-orphans" "$DOCKER_LOG" || { echo "FAIL: rebuild must include --build"; cat "$DOCKER_LOG"; exit 1; }
+
 # ports → live ps 파싱
 mrun ports 2>/dev/null | grep -q "web=55001" || { echo "FAIL: live ps ports"; exit 1; }
+
+# restart --web → 기존 image로 up 재적용, build는 하지 않음
+: > "$DOCKER_LOG"; mrun restart --web >/dev/null
+grep -q "compose .*up -d --remove-orphans web" "$DOCKER_LOG" || { echo "FAIL: restart up not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: restart must not force --build"; cat "$DOCKER_LOG"; exit 1; } || true
 
 # stop --web → stop web (down 아님)
 : > "$DOCKER_LOG"; mrun stop --web >/dev/null
