@@ -13,7 +13,7 @@ case "$*" in
   "compose version --short") echo "2.40.3" ;;
   info) exit 0 ;;
   *"config --format json"*) cat "$DOCKER_CONFIG_FIXTURE" ;;
-  *"ps --all --services"*) echo "web" ;;
+  *"ps --services --status running"*) echo "web" ;;
   *"ps --all --format json"*) echo '[{"Service":"web","State":"running","Health":"","Publishers":[{"PublishedPort":5555}]}]' ;;
   *"logs -f"*) echo "HELLO-COMPOSE-LOG"; exec sleep 30 ;;   # follow 시뮬레이션
   *) exit 0 ;;

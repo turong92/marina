@@ -143,6 +143,16 @@ compose_main() {
       [[ "$_all" == 1 ]] && _tgt=""   # --all 이면 prebuild 필터 해제(전체)
       [[ -n "$envvar" ]] && envargs+=("--env=$envvar=${MARINA_COMPOSE_ENV:-$envdef}")
       mkdir -p "$sd"
+      local MARINA_WATCH_STARTED_NS=""
+      if [[ "$command" == "stop" ]]; then
+        if [[ ${#svcs[@]} -gt 0 ]]; then
+          for x in "${svcs[@]}"; do _compose_watch_mark_stop "${x#--service=}"; done
+        else
+          _compose_watch_mark_stop ""
+        fi
+      else
+        MARINA_WATCH_STARTED_NS="$(_compose_watch_now_ns)"
+      fi
       [[ "$command" == "stop" ]] || ensure_external_worktrees || return 1   # 외부 레포 마운트 보장(up 전) — 실패 시 중단(빌드컨텍스트 없음)
       [[ "$command" == "stop" ]] || run_prebuild_hooks "$stored" "$cp" "$_tgt" || return 1   # pre-build(B): 대상 서비스의 서브레포만(--all 이면 전체)
 	      [[ "$command" == "stop" ]] || apply_glob_links "" "$stored" "$cp"   # opt-in 링크(x-marina.links 우선) — 호스트 deps/config, 빌드출력 제외.
@@ -220,7 +230,7 @@ PY
             for x in "${svcs[@]}"; do tail_svcs+=("${x#--service=}"); done
           else
             while IFS= read -r x; do [[ -n "$x" ]] && tail_svcs+=("$x"); done \
-              < <(docker compose -p "$cname" ps --all --services 2>/dev/null)
+              < <(docker compose -p "$cname" ps --services --status running 2>/dev/null)
           fi
           for x in ${tail_svcs[@]+"${tail_svcs[@]}"}; do _compose_logtail_start "$cname" "$x"; done
           local -a watch_args=()
@@ -263,7 +273,7 @@ PY
             local -a restart_svcs=()
             while IFS= read -r x; do
               if [[ -n "$x" ]]; then restart_svcs+=("$x"); _compose_logtail_start "$cname" "$x"; fi
-            done < <(docker compose -p "$cname" ps --all --services 2>/dev/null)
+            done < <(docker compose -p "$cname" ps --services --status running 2>/dev/null)
             local -a restart_watch_args=()
             for x in ${restart_svcs[@]+"${restart_svcs[@]}"}; do restart_watch_args+=("--service=$x"); done
             while IFS= read -r x; do

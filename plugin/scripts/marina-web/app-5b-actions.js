@@ -124,7 +124,7 @@
     function cardMenuItems(session) {
       const wt = worktreeData.find(w => w.root === session.root);
       const items = [];
-      items.push({ label: '🔨 빌드 로그 — start/restart 의 prebuild·docker build 출력', run: () => selectLog(session.root, 'build', 'current', 'service') });
+      items.push({ label: '🔨 빌드 로그 — rebuild의 prebuild·docker build 출력', run: () => selectLog(session.root, 'build', 'current', 'service') });
       // 카드 다이어트(형 피드백 2026-07-13) — ✎/캐시 칩·↔ link 버튼을 카드 얼굴에서 여기로 흡수
       items.push({ label: '⎇ 깃 — 이 워크트리 브랜치·커밋 그래프 (깃 탭)', run: () => openGitTab(session.root, wt?.branches?.[wt?.projectLabel] || '') });   // 깃 탭 기본 레포탭=root — root 레포 브랜치로 필터
       items.push({ label: '↔ link — main 의 deps/config 를 이 worktree 로', run: () => openLinksModal(session) });

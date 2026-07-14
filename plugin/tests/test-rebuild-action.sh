@@ -34,5 +34,7 @@ grep -q 'rebuild_service' "$SCRIPTS/marina_handler.py" || { echo "FAIL: handler 
 grep -q 'self.path == "/api/rebuild"' "$SCRIPTS/marina_handler.py" || { echo "FAIL: /api/rebuild route missing"; exit 1; }
 grep -q "action('rebuild', session.root, svc.service)" "$SCRIPTS/marina-web/app-5b-actions.js" || { echo "FAIL: Compose service Rebuild menu missing"; exit 1; }
 grep -q "svc.busy === 'rebuild' ? 'rebuilding…'" "$SCRIPTS/marina-web/app-5-sessions.js" || { echo "FAIL: rebuilding status text missing"; exit 1; }
+grep -q '빌드 로그 — rebuild의 prebuild·docker build 출력' "$SCRIPTS/marina-web/app-5b-actions.js" || { echo "FAIL: build log label still describes restart as a build"; exit 1; }
+grep -q 'restart --<service>.*기존 이미지로 재적용' "$SCRIPTS/marina.sh" || { echo "FAIL: CLI help still describes restart as a build"; exit 1; }
 
 echo "PASS test-rebuild-action"

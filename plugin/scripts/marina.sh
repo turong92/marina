@@ -93,7 +93,7 @@ usage (marina.sh = 내부 launcher; 평소엔 `marina <명령>` 래퍼로 — �
     marina.sh start   --<service> | --all     # 특정 서비스 | 전체 스택 (기존 이미지로 빠르게 시작)
     marina.sh rebuild --<service> | --all     # Docker image build 후 시작
     marina.sh stop    --<service> | --all      # 특정 서비스 | 전체 (--all = down)
-    marina.sh restart --<service> | --all      # 정의 변경분 재적용 (selected = up --build 재적용)
+    marina.sh restart --<service> | --all      # 기존 이미지로 재적용
     marina.sh status | ports                   # 실행 상태·라이브 포트
     marina.sh logs [service]                   # docker 로그 follow
   worktree (작업 시작 — 브랜치명 지정 워크트리 생성; Claude 자동 claude/<id> 대신 feature/{task} 등):
@@ -146,37 +146,146 @@ _compose_logtail_stop() {  # $1=service (없으면 전체). set -e 안전 — �
 
 # Compose Develop Watch는 foreground 명령이라 서비스별 PID로 supervise한다.
 # 실행 명령은 marina-compose.py가 os.execvpe로 실제 docker process로 치환한다.
+_compose_process_stamp() {  # PID 재사용 판별용 OS process start time.
+  ps -p "$1" -o lstart= 2>/dev/null | awk '{$1=$1; print}'
+}
+
+_compose_watch_owned() {  # $1=pid, $2=service, $3=recorded process stamp
+  local p="$1" service="$2" recorded="${3:-}" current cmd
+  [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null || return 1
+  if [[ -n "$recorded" ]]; then
+    current="$(_compose_process_stamp "$p")"
+    [[ -n "$current" && "$current" == "$recorded" ]]
+    return
+  fi
+  # Upgrade compatibility for legacy one-line PID files: only kill a process whose command is still our watcher.
+  cmd="$(ps -p "$p" -o command= 2>/dev/null || true)"
+  [[ "$cmd" == *"marina-compose.py watch"*"--service=$service"* \
+    || "$cmd" == *"docker compose"*"watch --no-up $service"* ]]
+}
+
+_compose_watch_lock() {  # $1=lock directory
+  local lock="$1" owner
+  for _ in $(seq 1 100); do
+    if mkdir "$lock" 2>/dev/null; then
+      printf '%s\n' "$$" > "$lock/owner"
+      return 0
+    fi
+    owner="$(cat "$lock/owner" 2>/dev/null || true)"
+    if [[ ! "$owner" =~ ^[0-9]+$ ]] || ! kill -0 "$owner" 2>/dev/null; then
+      rm -rf "$lock"
+      continue
+    fi
+    sleep 0.05
+  done
+  echo "warning: Compose Watch lock timeout: $lock" >&2
+  return 1
+}
+
+_compose_watch_now_ns() {
+  python3 -c 'import time; print(time.time_ns())'
+}
+
+_compose_watch_mark_stop() {  # $1=service, empty means stop --all
+  local service="${1:-}" sd lock target now tmp
+  sd="$(session_dir)"
+  lock="$sd/.watch.intent.lock"
+  _compose_watch_lock "$lock" || return 1
+  now="$(_compose_watch_now_ns)"
+  if [[ -n "$service" ]]; then target="$sd/${service}.watch.stop"
+  else target="$sd/.watch.stop.all"
+  fi
+  tmp="$target.tmp.$$"
+  printf '%s\n' "$now" > "$tmp"
+  mv "$tmp" "$target"
+  rm -rf "$lock"
+}
+
+_compose_watch_stop_unlocked() {  # $1=service
+  local service="$1" sd f p recorded
+  sd="$(session_dir)"
+  f="$sd/${service}.watch.pid"
+  [[ -f "$f" ]] || return 0
+  p="$(sed -n '1p' "$f" 2>/dev/null || true)"
+  recorded="$(sed -n '2p' "$f" 2>/dev/null || true)"
+  if _compose_watch_owned "$p" "$service" "$recorded"; then
+    kill -TERM -- "-$p" 2>/dev/null || kill "$p" 2>/dev/null || true
+    for _ in $(seq 1 30); do
+      kill -0 -- "-$p" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 -- "-$p" 2>/dev/null; then
+      kill -KILL -- "-$p" 2>/dev/null || true
+    fi
+  fi
+  rm -f "$f"
+}
+
 _compose_watch_start() {  # $1=service, $2...=foreground watch command
   local service="$1"; shift
-  local sd tpf log_path
+  local sd tpf log_path lock intent_lock all_stop service_stop rc=0
   sd="$(session_dir)"
   tpf="$sd/${service}.watch.pid"
   log_path="$sd/${service}.watch.log"
-  _compose_watch_stop "$service"
+  lock="$sd/${service}.watch.lock"
+  intent_lock="$sd/.watch.intent.lock"
+  _compose_watch_lock "$intent_lock" || return 1
+  all_stop="$(cat "$sd/.watch.stop.all" 2>/dev/null || echo 0)"
+  service_stop="$(cat "$sd/${service}.watch.stop" 2>/dev/null || echo 0)"
+  if [[ "${MARINA_WATCH_STARTED_NS:-}" =~ ^[0-9]+$ ]] \
+    && { [[ "$all_stop" =~ ^[0-9]+$ && "$all_stop" -gt "$MARINA_WATCH_STARTED_NS" ]] \
+      || [[ "$service_stop" =~ ^[0-9]+$ && "$service_stop" -gt "$MARINA_WATCH_STARTED_NS" ]]; }; then
+    rm -rf "$intent_lock"
+    return 0
+  fi
+  if ! _compose_watch_lock "$lock"; then
+    rm -rf "$intent_lock"
+    return 1
+  fi
+  _compose_watch_stop_unlocked "$service"
   : > "$log_path"
-  ( set -m
+  if (
+    set -m
     nohup "$@" >> "$log_path" 2>&1 &
-    echo $! > "$tpf"
-  )
-  return 0
+    p=$!
+    stamp=""
+    for _ in $(seq 1 20); do
+      stamp="$(_compose_process_stamp "$p")"
+      [[ -n "$stamp" ]] && break
+      kill -0 "$p" 2>/dev/null || break
+      sleep 0.05
+    done
+    if [[ -n "$stamp" ]]; then
+      tmp="$tpf.tmp.$$"
+      printf '%s\n%s\n' "$p" "$stamp" > "$tmp"
+      mv "$tmp" "$tpf"
+    else
+      echo "warning: Compose Watch가 시작 직후 종료됨: $service ($log_path)" >&2
+    fi
+  ); then
+    rc=0
+  else
+    rc=$?
+  fi
+  rm -rf "$lock"
+  rm -rf "$intent_lock"
+  return "$rc"
 }
 
 _compose_watch_stop() {  # $1=service (없으면 전체). 항상 0 반환.
-  local sd f p
+  local sd f service lock
   sd="$(session_dir)"
   if [[ -n "${1:-}" ]]; then
-    f="$sd/${1}.watch.pid"
-    if [[ -f "$f" ]]; then
-      p="$(cat "$f" 2>/dev/null || true)"
-      [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null || true
-      rm -f "$f"
-    fi
+    service="$1"
+    lock="$sd/${service}.watch.lock"
+    _compose_watch_lock "$lock" || return 0
+    _compose_watch_stop_unlocked "$service"
+    rm -rf "$lock"
   else
     shopt -s nullglob
     for f in "$sd"/*.watch.pid; do
-      p="$(cat "$f" 2>/dev/null || true)"
-      [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && kill "$p" 2>/dev/null || true
-      rm -f "$f"
+      service="${f##*/}"; service="${service%.watch.pid}"
+      _compose_watch_stop "$service"
     done
     shopt -u nullglob
   fi

@@ -129,7 +129,7 @@ def _spawn_lifecycle(key: str, op: str, fn) -> dict[str, Any]:
 
 def start_all(root: Path) -> dict[str, Any]:
     return _spawn_lifecycle(busy_key(root, "--all"), "start",
-                            lambda: _marina_cli_logged(root, "start", "--all", timeout=LIFECYCLE_TIMEOUT))   # compose_main → ensure+pre-build+ up -d --build. 출력은 'build' 로그 run 으로(대시보드 노출)
+                            lambda: _marina_cli_logged(root, "start", "--all", timeout=LIFECYCLE_TIMEOUT))   # compose_main → ensure+pre-build+ up -d. 출력은 'build' 로그 run 으로(대시보드 노출)
 
 def cleanup_session(root: Path) -> dict[str, Any]:
     stop_all(root)
