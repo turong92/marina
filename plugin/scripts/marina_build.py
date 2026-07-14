@@ -8,7 +8,9 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-_CACHE: dict[str, tuple[tuple[int, int, int, int], dict[str, Any]]] = {}
+from marina_build_inputs import compare_build_inputs
+
+_CACHE: dict[str, tuple[tuple[int, ...], dict[str, Any]]] = {}
 _DEF = re.compile(r"^#(?P<id>\d+) \[(?P<label>[^]]+)](?: (?P<command>.+))?$")
 _DONE = re.compile(r"^#(?P<id>\d+) DONE (?P<seconds>\d+(?:\.\d+)?)s$")
 _CACHED = re.compile(r"^#(?P<id>\d+) CACHED$")
@@ -46,6 +48,29 @@ def read_build_meta(log_path: Path) -> dict[str, Any]:
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError):
         return {}
+
+
+def _previous_inputs(log_path: Path) -> tuple[dict[str, Any] | None, tuple[int, int]]:
+    match = re.fullmatch(r"run-(\d+)\.log", log_path.name)
+    if not match:
+        return None, (0, 0)
+    current = int(match.group(1))
+    candidates = []
+    for path in log_path.parent.glob("run-*.log"):
+        item = re.fullmatch(r"run-(\d+)\.log", path.name)
+        if item and int(item.group(1)) < current:
+            candidates.append((int(item.group(1)), path))
+    for _sequence, path in sorted(candidates, reverse=True):
+        meta = read_build_meta(path)
+        inputs = meta.get("inputs")
+        if isinstance(inputs, dict):
+            try:
+                stat = build_meta_path(path).stat()
+                signature = (stat.st_mtime_ns, stat.st_size)
+            except OSError:
+                signature = (0, 0)
+            return inputs, signature
+    return None, (0, 0)
 
 
 def _display_label(label: str, command: str) -> str:
@@ -157,7 +182,15 @@ def build_summary(log_path: Path) -> dict[str, Any]:
     except OSError:
         meta_sig = (0, 0)
 
-    signature = (log_stat.st_mtime_ns, log_stat.st_size, meta_sig[0], meta_sig[1])
+    previous_inputs, previous_sig = _previous_inputs(log_path)
+    signature = (
+        log_stat.st_mtime_ns,
+        log_stat.st_size,
+        meta_sig[0],
+        meta_sig[1],
+        previous_sig[0],
+        previous_sig[1],
+    )
     key = str(log_path)
     cached = _CACHE.get(key)
     if cached and cached[0] == signature:
@@ -179,6 +212,7 @@ def build_summary(log_path: Path) -> dict[str, Any]:
         "cacheMisses": len(misses),
         "steps": steps,
         "bottleneck": bottleneck,
+        "reasons": compare_build_inputs(meta.get("inputs") or {}, previous_inputs, str(meta.get("op") or "")),
     }
     _CACHE[key] = (signature, result)
     return result

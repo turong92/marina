@@ -41,12 +41,40 @@ sys.path.insert(0, sys.argv[1])
 from marina_build import build_summary, write_build_meta
 
 log = Path(sys.argv[2])
+previous_log = log.with_name("run-000.log")
+previous_log.write_text("", encoding="utf-8")
+write_build_meta(previous_log, {
+    "status": "success",
+    "op": "rebuild",
+    "inputs": {
+        "version": 1,
+        "status": "ok",
+        "services": {
+            "web": {
+                "dockerfile": {"web/Dockerfile.local": "file:old"},
+                "rebuild": {"web/package.json": "file:same"},
+                "buildArgs": {"PROFILE": "hmac:old"},
+            }
+        },
+    },
+})
 write_build_meta(log, {
     "status": "success",
     "op": "start",
     "startedAt": 100.0,
     "endedAt": 230.0,
     "durationSec": 130.0,
+    "inputs": {
+        "version": 1,
+        "status": "ok",
+        "services": {
+            "web": {
+                "dockerfile": {"web/Dockerfile.local": "file:new"},
+                "rebuild": {"web/package.json": "file:same"},
+                "buildArgs": {"PROFILE": "hmac:new"},
+            }
+        },
+    },
 })
 out = build_summary(log)
 assert out["status"] == "success", out
@@ -61,6 +89,10 @@ assert any("pnpm install" in label for label in labels), labels
 assert "load build context" in labels, labels
 assert "exporting to image" in labels, labels
 assert any(step["cached"] for step in out["steps"]), out
+reason_keys = {(reason["kind"], reason["label"], reason["change"]) for reason in out["reasons"]}
+assert ("dockerfile", "web/Dockerfile.local", "changed") in reason_keys, reason_keys
+assert ("build-arg", "PROFILE", "changed") in reason_keys, reason_keys
+assert "inputs" not in out, out
 
 first = build_summary(log)
 second = build_summary(log)

@@ -15,6 +15,11 @@ import marina_build as mb
 import marina_paths as mp
 mc.script = lambda r: Path("/bin/echo")               # 성공 경로 — echo 출력이 run 파일로
 mc.marina_env = lambda r: os.environ.copy()
+mc.capture_build_inputs = lambda r, args, env: {
+    "version": 1,
+    "status": "ok",
+    "services": {"api": {"dockerfile": {"api/Dockerfile": "file:one"}, "rebuild": {}, "buildArgs": {}}},
+}
 mc._marina_cli_logged(root, "start", "--all", timeout=30)
 log = mp.service_log(root, "build")
 text = Path(log).read_text()
@@ -29,6 +34,7 @@ assert success_meta["op"] == "start", success_meta
 assert success_meta["exitCode"] == 0, success_meta
 assert success_meta["endedAt"] >= success_meta["startedAt"], success_meta
 assert success_meta["durationSec"] >= 0, success_meta
+assert success_meta["inputs"]["services"]["api"]["dockerfile"], success_meta
 # 실패 경로 — rc!=0 → CalledProcessError(output=파일 끝) → busyError 500자 계약 유지 가능
 os.environ["MARINA_LOG_KEEP"] = "1"
 mc.script = lambda r: Path("/usr/bin/false")
