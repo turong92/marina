@@ -215,8 +215,8 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
     op = args[0] if args else ""
     try:
         inputs = capture_build_inputs(root, tuple(args), env)
-    except Exception as exc:
-        inputs = {"version": 1, "status": "unknown", "error": str(exc)[:500]}
+    except Exception:
+        inputs = {"version": 1, "status": "unknown"}
     meta = {"status": "running", "op": op, "startedAt": started_at, "inputs": inputs}
     write_build_meta(log_path, meta)
     rc = None

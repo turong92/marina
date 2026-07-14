@@ -35,6 +35,10 @@ assert success_meta["exitCode"] == 0, success_meta
 assert success_meta["endedAt"] >= success_meta["startedAt"], success_meta
 assert success_meta["durationSec"] >= 0, success_meta
 assert success_meta["inputs"]["services"]["api"]["dockerfile"], success_meta
+# Snapshot failures are best-effort, but their raw stderr may contain secrets.
+mc.capture_build_inputs = lambda r, args, env: (_ for _ in ()).throw(
+    ValueError("TOKEN=must-not-reach-build-meta")
+)
 # 실패 경로 — rc!=0 → CalledProcessError(output=파일 끝) → busyError 500자 계약 유지 가능
 os.environ["MARINA_LOG_KEEP"] = "1"
 mc.script = lambda r: Path("/usr/bin/false")
@@ -48,6 +52,8 @@ failure_meta = mb.read_build_meta(failure_log)
 assert failure_meta["status"] == "failed", failure_meta
 assert failure_meta["op"] == "start", failure_meta
 assert failure_meta["exitCode"] != 0, failure_meta
+assert failure_meta["inputs"] == {"version": 1, "status": "unknown"}, failure_meta
+assert "must-not-reach-build-meta" not in str(failure_meta), failure_meta
 assert not success_log.exists(), success_log
 assert not mb.build_meta_path(success_log).exists(), mb.build_meta_path(success_log)
 # log_targets_for 에 build 포함 (비 compose 폴백 경로)
