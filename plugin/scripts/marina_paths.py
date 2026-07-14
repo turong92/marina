@@ -253,7 +253,14 @@ def finish_log_path(root: Path, service: str, path: Path) -> None:
             finally:
                 os.close(active_fd)
             _active_log_path(path).unlink(missing_ok=True)
-        _prune_log_runs(log_dir(root, service), int(_env("LOG_KEEP", "10")), preserve=path)
+        current = service_log(root, service)
+        try:
+            latest = Path(os.readlink(current))
+            if not latest.is_absolute():
+                latest = current.parent / latest
+        except OSError:
+            latest = None
+        _prune_log_runs(log_dir(root, service), int(_env("LOG_KEEP", "10")), preserve=latest)
 
 def ensure_current_log(root: Path, service: str) -> Path:
     current = service_log(root, service)

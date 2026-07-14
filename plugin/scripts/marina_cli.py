@@ -226,6 +226,7 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
         "inputs": {"version": 1, "status": "pending"},
     }
     rc = None
+    tail = ""
     timed_out = False
     try:
         write_build_meta(log_path, meta)
@@ -263,19 +264,19 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
         }
         if rc is not None:
             final["exitCode"] = rc
+        if rc not in (None, 0):
+            try:
+                size = os.path.getsize(log_path)
+                with open(log_path, "rb") as f:
+                    f.seek(max(0, size - 4096))
+                    tail = f.read().decode("utf-8", "replace")
+            except OSError:
+                pass
         try:
             write_build_meta(log_path, final)
         finally:
             finish_log_path(root, "build", log_path)
     if rc != 0:
-        tail = ""
-        try:
-            size = os.path.getsize(log_path)
-            with open(log_path, "rb") as f:
-                f.seek(max(0, size - 4096))
-                tail = f.read().decode("utf-8", "replace")
-        except OSError:
-            pass
         raise subprocess.CalledProcessError(rc, argv, output=tail)
 
 def _direct_cli_root(cwd: Path | None = None) -> Path:

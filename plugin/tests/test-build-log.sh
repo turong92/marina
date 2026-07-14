@@ -67,9 +67,12 @@ with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
     allocated = list(pool.map(lambda _: mp.next_log_path(concurrent_root, "build", active=True), range(32)))
 assert len(set(allocated)) == len(allocated), allocated
 assert all(path.exists() for path in allocated), allocated
-for path in allocated:
+ordered = sorted(allocated)
+for path in reversed(ordered):
     mp.finish_log_path(concurrent_root, "build", path)
-assert len(list(mp.log_dir(concurrent_root, "build").glob("run-*.log"))) == 1
+remaining = list(mp.log_dir(concurrent_root, "build").glob("run-*.log"))
+assert remaining == [ordered[-1]], remaining
+assert mp.service_log(concurrent_root, "build").resolve() == ordered[-1].resolve()
 assert not list(mp.log_dir(concurrent_root, "build").glob("run-*.active"))
 # log_targets_for 에 build 포함 (비 compose 폴백 경로)
 import marina_sessions as ms
