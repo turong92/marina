@@ -11,15 +11,13 @@ ENTRY="$WEB/app-2e-entry.js"
 SESS="$WEB/app-5-sessions.js"
 CSS="$WEB/styles.css"
 
-# ── R1: 헤더 상시 [+ 등록] ────────────────────────────────────────────────────
-grep -q 'id="headerRegister"' "$H" || { echo "FAIL: 헤더에 #headerRegister 버튼 없음"; exit 1; }
-python3 - "$H" <<'PY' || { echo "FAIL: #headerRegister 가 #refresh 왼쪽(헤더 toolbar)에 없음"; exit 1; }
+# ── R1: [+ 등록] 상시 노출 (2026-07-14 형: 헤더→좌측 sessions-bar 로 이동) ─────────
+grep -q 'id="headerRegister"' "$H" || { echo "FAIL: #headerRegister 버튼 없음"; exit 1; }
+python3 - "$H" <<'PY' || { echo "FAIL: #headerRegister 가 좌측 sessions-bar 에 없음"; exit 1; }
 import sys
 html = open(sys.argv[1]).read()
-head = html[:html.index('</header>')]
-assert 'class="toolbar"' in head, "toolbar 가 header 안에 없음"
-assert 'headerRegister' in head, "headerRegister 가 header 안에 없음"
-assert head.index('headerRegister') < head.index('id="refresh"'), "headerRegister 가 refresh 보다 뒤에 있음"
+bar = html[html.index('class="sessions-bar"'):html.index('id="switcherMenu"') + 200]
+assert 'headerRegister' in bar, "headerRegister 가 sessions-bar 에 없음"
 PY
 grep -q "getElementById('headerRegister')" "$CORE" || { echo "FAIL: headerRegister 클릭 배선 없음"; exit 1; }
 

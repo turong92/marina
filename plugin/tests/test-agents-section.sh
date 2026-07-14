@@ -82,12 +82,16 @@ assert recent.get("sid") == "cli-recent", f"claude sid 노출 실패: {recent}"
 tr = ms.agent_transcript(Path(wt), "claude", "cli-recent")
 assert [t["role"] for t in tr["turns"]] == ["user", "assistant"], tr
 assert tr["turns"][0]["text"] == "질문", tr
-try:
-    ms.agent_transcript(Path(wt), "claude", "../evil")
-    raise AssertionError("sid 형식 검증 뚫림")
-except ValueError:
-    pass
-print("ok agent_transcript (claude — 턴 추출·sid 형식 검증)")
+for bad_sid in ["../evil", "-rf-danger"]:   # 경로 탈출·leading dash 둘 다 거부(codex P2)
+    try:
+        ms.agent_transcript(Path(wt), "claude", bad_sid)
+        raise AssertionError(f"sid 형식 검증 뚫림: {bad_sid}")
+    except ValueError:
+        pass
+# bare 토큰·이메일 마스킹(모달이 약속) — redact_text 키워드로 안 잡히는 형태
+_m = ms._redact_transcript("ghp_abcdefghijklmnopqrstuvwxyz012345 · me@x.com · Bearer abcdefghijklmnop123456")
+assert "ghp_" not in _m and "me@x.com" not in _m and "abcdefghijklmnop123456" not in _m, _m
+print("ok agent_transcript (턴 추출·sid 검증·bare 토큰/이메일 마스킹)")
 
 # ── Codex: title+ts 만(preview 생략) ──
 index_path = Path(codex_home) / "session_index.jsonl"

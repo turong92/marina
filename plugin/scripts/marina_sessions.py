@@ -559,7 +559,7 @@ def _tail_lines(path: Path) -> list[str]:
 def agent_transcript(root: Path, source: str, sid: str) -> dict[str, Any]:
     # AGENTS 행 클릭 뷰어 — 끝 256KB 에서 user/assistant 텍스트 턴만 추출(도구 호출·결과는 생략), 로그처럼 마스킹.
     from marina_logtext import redact_text   # 지역 import — 순환 의존 예방
-    if not re.fullmatch(r"[A-Za-z0-9_-]{4,64}", sid or ""):
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}", sid or ""):   # leading dash 금지
         raise ValueError("invalid session id")
     turns: list[dict[str, str]] = []
     if source == "claude":
@@ -600,8 +600,27 @@ def agent_transcript(root: Path, source: str, sid: str) -> dict[str, Any]:
         raise ValueError("unknown source")
     turns = turns[-AGENT_TRANSCRIPT_MAX_TURNS:]
     for t in turns:
-        t["text"] = redact_text(t["text"])
+        t["text"] = _redact_transcript(redact_text(t["text"]))
     return {"turns": turns, "source": source}
+
+
+# 대화 전용 마스킹 — redact_text(키워드 key/value) 로는 안 잡히는 bare 토큰/이메일(codex P2).
+# 모달이 '민감정보 마스킹'을 약속하므로 대화 본문에 노출된 흔한 secret 형태를 추가로 가린다.
+_TRANSCRIPT_SECRET_RES = [
+    re.compile(r"gh[porsu]_[A-Za-z0-9]{20,}"),                 # GitHub PAT/OAuth
+    re.compile(r"github_pat_[A-Za-z0-9_]{20,}"),               # GitHub fine-grained PAT
+    re.compile(r"sk-[A-Za-z0-9_-]{20,}"),                      # OpenAI 계열
+    re.compile(r"xox[baprs]-[A-Za-z0-9-]{10,}"),               # Slack
+    re.compile(r"AKIA[0-9A-Z]{16}"),                           # AWS access key id
+    re.compile(r"(?i)bearer\s+[A-Za-z0-9._\-]{16,}"),          # Bearer 토큰
+    re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}"),  # JWT
+    re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),  # 이메일
+]
+
+def _redact_transcript(text: str) -> str:
+    for rx in _TRANSCRIPT_SECRET_RES:
+        text = rx.sub("[redacted]", text)
+    return text
 
 def repo_head_subject(repo: Path) -> str:
     # 최신 커밋 제목 — 세션 타이틀 없을 때(CLI/codex) 카드 식별 폴백.

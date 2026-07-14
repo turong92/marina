@@ -19,14 +19,15 @@
     function renderAgentRow(agent) {   // 상태점 + source 텍스트칩(CC/CX, 이모지 금지) + title + 우측 relTime, 아래 preview(.svc-tail 재사용)
       const active = agentActive(agent.ts);
       const isCodex = agent.source === 'codex';
-      const openable = !!agent.sid;   // transcript 식별자 있어야 열람 가능(만료·구버전 rollout 은 표시만)
+      const openable = !!agent.sid;   // 세션 식별자 있어야 attach/열람 가능(만료·구버전 rollout 은 표시만)
       return `
         <div class="svc nested agent-row${openable ? '' : ' disabled'}" data-agent-row data-agent-ts="${agent.ts}"${openable ? ` data-agent-sid="${escapeHtml(agent.sid)}" data-agent-source="${escapeHtml(agent.source)}"` : ''}
-          title="${openable ? '클릭하면 이 세션의 대화 내용(끝부분)을 열어요' : '대화 원본을 못 찾음 — 표시만'}">
+          title="${openable ? '클릭=터미널로 이 세션에 붙기(resume)' + (active ? ' — 지금 다른 곳에서 활성일 수 있어요(동시 attach 주의)' : '') : '세션 원본을 못 찾음 — 표시만'}">
           <span class="wt-dot ${active ? 'boot' : 'stop'}" title="${active ? '최근 2분 내 활동' : '비활성'}"></span>
           <span class="agent-src ${isCodex ? 'codex' : 'claude'}">${isCodex ? 'Codex' : 'Claude'}</span>
           <span class="svc-name"><span title="${escapeHtml(agent.title)}">${escapeHtml(agent.title)}</span></span>
           <span class="svc-right">
+            ${openable ? `<span class="hov-acts"><button data-agent-peek title="대화 내용만 읽기(attach 없이)">대화</button></span>` : ''}
             <span class="mono-port svc-uptime" data-agent-relts>${escapeHtml(relTime(agent.ts))}</span>
           </span>
           ${agent.preview ? `<span class="svc-tail" title="${escapeHtml(agent.preview)}">${escapeHtml(agent.preview)}</span>` : ''}
@@ -442,9 +443,11 @@
           else expandedRoots.add(session.root);
           render();
         };
-        card.querySelectorAll('[data-agent-row][data-agent-sid]').forEach((row, i) => {   // 행 클릭 = 대화 뷰어(서비스 행=로그와 같은 문법)
+        card.querySelectorAll('[data-agent-row][data-agent-sid]').forEach((row, i) => {   // 행 클릭 = 터미널 attach(오르카), '대화' = 읽기 전용 뷰어
           const agent = agents.filter(a => a.sid)[i];
-          row.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTranscript === 'function') openAgentTranscript(session, agent); };
+          row.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTerminal === 'function') openAgentTerminal(session.root, agent); };
+          const peek = row.querySelector('[data-agent-peek]');
+          if (peek) peek.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTranscript === 'function') openAgentTranscript(session, agent); };
         });
         renderServiceTree(card.querySelector('.svc-list'), session, wt);
         sessionsEl.appendChild(card);

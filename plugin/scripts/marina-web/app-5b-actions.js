@@ -97,8 +97,16 @@
       menu.className = 'act-menu';
       menu.dataset.anchor = anchor.dataset.menuId;
       for (const it of items) {
+        if (it.divider) { const d = document.createElement('div'); d.className = 'act-menu-div'; menu.appendChild(d); continue; }
         const b = document.createElement('button');
-        b.textContent = it.label;
+        if (it.sub) {   // 2줄 항목(GitKraken D&D) — 명령 전문(label) + 부제(sub). 잘리지 않게 CSS 로 넓게
+          b.className = 'two-line';
+          b.innerHTML = `<span class="am-label"></span><span class="am-sub"></span>`;
+          b.querySelector('.am-label').textContent = it.label;
+          b.querySelector('.am-sub').textContent = it.sub;
+        } else {
+          b.textContent = it.label;
+        }
         b.onclick = (e) => { e.stopPropagation(); closeActMenu(); Promise.resolve(it.run()).catch(err => alert(String((err && err.message) || err))); };
         menu.appendChild(b);
       }

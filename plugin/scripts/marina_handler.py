@@ -38,7 +38,7 @@ from marina_update import _serving_sha, update_claude, update_codex, update_stat
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_sessions import agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_open, term_resize, term_stream
-from marina_git import git_commit, git_commit_info, git_diff, git_graph, git_merge, git_pull, git_push, git_wip_stat
+from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
@@ -99,6 +99,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
                 return
             ctype = ("text/css; charset=utf-8" if name.endswith(".css")
+                     else "image/png" if name.endswith(".png")
+                     else "image/svg+xml" if name.endswith(".svg")
+                     else "image/x-icon" if name.endswith(".ico")
                      else "application/javascript; charset=utf-8" if name.endswith(".js")
                      else "application/octet-stream")
             data = fp.read_bytes()
@@ -364,7 +367,9 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 root = safe_root(query.get("root", [""])[0])
                 payload = git_graph(root, query.get("repo", ["."])[0],
-                                    refresh=query.get("refresh", ["0"])[0] == "1")
+                                    refresh=query.get("refresh", ["0"])[0] == "1",
+                                    all_remotes=query.get("all", ["0"])[0] == "1",
+                                    want_avatars=query.get("avatars", ["0"])[0] == "1")
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return
@@ -530,8 +535,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": "터미널은 로컬 대시보드에서만 쓸 수 있어요"}, 403)
                     return
                 if self.path == "/api/term-open":
+                    agent = body.get("agent") or {}
                     self.send_json(term_open(safe_root(str(body.get("root", ""))),
-                                             int(body.get("cols") or 80), int(body.get("rows") or 24)))
+                                             int(body.get("cols") or 80), int(body.get("rows") or 24),
+                                             agent_source=str(agent.get("source", "")), agent_sid=str(agent.get("sid", ""))))
                 elif self.path == "/api/term-input":
                     self.send_json(term_input(str(body.get("tid", "")), str(body.get("data", ""))))
                 elif self.path == "/api/term-resize":
@@ -976,12 +983,25 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(git_push(root, str(body.get("repo", ".")), force=bool(body.get("force"))))
                 return
 
-            if self.path == "/api/git-pull":   # D&D ☁→로컬 당겨오기 (ff-only)
-                self.send_json(git_pull(root, str(body.get("repo", "."))))
+            if self.path == "/api/git-pull":   # D&D ☁→로컬 당겨오기 (기본 ff-only, rebase 옵션)
+                self.send_json(git_pull(root, str(body.get("repo", ".")), rebase=bool(body.get("rebase"))))
                 return
 
             if self.path == "/api/git-merge":   # D&D 로컬→로컬 병합 — root = 타깃 브랜치의 워크트리
                 self.send_json(git_merge(root, str(body.get("repo", ".")), str(body.get("branch", ""))))
+                return
+
+            if self.path == "/api/git-rebase":   # D&D 리베이스 — root = 소스 브랜치의 워크트리, onto = 타깃
+                self.send_json(git_rebase(root, str(body.get("repo", ".")), str(body.get("onto", ""))))
+                return
+
+            if self.path == "/api/git-fetch":   # REMOTE 섹션 ⇣ — origin 갱신(prune)
+                self.send_json(git_fetch(root, str(body.get("repo", "."))))
+                return
+
+            if self.path == "/api/git-stash":   # 스태시 — save(WIP 패널)/apply/drop(STASHES 섹션)
+                self.send_json(git_stash(root, str(body.get("repo", ".")), str(body.get("op", "")),
+                                         ref=str(body.get("ref", "")), message=str(body.get("message", ""))))
                 return
 
             if self.path == "/api/set-default-attach":

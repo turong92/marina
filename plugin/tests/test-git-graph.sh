@@ -53,11 +53,26 @@ assert fx['mismatch'], fx                           # a 는 detached attach → 
 hashes = {c['hash'] for c in g['commits']}
 assert '$FEAT_HEAD' in hashes, 'feat head not in log'
 assert all(set(c) >= {'hash','parents','subject','ts','author'} for c in g['commits'])
+# 아바타 = 깃 호스트 프로필(크라켄 방식). 기본 뷰(avatars 미요청)엔 아바타 없음, 원본 이메일 절대 비노출.
+assert all('avatar' not in c for c in g['commits']), 'avatars 미요청인데 아바타 노출(불필요 네트워크)'
+assert not any('email' in c for c in g['commits']), '원본 이메일 노출'
 " || { echo 'FAIL: git-graph'; exit 1; }
 
 # 알 수 없는 repo → 4xx
 code="$(curl -s -o /dev/null -w '%{http_code}' "${hdr[@]}" "$base/api/git-graph?root=$SRC&repo=zzz")"
 [[ "$code" == 4* ]] || { echo "FAIL: git-graph bad repo expected 4xx, got $code"; exit 1; }
+
+# ── 아바타 파서 유닛(네트워크 없이) — noreply 이메일→GitHub 아바타 URL, 비-github 리모트 무시 ──
+python3 - "$HERE/../scripts" <<'PY'
+import sys; sys.path.insert(0, sys.argv[1])
+import marina_git as mg
+assert mg._noreply_avatar("82567259+turong92@users.noreply.github.com") == "https://avatars.githubusercontent.com/u/82567259", mg._noreply_avatar("82567259+turong92@users.noreply.github.com")
+assert mg._noreply_avatar("octocat@users.noreply.github.com") == "https://github.com/octocat.png"
+assert mg._noreply_avatar("someone@naver.com") == ""    # 일반 이메일은 로컬 파싱 대상 아님(GitHub API 소관)
+assert mg._github_avatar_map("") == {}                  # 리모트 없음
+assert mg._github_avatar_map("/some/local/path") == {}  # 비-github → 네트워크 시도 안 함
+print("ok avatar parsers (noreply·non-github)")
+PY
 
 # ── merged 판정: feat/x 를 main 에 머지 후 refresh=1 ───────────
 git -C "$SRC" merge -q --no-ff feat/x -m "merge feat/x"

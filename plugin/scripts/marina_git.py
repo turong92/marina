@@ -5,9 +5,11 @@ spec: docs/superpowers/specs/2026-07-02-git-graph-panel-design.md, 2026-07-11-co
 git_graph/git_diff 는 읽기 전용. git_commit/git_push(P2) 만 실제로 git 상태를 바꾼다 —
 둘 다 main 체크아웃 거부(is_source_checkout)·force/amend 없음·저장소 상대경로만 허용."""
 from __future__ import annotations
+import json
 import re
 import subprocess
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -45,12 +47,89 @@ def _checkout_of(root: Path, repo: str) -> Path:
     return root / repo
 
 
-def git_graph(any_root: Path, repo: str, refresh: bool = False) -> dict[str, Any]:
+# ── 커밋 아바타(크라켄 방식) — Gravatar 가 아니라 깃 호스트(GitHub)의 프로필. 이메일→유저 매핑을 GitHub 이
+# 알고 있어(계정에 등록된 이메일) 크라켄처럼 "그냥 뜬다". noreply 이메일은 네트워크 없이 로컬 파싱. ──
+_gh_avatar_cache: dict[str, tuple[float, dict[str, str], bool]] = {}   # slug → (ts, {email: url}, ok)
+_gh_token_cache: tuple[float, str] | None = None
+
+
+def _github_token() -> str:
+    # 비공개 레포 아바타 + rate limit 완화용 — env 우선, 없으면 gh CLI 로그인 토큰 재활용(10분 캐시).
+    # 토큰은 GitHub API 요청 헤더로만 쓰고 프론트로는 절대 안 나감(해석된 URL 만 노출).
+    global _gh_token_cache
+    now = time.time()
+    if _gh_token_cache and now - _gh_token_cache[0] < 600:
+        return _gh_token_cache[1]
+    import os
+    tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN") or ""
+    if not tok:
+        try:
+            r = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5.0)
+            if r.returncode == 0:
+                tok = r.stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            tok = ""
+    _gh_token_cache = (now, tok)
+    return tok
+
+
+def _noreply_avatar(email: str) -> str:
+    # GitHub noreply 이메일에 유저 id/이름이 박혀 있어 API 없이 아바타 URL 구성.
+    m = re.match(r"(\d+)\+[^@]+@users\.noreply\.github\.com$", email)
+    if m:
+        return f"https://avatars.githubusercontent.com/u/{m.group(1)}"
+    m = re.match(r"([^@+]+)@users\.noreply\.github\.com$", email)
+    if m:
+        return f"https://github.com/{m.group(1)}.png"
+    return ""
+
+
+def _github_avatar_map(remote_url: str) -> dict[str, str]:
+    # GitHub commits API 로 이메일→아바타 URL. 공개 레포는 무인증(60req/h) — 결과를 slug 별 장수 캐시(1h).
+    m = re.search(r"github\.com[:/]+([^/]+)/([^/]+?)(?:\.git)?/?$", remote_url or "")
+    if not m:
+        return {}
+    slug = f"{m.group(1)}/{m.group(2)}"
+    now = time.time()
+    cached = _gh_avatar_cache.get(slug)
+    if cached and now - cached[0] < (3600 if cached[2] else 60):   # 성공 1h / 실패 60s(오프라인 재시도 여지)
+        return cached[1]
+    result: dict[str, str] = dict(cached[1]) if cached else {}
+    ok = False
+    headers = {"User-Agent": "marina-dashboard", "Accept": "application/vnd.github+json"}
+    token = _github_token()
+    if token:   # 비공개 레포 접근 + rate limit 60→5000/h
+        headers["Authorization"] = f"Bearer {token}"
+    try:
+        for page in (1, 2):   # 최근 200 커밋 = 2페이지
+            req = urllib.request.Request(
+                f"https://api.github.com/repos/{slug}/commits?per_page=100&page={page}",
+                headers=headers)
+            with urllib.request.urlopen(req, timeout=4.0) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            if not isinstance(data, list) or not data:
+                break
+            for c in data:
+                em = ((c.get("commit") or {}).get("author") or {}).get("email")
+                url = (c.get("author") or {}).get("avatar_url")
+                if em and url:
+                    result[em.strip().lower()] = url
+            if len(data) < 100:
+                break
+        ok = True
+    except Exception:
+        pass   # 오프라인·rate limit·비공개 — 조용히 빈/기존 맵 (noreply 파싱이 폴백)
+    _gh_avatar_cache[slug] = (now, result, ok)
+    return result
+
+
+def git_graph(any_root: Path, repo: str, refresh: bool = False, all_remotes: bool = False,
+              want_avatars: bool = False) -> dict[str, Any]:
     main = source_root_for(any_root).resolve()
     repos = [r for r in repo_names_for(main) if (_checkout_of(main, r) / ".git").exists()]
     if repo not in repos:
         raise ValueError("unknown repo")
-    key = f"{main}::{repo}"
+    key = f"{main}::{repo}::{'all' if all_remotes else 'mine'}::{'av' if want_avatars else 'noav'}"
     cached = _graph_cache.get(key)
     if cached and not refresh and time.time() - cached[0] < _GRAPH_TTL:
         return cached[1]
@@ -122,8 +201,8 @@ def git_graph(any_root: Path, repo: str, refresh: bool = False) -> dict[str, Any
         seen.add(e["branch"])
         branches.append(e)
 
-    # 원격 브랜치(remote 커밋 가시화 — 형: d&d 푸시 기반). 로컬 브랜치의 origin 카운터파트 + origin/<main>만
-    # (전체 origin/* 는 장수 레포에서 수십 개 — 화면 소음). 미푸시/미당김이면 head 가 달라 별도 커밋 행이 생긴다.
+    # 원격 브랜치(remote 커밋 가시화 — 형: d&d 푸시 기반). 기본은 로컬 브랜치의 origin 카운터파트 + origin/<main>만
+    # (전체 origin/* 는 장수 레포에서 수십 개 — 화면 소음). all_remotes=True(REMOTE 섹션 '전체' 토글)면 전부.
     local_names = {b["branch"] for b in branches}
     try:
         refs_out = _git(["for-each-ref", "--format=%(refname:short)\x1f%(objectname)", "refs/remotes/origin"], main_co)
@@ -135,28 +214,59 @@ def git_graph(any_root: Path, repo: str, refresh: bool = False) -> dict[str, Any
         except ValueError:
             continue
         short = rname[len("origin/"):]
-        if rname == "origin/HEAD" or (short not in local_names and short != main_branch):
+        if rname == "origin/HEAD" or (not all_remotes and short not in local_names and short != main_branch):
             continue
         branches.append({"branch": rname, "remote": True, "detached": False, "head": rhead,
                          "root": str(main), "alias": "", "isMain": False,
                          "dirtyCount": 0, "untrackedCount": 0, "merged": False, "mismatch": [],
                          "upstream": True, "aheadRemote": 0, "behindRemote": 0})
 
+    # origin 슬러그(owner/repo) — PR 열기 URL·아바타 해석 공용
+    try:
+        origin_url = _git(["remote", "get-url", "origin"], main_co).strip()
+    except (RuntimeError, subprocess.TimeoutExpired):
+        origin_url = ""
+    m = re.search(r"github\.com[:/]+([^/]+/[^/]+?)(?:\.git)?/?$", origin_url)
+    origin_slug = m.group(1) if m else ""
+    # 아바타 해석(want_avatars 일 때만). GitHub API 맵 + noreply 로컬 파싱.
+    gh_map = _github_avatar_map(origin_url) if want_avatars else {}
+
     commits: list[dict[str, Any]] = []
     heads = sorted({b["head"] for b in branches})
     if heads:
         out = _git(["log", "--topo-order", "-n", "200",
-                    "--format=%H%x1f%P%x1f%s%x1f%ct%x1f%an%x1e", *heads], main_co, timeout=10.0)
+                    "--format=%H%x1f%P%x1f%s%x1f%ct%x1f%an%x1f%ae%x1e", *heads], main_co, timeout=10.0)
         for rec in out.split("\x1e"):
             rec = rec.strip("\n")
             if not rec:
                 continue
-            h, parents, subject, ts, author = rec.split("\x1f")
-            commits.append({"hash": h, "parents": parents.split(),
-                            "subject": subject, "ts": int(ts), "author": author})
+            h, parents, subject, ts, author, email = rec.split("\x1f")
+            c = {"hash": h, "parents": parents.split(),
+                 "subject": subject, "ts": int(ts), "author": author}
+            if want_avatars:   # 프론트로 이메일 원본은 안 보냄 — 해석된 아바타 URL 만
+                em = email.strip().lower()
+                url = gh_map.get(em) or _noreply_avatar(em)
+                if url:
+                    c["avatar"] = url
+            commits.append(c)
 
-    payload = {"repo": repo, "repos": repos, "mainRoot": str(main),
-               "mainBranch": main_branch, "branches": branches, "commits": commits}
+    # 스태시(크라켄 STASHES 섹션) — refs/stash 는 워크트리들이 공유(공통 git dir). 어느 워크트리에서
+    # 만들었는지는 메시지("WIP on <branch>: …")로 남아, 프론트가 그 브랜치 워크트리를 적용 타깃으로 잡는다.
+    stashes: list[dict[str, Any]] = []
+    try:
+        st_out = _git(["stash", "list", "--format=%gd%x1f%ct%x1f%gs"], main_co)
+    except (RuntimeError, subprocess.TimeoutExpired):
+        st_out = ""
+    for rec in st_out.strip().splitlines():
+        try:
+            ref, ts, msg = rec.split("\x1f")
+        except ValueError:
+            continue
+        m = re.match(r"(?:WIP on|On) ([^:]+):", msg)
+        stashes.append({"ref": ref, "ts": int(ts), "msg": msg, "branch": m.group(1) if m else ""})
+
+    payload = {"repo": repo, "repos": repos, "mainRoot": str(main), "originSlug": origin_slug,
+               "mainBranch": main_branch, "branches": branches, "commits": commits, "stashes": stashes}
     _graph_cache[key] = (time.time(), payload)
     return payload
 
@@ -226,16 +336,96 @@ def git_push(root: Path, repo: str, force: bool = False) -> dict[str, Any]:
     return {"ok": True, "output": tail}
 
 
-def git_pull(root: Path, repo: str) -> dict[str, Any]:
-    """D&D 당겨오기 — ff-only 만(히스토리 안 꼬임). 갈라졌으면 에러로 안내하고 사람이 결정."""
+def _rebasing(co: Path) -> bool:
+    """진행 중 리베이스 여부 — REBASE_HEAD 는 rebase 도중에만 존재(워크트리에서도 동작)."""
+    return subprocess.run(["git", "-C", str(co), "rev-parse", "-q", "--verify", "REBASE_HEAD"],
+                          capture_output=True, timeout=5.0).returncode == 0
+
+
+def git_pull(root: Path, repo: str, rebase: bool = False) -> dict[str, Any]:
+    """D&D 당겨오기 — 기본 ff-only(히스토리 안 꼬임). rebase=True 면 diverged 를 로컬 커밋 재적용으로 해소,
+    충돌이면 자동 rebase --abort 후 에러(수동 결정으로 돌려보냄)."""
     main, co = _resolve_write_checkout(root, repo)
     branch = repo_branch(co)
     if not branch:
         raise ValueError("detached HEAD 는 pull 할 수 없습니다")
-    proc = subprocess.run(["git", "-C", str(co), "pull", "--ff-only"], capture_output=True, text=True, timeout=30.0)
+    if rebase and _rebasing(co):
+        raise ValueError("이미 리베이스 진행 중(REBASE_HEAD) — 마무리하거나 중단한 뒤 다시 시도하세요")
+    args = ["pull", "--rebase"] if rebase else ["pull", "--ff-only"]
+    proc = subprocess.run(["git", "-C", str(co), *args], capture_output=True, text=True, timeout=60.0)
     tail = "\n".join(((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-20:])
     if proc.returncode != 0:
-        raise RuntimeError(tail or "git pull --ff-only failed")
+        if rebase and _rebasing(co):   # 이번 pull --rebase 가 만든 충돌만 되돌림
+            subprocess.run(["git", "-C", str(co), "rebase", "--abort"], capture_output=True, text=True, timeout=10.0)
+            raise RuntimeError(f"pull --rebase 충돌 — 자동 되돌림(rebase --abort). 수동 해소가 필요해요.\n{tail}")
+        raise RuntimeError(tail or f"git {' '.join(args)} failed")
+    _invalidate_graph_cache(main)
+    return {"ok": True, "output": tail}
+
+
+def git_rebase(root: Path, repo: str, onto: str) -> dict[str, Any]:
+    """D&D 리베이스 — root(소스 브랜치 워크트리)에서 `git rebase <onto>`. 히스토리 재작성이라
+    이미 푸시한 브랜치는 이후 force-with-lease 푸시가 필요해진다(그건 D&D 푸시 메뉴가 안내).
+    충돌이면 자동 rebase --abort 후 에러."""
+    if not onto or onto.startswith("-") or not re.fullmatch(r"[A-Za-z0-9._/-]+", onto):
+        raise ValueError("invalid branch name")
+    main, co = _resolve_write_checkout(root, repo)
+    branch = repo_branch(co)
+    if not branch:
+        raise ValueError("detached HEAD 는 리베이스할 수 없습니다")
+    if branch == onto:
+        raise ValueError("자기 자신 위로는 리베이스할 수 없어요")
+    if _rebasing(co):
+        raise ValueError("이미 리베이스 진행 중(REBASE_HEAD) — 마무리하거나 중단한 뒤 다시 시도하세요")
+    proc = subprocess.run(["git", "-C", str(co), "rebase", onto],
+                          capture_output=True, text=True, timeout=60.0)
+    tail = "\n".join(((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-20:])
+    if proc.returncode != 0:
+        if _rebasing(co):   # 이번 rebase 가 만든 충돌 상태만 되돌림
+            subprocess.run(["git", "-C", str(co), "rebase", "--abort"], capture_output=True, text=True, timeout=10.0)
+            raise RuntimeError(f"리베이스 충돌 — 자동 되돌림(rebase --abort). 수동 해소가 필요해요.\n{tail}")
+        raise RuntimeError(tail or "git rebase failed")
+    _invalidate_graph_cache(main)
+    return {"ok": True, "output": tail, "branch": branch, "onto": onto}
+
+
+_STASH_REF_RE = re.compile(r"stash@\{\d{1,3}\}")
+
+
+def git_stash(root: Path, repo: str, op: str, ref: str = "", message: str = "") -> dict[str, Any]:
+    """스태시 3동작 — save(그 워크트리 dirty 전부, untracked 포함)/apply(스태시 유지)/drop.
+    apply 충돌은 git 에러 그대로 안내(스태시는 보존되므로 잃는 것 없음)."""
+    main, co = _resolve_write_checkout(root, repo)
+    if op == "save":
+        args = ["stash", "push", "-u"] + (["-m", message.strip()] if message.strip() else [])
+        proc = subprocess.run(["git", "-C", str(co), *args], capture_output=True, text=True, timeout=30.0)
+        tail = "\n".join(((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-10:])
+        if proc.returncode != 0:
+            raise RuntimeError(tail or "git stash push failed")
+        if "No local changes" in tail:
+            raise ValueError("스태시할 변경이 없어요")
+        _invalidate_graph_cache(main)
+        return {"ok": True, "output": tail}
+    if not _STASH_REF_RE.fullmatch(ref or ""):
+        raise ValueError("invalid stash ref")
+    if op not in ("apply", "drop"):
+        raise ValueError("op must be save|apply|drop")
+    proc = subprocess.run(["git", "-C", str(co), "stash", op, ref], capture_output=True, text=True, timeout=30.0)
+    tail = "\n".join(((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-10:])
+    if proc.returncode != 0:
+        raise RuntimeError(f"git stash {op} 실패 — {tail}" if tail else f"git stash {op} failed")
+    _invalidate_graph_cache(main)
+    return {"ok": True, "output": tail}
+
+
+def git_fetch(root: Path, repo: str) -> dict[str, Any]:
+    """원격 상태 갱신 — fetch --prune (REMOTE 섹션 ⇣ 버튼). 로컬 브랜치는 건드리지 않는다."""
+    main, co = _resolve_write_checkout(root, repo)
+    proc = subprocess.run(["git", "-C", str(co), "fetch", "origin", "--prune"],
+                          capture_output=True, text=True, timeout=60.0)
+    tail = "\n".join(((proc.stdout or "") + (proc.stderr or "")).strip().splitlines()[-20:])
+    if proc.returncode != 0:
+        raise RuntimeError(tail or "git fetch failed")
     _invalidate_graph_cache(main)
     return {"ok": True, "output": tail}
 

@@ -22,7 +22,13 @@
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--sys-bg-base); color: var(--sys-cont-neutral-default); }
     header { height: 56px; display: flex; align-items: center; justify-content: space-between; padding: 0 20px; border-bottom: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); }
-    h1 { margin: 0; font-size: 16px; font-weight: 700; line-height: 1; letter-spacing: 0; }
+    h1 { margin: 0; font-size: 16px; font-weight: 700; line-height: 1; letter-spacing: 0; display: flex; align-items: center; gap: 9px; }
+    /* 로고 마크 — 세로형 닻(투명 PNG). 라이트=네이비/다크=화이트 이미지 스왑(테마 클래스) */
+    .brand-mark { flex: none; height: 30px; display: inline-flex; align-items: center; }
+    .brand-mark img { height: 100%; width: auto; display: block; }
+    .brand-mark .bm-dark { display: none; }
+    html.dark .brand-mark .bm-light { display: none; }
+    html.dark .brand-mark .bm-dark { display: block; }
     .brand-sub { color: var(--sys-cont-neutral-lightest); font-size: 12px; font-weight: 500; }
     button, select, input { font: inherit; font-size: 13px; line-height: 1; }
     button { height: 32px; border: 1px solid var(--sys-style-neutral-default); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-default); padding: 0 10px; cursor: pointer; }
@@ -411,6 +417,15 @@
     aside { border-right: 1px solid var(--sys-style-neutral-light); overflow-y: auto; min-height: 0; }
     section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
     .toolbar { display: flex; gap: 8px; align-items: center; }
+    /* 설정(⚙) 팝오버 — 테마·알림 등 '설정성' 토글을 모음. 액션(↻)은 헤더에 그대로 */
+    .settings-wrap { position: relative; }
+    #settingsBtn { font-size: 15px; line-height: 1; }
+    .settings-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 300; min-width: 190px; padding: 6px; display: flex; flex-direction: column; gap: 2px; border-radius: 9px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+    .settings-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 5px 8px; border-radius: 6px; font-size: 12.5px; color: var(--sys-cont-neutral-default); }
+    .settings-row:hover { background: var(--sys-bg-surface-hover); }
+    .settings-row > span { color: var(--sys-cont-neutral-light); font-weight: 600; }
+    .settings-row select { height: 26px; }
+    .settings-row .notify-toggle { height: 26px; }
     .sessions { padding: 14px; display: grid; gap: 12px; }
     /* ── Orca 문법 카드 (콘솔 스펙 D3) — 무테두리, 간격·배경 명도로 구분, 선택/hover 승격 ── */
     .session { border: none; border-radius: 10px; background: var(--sys-bg-surface); overflow: hidden; position: relative; padding-bottom: 8px; }
@@ -469,9 +484,14 @@
     .hov-acts button:hover { background: var(--sys-cont-neutral-lightest); color: var(--sys-bg-surface); }
     .wt-right { margin-left: auto; color: var(--sys-cont-neutral-lightest); font-size: 11px; white-space: nowrap; align-self: center; }
     /* ⋯ 팝오버 메뉴 — 카드/행 공용 싱글턴 */
-    .act-menu { position: fixed; z-index: 300; min-width: 200px; max-width: 320px; display: flex; flex-direction: column; padding: 4px; border-radius: 8px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
+    .act-menu { position: fixed; z-index: 300; min-width: 200px; max-width: min(640px, 92vw); display: flex; flex-direction: column; padding: 4px; border-radius: 8px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); box-shadow: 0 8px 24px rgba(0, 0, 0, .18); }
     .act-menu button { border: none; background: transparent; text-align: left; padding: 7px 10px; border-radius: 6px; font-size: 12.5px; color: var(--sys-cont-neutral-default); cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .act-menu button:hover { background: var(--sys-bg-surface-hover); }
+    /* GitKraken D&D — 명령 전문(줄바꿈으로 절대 안 잘림) + 부제(한 줄 설명) */
+    .act-menu button.two-line { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; white-space: normal; overflow: visible; text-overflow: clip; }
+    .act-menu .am-label { font-weight: 600; line-height: 1.35; word-break: break-word; font-family: ui-monospace, Menlo, monospace; }
+    .act-menu .am-sub { font-size: 11px; color: var(--sys-cont-neutral-lightest); line-height: 1.35; word-break: break-word; }
+    .act-menu-div { height: 1px; margin: 4px 6px; background: var(--sys-style-neutral-light); }
     .session-title { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
     /* 툴바(프리셋+버튼들)가 max-content 로 벌어져도 제목이 짜부되지 않게 최소 폭 보장 — 초과분은 툴바가 내부 wrap */
     .session-main { min-width: 120px; flex: 1; }
@@ -486,11 +506,25 @@
     .session-tools button.icon { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
     .session-tools button.icon svg { width: 16px; height: 16px; }
     /* 즉시 툴팁 — 네이티브 title 의 ~1s 지연 제거 (mouseover 위임이 title→data-tip 으로 흡수) */
-    /* width:max-content — 박스 너비를 앵커 위치와 분리. 없으면 우측 끝 버튼(↗ 등)에서 shrink-to-fit 이 뷰포트 우변까지 짜부돼 한 글자씩 세로로 쏟아짐 (clamp 로직이 가로로 밀어줌) */
-    #tip { position: fixed; z-index: 1000; width: max-content; max-width: min(380px, calc(100vw - 16px)); padding: 6px 10px; border-radius: 6px; background: var(--sys-cont-neutral-default); color: var(--sys-bg-surface); font-size: 12px; line-height: 1.55; pointer-events: none; opacity: 0; transform: translateX(-50%); transition: opacity .06s; white-space: pre-wrap; word-break: break-word; }
+    /* 공통 툴팁(구조화 카드) — width:max-content 로 박스 너비를 앵커와 분리(우측 끝 버튼에서 세로 쏟아짐 방지),
+       clamp 로직이 가로로 밀어줌. surface 배경+테두리+그림자로 카드감, 제목/본문 위계, 캐럿으로 앵커 지시. */
+    #tip { position: fixed; z-index: 1000; width: max-content; max-width: min(340px, calc(100vw - 16px));
+      pointer-events: none; opacity: 0; transform: translateX(-50%) translateY(2px); transition: opacity .09s, transform .09s; }
+    #tip.on { opacity: 1; transform: translateX(-50%) translateY(0); }
+    .tip-inner { padding: 7px 11px; border-radius: 9px; background: var(--sys-bg-surface);
+      border: 1px solid var(--sys-style-neutral-default); box-shadow: 0 6px 22px rgba(0,0,0,.28), 0 1px 3px rgba(0,0,0,.2); }
+    .tip-head { font-size: 12px; font-weight: 700; line-height: 1.45; color: var(--sys-cont-neutral-default); white-space: pre-wrap; word-break: break-word; }
+    .tip-body { margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--sys-style-neutral-light); }
+    .tip-line { position: relative; font-size: 11.5px; line-height: 1.5; color: var(--sys-cont-neutral-light); white-space: pre-wrap; word-break: break-word; }
+    .tip-body .tip-line { padding-left: 9px; }
+    .tip-body .tip-line::before { content: ''; position: absolute; left: 1px; top: 8px; width: 3px; height: 3px; border-radius: 50%; background: var(--sys-cont-neutral-lightest); }
+    /* 캐럿 — 기본 위쪽(툴팁이 앵커 아래), .above 면 아래쪽. --tip-arrow-x 로 clamp 이동분 추종 */
+    .tip-arrow { position: absolute; left: var(--tip-arrow-x, 50%); top: -5px; width: 9px; height: 9px; transform: translateX(-50%) rotate(45deg);
+      background: var(--sys-bg-surface); border-left: 1px solid var(--sys-style-neutral-default); border-top: 1px solid var(--sys-style-neutral-default); }
+    #tip.above .tip-arrow { top: auto; bottom: -5px; border-left: none; border-top: none;
+      border-right: 1px solid var(--sys-style-neutral-default); border-bottom: 1px solid var(--sys-style-neutral-default); }
     .help-q { display: inline-flex; align-items: center; justify-content: center; width: 14px; height: 14px; margin-left: 4px; border: 1px solid var(--muted); border-radius: 50%; font-size: 9px; line-height: 1; cursor: help; vertical-align: middle; opacity: .7; }
     .help-q:hover { opacity: 1; }
-    #tip.on { opacity: 1; }
     .stat-row { display: flex; flex-wrap: wrap; gap: 4px 6px; margin-top: 8px; }
     .pill-stat { display: inline-flex; align-items: center; height: 22px; padding: 0 8px; border-radius: 6px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-base); color: var(--sys-cont-neutral-light); font-size: 11px; font-weight: 500; line-height: 1; white-space: nowrap; }
     button.pill-stat { cursor: pointer; }
@@ -540,8 +574,17 @@
     .svc.agent-row:hover { background: transparent; }
     .svc.agent-row { cursor: default; }   /* 표시용 행 — 클릭 대상 아님(.svc 보다 특이성 높여 override) */
     .svc.agent-row:hover { background: transparent; }
-    /* 터미널 탭 — xterm 컨테이너가 pane 을 꽉 채움 */
-    #tab-term { position: relative; }
+    /* 터미널 탭 — 헤더 스트립(워크트리 선택·↻·⏹) + xterm 본문이 pane 을 꽉 채움 */
+    #tab-term { display: flex; flex-direction: column; }
+    .term-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--sys-style-neutral-light); }
+    .term-head select { height: 22px; max-width: 260px; font-size: 11px; border: 1px solid var(--sys-style-neutral-light); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); padding: 0 4px; font-family: ui-monospace, Menlo, monospace; }
+    .term-head button { height: 22px; min-width: 24px; border: 1px solid var(--sys-style-neutral-light); border-radius: 6px; background: none; color: var(--sys-cont-neutral-light); font-size: 12px; cursor: pointer; }
+    .term-head button:hover { background: var(--sys-bg-surface-hover); color: var(--sys-cont-neutral-default); }
+    .term-agent-chip { display: inline-flex; align-items: center; gap: 5px; min-width: 0; font-size: 11.5px; color: var(--sys-cont-neutral-default); }
+    .term-agent-chip .term-agent-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px; }
+    .agent-row .hov-acts button { height: 18px; padding: 0 7px; border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); font-size: 10.5px; cursor: pointer; }
+    .agent-row .hov-acts button:hover { color: var(--sys-cont-neutral-default); background: var(--sys-bg-surface-hover); }
+    .term-body { flex: 1; min-height: 0; position: relative; }
     .term-wrap { position: absolute; inset: 0; padding: 4px 2px 4px 8px; }
     .term-wrap .xterm { height: 100%; }
 
@@ -743,6 +786,9 @@
     .git-head-fill { flex: 1; }   /* 탭이 줄바꿈돼도 ⓘ·↻ 는 항상 우측 끝 */
     .git-legend { flex: none; font-size: 12px; color: var(--sys-cont-neutral-lightest); cursor: help; }
     .git-legend:hover { color: var(--sys-cont-neutral-default); }
+    .git-panel-head [data-git-avatars] { flex: none; height: 22px; min-width: 24px; border: 1px solid var(--sys-style-neutral-light); border-radius: 6px; background: none; color: var(--sys-cont-neutral-lightest); font-size: 12px; cursor: pointer; }
+    .git-panel-head [data-git-avatars]:hover { background: var(--sys-bg-surface-hover); color: var(--sys-cont-neutral-default); }
+    .git-panel-head [data-git-avatars].on { background: color-mix(in srgb, var(--sys-cont-primary-default) 16%, transparent); color: var(--sys-cont-primary-default); border-color: var(--sys-cont-primary-default); }
     .git-body { overflow: auto; position: relative; min-height: 120px; }
     /* 워크스페이스 '깃' 탭 변형 — 모달 크기 제약 없이 pane 을 꽉 채움 (콘솔 스펙 D2) */
     .git-panel { flex: 1; min-height: 0; padding: 4px 12px 12px; }
@@ -789,24 +835,42 @@
     .git-detail .git-commit-slot { margin-top: 12px; }
     .git-row.selected { background: color-mix(in srgb, var(--sys-cont-primary-default) 10%, transparent); }
     /* 좌측 브랜치 트리(크라켄 LOCAL/REMOTE) — 클릭=필터, 색점=레인색(원격은 아웃라인) */
-    .git-side { flex: none; width: 190px; overflow: auto; border-right: 1px solid var(--sys-style-neutral-light); padding: 4px 0 10px; }
+    .git-side { flex: none; width: 230px; overflow: auto; border-right: 1px solid var(--sys-style-neutral-light); padding: 4px 0 10px; }
     .gs-filterbar { display: flex; align-items: center; gap: 6px; margin: 4px 8px 2px; padding: 3px 6px 3px 9px; border-radius: 8px; background: color-mix(in srgb, var(--sys-cont-primary-default) 10%, transparent); font-size: 11px; }
     .gs-filterbar .gs-fname { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: ui-monospace, Menlo, monospace; color: var(--sys-cont-primary-default); font-weight: 700; }
     .gs-filterbar button { flex: none; border: none; background: none; color: var(--sys-cont-primary-default); font-size: 11px; cursor: pointer; padding: 0 3px; }
-    .gs-sect { display: flex; align-items: center; gap: 4px; padding: 8px 10px 3px; font-size: 10px; font-weight: 800; letter-spacing: 0.08em; color: var(--sys-cont-neutral-lightest); cursor: pointer; user-select: none; }
-    .gs-sect .gs-n { font-weight: 600; opacity: 0.8; }
-    .gs-sect .gs-tw { width: 10px; }
-    .gs-row { display: flex; align-items: center; gap: 6px; padding: 3px 10px 3px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; }
+    /* 섹션 = 블록(형 재설계) — 헤더 스트립 배경 + 섹션 사이 여백, 카운트는 필 */
+    .gs-sect { display: flex; align-items: center; gap: 5px; margin-top: 8px; padding: 7px 10px; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; color: var(--sys-cont-neutral-light); background: color-mix(in srgb, var(--sys-style-neutral-light) 45%, transparent); cursor: pointer; user-select: none; white-space: nowrap; overflow: hidden; }
+    .gs-sect .gs-fetch { flex: none; white-space: nowrap; }
+    .git-side .gs-filterbar + .gs-sect, .git-side > .gs-sect:first-child { margin-top: 0; }
+    .gs-sect .gs-n { margin-left: auto; min-width: 18px; text-align: center; padding: 1px 6px; border-radius: 8px; font-weight: 700; font-size: 11px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-lightest); }
+    .gs-sect .gs-tw { width: 10px; color: var(--sys-cont-neutral-lightest); }
+    .gs-sect .gs-fetch { margin-left: 2px; height: 16px; min-width: 18px; border: 1px solid var(--sys-style-neutral-light); border-radius: 6px; background: none; color: var(--sys-cont-neutral-light); font-size: 10px; cursor: pointer; letter-spacing: 0; }
+    .gs-sect .gs-fetch:hover { background: var(--sys-bg-surface-hover); color: var(--sys-cont-neutral-default); }
+    .gs-sect .gs-all.on { background: color-mix(in srgb, var(--sys-cont-primary-default) 16%, transparent); color: var(--sys-cont-primary-default); border-color: var(--sys-cont-primary-default); }
+    /* 좌측 트리 리사이즈 레일 — hover 에만 존재감 */
+    .gs-rail { flex: none; width: 5px; margin-left: -3px; cursor: col-resize; }
+    .gs-rail:hover, .gs-rail:active { background: color-mix(in srgb, var(--sys-cont-primary-default) 30%, transparent); }
+    .gs-row { display: flex; align-items: center; gap: 7px; padding: 5px 10px 5px 16px; cursor: pointer; white-space: nowrap; overflow: hidden; }
     .gs-row:hover { background: var(--sys-bg-surface-hover); }
-    .gs-row.active { background: color-mix(in srgb, var(--sys-cont-primary-default) 12%, transparent); }
-    .gs-row.active .gs-leaf { font-weight: 700; color: var(--sys-cont-neutral-default); }
-    .gs-dot { flex: none; width: 8px; height: 8px; border-radius: 50%; }
-    .gs-cloud { flex: none; display: inline-flex; align-items: center; }
+    .gs-row.active { background: color-mix(in srgb, var(--sys-cont-primary-default) 12%, transparent); box-shadow: inset 2px 0 0 var(--sys-cont-primary-default); }
+    .gs-row.active .gs-leaf, .gs-row.active .gs-wtname { font-weight: 700; color: var(--sys-cont-neutral-default); }
+    /* 행 아이콘 문법 — ⎇ 로컬 · ☁ 원격 · ⌂ 워크트리 · ⧉ 스태시 (색=레인색) */
+    .gs-ic { flex: none; width: 15px; text-align: center; font-size: 13px; font-weight: 700; line-height: 1; }
+    .gs-cloud { display: inline-flex; align-items: center; justify-content: center; }
+    /* 워크트리 행 — 별칭(세션 이름)이 주인공: 산세리프로 브랜치(모노)와 구분 */
+    .gs-wtname { min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: Pretendard, ui-sans-serif, sans-serif; font-size: 12.5px; font-weight: 600; color: var(--sys-cont-neutral-light); }
     .git-chip.br .gi-cloud { vertical-align: -1.5px; margin: 0 1px; }
-    .gs-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--sys-cont-neutral-light); }
+    .gs-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, Menlo, monospace; font-size: 12.5px; color: var(--sys-cont-neutral-light); }
     .gs-name .gs-pre { color: var(--sys-cont-neutral-lightest); }
-    .gs-alias { flex: none; max-width: 62px; overflow: hidden; text-overflow: ellipsis; font-size: 10.5px; color: var(--sys-cont-neutral-lightest); }
-    .gs-row .git-badge { min-width: 15px; height: 15px; font-size: 9.5px; }
+    .gs-alias { flex: none; max-width: 74px; overflow: hidden; text-overflow: ellipsis; font-size: 11.5px; color: var(--sys-cont-neutral-lightest); }
+    .gs-row .git-badge { min-width: 17px; height: 17px; font-size: 11px; }
+    /* 스태시 행 — hover 에만 액션([적용][✕]) */
+    .gs-row .hov-acts { display: none; margin-left: 2px; gap: 3px; align-items: center; }
+    .gs-row:hover .hov-acts { display: inline-flex; }
+    .gs-stash-acts button { height: 16px; padding: 0 6px; font-size: 10px; border: 1px solid var(--sys-style-neutral-light); border-radius: 7px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); cursor: pointer; }
+    .gs-stash-acts button:hover { color: var(--sys-cont-neutral-default); background: var(--sys-bg-surface-hover); }
+    .gd-push.gd-stash { background: var(--sys-style-neutral-default); color: var(--sys-cont-neutral-default); }
     .gs-row.gs-in { padding-left: 28px; }
     .gs-folder { display: flex; align-items: center; gap: 4px; padding: 3px 10px 3px 14px; cursor: pointer; white-space: nowrap; overflow: hidden; user-select: none; font-family: ui-monospace, Menlo, monospace; font-size: 11px; color: var(--sys-cont-neutral-lightest); }
     .gs-folder:hover { background: var(--sys-bg-surface-hover); }
@@ -816,12 +880,12 @@
     .gd-droppable { outline: 1.5px dashed var(--sys-cont-primary-default); outline-offset: 1px; border-radius: 8px; }
     .gd-dropover { outline: 2px solid var(--sys-cont-primary-default); background: color-mix(in srgb, var(--sys-cont-primary-default) 14%, transparent) !important; }
 /* ── 깃 탭 컬럼 구조 (GitKraken) — [BRANCH 라벨열 | 그래프 | 메시지 | SHA·시간]. 라벨은 열 폭에서 잘리고 hover 시 오버레이 확장 */
-    .git-graph-wrap { position: relative; --git-label-w: 168px; }
-    .git-graph-svg { position: absolute; left: var(--git-label-w); top: 24px; pointer-events: none; }
-    .git-cols-head { position: sticky; top: 0; z-index: 6; background: var(--sys-bg-surface); display: flex; align-items: center; gap: 8px; height: 24px; padding-right: 10px; font-size: 10px; font-weight: 800; letter-spacing: 0.08em; color: var(--sys-cont-neutral-lightest); border-bottom: 1px solid var(--sys-style-neutral-light); }
+    .git-graph-wrap { position: relative; --git-label-w: 192px; }
+    .git-graph-svg { position: absolute; left: var(--git-label-w); top: 28px; pointer-events: none; }
+    .git-cols-head { position: sticky; top: 0; z-index: 6; background: var(--sys-bg-surface); display: flex; align-items: center; gap: 8px; height: 28px; padding-right: 12px; font-size: 11px; font-weight: 800; letter-spacing: 0.08em; color: var(--sys-cont-neutral-lightest); border-bottom: 1px solid var(--sys-style-neutral-light); }
     .git-cols-head .gch-branch { flex: none; width: var(--git-label-w); padding-left: 4px; }
-    .git-cols-head .gch-msg { flex: 0 1 480px; min-width: 0; }
-    .git-cols-head .gch-sha { flex: none; width: 56px; }
+    .git-cols-head .gch-msg { flex: 0 1 560px; min-width: 0; }
+    .git-cols-head .gch-sha { flex: none; width: 62px; }
     .git-cols-head .gch-graph { overflow: hidden; }
     .git-reflabel { flex: none; width: var(--git-label-w); position: relative; display: inline-flex; align-items: center; min-width: 0; overflow: hidden; z-index: 1; }
     .grl-in { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; overflow: hidden; }
@@ -834,17 +898,17 @@
     .git-chip.br { cursor: pointer; }
     .git-chip.br:hover { filter: brightness(1.1); }
     .git-graph-gap { flex: none; width: var(--git-graph-w, 40px); }
-    .git-row { height: 32px; display: flex; align-items: center; gap: 8px; padding-right: 10px; border-bottom: 1px solid var(--sys-style-neutral-light); font-size: 12.5px; cursor: pointer; white-space: nowrap; overflow: hidden; }
+    .git-row { height: 40px; display: flex; align-items: center; gap: 8px; padding-right: 12px; border-bottom: 1px solid var(--sys-style-neutral-light); font-size: 13.5px; cursor: pointer; white-space: nowrap; overflow: hidden; }
     .git-row:hover { background: var(--sys-bg-surface-hover); }
-    /* 메시지 = 고정 폭 컬럼(말줄임+hover 툴팁) — SHA 가 메시지 바로 옆에 붙는다(형: 우측 멀리 두지 말 것) */
-    .git-subject { flex: 0 1 480px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-    .git-when { margin-left: 14px; font-size: 11px; color: var(--sys-cont-neutral-lightest); font-family: ui-monospace, Menlo, monospace; flex: none; }
+    /* 메시지 = 폭 상한 두고 말줄임(형: SHA 를 메시지 옆에 붙일 것 — 우측 끝으로 밀지 말기). hover 툴팁 */
+    .git-subject { flex: 0 1 560px; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+    .git-when { margin-left: 14px; font-size: 12px; color: var(--sys-cont-neutral-lightest); font-family: ui-monospace, Menlo, monospace; flex: none; }
     /* SHA = 우측 고정 폭 컬럼(헤더 gch-sha 와 동폭) — 메시지 길이와 무관하게 세로 정렬(크라켄 컬럼) */
-    .git-row .git-sha { flex: none; width: 56px; font-size: 11px; color: var(--sys-cont-neutral-lightest); font-family: ui-monospace, Menlo, monospace; }
+    .git-row .git-sha { flex: none; width: 62px; font-size: 12px; color: var(--sys-cont-neutral-lightest); font-family: ui-monospace, Menlo, monospace; }
     /* 시간 그룹 마커(크라켄 "N hours ago") — 행 경계선 위에 걸치는 필 */
     .git-rows { position: relative; }
-    .git-time-mark { position: absolute; right: 10px; z-index: 5; height: 17px; display: inline-flex; align-items: center; padding: 0 8px; border-radius: 9px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); color: var(--sys-cont-neutral-lightest); font-size: 10px; font-weight: 700; pointer-events: none; }
-    .git-chip { flex: none; font-size: 11px; padding: 1px 8px; border-radius: 9px; border: 1px solid var(--sys-style-neutral-light); font-family: ui-monospace, Menlo, monospace; background: none; color: inherit; }
+    .git-time-mark { position: absolute; right: 12px; z-index: 5; height: 19px; display: inline-flex; align-items: center; padding: 0 9px; border-radius: 10px; border: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); color: var(--sys-cont-neutral-lightest); font-size: 11px; font-weight: 700; pointer-events: none; }
+    .git-chip { flex: none; font-size: 12.5px; padding: 2px 10px; border-radius: 10px; border: 1px solid var(--sys-style-neutral-light); font-family: ui-monospace, Menlo, monospace; background: none; color: inherit; }
     /* 브랜치 필 — 레인색 채움(GitKraken) + 세션 별칭 내장. 어느 브랜치인지가 행의 첫 정보 */
     .git-chip.br { border: none; color: #fff; font-weight: 700; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
     .git-chip.br .br-who { font-family: Pretendard, ui-sans-serif, sans-serif; font-weight: 500; opacity: 0.85; }

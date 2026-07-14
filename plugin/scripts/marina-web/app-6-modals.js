@@ -393,6 +393,24 @@
       await watchRestartThenReload();
     }
 
+    // 설정(⚙) 팝오버 토글 — 안쪽 클릭(테마 select·알림 버튼)엔 안 닫히고, 바깥 클릭·Esc 로만 닫힘
+    const settingsBtn = document.getElementById('settingsBtn');
+    const settingsMenu = document.getElementById('settingsMenu');
+    if (settingsBtn && settingsMenu) {
+      const closeSettings = (e) => {
+        if (e && (settingsMenu.contains(e.target) || settingsBtn.contains(e.target))) return;
+        settingsMenu.hidden = true;
+        document.removeEventListener('click', closeSettings);
+        document.removeEventListener('keydown', onSettingsKey);
+      };
+      const onSettingsKey = (e) => { if (e.key === 'Escape') closeSettings(); };
+      settingsBtn.onclick = (e) => {
+        e.stopPropagation();
+        settingsMenu.hidden = !settingsMenu.hidden;
+        if (!settingsMenu.hidden) setTimeout(() => { document.addEventListener('click', closeSettings); document.addEventListener('keydown', onSettingsKey); }, 0);
+      };
+    }
+
     const themeSelect = document.getElementById('themeSelect');
     const themeMedia = window.matchMedia('(prefers-color-scheme: dark)');
     function applyTheme() {
@@ -569,15 +587,31 @@
       document.getElementById('followLog').classList.remove('active');
     }, {passive: true});
 
-    // 즉시 툴팁 — 네이티브 title 의 ~1초 지연 제거. mouseover 위임이 title 을 data-tip 으로 흡수해
-    // 동적 생성 노드(render 마다 새 카드)도 자동 적용. 80ms 만 기다려 스쳐 갈 때 번쩍임 방지.
+    // 공통 툴팁 — 네이티브 title 의 ~1초 지연 제거 + 구조화. mouseover 위임이 title 을 data-tip 으로 흡수해
+    // 동적 생성 노드(render 마다 새 카드)도 자동 적용. 대시보드 전체 title 이 이 하나를 거친다(재활용).
     const tipEl = document.createElement('div');
     tipEl.id = 'tip';
+    tipEl.innerHTML = '<span class="tip-arrow"></span><div class="tip-inner"></div>';
     document.body.appendChild(tipEl);
+    const tipInner = tipEl.querySelector('.tip-inner');
     let tipTimer = 0;
     function hideTip() {
       clearTimeout(tipTimer);
       tipEl.classList.remove('on');
+    }
+    // 관용 문법( '제목 — 본문 · 부가' )을 구조로: 첫 ' — ' 앞=강조 제목, 뒤=본문(‘ · ’·개행은 줄로).
+    // 이모지/기호로 시작하는 짧은 라벨은 통째 제목 취급(설명 없는 아이콘 버튼).
+    function renderTip(text) {
+      const t = text.replace(/\s+$/, '');
+      const dash = t.indexOf(' — ');
+      let head = t, body = '';
+      if (dash >= 0) { head = t.slice(0, dash); body = t.slice(dash + 3); }
+      let html = `<div class="tip-head">${escapeHtml(head)}</div>`;
+      if (body) {
+        const lines = body.split(/\n|\s·\s/).map(s => s.trim()).filter(Boolean);
+        html += '<div class="tip-body">' + lines.map(l => `<div class="tip-line">${escapeHtml(l)}</div>`).join('') + '</div>';
+      }
+      tipInner.innerHTML = html;
     }
     document.addEventListener('mouseover', (event) => {
       const target = event.target.closest?.('[title], [data-tip]');
@@ -590,20 +624,26 @@
       if (!text) return;
       clearTimeout(tipTimer);
       tipTimer = setTimeout(() => {
-        tipEl.textContent = text;
+        renderTip(text);
         const rect = target.getBoundingClientRect();
-        tipEl.style.top = `${rect.bottom + 8}px`;
-        tipEl.style.left = `${rect.left + rect.width / 2}px`;
+        const cx = rect.left + rect.width / 2;
+        tipEl.classList.remove('above');
+        tipEl.style.top = `${rect.bottom + 9}px`;
+        tipEl.style.left = `${cx}px`;
+        tipEl.style.setProperty('--tip-arrow-x', '50%');
         tipEl.classList.add('on');
         requestAnimationFrame(() => {
-          const tipRect = tipEl.getBoundingClientRect();
+          const r = tipEl.getBoundingClientRect();
           let shift = 0;
-          if (tipRect.left < 4) shift = 4 - tipRect.left;
-          else if (tipRect.right > innerWidth - 4) shift = (innerWidth - 4) - tipRect.right;
-          if (shift) tipEl.style.left = `${rect.left + rect.width / 2 + shift}px`;
-          if (tipRect.bottom > innerHeight - 4) tipEl.style.top = `${Math.max(4, rect.top - 8 - tipRect.height)}px`;
+          if (r.left < 6) shift = 6 - r.left;
+          else if (r.right > innerWidth - 6) shift = (innerWidth - 6) - r.right;
+          if (shift) { tipEl.style.left = `${cx + shift}px`; tipEl.style.setProperty('--tip-arrow-x', `calc(50% - ${shift}px)`); }
+          if (r.bottom > innerHeight - 6) {   // 아래로 넘치면 위로 뒤집고 화살표도 아래로
+            tipEl.classList.add('above');
+            tipEl.style.top = `${rect.top - 9 - r.height}px`;
+          }
         });
-      }, 80);
+      }, 90);
     });
     document.addEventListener('mouseout', (event) => {
       if (event.target.closest?.('[data-tip]')) hideTip();

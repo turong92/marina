@@ -12,6 +12,7 @@ import base64
 import fcntl
 import os
 import pty
+import re
 import select
 import signal
 import struct
@@ -98,12 +99,34 @@ def _reap_idle() -> None:
         term_kill(t.tid)
 
 
-def term_open(root: Path, cols: int = 80, rows: int = 24) -> dict[str, Any]:
-    """root 워크트리의 셸 세션 — 살아있으면 재사용(스크롤백 유지), 없으면 $SHELL -il 새로 fork."""
+# 에이전트 attach(오르카 문법) — 좌측 AGENTS 행에 터미널로 바로 붙는다: 새 PTY 에서 CLI resume.
+# 셸 -ilc 경유(rc 로드 → PATH/노드 버전 등 사용자 환경 그대로). sid 는 정규식 검증 후에만 문자열 조립.
+# resume 명령을 셸 문자열이 아니라 argv 로 조립 → 셸 인용/인젝션 걱정 원천 제거. `--` 로 옵션 종료해
+# sid 가 CLI 플래그로 해석되는 것도 차단(codex P2). sid 정규식은 leading `-` 도 금지(이중 안전).
+_AGENT_CLIS = {
+    "claude": lambda sid: ["claude", "--resume", "--", sid],
+    "codex": lambda sid: ["codex", "resume", "--", sid],
+}
+_SID_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}")
+
+
+def term_open(root: Path, cols: int = 80, rows: int = 24,
+              agent_source: str = "", agent_sid: str = "") -> dict[str, Any]:
+    """root 워크트리의 PTY 세션 — 살아있으면 재사용(스크롤백 유지).
+    기본은 $SHELL -il, agent_source/sid 를 주면 그 CLI 세션에 resume 으로 붙는다(워크트리·에이전트별 별도 세션)."""
     _reap_idle()
-    key = str(root.resolve())
-    if not Path(key).is_dir():
+    cwd = str(root.resolve())
+    if not Path(cwd).is_dir():
         raise ValueError("존재하지 않는 워크트리")
+    cmd = ""
+    key = cwd
+    if agent_source:
+        if agent_source not in _AGENT_CLIS:
+            raise ValueError("unknown agent source")
+        if not _SID_RE.fullmatch(agent_sid or ""):
+            raise ValueError("invalid session id")
+        cmd = _AGENT_CLIS[agent_source](agent_sid)
+        key = f"{cwd}::agent:{agent_source}:{agent_sid}"
     with _lock:
         existing = _by_root.get(key)
         if existing and existing.alive:
@@ -112,13 +135,16 @@ def term_open(root: Path, cols: int = 80, rows: int = 24) -> dict[str, Any]:
         pid, fd = pty.fork()
         if pid == 0:  # 자식 — 즉시 exec (스레드 안전을 위해 그 사이 파이썬 코드 최소화)
             try:
-                os.chdir(key)
+                os.chdir(cwd)
             except OSError:
                 pass
             shell = os.environ.get("SHELL") or "/bin/zsh"
             env = dict(os.environ, TERM="xterm-256color", MARINA_TERM="1")
+            # 로그인 셸 env 는 유지하되 명령은 argv 로 — `-c 'exec "$@"' <sh> <argv…>` 패턴이라
+            # sid 가 셸에 재파싱되지 않는다(문자열 조립 인젝션 원천 차단, codex P2).
+            argv = [shell, "-il", "-c", 'exec "$@"', shell, *cmd] if cmd else [shell, "-il"]
             try:
-                os.execvpe(shell, [shell, "-il"], env)
+                os.execvpe(shell, argv, env)
             except OSError:
                 os._exit(127)
         _set_winsize(fd, cols, rows)

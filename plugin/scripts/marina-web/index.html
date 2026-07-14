@@ -5,22 +5,36 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Marina</title>
   <meta name="marina-build" content="{{MARINA_BUILD}}" />
+  <!-- 파비콘 — 탭 색(OS 테마)에 따라 자동 스왑: 라이트 탭=네이비, 다크 탭=흰색 -->
+  <link rel="icon" type="image/png" href="/web/favicon.png" media="(prefers-color-scheme: light)" />
+  <link rel="icon" type="image/png" href="/web/favicon-dark.png" media="(prefers-color-scheme: dark)" />
+  <link rel="icon" type="image/png" href="/web/favicon-dark.png" />
   <link rel="stylesheet" href="/web/styles.css" />
   <link rel="stylesheet" href="/web/vendor-xterm.css" />
 </head>
 <body>
   <header>
-    <h1>Marina <span class="brand-sub">dev sessions</span></h1>
+    <h1><span class="brand-mark" aria-hidden="true"><img class="bm-light" src="/web/marina-mark-light.png" alt="" /><img class="bm-dark" src="/web/marina-mark-dark.png" alt="" /></span>Marina <span class="brand-sub">dev sessions</span></h1>
     <div class="toolbar">
       <div class="mem" id="mem" hidden title="dev = marina 추적 서비스의 RSS 합 / 시스템 = OS 전체 사용량(브라우저·IDE 등 모든 앱 포함, memory_pressure 기준이라 활동 모니터 수치와 다를 수 있음). 가용 4GB 미만이면 적색 + 서비스 시작 차단"><span id="memText"></span><span class="mem-bar"><i id="memBar"></i></span></div>
-      <button id="notifyToggle" class="notify-toggle" title="알림 꺼짐(기본, 옵트인) — 클릭하면 서비스 기동 완료/실패를 브라우저 알림으로 받아요">🔕</button>
-      <select id="themeSelect" title="대시보드 테마 — 시스템은 OS 다크/라이트 실시간 추종">
-        <option value="system">시스템</option>
-        <option value="light">라이트</option>
-        <option value="dark">다크</option>
-      </select>
-      <button id="headerRegister" class="register-btn-secondary" title="새 프로젝트 등록">+ 등록</button>
       <button id="refresh" title="새로고침 — 세션·디스크 분석(du) 전체 재계산">↻</button>
+      <div class="settings-wrap">
+        <button id="settingsBtn" title="설정 — 테마·알림">⚙</button>
+        <div id="settingsMenu" class="settings-menu" hidden>
+          <div class="settings-row">
+            <span>테마</span>
+            <select id="themeSelect" title="대시보드 테마 — 시스템은 OS 다크/라이트 실시간 추종">
+              <option value="system">시스템</option>
+              <option value="light">라이트</option>
+              <option value="dark">다크</option>
+            </select>
+          </div>
+          <div class="settings-row">
+            <span>알림</span>
+            <button id="notifyToggle" class="notify-toggle" title="알림 꺼짐(기본, 옵트인) — 클릭하면 서비스 기동 완료/실패를 브라우저 알림으로 받아요">🔕</button>
+          </div>
+        </div>
+      </div>
     </div>
   </header>
   <div class="update-banner" id="updateBanner" hidden></div>
@@ -34,6 +48,7 @@
           </button>
           <div id="switcherMenu" class="switcher-menu" hidden></div>
         </div>
+        <button id="headerRegister" class="register-btn-secondary" title="새 프로젝트 등록 — compose·kind 프로젝트를 대시보드에 추가">+ 등록</button>
         <button id="worktreeCreateBtn" title="선택한 프로젝트에 워크트리(브랜치) 생성">+ 워크트리</button>
         <button id="collapseAll" title="세션 카드 전체 접기/펼치기">⇈</button>
       </div>

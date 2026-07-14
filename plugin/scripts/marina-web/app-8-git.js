@@ -2,10 +2,12 @@
     // 변경 탭은 철거(2026-07-13) — diff·커밋 폼(wipMode, app-8b) 전부 이 탭 안에서 해결.
     // 전역 공유(classic script): api/enc/escapeHtml(app-3), worktreeData/selectedProjectId(app-1), openActMenu(app-5b)
     const GIT_LANES = ['#8a7ef0', '#2fae87', '#e0854f', '#d4537e', '#4f8fdd', '#b08a2e', '#7aa53c'];
-    const GIT_ROW_H = 32, GIT_LANE_W = 20, GIT_PAD_X = 14;
+    const GIT_ROW_H = 40, GIT_LANE_W = 22, GIT_PAD_X = 16;
     let gitRepoTab = '.';
     let gitWtFilter = '';   // P2 워크트리 필터 — '' = 전체, 아니면 branch 라벨(main 은 항상 표시). 리렌더에도 유지.
     const gitSideOpen = { local: true, remote: true, worktrees: true };   // 좌측 트리 섹션 접힘 상태(크라켄 LOCAL/REMOTE/WORKTREES)
+    let gitAllRemotes = localStorage.getItem('gitAllRemotes') === '1';    // REMOTE '전체' — origin/* 전부 vs 내 카운터파트만(기본)
+    let gitSideW = parseInt(localStorage.getItem('gitSideW'), 10) || 0;   // 좌측 트리 폭(드래그 리사이즈, 0=기본)
     // 원격 아이콘 — 유니코드 ☁ 는 폰트에 따라 화살표처럼 보임(형) → 인라인 SVG 구름으로 통일
     const GIT_CLOUD = '<svg class="gi-cloud" viewBox="0 0 16 16" width="11" height="11" aria-hidden="true"><path d="M4.5 12.5a3 3 0 0 1-.4-5.97 4.25 4.25 0 0 1 8.3-.83 3.15 3.15 0 0 1-.5 6.8z" fill="currentColor"/></svg>';
 
@@ -34,7 +36,7 @@
     async function loadGitGraphInto(container, root, repo, refresh) {
       const body = container.querySelector('[data-git-body]'); if (!body) return;
       let g;
-      try { g = await api(`/api/git-graph?root=${enc(root)}&repo=${enc(repo)}${refresh ? '&refresh=1' : ''}`); }
+      try { g = await api(`/api/git-graph?root=${enc(root)}&repo=${enc(repo)}${refresh ? '&refresh=1' : ''}${gitAllRemotes ? '&all=1' : ''}&avatars=1`); }
       catch (e) {
         if (repo !== '.') { gitRepoTab = '.'; return loadGitGraphInto(container, root, '.', refresh); }  // 탭 잔상(다른 프로젝트의 repo명) 복구
         body.innerHTML = `<div class="git-err">${escapeHtml(e.message)}</div>`; return;
@@ -173,7 +175,7 @@
         if (r.wip) {
           const tip = rowIdx.get(r.b.head);
           if (tip !== undefined) svg += `<path d="M${X(r.lane)},${Y(i)} L${X(r.lane)},${Y(tip)}" stroke="${C(r.lane)}" stroke-width="2" stroke-dasharray="3 3" fill="none"/>`;
-          svg += `<circle cx="${X(r.lane)}" cy="${Y(i)}" r="6" fill="none" stroke="${C(r.lane)}" stroke-width="2" stroke-dasharray="3 2.5"/>`;
+          svg += `<circle cx="${X(r.lane)}" cy="${Y(i)}" r="8" fill="none" stroke="${C(r.lane)}" stroke-width="2" stroke-dasharray="3 2.5"/>`;
           return;
         }
         for (const p of r.c.parents) {
@@ -182,15 +184,28 @@
             svg += `<path d="M${X(r.lane)},${Y(i)} L${X(r.lane)},${Y(i) + GIT_ROW_H * 0.8}" stroke="${C(r.lane)}" stroke-width="2" opacity=".35" fill="none"/>`;
             continue;
           }
-          const pl = rows[pi].lane, ym = (Y(i) + Y(pi)) / 2;
-          svg += X(pl) === X(r.lane)
-            ? `<path d="M${X(r.lane)},${Y(i)} L${X(pl)},${Y(pi)}" stroke="${C(r.lane)}" stroke-width="2" fill="none"/>`
-            : `<path d="M${X(r.lane)},${Y(i)} C${X(r.lane)},${ym} ${X(pl)},${ym} ${X(pl)},${Y(pi)}" stroke="${C(r.lane)}" stroke-width="2" fill="none"/>`;
+          // 커넥터 — 크라켄식 각진 라우팅(형: 곡선이 보기 힘듦). 자식 레인에서 수직으로 내려오다
+          // 부모 행 직전에 둥근 코너 하나로 부모 레인에 합류. 부드러운 S-베지어 대신 orthogonal+radius.
+          const pl = rows[pi].lane, x1 = X(r.lane), y1 = Y(i), x2 = X(pl), y2 = Y(pi);
+          if (x1 === x2) {
+            svg += `<path d="M${x1},${y1} L${x2},${y2}" stroke="${C(r.lane)}" stroke-width="2" fill="none"/>`;
+          } else {
+            const dir = x2 > x1 ? 1 : -1, R = Math.min(9, Math.abs(y2 - y1) / 2, Math.abs(x2 - x1));
+            svg += `<path d="M${x1},${y1} L${x1},${y2 - R} Q${x1},${y2} ${x1 + dir * R},${y2} L${x2},${y2}" stroke="${C(r.lane)}" stroke-width="2" fill="none"/>`;
+          }
         }
-        // 아바타 노드(크라켄) — 이미지 대신 작성자 이니셜 디스크(로컬 대시보드라 외부 아바타 fetch 없음)
-        const ini = ((r.c.author || '?').trim()[0] || '?').toUpperCase();
-        svg += `<circle cx="${X(r.lane)}" cy="${Y(i)}" r="8" fill="${C(r.lane)}"/>`
-          + `<text x="${X(r.lane)}" y="${Y(i)}" text-anchor="middle" dominant-baseline="central" font-size="9" font-weight="700" fill="#fff">${escapeHtml(ini)}</text>`;
+        // 아바타 노드(크라켄) — 이니셜 디스크가 기본(fallback). 아바타 URL(GitHub 프로필)이 해석됐으면
+        // 그 위에 원형 클립으로 덮는다. 로드 실패(오프라인 등)면 이미지가 안 그려져 밑의 이니셜이 그대로 보임.
+        // 노드 = 아바타(20px) + 테두리 링(형). surface 헤일로로 뒤 레인선과 분리(크라켄 감) → 레인색 링.
+        const cx = X(r.lane), cy = Y(i), ini = ((r.c.author || '?').trim()[0] || '?').toUpperCase();
+        svg += `<circle cx="${cx}" cy="${cy}" r="12.5" fill="none" stroke="var(--sys-bg-surface)" stroke-width="3"/>`
+          + `<circle cx="${cx}" cy="${cy}" r="10" fill="${C(r.lane)}"/>`
+          + `<text x="${cx}" y="${cy}" text-anchor="middle" dominant-baseline="central" font-size="11" font-weight="700" fill="#fff">${escapeHtml(ini)}</text>`;
+        if (r.c.avatar) {
+          const url = r.c.avatar + (r.c.avatar.includes('?') ? '&' : '?') + 's=64';
+          svg += `<image x="${cx - 10}" y="${cy - 10}" width="20" height="20" clip-path="url(#gav-clip)" preserveAspectRatio="xMidYMid slice" href="${escapeHtml(url)}"/>`;
+        }
+        svg += `<circle cx="${cx}" cy="${cy}" r="11" fill="none" stroke="${C(r.lane)}" stroke-width="1.75"/>`;
       });
 
       const tipOf = new Map();
@@ -280,13 +295,16 @@
       };
       // 행 3종 — LOCAL=브랜치명(prefix 딤/폴더), REMOTE=구름 아이콘+짧은 이름, WORKTREES=워크트리 별칭 위주(브랜치 딤).
       const sideOpen = (k) => gitSideOpen[k] !== false;   // 미기록 키(폴더)는 기본 펼침
+      // 행 아이콘 문법(섹션 구분, 형 재설계) — ⎇ 로컬 브랜치(레인색) · ☁ 원격 · ⌂ 워크트리(별칭=산세리프) · ⧉ 스태시
       const sideRow = (b, wt, indent) => {
         const key = b.remote ? gitShortRef(b.branch) : b.branch;
+        const col = colorOf(b.branch);
         const marker = b.remote
-          ? `<span class="gs-cloud" style="color:${colorOf(b.branch)}">${GIT_CLOUD}</span>`
-          : `<i class="gs-dot" style="background:${colorOf(b.branch)}"></i>`;
+          ? `<span class="gs-ic gs-cloud" style="color:${col}">${GIT_CLOUD}</span>`
+          : wt ? `<span class="gs-ic" style="color:${col}">⌂</span>`
+               : `<span class="gs-ic" style="color:${col}">⎇</span>`;
         const nm = b.remote ? gitShortRef(b.branch) : b.branch;
-        const name = wt ? `<span class="gs-leaf">${escapeHtml(b.alias || b.branch)}</span>`
+        const name = wt ? `<span class="gs-wtname">${escapeHtml(b.alias || b.branch)}</span>`
           : sideName(indent ? nm.slice(nm.indexOf('/') + 1) : nm);   // 폴더 안에선 접두 생략(폴더가 접두)
         const sub = wt ? `<span class="gs-alias">${escapeHtml(b.branch)}</span>` : '';
         return `<div class="gs-row${gitWtFilter === key ? ' active' : ''}${indent ? ' gs-in' : ''}" data-side-branch="${escapeHtml(key)}"${dndAttrs(b)}
@@ -311,6 +329,18 @@
         }
         return out;
       };
+      // 스태시 행(크라켄 STASHES) — refs/stash 는 레포 공유. 적용 타깃 = 그 브랜치가 체크아웃된 워크트리.
+      const sideStash = (s) => {
+        const b = g.branches.find(x => !x.remote && x.branch === s.branch);
+        const col = s.branch && colorIdx.has(s.branch) ? colorOf(s.branch) : 'var(--sys-cont-neutral-lightest)';
+        const short = s.msg.replace(/^(?:WIP on|On) [^:]+:\s*/, '');
+        return `<div class="gs-row gs-stash" title="${escapeHtml(s.ref)} — ${escapeHtml(s.msg)}${b ? '' : ' · 브랜치 워크트리 없음(적용 불가, 삭제만)'}">
+          <span class="gs-ic" style="color:${col}">⧉</span>
+          <span class="gs-name">${s.branch ? `<span class="gs-pre">${escapeHtml(s.branch)}: </span>` : ''}<span class="gs-leaf">${escapeHtml(short)}</span></span>
+          <span class="hov-acts gs-stash-acts">
+            ${b ? `<button data-stash-apply data-ref="${escapeHtml(s.ref)}" data-root="${escapeHtml(b.root)}" title="${escapeHtml(b.branch)} 워크트리에 적용 — 스태시는 유지(충돌해도 안 사라짐)">적용</button>` : ''}
+            <button data-stash-drop data-ref="${escapeHtml(s.ref)}" title="스태시 삭제 — 되돌릴 수 없음">✕</button></span></div>`;
+      };
       const sideLocals = g.branches.filter(b => !b.remote && !b.detached);   // 브랜치 목록 — detached 는 워크트리 섹션에서만
       const sideRemotes = g.branches.filter(b => b.remote);
       const sideWts = g.branches.filter(b => !b.remote);                      // 워크트리 = 로컬 체크아웃 전부(detached 포함)
@@ -319,17 +349,19 @@
          ${sideOpen(id) ? rowsHtml : ''}`;
       const sideHtml = `${gitWtFilter ? `<div class="gs-filterbar" title="브랜치 필터 작동 중"><span class="gs-fname">⎇ ${escapeHtml(gitWtFilter)}</span><button data-gs-clear title="필터 해제 — 전체 보기">✕</button></div>` : ''}
         ${sideSect('local', 'LOCAL', sideTree('local', sideLocals, false), sideLocals.length)}
-        ${sideRemotes.length ? sideSect('remote', 'REMOTE · origin', sideTree('remote', sideRemotes, false), sideRemotes.length, ' data-drop-remote=""') : ''}
-        ${sideSect('worktrees', 'WORKTREES', sideWts.map(b => sideRow(b, true)).join(''), sideWts.length)}`;
+        ${sideSect('remote', `<span title="origin 원격">REMOTE</span> <button class="gs-fetch" data-gs-fetch title="git fetch origin --prune — 원격 상태 갱신(로컬 브랜치는 안 건드림)">⇣</button><button class="gs-fetch gs-all${gitAllRemotes ? ' on' : ''}" data-gs-allremotes title="origin 브랜치 전체 보기 — 기본은 내 브랜치의 카운터파트(+main)만. 팀원 브랜치 구경용">전체</button>`, sideTree('remote', sideRemotes, false), sideRemotes.length, ' data-drop-remote=""')}
+        ${sideSect('worktrees', 'WORKTREES', sideWts.map(b => sideRow(b, true)).join(''), sideWts.length)}
+        ${(g.stashes || []).length ? sideSect('stashes', 'STASHES', g.stashes.map(sideStash).join(''), g.stashes.length) : ''}`;
 
       body.innerHTML = `<div class="git-split">
-        <div class="git-side">${sideHtml}</div>
+        <div class="git-side"${gitSideW ? ` style="width:${gitSideW}px"` : ''}>${sideHtml}</div>
+        <div class="gs-rail" data-gs-rail title="드래그 = 좌측 트리 폭 조절 · 더블클릭 = 기본 폭"></div>
         <div class="git-rows-pane">
           <div class="git-graph-wrap" style="--git-graph-w:${gw}px">
             <div class="git-cols-head">
               <span class="gch-branch">BRANCH</span>
               <span class="git-graph-gap gch-graph">GRAPH</span><span class="gch-msg">COMMIT MESSAGE</span><span class="gch-sha">SHA</span></div>
-            <svg class="git-graph-svg" width="${gw}" height="${rows.length * GIT_ROW_H}" aria-hidden="true">${svg}</svg>
+            <svg class="git-graph-svg" width="${gw}" height="${rows.length * GIT_ROW_H}" aria-hidden="true"><defs><clipPath id="gav-clip" clipPathUnits="objectBoundingBox"><circle cx="0.5" cy="0.5" r="0.5"/></clipPath></defs>${svg}</svg>
             <div class="git-rows">${html}${timeMarks}</div>
           </div>
         </div>
@@ -346,41 +378,115 @@
       });
       const gsClear = body.querySelector('[data-gs-clear]');
       if (gsClear) gsClear.onclick = () => { gitWtFilter = ''; renderGitGraph(body, g); };
-      // ── D&D(크라켄) — 드롭하면 즉시 실행이 아니라 "할 수 있는 동작" 메뉴(openActMenu)로 확정 ──
+      // 스태시 적용/삭제 — 적용은 스태시를 보존(pop 아님)하므로 충돌해도 잃는 것 없음
+      const stashAct = async (payload, what) => {
+        try {
+          await api('/api/git-stash', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ repo: g.repo, ...payload }) });
+          document.querySelector('[data-git-refresh]')?.click();
+        } catch (err) { alert(`${what} 실패: ${(err && err.message) || err}`); }
+      };
+      body.querySelectorAll('[data-stash-apply]').forEach(el => el.onclick = (e) => {
+        e.stopPropagation();
+        stashAct({ op: 'apply', root: el.dataset.root, ref: el.dataset.ref }, '스태시 적용');
+      });
+      body.querySelectorAll('[data-stash-drop]').forEach(el => el.onclick = (e) => {
+        e.stopPropagation();
+        if (confirm(`${el.dataset.ref} 스태시를 삭제할까요? 되돌릴 수 없어요.`)) stashAct({ op: 'drop', root: g.mainRoot, ref: el.dataset.ref }, '스태시 삭제');
+      });
+      // 좌측 트리 폭 드래그(형: 쫍다) — 레일 드래그로 조절, 더블클릭 리셋, localStorage 기억
+      const sideEl = body.querySelector('.git-side');
+      const rail = body.querySelector('[data-gs-rail]');
+      if (rail) {
+        rail.onmousedown = (e) => {
+          e.preventDefault();
+          const sx = e.clientX, sw = sideEl.getBoundingClientRect().width;
+          const mv = (ev) => { gitSideW = Math.max(150, Math.min(520, Math.round(sw + ev.clientX - sx))); sideEl.style.width = gitSideW + 'px'; };
+          const up = () => { document.removeEventListener('mousemove', mv); document.removeEventListener('mouseup', up); localStorage.setItem('gitSideW', String(gitSideW)); };
+          document.addEventListener('mousemove', mv);
+          document.addEventListener('mouseup', up);
+        };
+        rail.ondblclick = () => { gitSideW = 0; localStorage.removeItem('gitSideW'); sideEl.style.width = ''; };
+      }
+      const gsAll = body.querySelector('[data-gs-allremotes]');
+      if (gsAll) gsAll.onclick = (e) => {
+        e.stopPropagation();   // 섹션 접힘 토글로 안 번지게
+        gitAllRemotes = !gitAllRemotes;
+        localStorage.setItem('gitAllRemotes', gitAllRemotes ? '1' : '0');
+        document.querySelector('[data-git-refresh]')?.click();   // all 은 캐시 키가 달라 새로 로드
+      };
+      const gsFetch = body.querySelector('[data-gs-fetch]');
+      if (gsFetch) gsFetch.onclick = async (e) => {
+        e.stopPropagation();   // 섹션 접힘 토글로 안 번지게
+        gsFetch.disabled = true; gsFetch.textContent = '…';
+        try {
+          await api('/api/git-fetch', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ root: g.mainRoot, repo: g.repo }) });
+          document.querySelector('[data-git-refresh]')?.click();
+        } catch (err) { alert(`fetch 실패: ${(err && err.message) || err}`); gsFetch.disabled = false; gsFetch.textContent = '⇣'; }
+      };
+      // ── D&D(크라켄) — 소스를 타깃에 드롭 → GitKraken 문법 메뉴(영어 전문 명령, 형). 실행 아닌 확정 메뉴 ──
       let dragSrc = null;
       const dTargets = () => [...body.querySelectorAll('[data-drop-remote],[data-drop-local]')];
-      // 방향 → 동작: 로컬→원격 = push(뭔가 밀 게 있을 때만), ☁→같은 로컬 = pull, 그 외 →로컬 = merge
+      // 드롭 유효성 — 소스 로컬: 원격 타깃(rebase/push/pr)·다른 로컬(merge/rebase). 소스 원격: 로컬 타깃(pull/merge).
       const dropMode = (t) => {
         if (!dragSrc) return null;
-        if (t.dataset.dropRemote !== undefined) {
-          if (dragSrc.kind !== 'local') return null;
-          const k = t.dataset.dropRemote;
-          if (k !== '' && k !== gitShortRef(dragSrc.branch)) return null;
-          // 밀 게 있어야 push — behind-only(원격이 앞섬)는 pull 할 상황이라 강제푸시 유도 금지(codex P2)
-          return (!dragSrc.hasUp || dragSrc.ahead) ? 'push' : null;
-        }
+        if (t.dataset.dropRemote !== undefined) return dragSrc.kind === 'local' ? 'onto-remote' : null;
         const y = t.dataset.dropLocal;
-        if (dragSrc.kind === 'remote') return gitShortRef(dragSrc.branch) === y ? 'pull' : 'merge';
-        return dragSrc.branch !== y ? 'merge' : null;
+        if (dragSrc.kind === 'remote') return 'onto-local';
+        return dragSrc.branch !== y ? 'onto-local' : null;
       };
       const dropAct = async (path, payload, what) => {
         try {
           await api(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
           document.querySelector('[data-git-refresh]')?.click();
-        } catch (err) { alert(`${what} 실패: ${(err && err.message) || err}`); }
+        } catch (err) { alert(`${what} failed: ${(err && err.message) || err}`); }
       };
+      // 터미널로 타이핑되는 ref 는 셸 인용 필수 — git refname 에 ;·$·백틱 이 들어갈 수 있어(codex P2)
+      const shq = (s) => "'" + String(s).replace(/'/g, "'\\''") + "'";
+      const openPR = (base, head) => {
+        if (!g.originSlug) { alert('GitHub 원격이 아니라 PR 을 열 수 없어요'); return; }
+        window.open(`https://github.com/${g.originSlug}/compare/${encodeURIComponent(base)}...${encodeURIComponent(head)}?expand=1`, '_blank');
+      };
+      // GitKraken 문법 — 명령 전문(잘리지 않게 act-menu 폭 넓힘). 부제(한 줄)로 실제 동작 보강.
       const dropMenu = (t, mode, src) => {
         const items = [];
-        if (mode === 'push') {
-          const short = gitShortRef(src.branch);
-          if (!src.hasUp) items.push({ label: `↑ origin 에 첫 푸시 (-u origin ${short})`, run: () => dropAct('/api/git-push', { root: src.root, repo: g.repo }, '푸시') });
-          else if (src.ahead) items.push({ label: `↑ origin/${short} 로 푸시 (${src.ahead}커밋)`, run: () => dropAct('/api/git-push', { root: src.root, repo: g.repo }, '푸시') });
-          if (src.hasUp && src.ahead && src.behind) items.push({ label: `⚡ 강제 푸시 --force-with-lease (원격 ${src.behind}커밋 대체)`,   // diverged 일 때만(codex P2)
-            run: () => { if (confirm(`origin/${short} 이 가진 커밋 ${src.behind}개가 로컬 히스토리로 대체됩니다. 계속할까요?`)) dropAct('/api/git-push', { root: src.root, repo: g.repo, force: true }, '강제 푸시'); } });
-        } else if (mode === 'pull') {
-          items.push({ label: `↓ origin/${t.dataset.dropLocal} 당겨오기 (ff-only)`, run: () => dropAct('/api/git-pull', { root: t.dataset.dropRoot, repo: g.repo }, '당겨오기') });
-        } else if (mode === 'merge') {
-          items.push({ label: `⇣ ${t.dataset.dropLocal} ← ${src.branch} 병합`, run: () => dropAct('/api/git-merge', { root: t.dataset.dropRoot, repo: g.repo, branch: src.branch }, '병합') });
+        const S = src.branch, Sshort = gitShortRef(S);
+        if (mode === 'onto-remote') {
+          const rref = t.dataset.dropRemote;                 // '' = REMOTE 섹션(=소스의 카운터파트로 취급)
+          const target = `origin/${rref || Sshort}`;         // 항상 원격 추적 ref (로컬 main 과 구분 — 버그 방지)
+          const isCounterpart = !rref || rref === Sshort;    // 소스 자신의 원격이냐
+          if (!isCounterpart) {                              // 다른 원격(예: origin/main) 위로 rebase / PR
+            items.push({ label: `Rebase ${S} onto ${target}`, sub: `git rebase ${target} — ${Sshort} 을 ${target} 뒤에 재적용(히스토리 재작성)`,
+              run: () => dropAct('/api/git-rebase', { root: src.root, repo: g.repo, onto: target }, 'Rebase') });
+            items.push({ label: `Interactive Rebase ${S} onto ${target}`, sub: `터미널에서 git rebase -i ${target} (squash·reorder)`,
+              run: () => { if (typeof openTerminalCmd === 'function') openTerminalCmd(src.root, `git rebase -i ${shq(target)} `); } });
+          }
+          const canPush = isCounterpart && (!src.hasUp || src.ahead);
+          if (canPush) {
+            if (items.length) items.push({ divider: true });
+            items.push({ label: `Push ${S} to ${target}`, sub: src.hasUp ? `git push — 미푸시 ${src.ahead}커밋` : `git push -u origin ${Sshort} — 첫 푸시`,
+              run: () => dropAct('/api/git-push', { root: src.root, repo: g.repo }, 'Push') });
+          }
+          if (isCounterpart && src.hasUp && src.ahead && src.behind) {
+            items.push({ label: `Force Push ${S} to ${target}`, sub: `git push --force-with-lease — 원격 ${src.behind}커밋 대체`,
+              run: () => { if (confirm(`Force push: origin ${src.behind}커밋이 대체됩니다. 계속?`)) dropAct('/api/git-push', { root: src.root, repo: g.repo, force: true }, 'Force push'); } });
+          }
+          if (items.length) items.push({ divider: true });
+          items.push({ label: `Start a pull request to ${target} from ${S}`, sub: 'GitHub compare 페이지 열기',
+            run: () => openPR(rref || g.mainBranch, Sshort) });
+        } else {                                             // onto-local
+          const T = t.dataset.dropLocal, Troot = t.dataset.dropRoot;
+          items.push({ label: `Merge ${S} into ${T}`, sub: `git merge ${S} — ${T} 워크트리에서(충돌 시 자동 abort)`,
+            run: () => dropAct('/api/git-merge', { root: Troot, repo: g.repo, branch: S }, 'Merge') });
+          if (src.kind === 'remote' && gitShortRef(S) === T) {   // 원격→카운터파트 로컬 = pull
+            items.push({ label: `Pull ${S} into ${T}`, sub: `git pull --ff-only`, run: () => dropAct('/api/git-pull', { root: Troot, repo: g.repo }, 'Pull') });
+            items.push({ label: `Pull (rebase) ${S} into ${T}`, sub: `git pull --rebase — 내 커밋을 위로 재적용`, run: () => dropAct('/api/git-pull', { root: Troot, repo: g.repo, rebase: true }, 'Pull rebase') });
+          }
+          if (src.kind === 'local') {                        // 로컬→로컬 = rebase 도(소스 워크트리에서)
+            items.push({ label: `Rebase ${S} onto ${T}`, sub: `git rebase ${T} — ${S} 워크트리에서(히스토리 재작성)`,
+              run: () => dropAct('/api/git-rebase', { root: src.root, repo: g.repo, onto: T }, 'Rebase') });
+            items.push({ label: `Interactive Rebase ${S} onto ${T}`, sub: `터미널에서 git rebase -i ${T}`,
+              run: () => { if (typeof openTerminalCmd === 'function') openTerminalCmd(src.root, `git rebase -i ${shq(T)} `); } });
+          }
         }
         if (items.length && typeof openActMenu === 'function') openActMenu(t, items);
       };
@@ -490,6 +596,7 @@
         <div class="gd-subject">● 미커밋 변경</div>
         <div class="gd-meta">커밋 대상: ${escapeHtml(repoName)} ⎇ ${escapeHtml(b.branch || '?')}${b.mismatch && b.mismatch.length ? ' <span class="git-badge warn" title="같은 워크트리의 다른 레포가 다른 브랜치 — 레포 탭별로 그 레포 브랜치에 커밋됩니다">⚠</span>' : ''}
           ${needPush ? `<button class="gd-push" data-gd-push title="${b.upstream === false ? '원격에 브랜치 없음 — 첫 푸시(-u origin)' : `미푸시 ${b.aheadRemote}커밋 푸시`}">↑ 푸시${b.aheadRemote ? ' ' + b.aheadRemote : ''}</button>` : ''}
+          ${list.length ? `<button class="gd-push gd-stash" data-gd-stash title="변경 전부(untracked 포함)를 스태시로 치워두기 — 좌측 STASHES 에서 적용/삭제">⧉ 스태시</button>` : ''}
           <span class="git-commit-flash" data-diff-flash></span></div>
         <div class="gd-files-head">파일 ${list.length}개 — 이름 클릭=diff, 체크=커밋 포함</div>
         <div class="gd-files">${files || '<div class="gd-empty">변경 없음</div>'}</div>
@@ -498,6 +605,20 @@
       panel.querySelectorAll('.git-stage-cb').forEach(cb => cb.onclick = (e) => e.stopPropagation());   // 체크는 diff 안 엶
       panel.querySelectorAll('[data-gd-file]').forEach(b2 => b2.onclick = () =>
         gitShowDiffOverlay(panel.closest('.git-split'), { root: wipRoot, repo: g.repo, title: '미커밋 변경', focusFile: b2.dataset.gdFile }));
+      const stashBtn = panel.querySelector('[data-gd-stash]');
+      if (stashBtn) stashBtn.onclick = async () => {
+        const memo = prompt('스태시 메모 (선택 — 비워도 됩니다)', '');
+        if (memo === null) return;   // 취소
+        stashBtn.disabled = true; stashBtn.textContent = '스태시 중…';
+        try {
+          await api('/api/git-stash', { method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ op: 'save', root: wipRoot, repo: g.repo, message: memo }) });
+          document.querySelector('[data-git-refresh]')?.click();
+        } catch (e2) {
+          stashBtn.disabled = false; stashBtn.textContent = '⧉ 스태시';
+          const f = panel.querySelector('[data-diff-flash]'); if (f) f.textContent = `스태시 실패: ${(e2 && e2.message) || e2}`;
+        }
+      };
       const pushBtn = panel.querySelector('[data-gd-push]');
       if (pushBtn) pushBtn.onclick = async () => {
         pushBtn.disabled = true; pushBtn.textContent = '푸시 중…';
