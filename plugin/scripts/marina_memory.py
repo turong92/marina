@@ -17,7 +17,7 @@ from typing import Any
 
 from marina_paths import session_id
 from marina_registry import project_for
-from marina_state import _env, _mc
+from marina_state import _bin, _env, _mc
 
 
 _CACHE_TTL_SECONDS = 5.0
@@ -43,6 +43,10 @@ _reservation_sequence = 0
 def _run(args: list[str], timeout: float) -> str:
     """Run a bounded command. Tests replace this module-level seam."""
     return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=timeout)
+
+
+def _docker(*args: str) -> list[str]:
+    return [_bin("docker"), *args]
 
 
 def parse_size_mb(value: str) -> int | None:
@@ -174,7 +178,7 @@ def _inspect_many(
     result = {container_id: _inspect_cache[container_id] for container_id in ids if container_id in _inspect_cache}
     missing = [container_id for container_id in ids if container_id not in result or container_id in refresh]
     if missing:
-        rows = _json_rows(_run(["docker", "inspect", *missing], _INSPECT_TIMEOUT_SECONDS))
+        rows = _json_rows(_run(_docker("inspect", *missing), _INSPECT_TIMEOUT_SECONDS))
         for container_id in missing:
             details = _row_for_id(rows, container_id)
             if details:
@@ -191,8 +195,8 @@ def _inspect(container_id: str) -> dict[str, Any]:
 def _container_rows(
     docker_total_mb: int | None,
 ) -> tuple[list[dict[str, Any]], bool, list[str], bool]:
-    stats_rows = _json_rows(_run(["docker", "stats", "--no-stream", "--format", "{{json .}}"], _DOCKER_TIMEOUT_SECONDS))
-    ps_rows = _json_rows(_run(["docker", "ps", "--all", "--format", "{{json .}}"], _DOCKER_TIMEOUT_SECONDS))
+    stats_rows = _json_rows(_run(_docker("stats", "--no-stream", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS))
+    ps_rows = _json_rows(_run(_docker("ps", "--all", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS))
     containers: list[dict[str, Any]] = []
     partial = False
     usage_complete = True
@@ -288,7 +292,7 @@ def _empty_snapshot(error: str | None = None, host: dict[str, Any] | None = None
 
 def _collect_snapshot(host: dict[str, Any] | None = None) -> dict[str, Any]:
     snapshot = _empty_snapshot(host=host)
-    info_rows = _json_rows(_run(["docker", "info", "--format", "{{json .}}"], _DOCKER_TIMEOUT_SECONDS))
+    info_rows = _json_rows(_run(_docker("info", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS))
     info = info_rows[0] if info_rows else {}
     total_bytes = info.get("MemTotal")
     total_mb = round(int(total_bytes) / (1024**2)) if total_bytes is not None else None

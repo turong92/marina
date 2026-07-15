@@ -12,6 +12,7 @@ import time
 
 sys.path.insert(0, sys.argv[1])
 mm = importlib.import_module("marina_memory")
+mm._bin = lambda name: name
 
 assert mm.parse_size_mb("8.93GiB") == 9144
 assert mm.parse_size_mb("638MiB") == 638
