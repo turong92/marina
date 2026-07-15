@@ -466,6 +466,11 @@ def _resolved_gateway_port() -> int:
         return _GATEWAY_PORT
 
 
+def _gateway_port_ready(port: int) -> bool:
+    """실제 marina Caddy runtime listener 확인. PID 생존이나 타 프로세스 포트 점유를 정상으로 보지 않는다."""
+    return _gw().runtime_listens(port, timeout=0.3)
+
+
 def ensure_gateway() -> None:
     """서비스 start 이벤트 — 라우트 대상(실행중·호스트포트 보유 서비스)이 있고 caddy 설치돼 있으면
     게이트웨이를 없을 때 자동 기동(비특권 포트, 권한 불요)하고 라우트를 반영한다. 절대 예외 안 던짐(서비스 흐름·데몬 안 깸)."""
@@ -478,7 +483,8 @@ def ensure_gateway() -> None:
             return                                        # 라우팅할 게 없으면 안 띄움
         if not _gw().caddy_bin():
             return                                        # caddy 미설치 → 조용히(나머지 marina 정상)
-        if _gw_pid_alive():
+        running = _gw_pid_alive()
+        if running:
             port = _resolved_gateway_port()
         else:
             # port 파일 값이 아직 빈 포트면 재사용 — 먼저 돈 cmd_up(expose env 주입)이 그 파일을 읽고/선기록하므로
@@ -486,13 +492,16 @@ def ensure_gateway() -> None:
             port = _GATEWAY_PORT if _env("GATEWAY_PORT", "") else (_port_file_reusable() or _free_port_from(_GATEWAY_PORT))
             _GW_DIR.mkdir(parents=True, exist_ok=True)
             _GW_PORT_FILE.write_text(str(port))
-            # caddy 가 읽을 config 를 기동 전에 선기록 → caddy run 이 즉시 포트+라우트로 바인드
-            # (reload 레이스 제거: admin 미준비 상태에서 apply→reload 실패로 라우트 누락되는 문제 방지)
+        listener_ready = running and _gateway_port_ready(port)
+        if not running or not listener_ready:
+            _GW_DIR.mkdir(parents=True, exist_ok=True)
+            _GW_PORT_FILE.write_text(str(port))
+            # 신규 기동과 PID-only 드리프트 복구 모두 desired config를 먼저 기록한다.
             _gw().write_config(_gw().build_caddyfile(snap, port), _GATEWAY_STATE)
             subprocess.run(["bash", str(_GW_CONTROL), "start"],
                            env={**os.environ, "MARINA_GATEWAY_PORT": str(port), "MARINA_HOME": str(MARINA_HOME)},
                            timeout=20, capture_output=True)
-        _gw().apply(snap, port, _GATEWAY_STATE)   # 이미 떠있던 경우/드리프트 시 무중단 reload
+        _gw().apply(snap, port, _GATEWAY_STATE, force=running and not listener_ready)
     except Exception as exc:
         sys.stderr.write(f"gateway ensure 실패(무시): {exc}\n")
 

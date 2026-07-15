@@ -7,11 +7,18 @@ import json
 import os
 import re
 import shutil
+import socket
 import subprocess
 import sys
+import urllib.request
 
-ADMIN = "localhost:2021"   # marina 전용 admin(caddy 기본 2019 회피) — 다른 caddy 인스턴스 config 안 건드림(코덱스 P2)
+DEFAULT_ADMIN = "localhost:2021"   # marina 전용 admin(caddy 기본 2019 회피)
 WEB_NAMES = ("web", "fe", "frontend", "app", "ui")   # 대표 web 후보(우선순위 순)
+
+
+def admin_address() -> str:
+    """Caddy admin endpoint. 테스트/병렬 marina 인스턴스는 env 로 서로 격리한다."""
+    return (os.environ.get("MARINA_GATEWAY_ADMIN") or DEFAULT_ADMIN).strip()
 
 
 def _domain_label(s: str) -> str:
@@ -101,7 +108,7 @@ def build_caddyfile(snapshot: list, port: int = 80) -> str:
     서비스가 routes(경로 prefix)를 선언하면 대표 도메인에 그 경로를 해당 서비스로 path 라우팅 —
     호스트 브라우저가 상대주소로 be 를 부를 때(fe baseURL='') `<wt>.<proj>.localhost/v1/*`→be (limit#1 해소).
     선언 없으면 경로 가정 안 함(범용). 로컬 전용이라 loopback 바인드(127.0.0.1 ::1, 코덱스 P1). admin API 무중단 reload, auto_https off."""
-    lines = ["{", f"    admin {ADMIN}", "    auto_https off", "}", ""]
+    lines = ["{", f"    admin {admin_address()}", "    auto_https off", "}", ""]
     used = set()
     for wt in (snapshot or []):
         wid_raw = (wt or {}).get("id") or ""
@@ -190,6 +197,38 @@ def write_config(text: str, state_path: str) -> None:
         f.write(text)
 
 
+def sync_admin(config_path: str, address: str = None) -> bool:
+    """marina Caddyfile의 global options admin만 갱신한다. 반환값은 파일 변경 여부다."""
+    address = (address or admin_address()).strip()
+    with open(config_path, encoding="utf-8") as f:
+        lines = f.readlines()
+    if not lines or lines[0].strip() != "{":
+        raise ValueError("marina Caddyfile global options block missing")
+    close = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "}"), None)
+    if close is None:
+        raise ValueError("marina Caddyfile global options block is not closed")
+    replacement = f"    admin {address}\n"
+    admin_line = next((i for i in range(1, close) if re.match(r"^\s*admin\s+", lines[i])), None)
+    if admin_line is None:
+        lines.insert(close, replacement)
+    elif lines[admin_line] == replacement:
+        return False
+    else:
+        lines[admin_line] = replacement
+    path = os.path.abspath(config_path)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+        os.replace(tmp, path)
+    finally:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+    return True
+
+
 def config_changed(text: str, state_path: str) -> bool:
     """이전에 쓴 config 와 다른가 — 같으면 False(reload 억제)."""
     try:
@@ -209,27 +248,45 @@ def caddy_bin():
     return None
 
 
+def runtime_listens(port: int, timeout: float = 0.5) -> bool:
+    """marina Caddy의 runtime config와 실제 socket이 모두 gateway port를 가리키는지 확인한다."""
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://{admin_address()}/config/apps/http/servers/", timeout=timeout) as response:
+            servers = json.load(response)
+        expected = {f"127.0.0.1:{int(port)}", f"[::1]:{int(port)}", f"localhost:{int(port)}"}
+        configured = any(expected.intersection((server or {}).get("listen") or [])
+                         for server in (servers or {}).values())
+        if not configured:
+            return False
+        with socket.create_connection(("127.0.0.1", int(port)), timeout=timeout):
+            return True
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+
+
 def reload_caddy(config_path: str) -> bool:
     """실행 중 caddy 에 새 config 적용(admin API, 무중단). caddy 없거나 reload 실패면 False."""
     cb = caddy_bin()
     if not cb:
         return False
     try:
-        subprocess.run([cb, "reload", "--config", config_path, "--adapter", "caddyfile"],
+        subprocess.run([cb, "reload", "--config", config_path, "--adapter", "caddyfile",
+                        "--address", admin_address()],
                        check=True, capture_output=True, text=True, timeout=15)
         return True
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return False
 
 
-def apply(snapshot: list, port: int, config_path: str, applied_path: str = None) -> bool:
+def apply(snapshot: list, port: int, config_path: str, applied_path: str = None, force: bool = False) -> bool:
     """스냅샷 → desired config. config_path 는 항상 최신(caddy start 가 읽음). reload 성공한 것만 applied_path 에 기록 —
     reload 실패(예: caddy admin 아직 미준비) 시 applied 미갱신 → 다음 폴링이 재시도. 반환=이번에 reload 성공했는지(코덱스 P2)."""
     if applied_path is None:
         applied_path = config_path + ".applied"
     cfg = build_caddyfile(snapshot, port)
     write_config(cfg, config_path)                  # caddy start 가 읽는 파일은 항상 최신 desired
-    if not config_changed(cfg, applied_path):       # 이미 성공 적용된 것과 같으면 reload 불요
+    if not force and not config_changed(cfg, applied_path):  # 이미 성공 적용된 것과 같으면 reload 불요
         return False
     if reload_caddy(config_path):
         write_config(cfg, applied_path)             # 성공한 것만 applied 로 마킹
@@ -244,11 +301,19 @@ def main(argv=None):
     g.add_argument("--port", type=int, default=80)
     c = sub.add_parser("config")              # stdin=snapshot json → stdout 요약 JSON (라우팅+CORS, 관측)
     c.add_argument("--port", type=int, default=80)
+    h = sub.add_parser("health")              # Caddy runtime config + 실제 listener 검증
+    h.add_argument("--port", type=int, required=True)
+    s = sub.add_parser("sync-admin")          # 기존 Caddyfile global admin을 현재 env로 마이그레이션
+    s.add_argument("--config", required=True)
     args = ap.parse_args(argv)
     if args.cmd == "gen":
         print(build_caddyfile(json.load(sys.stdin), args.port), end="")
     elif args.cmd == "config":
         print(json.dumps(summarize_gateway(json.load(sys.stdin), args.port), ensure_ascii=False, indent=2))
+    elif args.cmd == "health":
+        return 0 if runtime_listens(args.port) else 1
+    elif args.cmd == "sync-admin":
+        sync_admin(args.config)
     return 0
 
 

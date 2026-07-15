@@ -6,6 +6,7 @@ DASH="$HERE/../scripts/marina-dashboard.sh"
 run_case() {  # $1=uname-output  $2=expected supervisor
   local os="$1" exp="$2" TMP; TMP="$(mktemp -d)"
   export MARINA_HOME="$TMP/.marina" HOME="$TMP" CLAUDE_CONFIG_DIR="$TMP/.claude"
+  export MARINA_GATEWAY_ADMIN="127.0.0.1:24567"
   mkdir -p "$CLAUDE_CONFIG_DIR/plugins"
   cat > "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json" <<JSON
 { "plugins": { "marina@marina-dev": [ { "installPath": "$TMP/plug" } ] } }
@@ -29,12 +30,14 @@ JSON
     local U="$HOME/.config/systemd/user/marina-dashboard.service"
     [[ -f "$U" ]] || { echo "FAIL: unit missing"; exit 1; }
     grep -q "ExecStart=$MARINA_HOME/dashboard-launch.sh" "$U" || { echo "FAIL: ExecStart not launcher"; exit 1; }
+    grep -q "Environment=MARINA_GATEWAY_ADMIN=$MARINA_GATEWAY_ADMIN" "$U" || { echo "FAIL: gateway admin env missing"; exit 1; }
   fi
   if [[ "$exp" == launchd ]]; then
     local P="$MARINA_HOME/marina.dashboard.plist"
     [[ -f "$P" ]] || { echo "FAIL: plist missing"; exit 1; }
     grep -q "$MARINA_HOME/dashboard-launch.sh" "$P" || { echo "FAIL: plist not pointing at launcher"; exit 1; }
     grep -q 'marina-control.py' "$P" && { echo "FAIL: plist still references control.py"; exit 1; }
+    grep -A1 -q '<key>MARINA_GATEWAY_ADMIN</key>' "$P" || { echo "FAIL: gateway admin env missing"; exit 1; }
   fi
   rm -rf "$TMP"
 }

@@ -8,7 +8,8 @@ command -v caddy >/dev/null 2>&1 || { echo "SKIP test-gateway-e2e (caddy 미설�
 
 TMP="$(mktemp -d)"; CFG="$TMP/Caddyfile"
 freeport() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
-GP="$(freeport)"; P1="$(freeport)"; P2="$(freeport)"
+GP="$(freeport)"; P1="$(freeport)"; P2="$(freeport)"; ADMIN_PORT="$(freeport)"
+export MARINA_GATEWAY_ADMIN="127.0.0.1:$ADMIN_PORT"
 mkdir -p "$TMP/a" "$TMP/b"; echo "AAA" > "$TMP/a/index.html"; echo "BBB" > "$TMP/b/index.html"
 ( cd "$TMP/a" && python3 -m http.server "$P1" >/dev/null 2>&1 & echo $! > "$TMP/a.pid" )
 ( cd "$TMP/b" && python3 -m http.server "$P2" >/dev/null 2>&1 & echo $! > "$TMP/b.pid" )
@@ -34,7 +35,7 @@ echo "$a" | grep -q AAA || { echo "FAIL: main→A: [$a]"; cat "$TMP/caddy.log"; 
 b="$(curl -s -H 'Host: feat.shop.localhost' "localhost:$GP/")"; echo "$b" | grep -q BBB || { echo "FAIL: feat→B: [$b]"; exit 1; }
 
 # 동적 remove: B 빼고 reload → feat 라우트 제거(이제 B 로 안 감 = BBB 없음; caddy 는 미매칭 Host 에 빈 200)
-snap_a | gen; caddy reload --config "$CFG" --adapter caddyfile >/dev/null 2>&1; sleep 0.5
+snap_a | gen; caddy reload --config "$CFG" --adapter caddyfile --address "$MARINA_GATEWAY_ADMIN" >/dev/null 2>&1; sleep 0.5
 fbody="$(curl -s -H 'Host: feat.shop.localhost' "localhost:$GP/")"
 echo "$fbody" | grep -q BBB && { echo "FAIL: remove 후에도 feat→B(BBB) 도달: [$fbody]"; exit 1; } || true
 curl -s -H 'Host: main.shop.localhost' "localhost:$GP/" | grep -q AAA || { echo "FAIL: remove 후 main 깨짐"; exit 1; }
@@ -44,7 +45,7 @@ kill "$(cat "$TMP/b.pid")" 2>/dev/null || true
 P3="$(freeport)"
 ( cd "$TMP/b" && python3 -m http.server "$P3" >/dev/null 2>&1 & echo $! > "$TMP/b.pid" )
 snap_both x "$P3" | gen
-caddy reload --config "$CFG" --adapter caddyfile >/dev/null 2>&1; sleep 0.5
+caddy reload --config "$CFG" --adapter caddyfile --address "$MARINA_GATEWAY_ADMIN" >/dev/null 2>&1; sleep 0.5
 b2="$(curl -s -H 'Host: feat.shop.localhost' "localhost:$GP/")"; echo "$b2" | grep -q BBB || { echo "FAIL: restart/port-change 후 feat 새 포트 재지정 안 됨: [$b2]"; exit 1; }
 
 echo "PASS test-gateway-e2e (정적 라우팅 + 동적 add/remove/port-change)"

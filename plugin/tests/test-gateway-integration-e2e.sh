@@ -10,7 +10,9 @@ command -v caddy >/dev/null 2>&1 || { echo "SKIP test-gateway-integration-e2e (c
 
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME"
 P="$TMP/proj-$$"; mkdir -p "$P"; P="$(cd "$P" && pwd -P)"
-GP=8896; CPORT=3959; DPID=""
+freeport() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
+GP="$(freeport)"; CPORT="$(freeport)"; ADMIN_PORT="$(freeport)"; DPID=""
+export MARINA_GATEWAY_PORT="$GP" MARINA_GATEWAY_ADMIN="127.0.0.1:$ADMIN_PORT"
 mrun() { (cd "$P" && MARINA_HOME="$MARINA_HOME" bash "$SH" "$@"); }
 cleanup() {
   [ -n "$DPID" ] && kill "$DPID" 2>/dev/null || true
@@ -33,7 +35,7 @@ mrun start --all >/dev/null 2>&1 || { echo "FAIL: marina start"; mrun start --al
 
 # caddy 기동(테스트 포트) + 게이트웨이 ON 데몬(같은 MARINA_HOME) — 데몬 refresh 가 caddy 를 채움
 MARINA_HOME="$MARINA_HOME" MARINA_GATEWAY_PORT="$GP" bash "$GWC" start >/dev/null
-for _ in $(seq 1 20); do curl -s -o /dev/null localhost:2021/config/ && break; sleep 0.3; done
+for _ in $(seq 1 20); do curl -s -o /dev/null "http://$MARINA_GATEWAY_ADMIN/config/" && break; sleep 0.3; done
 MARINA_HOME="$MARINA_HOME" MARINA_CONTROL_HOST=127.0.0.1 MARINA_CONTROL_PORT=$CPORT MARINA_GATEWAY=1 MARINA_GATEWAY_PORT=$GP MARINA_GATEWAY_POLL=2 python3 "$CTRL" >"$TMP/daemon.log" 2>&1 &
 DPID=$!
 

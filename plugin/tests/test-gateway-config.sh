@@ -57,6 +57,17 @@ assert gw.apply(snap, 80, cp, ap) is True           # 같은 snapshot 이어도 
 assert os.path.exists(ap), "성공하면 applied 기록"
 assert gw.apply(snap, 80, cp, ap) is False          # 이제 applied==desired → reload 안 함
 gw.reload_caddy=_orig
+# admin 주소는 실행 환경별로 격리 가능하고 reload 대상에도 명시돼야 한다.
+os.environ["MARINA_GATEWAY_ADMIN"]="127.0.0.1:29991"
+custom=gw.build_caddyfile(snap, 80)
+assert "admin 127.0.0.1:29991" in custom, custom
+calls=[]; _bin=gw.caddy_bin; _run=gw.subprocess.run
+gw.caddy_bin=lambda: "/tmp/fake-caddy"
+gw.subprocess.run=lambda cmd, **kw: calls.append(cmd)
+assert gw.reload_caddy(cp) is True
+assert calls and calls[0][-2:]==["--address", "127.0.0.1:29991"], calls
+gw.caddy_bin=_bin; gw.subprocess.run=_run
+os.environ.pop("MARINA_GATEWAY_ADMIN")
 # codex review P2: sanitize 충돌(feat_x vs feat-x) → 해시 disambiguate, 둘 다 유니크 라우트(전체 reject 방지)
 coll=[{"id":"feat_x","projectId":"p","services":[{"service":"web","port":"1","running":True}]},
       {"id":"feat-x","projectId":"p","services":[{"service":"web","port":"2","running":True}]}]
