@@ -164,6 +164,19 @@ def compare_build_inputs(
     return reasons
 
 
+def build_decision(
+    current: dict[str, Any],
+    baseline: dict[str, Any] | None,
+    explicit: bool = False,
+) -> tuple[bool, list[dict[str, str]]]:
+    reasons = compare_build_inputs(current, baseline, "rebuild" if explicit else "start")
+    if explicit:
+        return True, reasons
+    if current.get("status") != "ok" or not (current.get("services") or {}):
+        return False, reasons
+    return bool(reasons), reasons
+
+
 def load_build_input_key(home: Path) -> bytes:
     home.mkdir(parents=True, exist_ok=True)
     path = home / "build-input.key"
@@ -223,3 +236,30 @@ def read_build_input_snapshot(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict) or value.get("status") != "ok" or not isinstance(value.get("services"), dict):
         return {"version": 1, "status": "unknown"}
     return {"version": 1, "status": "ok", "services": value["services"]}
+
+
+def read_build_baseline(path: Path) -> dict[str, Any] | None:
+    value = read_build_input_snapshot(path)
+    return value if value.get("status") == "ok" else None
+
+
+def merge_build_baseline(path: Path, current: dict[str, Any]) -> None:
+    services = current.get("services")
+    if current.get("status") != "ok" or not isinstance(services, dict) or not services:
+        return
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = path.with_name(path.name + ".lock")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        previous = read_build_baseline(path) or {"version": 1, "status": "ok", "services": {}}
+        merged = dict(previous["services"])
+        merged.update(services)
+        write_build_input_snapshot(
+            path,
+            {"version": 1, "status": "ok", "services": merged},
+        )
+    finally:
+        os.close(lock_fd)
