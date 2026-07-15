@@ -302,3 +302,29 @@ Expected: only stale-image guard files and previously approved design/plan docs 
 git add README.md docs/superpowers/specs/2026-07-14-orca-comparison-and-roadmap-design.md docs/superpowers/specs/2026-07-14-compose-watch-standard-dev-design.md
 git commit -m "docs(build): explain automatic stale rebuilds"
 ```
+
+### Task 4: Review Correctness Hardening
+
+**Files:**
+- Modify: `plugin/scripts/marina_build_inputs.py`
+- Modify: `plugin/scripts/marina-compose.py`
+- Test: `plugin/tests/test-build-inputs.sh`
+- Test: `plugin/tests/test-compose-overlay.sh`
+- Test: `plugin/tests/test-compose-dispatch.sh`
+
+**Interfaces:**
+- Produces: baseline `image: {ref, id}` identity checked before every fast Start.
+- Produces: service-keyed build locks held from overlay submission through baseline update.
+- Extends: Dockerfile inputs with `dockerfile_inline` and directory inputs with content hashing.
+
+- [x] **Step 1: Reproduce external image ABA and overlapping same-service Start**
+
+- [x] **Step 2: Store and verify actual Compose image identity**
+
+- [x] **Step 3: Serialize overlapping build services with deterministic file locks**
+
+- [x] **Step 4: Reject structurally corrupt baselines and bound capture setup failures**
+
+- [x] **Step 5: Hash inline Dockerfiles and declared rebuild directory contents**
+
+- [x] **Step 6: Run focused Build Timeline, Why Rebuilt, dispatch, and Watch regressions**

@@ -11,6 +11,9 @@ marina 는 `docker compose ps` 로 실제 포트를 *그때그때* 읽는다(기
 inter-service 는 컨테이너 DNS(주입 0), marina 는 compose 불투명 실행.
 """
 import argparse
+from contextlib import contextmanager
+import fcntl
+import hashlib
 import json
 import os
 import re
@@ -24,6 +27,7 @@ from pathlib import Path
 try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로드(테스트)에서도 sibling 해석되게.
     from marina_dockerfile import is_profile_var
     from marina_build_inputs import (
+        attach_image_identities,
         build_decision,
         build_input_snapshot,
         load_build_input_key,
@@ -38,6 +42,7 @@ except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from marina_dockerfile import is_profile_var
     from marina_build_inputs import (
+        attach_image_identities,
         build_decision,
         build_input_snapshot,
         load_build_input_key,
@@ -711,6 +716,18 @@ def parse_ps_ports(ps_text: str):
     return {svc: sorted(ports) for svc, ports in out.items()}
 
 
+def _json_rows(value: str) -> list[dict]:
+    text = (value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        rows = parsed if isinstance(parsed, list) else [parsed]
+    except json.JSONDecodeError:
+        rows = [json.loads(line) for line in text.splitlines() if line.strip()]
+    return [row for row in rows if isinstance(row, dict)]
+
+
 def up_argv(stored, overlay, project_dir, project_name, services, build=False):
     a = ["docker", "compose", "-f", stored]
     if overlay and os.path.exists(overlay) and os.path.getsize(overlay) > 0:   # 빈 overlay 는 -f 안 함(docker 실패 방지)
@@ -823,6 +840,16 @@ def _show_ports(project_name):
 
 
 BUILD_INPUT_CAPTURE_TIMEOUT_SEC = 0.5
+UNKNOWN_BUILD_INPUTS = {"version": 1, "status": "unknown"}
+
+
+def _publish_build_input_handoff(payload):
+    handoff = os.environ.get("MARINA_BUILD_INPUT_SNAPSHOT", "").strip()
+    if handoff:
+        try:
+            write_build_input_snapshot(Path(handoff), payload)
+        except OSError:
+            pass
 
 
 def _write_build_input_handoff(path, project_dir, config, requested, build_args, ignored_paths=None):
@@ -842,12 +869,31 @@ def _write_build_input_handoff(path, project_dir, config, requested, build_args,
 
 def _capture_build_inputs(a, config, requested, build_args):
     session_dir = Path(a.session_dir)
-    session_dir.mkdir(parents=True, exist_ok=True)
-    fd, private_path = tempfile.mkstemp(prefix=".build-input-capture.", dir=str(session_dir))
-    os.fchmod(fd, 0o600)
-    os.close(fd)
-    os.unlink(private_path)
-    payload = {"version": 1, "status": "unknown"}
+    private_path = ""
+    fd = None
+    try:
+        session_dir.mkdir(parents=True, exist_ok=True)
+        fd, private_path = tempfile.mkstemp(prefix=".build-input-capture.", dir=str(session_dir))
+        os.fchmod(fd, 0o600)
+        os.close(fd)
+        fd = None
+        os.unlink(private_path)
+    except OSError:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if private_path:
+            try:
+                os.unlink(private_path)
+            except OSError:
+                pass
+        payload = dict(UNKNOWN_BUILD_INPUTS)
+        _publish_build_input_handoff(payload)
+        return payload
+
+    payload = dict(UNKNOWN_BUILD_INPUTS)
     try:
         try:
             pid = os.fork()
@@ -884,18 +930,14 @@ def _capture_build_inputs(a, config, requested, build_args):
                     except OSError:
                         pass
                     try:
-                        _, status = os.waitpid(pid, 0)
-                    except OSError:
+                        waited, status = os.waitpid(pid, os.WNOHANG)
+                        reaped = waited == pid
+                    except (ChildProcessError, OSError):
                         pass
             if reaped and status == 0:
                 payload = read_build_input_snapshot(Path(private_path))
 
-        handoff = os.environ.get("MARINA_BUILD_INPUT_SNAPSHOT", "").strip()
-        if handoff:
-            try:
-                write_build_input_snapshot(Path(handoff), payload)
-            except OSError:
-                pass
+        _publish_build_input_handoff(payload)
         return payload
     finally:
         try:
@@ -910,6 +952,176 @@ def _build_reason_text(reason):
     change = " ".join(str(reason.get("change") or "changed").split())
     subject = " ".join(value for value in (service, label) if value)
     return redact_text(f"{subject} {change}".strip())
+
+
+def _inspect_baseline_images(baseline, services):
+    baseline_services = baseline.get("services") if isinstance(baseline, dict) else {}
+    if not isinstance(baseline_services, dict):
+        return {}
+    identities = {}
+    for service in services:
+        inputs = baseline_services.get(service)
+        image = inputs.get("image") if isinstance(inputs, dict) else None
+        ref = image.get("ref") if isinstance(image, dict) else ""
+        if not isinstance(ref, str) or not ref:
+            continue
+        try:
+            image_id = subprocess.check_output(
+                ["docker", "image", "inspect", "--format={{.Id}}", ref],
+                text=True,
+                stderr=subprocess.DEVNULL,
+            ).strip().splitlines()[0]
+        except (FileNotFoundError, IndexError, subprocess.CalledProcessError):
+            image_id = "missing"
+        identities[service] = {"ref": ref, "id": image_id or "missing"}
+    return identities
+
+
+def _compose_image_identities(stored, overlay, project_dir, project_name, services, env):
+    base = ["docker", "compose", "-f", stored]
+    if overlay and os.path.exists(overlay) and os.path.getsize(overlay) > 0:
+        base += ["-f", overlay]
+    base += ["--project-directory", project_dir, "-p", project_name]
+    identities = {}
+    for service in services:
+        try:
+            output = subprocess.check_output(
+                base + ["images", "--format", "json", service],
+                text=True,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            ).strip()
+            rows = _json_rows(output)
+        except (FileNotFoundError, json.JSONDecodeError, subprocess.CalledProcessError):
+            continue
+        row = next((item for item in rows if isinstance(item, dict) and item.get("ID")), None)
+        if not row:
+            continue
+        repository = str(row.get("Repository") or "")
+        tag = str(row.get("Tag") or "")
+        if not repository or repository == "<none>":
+            continue
+        ref = repository if not tag or tag == "<none>" else f"{repository}:{tag}"
+        identities[service] = {"ref": ref, "id": str(row["ID"])}
+    return identities
+
+
+@contextmanager
+def _build_service_locks(session_dir, services):
+    lock_dir = Path(session_dir) / ".build-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    handles = []
+    try:
+        for service in sorted(set(services)):
+            key = hashlib.sha256(service.encode("utf-8")).hexdigest()[:20]
+            path = lock_dir / f"{key}.lock"
+            fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+            os.chmod(path, 0o600)
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            handles.append(fd)
+        yield
+    finally:
+        for fd in reversed(handles):
+            try:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+            finally:
+                os.close(fd)
+
+
+def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_args):
+    grouped, _ = start_group_requested(
+        xm, list(a.service or []), config.get("services") or {}
+    )
+    requested, skipped, unknown_auto = resolved_start_targets(
+        config, xm, list(a.service or [])
+    )
+    if unknown_auto:
+        sys.stderr.write(f"warning: x-marina.startGroup 의 미정의 서비스 무시: {', '.join(unknown_auto)}\n")
+    if grouped and not a.service:
+        print("startGroup: 시작 그룹만 기동 — " + ", ".join(requested) + " (그 외는 대시보드/CLI 에서 개별 시작)")
+    for service, why in skipped.items():
+        sys.stderr.write(f"skip: 서비스 '{service}' 건너뜀 — {why}. 나머지는 기동합니다.\n")
+    if not requested:
+        sys.stderr.write("error: 기동 가능한 서비스가 없습니다 — build 서비스의 Dockerfile 이 모두 없습니다.\n")
+        return 2
+
+    svc_cfg = config.get("services") or {}
+    build_services = [
+        service for service in requested
+        if isinstance((svc_cfg.get(service) or {}).get("build"), dict)
+    ]
+    with _build_service_locks(a.session_dir, build_services):
+        os.makedirs(a.session_dir, exist_ok=True)
+        overlay = _overlay_path(a.session_dir)
+        if overlay_text.strip():
+            with open(overlay, "w", encoding="utf-8") as handle:
+                handle.write(overlay_text)
+        else:
+            try:
+                os.remove(overlay)
+            except OSError:
+                pass
+            overlay = None
+
+        forward = overlay_conn.get("forward") or {}
+        sidecars = [
+            f"{service}-bind"
+            for service in requested
+            if (svc_cfg.get(service) or {}).get("build")
+            and _forward_for_service(
+                forward, service, _served_ports(svc_cfg.get(service) or {})
+            )
+        ]
+        current_inputs = _capture_build_inputs(a, config, requested, build_args)
+        baseline_path = Path(a.session_dir) / "build-baseline.json"
+        baseline = read_build_baseline(baseline_path)
+        decision_inputs = attach_image_identities(
+            current_inputs,
+            _inspect_baseline_images(baseline, current_inputs.get("services") or {}),
+        )
+        effective_build, build_reasons = build_decision(
+            decision_inputs,
+            baseline,
+            explicit=bool(a.build),
+        )
+        if current_inputs.get("status") != "ok":
+            if a.build:
+                sys.stderr.write("warning: build 입력을 확인하지 못했습니다; Rebuild는 계속하지만 baseline은 갱신하지 않습니다.\n")
+            else:
+                sys.stderr.write("warning: build 입력을 확인하지 못해 기존 이미지로 시작합니다; 문제가 있으면 Rebuild를 실행하세요.\n")
+        elif effective_build and not a.build:
+            for reason in build_reasons:
+                print(f"stale image: {_build_reason_text(reason)}; Start에 --build 자동 적용")
+        argv = up_argv(
+            a.stored, overlay, a.project_dir, name, requested + sidecars,
+            build=effective_build,
+        )
+        print("compose: " + " ".join(argv))
+        rc = subprocess.call(argv, env=env)
+        if rc == 0:
+            if effective_build and current_inputs.get("status") == "ok":
+                try:
+                    identities = _compose_image_identities(
+                        a.stored, overlay, a.project_dir, name,
+                        current_inputs.get("services") or {}, env,
+                    )
+                    merge_build_baseline(
+                        baseline_path,
+                        attach_image_identities(current_inputs, identities),
+                    )
+                    missing_images = sorted(set(current_inputs.get("services") or {}) - set(identities))
+                    if missing_images:
+                        sys.stderr.write(
+                            "warning: build 이미지 ID 확인 실패; 다음 Start에서 다시 build합니다: "
+                            + ", ".join(missing_images) + "\n"
+                        )
+                except OSError as exc:
+                    sys.stderr.write(f"warning: build baseline 저장 실패; 다음 Start에서 다시 확인합니다: {exc}\n")
+            summary = _forward_summary(_applied_forward(svc_cfg, requested, forward))
+            if summary:
+                print(summary)
+            _show_ports(name)
+        return rc
 
 
 def cmd_up(a):
@@ -974,69 +1186,9 @@ def cmd_up(a):
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
-    os.makedirs(a.session_dir, exist_ok=True)
-    op = _overlay_path(a.session_dir)
-    if overlay_text.strip():
-        with open(op, "w", encoding="utf-8") as f:
-            f.write(overlay_text)
-    else:                                          # 덮을 게 없으면 overlay 안 만듦(빈 -f 로 docker 실패 방지) + 이전 잔존 제거
-        try:
-            os.remove(op)
-        except OSError:
-            pass
-        op = None
-    grouped, _ = start_group_requested(
-        xm, list(a.service or []), config.get("services") or {}
+    return _run_up_locked(
+        a, env, name, config, xm, overlay_text, overlay_conn, build_args,
     )
-    requested, skipped, unknown_auto = resolved_start_targets(
-        config, xm, list(a.service or [])
-    )
-    if unknown_auto:
-        sys.stderr.write(f"warning: x-marina.startGroup 의 미정의 서비스 무시: {', '.join(unknown_auto)}\n")
-    if grouped and not a.service:
-        print("startGroup: 시작 그룹만 기동 — " + ", ".join(requested) + " (그 외는 대시보드/CLI 에서 개별 시작)")
-    for s, why in skipped.items():
-        sys.stderr.write(f"skip: 서비스 '{s}' 건너뜀 — {why}. 나머지는 기동합니다.\n")
-    if not requested:
-        sys.stderr.write("error: 기동 가능한 서비스가 없습니다 — build 서비스의 Dockerfile 이 모두 없습니다.\n")
-        return 2
-    forward = overlay_conn.get("forward") or {}                   # {port: target} — 엮기
-    svc_cfg = config.get("services") or {}
-    sidecars = [f"{svc}-bind"                                      # 엮기 사이드카는 overlay 에만 있어 requested 엔 없음 → up 대상에 명시 추가(코덱스 #1). 앱(build) 서비스마다 1개(받을 포트가 있을 때만).
-                for svc in requested
-                if (svc_cfg.get(svc) or {}).get("build") and _forward_for_service(forward, svc, _served_ports(svc_cfg.get(svc) or {}))]
-    current_inputs = _capture_build_inputs(a, config, requested, build_args)
-    baseline_path = Path(a.session_dir) / "build-baseline.json"
-    effective_build, build_reasons = build_decision(
-        current_inputs,
-        read_build_baseline(baseline_path),
-        explicit=bool(a.build),
-    )
-    if current_inputs.get("status") != "ok":
-        if a.build:
-            sys.stderr.write("warning: build 입력을 확인하지 못했습니다; Rebuild는 계속하지만 baseline은 갱신하지 않습니다.\n")
-        else:
-            sys.stderr.write("warning: build 입력을 확인하지 못해 기존 이미지로 시작합니다; 문제가 있으면 Rebuild를 실행하세요.\n")
-    elif effective_build and not a.build:
-        for reason in build_reasons:
-            print(f"stale image: {_build_reason_text(reason)}; Start에 --build 자동 적용")
-    argv = up_argv(
-        a.stored, op, a.project_dir, name, requested + sidecars,
-        build=effective_build,
-    )
-    print("compose: " + " ".join(argv))
-    rc = subprocess.call(argv, env=env)                            # P1: same env to up
-    if rc == 0:
-        if effective_build and current_inputs.get("status") == "ok":
-            try:
-                merge_build_baseline(baseline_path, current_inputs)
-            except OSError as exc:
-                sys.stderr.write(f"warning: build baseline 저장 실패; 다음 Start에서 다시 확인합니다: {exc}\n")
-        summary = _forward_summary(_applied_forward(svc_cfg, requested, forward))   # 사이드카가 실제 받는 것만
-        if summary:
-            print(summary)
-        _show_ports(name)
-    return rc
 
 
 def cmd_prebuild_run(a):

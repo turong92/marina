@@ -244,14 +244,17 @@ marina logs [svc]                # docker 로그 follow (대시보드 로그 뷰
 서비스에 Compose 표준 `develop.watch`가 선언되어 있으면 marina가 worktree별
 `docker compose watch --no-up` 프로세스를 함께 시작하고 stop/restart/down 때 정리한다. 소스와 dependency
 입력의 `sync`/`rebuild` 구분은 프로젝트 Compose가 소유한다. Marina는 별도 프로젝트 설정 schema 없이
-Dockerfile·`action: rebuild` 경로·최종 build args의 로컬 성공 baseline만 유지한다.
+Dockerfile·`dockerfile_inline`·`action: rebuild` 경로·최종 build args와 실제 Docker image ID의 로컬 성공
+baseline만 유지한다.
 Marina는 시작 대상 서비스가 선언한 Watch action만 현재 Compose 버전과 대조하고, 지원되지 않는 action은
 다른 동작으로 바꾸지 않고 시작 전에 설명과 함께 중단한다.
 
-Start/Restart에서 현재 입력이 baseline과 같으면 기존처럼 `up -d`만 실행한다. 다르거나 서비스 기록이 없으면
-그 실행에만 `--build`를 붙이고, 성공한 경우에만 baseline을 갱신한다. 입력 수집에 실패하면 기존 이미지로
-시작하면서 Rebuild 안내를 남긴다. build context 전체는 스캔하지 않으므로 이미지에 bake되어 변경 시 build가
-필요한 파일은 Compose Watch `action: rebuild`로 선언해야 한다.
+Start/Restart에서 현재 입력과 image ID가 baseline과 같으면 기존처럼 `up -d`만 실행한다. 다르거나 서비스
+기록이 없으면 그 실행에만 `--build`를 붙이고, 성공한 경우에만 baseline을 갱신한다. Compose Watch나 직접
+build가 이미지를 교체해도 image ID 차이로 다음 Start가 감지한다. 같은 build 서비스의 겹치는 Start는
+service lock으로 직렬화한다. 입력 수집에 실패하면 기존 이미지로 시작하면서 Rebuild 안내를 남긴다. build
+context 전체는 스캔하지 않으므로 이미지에 bake되어 변경 시 build가 필요한 파일은 Compose Watch
+`action: rebuild`로 선언해야 한다.
 
 `marina start web` 처럼 서비스명을 그대로 쓴다(전역 `marina` 래퍼). 무인자 `marina start` 는
 전체를 안 띄우고 안내만 한다 — 워크트리마다 모든 서비스를 무심코 올려 메모리를 잡아먹는 사고 방지.
@@ -331,7 +334,7 @@ services:
 |---|---|
 | 일반 source 저장 | 컨테이너로 sync, 런타임 reload. Docker build 없음 |
 | dependency manifest 또는 Dockerfile 저장 | 해당 서비스 이미지만 rebuild |
-| `marina start <svc>` | 성공 baseline과 입력이 같으면 빠르게 기동, 다르거나 기록이 없으면 자동 build |
+| `marina start <svc>` | 성공 baseline과 입력·image ID가 같으면 빠르게 기동, 다르거나 기록이 없으면 자동 build |
 | `marina rebuild <svc>` | 입력이 같아도 명시적으로 build 평가 후 기동 |
 
 BuildKit layer/cache mount는 `x-marina` 저장소가 아니라 **호스트 Docker daemon의 캐시**다. 같은 dependency 입력과

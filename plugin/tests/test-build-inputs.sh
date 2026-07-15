@@ -11,12 +11,14 @@ printf 'fastapi==1.0\n' > "$TMP/api/requirements.txt"
 
 python3 - "$HERE/../scripts" "$TMP" <<'PY'
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
 from marina_build_inputs import (
+    attach_image_identities,
     build_decision,
     build_input_snapshot,
     compare_build_inputs,
@@ -98,9 +100,19 @@ decision_got = {(item["kind"], item["label"], item["change"]) for item in decisi
 assert ("dockerfile", "api/Dockerfile.local", "changed") in decision_got, decision_got
 assert ("rebuild-input", "api/requirements.txt", "changed") in decision_got, decision_got
 assert ("build-arg", "PROFILE", "changed") in decision_got, decision_got
-assert build_decision(after, after) == (False, [])
+assert build_decision(after, after)[0] is True, "baseline without image identity must upgrade"
+identified_after = attach_image_identities(after, {
+    "api": {"ref": "project-api:latest", "id": "sha256:same"},
+})
+assert build_decision(identified_after, identified_after) == (False, [])
+changed_image = attach_image_identities(after, {
+    "api": {"ref": "project-api:latest", "id": "sha256:changed"},
+})
+image_build, image_reasons = build_decision(changed_image, identified_after)
+assert image_build is True
+assert any(item["kind"] == "image" for item in image_reasons), image_reasons
 assert build_decision(before, None)[0] is True
-assert build_decision(after, after, explicit=True) == (True, [{
+assert build_decision(identified_after, identified_after, explicit=True) == (True, [{
     "kind": "explicit-rebuild",
     "service": "",
     "label": "사용자가 Rebuild 실행",
@@ -128,6 +140,52 @@ corrupt_path.write_text("not json", encoding="utf-8")
 assert read_build_baseline(corrupt_path) is None
 merge_build_baseline(corrupt_path, unknown)
 assert corrupt_path.read_text(encoding="utf-8") == "not json"
+structural_path = root / "session" / "structural.json"
+structural_path.write_text(
+    json.dumps({"version": 1, "status": "ok", "services": {"api": "broken"}}),
+    encoding="utf-8",
+)
+assert read_build_baseline(structural_path) is None
+assert build_decision(before, read_build_baseline(structural_path))[0] is True
+malformed_baseline = {"version": 1, "status": "ok", "services": {"api": "broken"}}
+assert build_decision(before, malformed_baseline)[0] is True
+
+inline_config = {
+    "services": {
+        "inline": {
+            "build": {
+                "context": str(root),
+                "dockerfile_inline": "FROM scratch\nRUN echo first\n",
+            }
+        }
+    }
+}
+inline_before = build_input_snapshot(root, inline_config, ["inline"], {}, key)
+inline_config["services"]["inline"]["build"]["dockerfile_inline"] = (
+    "FROM scratch\nRUN echo second\n"
+)
+inline_after = build_input_snapshot(root, inline_config, ["inline"], {}, key)
+assert inline_before != inline_after
+assert "RUN echo" not in json.dumps(inline_before), inline_before
+
+dependency_dir = root / "dependency-dir"
+dependency_dir.mkdir()
+dependency_file = dependency_dir / "lock.txt"
+dependency_file.write_text("AAAA", encoding="utf-8")
+directory_config = {
+    "services": {
+        "directory": {
+            "build": {"context": str(root / "api"), "dockerfile": "Dockerfile.local"},
+            "develop": {"watch": [{"action": "rebuild", "path": str(dependency_dir)}]},
+        }
+    }
+}
+directory_before = build_input_snapshot(root, directory_config, ["directory"], {}, key)
+original_stat = dependency_file.stat()
+dependency_file.write_text("BBBB", encoding="utf-8")
+os.utime(dependency_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_ns))
+directory_after = build_input_snapshot(root, directory_config, ["directory"], {}, key)
+assert directory_before != directory_after
 
 concurrent_path = root / "concurrent" / "build-baseline.json"
 snapshots = []

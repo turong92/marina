@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -47,6 +48,8 @@ def _path_digest(path: Path, ignored_paths: tuple[Path, ...] = ()) -> str:
         return "other"
     for directory, dirnames, filenames in os.walk(path):
         directory_path = Path(directory)
+        relative_directory = directory_path.relative_to(path).as_posix()
+        digest.update(f"d\0{relative_directory}\n".encode())
         dirnames[:] = sorted(
             name for name in dirnames
             if not _is_ignored(directory_path / name, ignored_paths)
@@ -55,12 +58,19 @@ def _path_digest(path: Path, ignored_paths: tuple[Path, ...] = ()) -> str:
             item = directory_path / filename
             if _is_ignored(item, ignored_paths):
                 continue
-            try:
-                stat = item.stat()
-                rel = item.relative_to(path).as_posix()
-                digest.update(f"{rel}\0{stat.st_size}\0{stat.st_mtime_ns}\n".encode())
-            except OSError:
-                continue
+            item_stat = item.lstat()
+            rel = item.relative_to(path).as_posix()
+            mode = stat.S_IMODE(item_stat.st_mode)
+            if stat.S_ISLNK(item_stat.st_mode):
+                digest.update(f"l\0{rel}\0{mode:o}\0{os.readlink(item)}\n".encode())
+            elif stat.S_ISREG(item_stat.st_mode):
+                digest.update(f"f\0{rel}\0{mode:o}\0".encode())
+                with item.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                digest.update(b"\n")
+            else:
+                digest.update(f"o\0{rel}\0{item_stat.st_mode:o}\n".encode())
     return "dir:" + digest.hexdigest()
 
 
@@ -95,8 +105,14 @@ def build_input_snapshot(
         if not isinstance(build, dict):
             continue
         context = _absolute(root, str(build.get("context") or "."))
-        dockerfile = _absolute(context, str(build.get("dockerfile") or "Dockerfile"))
-        dockerfiles = {_label(root, dockerfile): _path_digest(dockerfile, ignored)}
+        inline = build.get("dockerfile_inline")
+        if inline is not None:
+            inline_digest = hashlib.sha256(str(inline).encode("utf-8")).hexdigest()
+            dockerfile = None
+            dockerfiles = {"<inline>": "inline:" + inline_digest}
+        else:
+            dockerfile = _absolute(context, str(build.get("dockerfile") or "Dockerfile"))
+            dockerfiles = {_label(root, dockerfile): _path_digest(dockerfile, ignored)}
         rebuild: dict[str, str] = {}
         develop = service.get("develop") or {}
         watch = develop.get("watch") if isinstance(develop, dict) else []
@@ -104,7 +120,7 @@ def build_input_snapshot(
             if not isinstance(rule, dict) or rule.get("action") != "rebuild" or not rule.get("path"):
                 continue
             path = _absolute(root, str(rule["path"]))
-            if path.resolve() == dockerfile.resolve():
+            if dockerfile is not None and path.resolve() == dockerfile.resolve():
                 continue
             rebuild[_label(root, path)] = _path_digest(path, ignored)
         args = dict(build.get("args") or {}) if isinstance(build.get("args"), dict) else {}
@@ -147,7 +163,9 @@ def compare_build_inputs(
     previous_services = previous.get("services") or {}
     for service in sorted(current_services):
         now = current_services.get(service) or {}
-        if service not in previous_services:
+        if not isinstance(now, dict):
+            continue
+        if service not in previous_services or not isinstance(previous_services.get(service), dict):
             reasons.append({
                 "kind": "first-run",
                 "service": service,
@@ -194,11 +212,56 @@ def build_decision(
     explicit: bool = False,
 ) -> tuple[bool, list[dict[str, str]]]:
     reasons = compare_build_inputs(current, baseline, "rebuild" if explicit else "start")
+    current_services = current.get("services") if isinstance(current.get("services"), dict) else {}
+    baseline_services = baseline.get("services") if isinstance(baseline, dict) else {}
+    if not isinstance(baseline_services, dict):
+        baseline_services = {}
+    if current.get("status") == "ok" and baseline and baseline.get("status") == "ok":
+        for service in sorted(current_services):
+            before = baseline_services.get(service)
+            if not isinstance(before, dict):
+                continue
+            old_image = before.get("image")
+            now = current_services.get(service)
+            new_image = now.get("image") if isinstance(now, dict) else None
+            if not _valid_image_identity(old_image) or new_image != old_image:
+                reasons.append({
+                    "kind": "image",
+                    "service": service,
+                    "label": "실제 Docker 이미지",
+                    "change": "unverified" if not _valid_image_identity(old_image) else "changed",
+                })
     if explicit:
         return True, reasons
-    if current.get("status") != "ok" or not (current.get("services") or {}):
+    if current.get("status") != "ok" or not current_services:
         return False, reasons
     return bool(reasons), reasons
+
+
+def _valid_image_identity(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and isinstance(value.get("ref"), str)
+        and bool(value["ref"])
+        and isinstance(value.get("id"), str)
+        and bool(value["id"])
+    )
+
+
+def attach_image_identities(
+    snapshot: dict[str, Any],
+    identities: dict[str, dict[str, str]],
+) -> dict[str, Any]:
+    if snapshot.get("status") != "ok" or not isinstance(snapshot.get("services"), dict):
+        return snapshot
+    services: dict[str, Any] = {}
+    for service, inputs in snapshot["services"].items():
+        item = dict(inputs) if isinstance(inputs, dict) else inputs
+        identity = identities.get(service)
+        if isinstance(item, dict) and _valid_image_identity(identity):
+            item["image"] = {"ref": identity["ref"], "id": identity["id"]}
+        services[service] = item
+    return {"version": 1, "status": "ok", "services": services}
 
 
 def load_build_input_key(home: Path) -> bytes:
@@ -257,8 +320,22 @@ def read_build_input_snapshot(path: Path) -> dict[str, Any]:
         value = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {"version": 1, "status": "unknown"}
-    if not isinstance(value, dict) or value.get("status") != "ok" or not isinstance(value.get("services"), dict):
+    if (
+        not isinstance(value, dict)
+        or value.get("version") != 1
+        or value.get("status") != "ok"
+        or not isinstance(value.get("services"), dict)
+    ):
         return {"version": 1, "status": "unknown"}
+    for service, inputs in value["services"].items():
+        if not isinstance(service, str) or not isinstance(inputs, dict):
+            return {"version": 1, "status": "unknown"}
+        for field in ("dockerfile", "rebuild", "buildArgs"):
+            if not isinstance(inputs.get(field), dict):
+                return {"version": 1, "status": "unknown"}
+        image = inputs.get("image")
+        if image is not None and not _valid_image_identity(image):
+            return {"version": 1, "status": "unknown"}
     return {"version": 1, "status": "ok", "services": value["services"]}
 
 

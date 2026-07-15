@@ -13,11 +13,22 @@ echo "docker $*" >> "$DOCKER_LOG"
 case "$*" in
   "compose version --short") echo "2.40.3" ;;
   info) exit 0 ;;
+  "image inspect --format={{.Id}} "*) echo "sha256:${INSPECT_IMAGE_ID:-image-a}" ;;
   *"config --format json"*) echo "APP_ENV_AT_CONFIG=${APP_ENV:-MISSING}" >> "$DOCKER_LOG"; cat "$DOCKER_CONFIG_FIXTURE" ;;
+  *"images --format json api"*)
+    echo "[{\"ID\":\"sha256:${COMPOSE_IMAGE_ID:-image-a}\",\"Repository\":\"proj-api\",\"Tag\":\"latest\"}]" ;;
   *"ps --format json"*) cat "$DOCKER_PS_FIXTURE" ;;
   *"up -d"*)
     [[ -s "${MARINA_BUILD_INPUT_SNAPSHOT:-}" ]] || { echo "snapshot missing before compose up" >&2; exit 23; }
     rm -f "$MARINA_BUILD_INPUT_SNAPSHOT"
+    if [[ "${SLOW_UP:-0}" == 1 ]]; then
+      if mkdir "$UP_PROBE" 2>/dev/null; then
+        sleep 2
+        rmdir "$UP_PROBE"
+      else
+        : > "$UP_PROBE.overlap"
+      fi
+    fi
     [[ "${FAIL_UP:-0}" != 1 ]] || exit 24 ;;
   *) exit 0 ;;
 esac
@@ -87,6 +98,13 @@ SD="$P/.workspace/marina/main"
 grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: first build service Start must build"; cat "$DOCKER_LOG"; exit 1; }
 grep -q "stale image:" <<<"$first_out" || { echo "FAIL: first automatic build reason missing"; echo "$first_out"; exit 1; }
 [[ -f "$SD/build-baseline.json" ]] || { echo "FAIL: successful build baseline missing"; exit 1; }
+python3 - "$SD/build-baseline.json" <<'PY'
+import json,sys
+baseline=json.load(open(sys.argv[1]))
+assert baseline["services"]["api"]["image"] == {
+    "id":"sha256:image-a", "ref":"proj-api:latest",
+}, baseline
+PY
 
 : > "$DOCKER_LOG"; mrun start --api >/dev/null
 grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: repeated Start not routed"; cat "$DOCKER_LOG"; exit 1; }
@@ -94,6 +112,10 @@ grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: unchanged Start must stay fa
 : > "$DOCKER_LOG"; mrun restart --api >/dev/null
 grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: unchanged Restart not routed"; cat "$DOCKER_LOG"; exit 1; }
 grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: unchanged Restart must stay fast"; cat "$DOCKER_LOG"; exit 1; } || true
+
+# Watch가 B를 build한 뒤 선언 입력이 baseline A로 되돌아온 ABA도 실제 image ID로 감지한다.
+: > "$DOCKER_LOG"; INSPECT_IMAGE_ID=image-b COMPOSE_IMAGE_ID=image-a mrun start --api >/dev/null
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: external image ABA must auto-build"; cat "$DOCKER_LOG"; exit 1; }
 
 printf '# changed\n' >> "$P/api/Dockerfile.local"
 : > "$DOCKER_LOG"; changed_out="$(mrun start --api 2>&1)"
@@ -116,6 +138,16 @@ grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "
 : > "$DOCKER_LOG"; mrun start --web >/dev/null
 grep -q "compose .*up -d --remove-orphans web" "$DOCKER_LOG" || { echo "FAIL: image-only Start not routed"; cat "$DOCKER_LOG"; exit 1; }
 grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: image-only Start must not auto-build"; cat "$DOCKER_LOG"; exit 1; } || true
+
+# 같은 build 서비스의 겹치는 Start는 image 판정부터 baseline 갱신까지 직렬화한다.
+export UP_PROBE="$TMP/up-probe"
+rm -rf "$UP_PROBE" "$UP_PROBE.overlap"
+SLOW_UP=1 mrun start --api >/dev/null 2>&1 & first_start=$!
+for _ in $(seq 1 200); do [[ -d "$UP_PROBE" ]] && break; sleep 0.01; done
+[[ -d "$UP_PROBE" ]] || { echo "FAIL: first concurrent Start did not enter up"; exit 1; }
+SLOW_UP=1 mrun start --api >/dev/null 2>&1 & second_start=$!
+wait "$first_start" "$second_start"
+[[ ! -e "$UP_PROBE.overlap" ]] || { echo "FAIL: same-service Starts overlapped compose up"; exit 1; }
 
 # stop --web → stop web (down 아님)
 : > "$DOCKER_LOG"; mrun stop --web >/dev/null

@@ -102,8 +102,36 @@ mc.build_input_snapshot=original_snapshot
 assert elapsed < 0.5, elapsed
 assert unknown == {"version":1,"status":"unknown"}, unknown
 assert json.load(open(handoff,encoding="utf-8")) == {"version":1,"status":"unknown"}
+
+# Capture setup failures are best-effort and still publish an unknown handoff.
+original_mkstemp=mc.tempfile.mkstemp
+def failed_mkstemp(*args, **kwargs):
+    raise OSError("capture directory unavailable")
+mc.tempfile.mkstemp=failed_mkstemp
+setup_unknown=mc._capture_build_inputs(
+    SimpleNamespace(project_dir=T,session_dir=os.path.join(T,"session")), {"services":{}}, [], {}
+)
+mc.tempfile.mkstemp=original_mkstemp
+assert setup_unknown == {"version":1,"status":"unknown"}, setup_unknown
+assert json.load(open(handoff,encoding="utf-8")) == {"version":1,"status":"unknown"}
+
+# Deadline handling must never fall back to a blocking waitpid(pid, 0).
+original_fork,original_waitpid,original_kill=mc.os.fork,mc.os.waitpid,mc.os.kill
+wait_options=[]
+mc.os.fork=lambda: 424242
+mc.os.waitpid=lambda pid,options: (wait_options.append(options) or (0,0))
+mc.os.kill=lambda pid,sig: None
+mc.BUILD_INPUT_CAPTURE_TIMEOUT_SEC=0.01
+bounded_unknown=mc._capture_build_inputs(
+    SimpleNamespace(project_dir=T,session_dir=os.path.join(T,"session")), {"services":{}}, [], {}
+)
+mc.os.fork,mc.os.waitpid,mc.os.kill=original_fork,original_waitpid,original_kill
+assert bounded_unknown == {"version":1,"status":"unknown"}, bounded_unknown
+assert wait_options and all(option == os.WNOHANG for option in wait_options), wait_options
 ps='[{"Service":"web","Publishers":[{"URL":"127.0.0.1","TargetPort":80,"PublishedPort":55001,"Protocol":"tcp"},{"PublishedPort":0}]},{"Service":"be","Publishers":[{"PublishedPort":55002}]}]'
 assert mc.parse_ps_ports(ps)=={"web":[55001],"be":[55002]}, mc.parse_ps_ports(ps)
+assert mc._json_rows('[{"ID":"a"},{"ID":"b"}]') == [{"ID":"a"},{"ID":"b"}]
+assert mc._json_rows('{"ID":"a"}\n{"ID":"b"}\n') == [{"ID":"a"},{"ID":"b"}]
 # 엮기 — _normalize_forward/_legacy_host_forward 상세는 test-compose-forward.sh 소관(중복 유지비 제거)
 # 엮기 — _auto_service_forward: compose 가 서빙하는 포트 → 그 서비스 (자동 서비스타겟)
 assert mc._auto_service_forward({"services":{"be":{"ports":[{"target":8081,"published":"8081"}]},"fe":{"ports":[{"target":3000}]},"redis":{"image":"r"}}})=={"8081":"be","3000":"fe"}
