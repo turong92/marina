@@ -55,13 +55,14 @@
       return `${(usedMb / 1024).toFixed(1)} / ${(totalMb / 1024).toFixed(1)} GB`;
     }
 
-    function memoryBlockConfirmation(block) {
+    function memoryBlockConfirmation(block, type = 'start') {
+      const operation = ({start: '시작', 'start-all': '전체 시작', restart: '재시작', rebuild: '재빌드'})[type] || '실행';
       const reason = {
-        'host-critical': `Host available ${formatMemoryGb(block.hostFreeMb)}가 시작 기준 ${formatMemoryGb(block.minFreeMb)}보다 낮아 시작을 막았어.`,
-        'docker-unknown': 'Docker 메모리 측정이 불완전해 안전하게 시작 여부를 판단할 수 없어 막았어.',
-        'docker-current': `Docker 여유가 이미 예약 ${formatMemoryGb(block.reserveMb)}보다 낮아 시작을 막았어.`,
-        'docker-projected': '이 서비스를 시작하면 Docker 여유가 예약치 아래로 내려가 시작을 막았어.',
-      }[block?.reason] || '메모리 여유가 부족해 시작을 막았어.';
+        'host-critical': `Host available ${formatMemoryGb(block.hostFreeMb)}가 기준 ${formatMemoryGb(block.minFreeMb)}보다 낮아 ${operation}을 막았어.`,
+        'docker-unknown': `Docker 메모리 측정이 불완전해 안전하게 판단할 수 없어 ${operation}을 막았어.`,
+        'docker-current': `Docker 여유가 이미 예약 ${formatMemoryGb(block.reserveMb)}보다 낮아 ${operation}을 막았어.`,
+        'docker-projected': `${operation}하면 Docker 여유가 예약치 아래로 내려가 막았어.`,
+      }[block?.reason] || `메모리 여유가 부족해 ${operation}을 막았어.`;
       const estimates = (Array.isArray(block?.estimatedServices) ? block.estimatedServices : [])
         .map(item => ({service: String(item?.service || '').trim(), memoryMb: finiteMemoryMb(item?.memoryMb)}))
         .filter(item => item.service && item.memoryMb !== null)
@@ -74,7 +75,7 @@
         ? `큰 추정: ${estimates.map(item => `${item.service} ${formatMemoryGb(item.memoryMb)}`).join(', ')}`
         : '큰 추정: 기록된 서비스 메모리 없음';
       const unknownLine = unknown.length ? `알 수 없는 서비스: ${unknown.join(', ')}` : '알 수 없는 서비스: 없음';
-      return `${reason}\n예상 Docker 여유 ${formatMemoryGb(block?.projectedFreeMb)} / 예약 ${formatMemoryGb(block?.reserveMb)}\n${estimateLine}\n${unknownLine}\n그래도 강제로 시작할까?`;
+      return `${reason}\n예상 Docker 여유 ${formatMemoryGb(block?.projectedFreeMb)} / 예약 ${formatMemoryGb(block?.reserveMb)}\n${estimateLine}\n${unknownLine}\n그래도 강제로 ${operation}할까?`;
     }
 
     async function action(type, root, service, force = false) {
@@ -84,7 +85,7 @@
         body: JSON.stringify({root, service, force})
       });
       if (result?.blocked === 'low-memory' && !force) {
-        if (confirm(memoryBlockConfirmation(result))) {
+        if (confirm(memoryBlockConfirmation(result, type))) {
           return action(type, root, service, true);
         }
         return;
@@ -176,7 +177,7 @@
         body: JSON.stringify({root: session.root, force})
       });
       if (result?.blocked === 'low-memory' && !force) {
-        if (confirm(memoryBlockConfirmation(result))) {
+        if (confirm(memoryBlockConfirmation(result, type))) {
           return sessionAction(type, session, true);
         }
         return;

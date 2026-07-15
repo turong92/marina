@@ -27,7 +27,7 @@ rg -q 'function memoryBlockConfirmation' "$UTIL" || { echo "FAIL: memory block c
 
 # Both individual and start-all actions must ask before issuing their one forced retry.
 rg -Fq "if (result?.blocked === 'low-memory' && !force)" "$UTIL" || { echo "FAIL: guarded block handling missing"; exit 1; }
-rg -Fq 'confirm(memoryBlockConfirmation(result))' "$UTIL" || { echo "FAIL: memory override confirmation missing"; exit 1; }
+rg -Fq 'confirm(memoryBlockConfirmation(result, type))' "$UTIL" || { echo "FAIL: memory override confirmation missing"; exit 1; }
 rg -Fq 'return action(type, root, service, true)' "$UTIL" || { echo "FAIL: individual force retry missing"; exit 1; }
 rg -Fq 'return sessionAction(type, session, true)' "$UTIL" || { echo "FAIL: start-all force retry missing"; exit 1; }
 rg -Fq 'JSON.stringify({root: session.root, force})' "$UTIL" || { echo "FAIL: start-all force payload missing"; exit 1; }
@@ -114,6 +114,10 @@ vm.runInContext('this.__test = {action, sessionAction, formatMemoryPair, finiteM
   const nullConfirmation = api.memoryBlockConfirmation({reason: 'docker-projected', projectedFreeMb: null, reserveMb: null, estimatedServices: [{service: 'web', memoryMb: null}], unknownServices: []});
   if (!nullConfirmation.includes('알 수 없음') || /0\.0 GB|undefined|NaN/.test(nullConfirmation)) {
     throw new Error(`null confirmation invented telemetry: ${nullConfirmation}`);
+  }
+  const rebuildConfirmation = api.memoryBlockConfirmation(lowMemory, 'rebuild');
+  if (!rebuildConfirmation.includes('강제로 재빌드할까?') || rebuildConfirmation.includes('강제로 시작할까?')) {
+    throw new Error(`operation-specific confirmation mismatch: ${rebuildConfirmation}`);
   }
   const nullMeta = api.serviceMemoryMeta({memoryUsageMb: null, memoryPeakMb: undefined, memoryLimitMb: '', oomKilled: null});
   if (nullMeta.current || nullMeta.title || /0 MB/.test(`${nullMeta.current} ${nullMeta.title}`)) {

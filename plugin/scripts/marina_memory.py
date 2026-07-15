@@ -164,18 +164,23 @@ def _row_for_id(rows: list[dict[str, Any]], container_id: str) -> dict[str, Any]
     return {}
 
 
-def _inspect_many(container_ids: list[str]) -> dict[str, dict[str, Any]]:
+def _inspect_many(
+    container_ids: list[str],
+    refresh_ids: set[str] | None = None,
+) -> dict[str, dict[str, Any]]:
     """Inspect all uncached containers in one bounded Docker call."""
     ids = list(dict.fromkeys(container_id for container_id in container_ids if container_id))
+    refresh = refresh_ids or set()
     result = {container_id: _inspect_cache[container_id] for container_id in ids if container_id in _inspect_cache}
-    missing = [container_id for container_id in ids if container_id not in result]
+    missing = [container_id for container_id in ids if container_id not in result or container_id in refresh]
     if missing:
         rows = _json_rows(_run(["docker", "inspect", *missing], _INSPECT_TIMEOUT_SECONDS))
         for container_id in missing:
             details = _row_for_id(rows, container_id)
             if details:
-                _inspect_cache[container_id] = details
                 result[container_id] = details
+                immutable = {key: copy.deepcopy(value) for key, value in details.items() if key != "State"}
+                _inspect_cache[container_id] = immutable
     return result
 
 
@@ -194,6 +199,7 @@ def _container_rows(
     errors: list[str] = []
 
     candidate_ids = [str(row.get("ID") or row.get("Id") or "") for row in stats_rows]
+    refresh_ids: set[str] = set()
     for row in ps_rows:
         container_id = str(row.get("ID") or row.get("Id") or "")
         labels = _labels(row)
@@ -201,9 +207,11 @@ def _container_rows(
         is_compose = bool(labels.get("com.docker.compose.project") and labels.get("com.docker.compose.service"))
         if state == "running" or is_compose:
             candidate_ids.append(container_id)
+        if state != "running" and is_compose and container_id:
+            refresh_ids.add(container_id)
     candidate_ids = list(dict.fromkeys(container_id for container_id in candidate_ids if container_id))
     try:
-        inspected = _inspect_many(candidate_ids)
+        inspected = _inspect_many(candidate_ids, refresh_ids)
     except Exception as exc:
         inspected = {}
         partial = True
@@ -318,6 +326,7 @@ def memory_snapshot(force: bool = False) -> dict[str, Any]:
     """Return a cached best-effort host/Docker snapshot; never raise."""
     global _refreshing, _snapshot_cache
     now = time.monotonic()
+    wait_fallback: dict[str, Any] | None = None
     with _cache_condition:
         if _snapshot_cache and not force and now - _snapshot_cache[0] < _CACHE_TTL_SECONDS:
             return _cache_value(_snapshot_cache[1])
@@ -325,13 +334,25 @@ def memory_snapshot(force: bool = False) -> dict[str, Any]:
             _cache_condition.wait(timeout=_DOCKER_TIMEOUT_SECONDS + _INSPECT_TIMEOUT_SECONDS)
             if _snapshot_cache:
                 if _refreshing:
-                    return _cache_value(
+                    wait_fallback = _cache_value(
                         _snapshot_cache[1], stale=True, error="memory snapshot refresh is still running",
                     )
-                return _cache_value(_snapshot_cache[1])
-            return _empty_snapshot("memory snapshot refresh is still running")
-        previous = _snapshot_cache[1] if _snapshot_cache else None
-        _refreshing = True
+                else:
+                    return _cache_value(_snapshot_cache[1])
+            elif _refreshing:
+                wait_fallback = _empty_snapshot("memory snapshot refresh is still running")
+        if wait_fallback is None:
+            previous = _snapshot_cache[1] if _snapshot_cache else None
+            _refreshing = True
+        else:
+            previous = None
+    if wait_fallback is not None:
+        try:
+            wait_fallback["host"] = host_memory()
+            wait_fallback["capturedAt"] = _captured_at()
+        except Exception:
+            pass
+        return wait_fallback
     try:
         fresh_host = host_memory()
         snapshot = _collect_snapshot(fresh_host)

@@ -111,6 +111,53 @@ assert incomplete["partial"] is True, incomplete
 assert incomplete["docker"]["usageComplete"] is False, incomplete
 assert incomplete["docker"]["usedMb"] is None, incomplete
 
+# A waiter that times out behind another Docker refresh still reads current host pressure.
+old_docker_timeout = mm._DOCKER_TIMEOUT_SECONDS
+old_inspect_timeout = mm._INSPECT_TIMEOUT_SECONDS
+mm._DOCKER_TIMEOUT_SECONDS = 0
+mm._INSPECT_TIMEOUT_SECONDS = 0
+mm._snapshot_cache = (time.monotonic() - mm._CACHE_TTL_SECONDS - 1, {
+    "host": {"totalMb": 32000, "availableMb": 8000, "availablePercent": 25},
+    "docker": {"available": False, "totalMb": None, "usedMb": None, "usageComplete": False},
+    "containers": [], "stale": False, "partial": True, "error": "docker unavailable",
+    "capturedAt": "old",
+})
+mm._refreshing = True
+mm.host_memory = lambda: {"totalMb": 32000, "availableMb": 1000, "availablePercent": 3}
+try:
+    waiter_fallback = mm.memory_snapshot()
+finally:
+    mm._refreshing = False
+    mm._DOCKER_TIMEOUT_SECONDS = old_docker_timeout
+    mm._INSPECT_TIMEOUT_SECONDS = old_inspect_timeout
+assert waiter_fallback["host"]["availableMb"] == 1000, waiter_fallback
+
+# Mutable inspect state must refresh when a running container later exits by OOM.
+transition = {"exited": False}
+def transition_run(args, timeout):
+    if args[:2] == ["docker", "info"]:
+        return info
+    if args[:2] == ["docker", "stats"]:
+        return "" if transition["exited"] else '{"ID":"abc123","Name":"demo-web-1","MemUsage":"512MiB / 15.6GiB"}'
+    if args[:2] == ["docker", "ps"]:
+        state = "exited" if transition["exited"] else "running"
+        return '{"ID":"abc123","Names":"demo-web-1","State":"' + state + '","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}'
+    if args[:2] == ["docker", "inspect"]:
+        state = "exited" if transition["exited"] else "running"
+        oom = "true" if transition["exited"] else "false"
+        return '[{"Id":"abc123","State":{"Status":"' + state + '","OOMKilled":' + oom + '},"HostConfig":{"Memory":0},"Config":{"Labels":{"com.docker.compose.project":"demo","com.docker.compose.service":"web"}}}]'
+    raise AssertionError(args)
+
+mm._run = transition_run
+mm._snapshot_cache = None
+mm._inspect_cache.clear()
+running_snapshot = mm.memory_snapshot(force=True)
+assert running_snapshot["containers"][0]["running"] is True
+transition["exited"] = True
+exited_snapshot = mm.memory_snapshot(force=True)
+exited_web = next(row for row in exited_snapshot["containers"] if row["composeService"] == "web")
+assert exited_web["running"] is False and exited_web["oomKilled"] is True, exited_web
+
 # A shared failed refresh marks every waiting caller stale, then caches that failure.
 mm._snapshot_cache = (time.monotonic() - mm._CACHE_TTL_SECONDS - 1, snapshot)
 timeout_calls = 0

@@ -347,7 +347,11 @@ def _service_profile(arg_names, marina_build_args, stored_build_args) -> dict:
     return {"profileVar": var, "profileValue": "" if val is None else str(val)}
 
 
-def _docker_compose_config_json(sp: Path, root: Path) -> tuple[dict | None, str]:
+def _docker_compose_config_json(
+    sp: Path,
+    root: Path,
+    env: dict[str, str] | None = None,
+) -> tuple[dict | None, str]:
     """보관 compose(sp) → `docker compose config --format json` 해석 결과(raw dict) 또는 (None, error).
     compose_resolved_view·weave_map(연결 탭 P3) 공유 — 같은 docker 호출 규약(중복 회피). 컨테이너를 안 띄우는
     '설정 해석' 1회 호출이라 가볍다(up/ps 아님) — daemon 이 꺼져 있어도 대체로 동작."""
@@ -355,7 +359,7 @@ def _docker_compose_config_json(sp: Path, root: Path) -> tuple[dict | None, str]
         proc = subprocess.run(
             _docker_cmd("compose", "-f", str(sp), "--project-directory", str(root),
                         "config", "--format", "json"),
-            capture_output=True, text=True, timeout=12)
+            capture_output=True, text=True, timeout=12, env=env)
     except FileNotFoundError:
         return None, "docker 미설치"
     except subprocess.TimeoutExpired:
@@ -381,12 +385,49 @@ def compose_start_targets(root: Path, project: dict, requested: list[str]) -> li
         raise ValueError("project id 없음") from exc
     if not stored.exists():
         raise ValueError(f"보관 compose 없음: {stored}")
-    config, error = _docker_compose_config_json(stored, root)
+    try:
+        source = stored.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise ValueError(f"compose 파일 읽기 실패: {exc}") from exc
+    resolved_source = source
+    for external in project.get("externalRepos") or []:
+        if not isinstance(external, dict):
+            continue
+        name = str(external.get("name") or "").strip()
+        source_path = str(external.get("source") or "").strip()
+        if not name or not source_path:
+            continue
+        attached = root / ".workspace" / "external" / name
+        replacement = attached if attached.exists() else Path(source_path).expanduser()
+        resolved_source = resolved_source.replace(f"./.workspace/external/{name}", str(replacement))
+        resolved_source = resolved_source.replace(f".workspace/external/{name}", str(replacement))
+
+    plan_file = stored
+    temporary: str | None = None
+    if resolved_source != source:
+        fd, temporary = tempfile.mkstemp(prefix=stored.name + ".memory-plan-", dir=str(stored.parent))
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(resolved_source)
+        plan_file = Path(temporary)
+
+    env = dict(os.environ)
+    env_var = str(project.get("composeEnvVar") or "").strip()
+    if env_var:
+        env[env_var] = os.environ.get("MARINA_COMPOSE_ENV") or str(project.get("composeEnvDefault") or "local")
+    try:
+        config, error = _docker_compose_config_json(plan_file, root, env=env)
+    finally:
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
     if config is None:
         raise ValueError(f"compose config 해석 실패: {error}")
     try:
         xmarina = _mc().xmarina_for_stored(str(stored)) or {}
-        targets, _skipped, _unknown = _mc().resolved_start_targets(config, xmarina, list(requested))
+        grouped, _unknown = _mc().start_group_requested(xmarina, list(requested), config.get("services") or {})
+        targets = _mc().service_dependency_closure(config, grouped)
     except Exception as exc:
         raise ValueError(f"compose 시작 대상 해석 실패: {exc}") from exc
     return list(dict.fromkeys(str(target) for target in targets if str(target)))

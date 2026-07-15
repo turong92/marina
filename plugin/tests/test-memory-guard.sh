@@ -129,16 +129,44 @@ with tempfile.TemporaryDirectory() as temp:
     stored = home / "demo" / "docker-compose.yml"
     stored.write_text("services:\n  web:\n    image: demo\n  db:\n    image: postgres\n", encoding="utf-8")
     original_config_reader = compose_svc._docker_compose_config_json
-    compose_svc._docker_compose_config_json = lambda path, candidate: ({
-        "services": {
-            "web": {"image": "demo", "depends_on": {"db": {"condition": "service_started"}}},
-            "db": {"image": "postgres"},
-        },
-    }, "")
+    external_source = Path(temp) / "external-source"
+    external_source.mkdir()
+    (external_source / "docker-compose.yml").write_text("services:\n  db:\n    image: postgres\n", encoding="utf-8")
+    stored.write_text(
+        "include:\n  - ./.workspace/external/data/docker-compose.yml\n"
+        "services:\n  web:\n    image: ${PROFILE:?PROFILE required}\n",
+        encoding="utf-8",
+    )
+    project_with_env = {
+        **project,
+        "composeEnvVar": "PROFILE",
+        "composeEnvDefault": "local",
+        "externalRepos": [{"name": "data", "source": str(external_source)}],
+    }
+    resolved_inputs = {}
+    def fake_config_reader(path, candidate, env=None):
+        resolved_inputs["text"] = path.read_text(encoding="utf-8")
+        resolved_inputs["env"] = dict(env or {})
+        return ({
+            "services": {
+                "web": {"image": "demo", "depends_on": {"db": {"condition": "service_started"}}},
+                "db": {"image": "postgres"},
+            },
+        }, "")
+    compose_svc._docker_compose_config_json = fake_config_reader
+    old_compose_env = os.environ.get("MARINA_COMPOSE_ENV")
+    os.environ["MARINA_COMPOSE_ENV"] = "test-profile"
     try:
-        assert compose_svc.compose_start_targets(root, project, ["web"]) == ["web", "db"]
+        assert compose_svc.compose_start_targets(root, project_with_env, ["web"]) == ["web", "db"]
     finally:
         compose_svc._docker_compose_config_json = original_config_reader
+        if old_compose_env is None:
+            os.environ.pop("MARINA_COMPOSE_ENV", None)
+        else:
+            os.environ["MARINA_COMPOSE_ENV"] = old_compose_env
+    assert resolved_inputs["env"]["PROFILE"] == "test-profile", resolved_inputs
+    assert str(external_source) in resolved_inputs["text"], resolved_inputs
+    assert not list(stored.parent.glob("*.memory-plan-*"))
 
     # Lifecycle paths reserve explicit services plus transitive dependencies.
     # Restart has no additional target because it reuses an already-running image.
