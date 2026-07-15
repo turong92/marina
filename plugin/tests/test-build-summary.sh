@@ -69,6 +69,13 @@ write_build_meta(log, {
     "startedAt": 100.0,
     "endedAt": 230.0,
     "durationSec": 130.0,
+    "memoryPressure": {
+        "hostAvailableMinMb": 3800,
+        "containersPeakMb": 700,
+        "dockerTotalMb": 8192,
+        "sampleCount": 3,
+        "partial": False,
+    },
     "inputs": {
         "version": 1,
         "status": "ok",
@@ -84,6 +91,13 @@ write_build_meta(log, {
 out = build_summary(log)
 assert out["status"] == "success", out
 assert out["durationSec"] == 130.0, out
+assert out["memoryPressure"] == {
+    "hostAvailableMinMb": 3800,
+    "containersPeakMb": 700,
+    "dockerTotalMb": 8192,
+    "sampleCount": 3,
+    "partial": False,
+}, out
 assert out["cacheHits"] == 1, out
 assert out["cacheMisses"] == 4, out
 assert out["bottleneck"]["durationSec"] == 68.5, out

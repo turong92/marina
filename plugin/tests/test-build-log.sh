@@ -6,13 +6,24 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export MARINA_HOME="$TMP/home"
 python3 - "$HERE/../scripts" "$TMP" <<'PY'
-import concurrent.futures, os, subprocess, sys
+import concurrent.futures, os, subprocess, sys, threading
 sys.path.insert(0, sys.argv[1])
 from pathlib import Path
 root = Path(sys.argv[2]) / "proj"; root.mkdir()
 import marina_cli as mc
 import marina_build as mb
+import marina_memory as mm
 import marina_paths as mp
+
+pressure_summaries = iter([
+    {"hostAvailableMinMb": 3800, "containersPeakMb": 700, "dockerTotalMb": 8192, "sampleCount": 1, "partial": False},
+    {"hostAvailableMinMb": 3900, "containersPeakMb": 650, "dockerTotalMb": 8192, "sampleCount": 1, "partial": False},
+    {"hostAvailableMinMb": 3700, "containersPeakMb": 720, "dockerTotalMb": 8192, "sampleCount": 1, "partial": True},
+])
+pressure_tokens = []
+finished_pressure_tokens = []
+mc.start_pressure_observation = lambda: pressure_tokens.append(f"pressure-{len(pressure_tokens) + 1}") or pressure_tokens[-1]
+mc.finish_pressure_observation = lambda token: finished_pressure_tokens.append(token) or next(pressure_summaries)
 marker = root / "lifecycle-finished"
 runner = root / "fake-marina.sh"
 runner.write_text(
@@ -41,6 +52,8 @@ assert success_meta["exitCode"] == 0, success_meta
 assert success_meta["endedAt"] >= success_meta["startedAt"], success_meta
 assert success_meta["durationSec"] >= 0, success_meta
 assert success_meta["inputs"]["services"]["api"]["dockerfile"], success_meta
+assert success_meta["memoryPressure"]["sampleCount"] >= 1, success_meta
+assert success_meta["memoryPressure"]["hostAvailableMinMb"] == 3800, success_meta
 assert marker.exists(), marker
 assert not success_log.with_suffix(".inputs.json").exists(), "snapshot handoff file must be removed"
 # 실패 경로 — rc!=0 → CalledProcessError(output=파일 끝) → busyError 500자 계약 유지 가능
@@ -57,9 +70,69 @@ assert failure_meta["status"] == "failed", failure_meta
 assert failure_meta["op"] == "start", failure_meta
 assert failure_meta["exitCode"] != 0, failure_meta
 assert failure_meta["inputs"] == {"version": 1, "status": "unknown"}, failure_meta
+assert failure_meta["memoryPressure"]["hostAvailableMinMb"] == 3900, failure_meta
 assert not failure_log.with_suffix(".inputs.json").exists(), "failed snapshot handoff file must be removed"
 assert not success_log.exists(), success_log
 assert not mb.build_meta_path(success_log).exists(), mb.build_meta_path(success_log)
+
+# Timeout must still finalize the observation through the same finally path.
+timeout_runner = root / "timeout-marina.sh"
+timeout_runner.write_text("#!/bin/sh\nsleep 2\n", encoding="utf-8")
+timeout_runner.chmod(0o755)
+mc.script = lambda r: timeout_runner
+try:
+    mc._marina_cli_logged(root, "start", "--slow", timeout=0.01)
+    raise AssertionError("TimeoutExpired expected")
+except subprocess.TimeoutExpired:
+    pass
+timeout_log = mp.selected_log(root, "build", "run-003.log")
+timeout_meta = mb.read_build_meta(timeout_log)
+assert timeout_meta["status"] == "timeout", timeout_meta
+assert timeout_meta["memoryPressure"]["hostAvailableMinMb"] == 3700, timeout_meta
+assert finished_pressure_tokens == ["pressure-1", "pressure-2", "pressure-3"], finished_pressure_tokens
+
+# Tokens share one daemon sampler but summarize only their own active intervals.
+original_interval = mm._PRESSURE_SAMPLE_INTERVAL_SECONDS
+original_sample = mm._pressure_sample
+samples = iter([
+    {"hostAvailableMb": 4000, "containersMb": 100, "dockerTotalMb": 8192, "partial": False},
+    {"hostAvailableMb": 3800, "containersMb": 200, "dockerTotalMb": 8192, "partial": False},
+    {"hostAvailableMb": 3900, "containersMb": 300, "dockerTotalMb": 8192, "partial": True},
+])
+first_sampled = threading.Event()
+def deterministic_sample():
+    value = next(samples)
+    first_sampled.set()
+    return value
+mm._PRESSURE_SAMPLE_INTERVAL_SECONDS = 60
+mm._pressure_sample = deterministic_sample
+try:
+    first_token = mm.start_pressure_observation()
+    assert first_sampled.wait(2), "sampler did not take its initial sample"
+    shared_sampler = mm._pressure_sampler
+    second_token = mm.start_pressure_observation()
+    assert mm._pressure_sampler is shared_sampler and shared_sampler is not None, "one sampler per build"
+    mm._record_pressure_sample()
+    first_pressure = mm.finish_pressure_observation(first_token)
+    mm._record_pressure_sample()
+    second_pressure = mm.finish_pressure_observation(second_token)
+finally:
+    mm._PRESSURE_SAMPLE_INTERVAL_SECONDS = original_interval
+    mm._pressure_sample = original_sample
+assert first_pressure == {
+    "hostAvailableMinMb": 3800,
+    "containersPeakMb": 200,
+    "dockerTotalMb": 8192,
+    "sampleCount": 2,
+    "partial": False,
+}, first_pressure
+assert second_pressure == {
+    "hostAvailableMinMb": 3800,
+    "containersPeakMb": 300,
+    "dockerTotalMb": 8192,
+    "sampleCount": 2,
+    "partial": True,
+}, second_pressure
 # Concurrent lifecycle requests must receive distinct build runs and handoff paths.
 concurrent_root = Path(sys.argv[2]) / "concurrent"; concurrent_root.mkdir()
 mp._session_id_cache[str(concurrent_root)] = "main"

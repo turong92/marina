@@ -19,6 +19,7 @@ import importlib.util as _ilu
 from marina_state import MARINA_SCRIPT, MARINA_HOME, _mc
 from marina_registry import external_repos_for, source_root_for, subrepos_of, project_for
 from marina_build_inputs import read_build_input_snapshot
+from marina_memory import finish_pressure_observation, start_pressure_observation
 
 def script(root: Path) -> Path:
     # 런처는 이 레포의 전역 marina.sh — worktree 위치와 무관 (구 SCRIPT_REL = 워크스페이스 내부 사본 탐색 제거).
@@ -228,6 +229,7 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
     rc = None
     tail = ""
     timed_out = False
+    pressure_token = start_pressure_observation()
     try:
         write_build_meta(log_path, meta)
         with open(log_path, "a", encoding="utf-8") as fh:
@@ -250,6 +252,7 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
                 raise
     finally:
         ended_at = time.time()
+        memory_pressure = finish_pressure_observation(pressure_token)
         inputs = read_build_input_snapshot(snapshot_path)
         try:
             snapshot_path.unlink()
@@ -261,6 +264,7 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
             "endedAt": ended_at,
             "durationSec": round(max(0.0, ended_at - started_at), 3),
             "inputs": inputs,
+            "memoryPressure": memory_pressure,
         }
         if rc is not None:
             final["exitCode"] = rc

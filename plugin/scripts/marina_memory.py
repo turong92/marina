@@ -23,11 +23,17 @@ from marina_state import _env, _mc
 _CACHE_TTL_SECONDS = 5.0
 _DOCKER_TIMEOUT_SECONDS = 3.0
 _INSPECT_TIMEOUT_SECONDS = 2.0
+_PRESSURE_SAMPLE_INTERVAL_SECONDS = 2.0
 _cache_condition = threading.Condition()
 _refreshing = False
 _snapshot_cache: tuple[float, dict[str, Any]] | None = None
 _inspect_cache: dict[str, dict[str, Any]] = {}
 _HISTORY_MAX_SERVICES = 200
+_pressure_condition = threading.Condition()
+_pressure_tokens: dict[str, list[dict[str, Any]]] = {}
+_pressure_sampler: threading.Thread | None = None
+_pressure_sampling = False
+_pressure_token_sequence = 0
 
 
 def _run(args: list[str], timeout: float) -> str:
@@ -289,6 +295,133 @@ def system_memory() -> dict[str, Any]:
         "freeMb": host.get("availableMb"),
         "freePercent": host.get("availablePercent"),
     }
+
+
+def _pressure_number(value: Any) -> int | None:
+    return int(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
+def _normal_container_total(snapshot: dict[str, Any]) -> int | None:
+    """Sum observed regular containers without attributing BuildKit usage to a build."""
+    containers = snapshot.get("containers")
+    if not isinstance(containers, list):
+        return None
+    total = 0
+    observed = False
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        name = str(container.get("name") or "").lower()
+        if "buildkit" in name:
+            continue
+        usage = _pressure_number(container.get("memoryUsageMb"))
+        if usage is not None and usage >= 0:
+            total += usage
+            observed = True
+    docker = snapshot.get("docker") if isinstance(snapshot.get("docker"), dict) else {}
+    if observed or docker.get("available"):
+        return total
+    return None
+
+
+def _pressure_sample() -> dict[str, Any]:
+    """Capture cheap host pressure plus cached Docker container usage."""
+    host = host_memory()
+    snapshot = memory_snapshot()
+    docker = snapshot.get("docker") if isinstance(snapshot.get("docker"), dict) else {}
+    available = _pressure_number(host.get("availableMb"))
+    containers = _normal_container_total(snapshot)
+    total = _pressure_number(docker.get("totalMb"))
+    return {
+        "hostAvailableMb": available,
+        "containersMb": containers,
+        "dockerTotalMb": total,
+        "partial": bool(snapshot.get("partial")) or available is None or containers is None or total is None,
+    }
+
+
+def _record_pressure_sample() -> None:
+    """Capture one shared sample and append it to every currently active token."""
+    global _pressure_sampling
+    with _pressure_condition:
+        while _pressure_sampling:
+            _pressure_condition.wait()
+        if not _pressure_tokens:
+            return
+        _pressure_sampling = True
+    try:
+        try:
+            sample = _pressure_sample()
+        except Exception:
+            sample = {
+                "hostAvailableMb": None,
+                "containersMb": None,
+                "dockerTotalMb": None,
+                "partial": True,
+            }
+        with _pressure_condition:
+            for samples in _pressure_tokens.values():
+                samples.append(dict(sample))
+    finally:
+        with _pressure_condition:
+            _pressure_sampling = False
+            _pressure_condition.notify_all()
+
+
+def _pressure_sampler_loop() -> None:
+    global _pressure_sampler
+    while True:
+        _record_pressure_sample()
+        with _pressure_condition:
+            if not _pressure_tokens:
+                if _pressure_sampler is threading.current_thread():
+                    _pressure_sampler = None
+                _pressure_condition.notify_all()
+                return
+            _pressure_condition.wait(timeout=_PRESSURE_SAMPLE_INTERVAL_SECONDS)
+
+
+def start_pressure_observation() -> str:
+    """Register one build with the process-wide, low-frequency pressure sampler."""
+    global _pressure_sampler, _pressure_token_sequence
+    with _pressure_condition:
+        _pressure_token_sequence += 1
+        token = f"pressure-{_pressure_token_sequence}"
+        _pressure_tokens[token] = []
+        if _pressure_sampler is None or not _pressure_sampler.is_alive():
+            _pressure_sampler = threading.Thread(
+                target=_pressure_sampler_loop,
+                name="marina-pressure-observer",
+                daemon=True,
+            )
+            _pressure_sampler.start()
+        _pressure_condition.notify_all()
+    return token
+
+
+def _pressure_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
+    host_values = [value for sample in samples if (value := _pressure_number(sample.get("hostAvailableMb"))) is not None]
+    container_values = [value for sample in samples if (value := _pressure_number(sample.get("containersMb"))) is not None]
+    docker_totals = [value for sample in samples if (value := _pressure_number(sample.get("dockerTotalMb"))) is not None]
+    return {
+        "hostAvailableMinMb": min(host_values) if host_values else None,
+        "containersPeakMb": max(container_values) if container_values else None,
+        "dockerTotalMb": docker_totals[-1] if docker_totals else None,
+        "sampleCount": len(samples),
+        "partial": not samples or any(bool(sample.get("partial")) for sample in samples),
+    }
+
+
+def finish_pressure_observation(token: str) -> dict[str, Any]:
+    """Stop one build observation and return only its observed interval summary."""
+    with _pressure_condition:
+        needs_sample = token in _pressure_tokens and not _pressure_tokens[token]
+    if needs_sample:
+        _record_pressure_sample()
+    with _pressure_condition:
+        samples = _pressure_tokens.pop(token, [])
+        _pressure_condition.notify_all()
+    return _pressure_summary(samples)
 
 
 def _memory_history_path(project_id: str) -> Path:

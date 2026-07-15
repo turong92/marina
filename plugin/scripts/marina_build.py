@@ -231,6 +231,7 @@ def build_summary(log_path: Path) -> dict[str, Any]:
         "startedAt": meta.get("startedAt"),
         "endedAt": meta.get("endedAt"),
         "durationSec": meta.get("durationSec"),
+        "memoryPressure": meta.get("memoryPressure"),
         "cacheHits": sum(1 for step in steps if step["cached"]),
         "cacheMisses": len(misses),
         "steps": steps,
