@@ -83,6 +83,39 @@ assert stale["stale"] is True and stale["partial"] is True
 assert stale["error"] and "TimeoutExpired" in stale["error"]
 assert stale["containers"] == snapshot["containers"]
 
+# A shared failed refresh marks every waiting caller stale, then caches that failure.
+mm._snapshot_cache = (time.monotonic() - mm._CACHE_TTL_SECONDS - 1, snapshot)
+timeout_calls = 0
+timeout_lock = threading.Lock()
+
+def slow_timeout_run(args, timeout):
+    global timeout_calls
+    if args[:2] == ["docker", "info"]:
+        with timeout_lock:
+            timeout_calls += 1
+        time.sleep(0.06)
+    raise subprocess.TimeoutExpired(args, timeout)
+
+mm._run = slow_timeout_run
+failure_barrier = threading.Barrier(8)
+failure_answers = []
+
+def collect_failure():
+    failure_barrier.wait()
+    failure_answers.append(mm.memory_snapshot())
+
+failure_threads = [threading.Thread(target=collect_failure) for _ in range(8)]
+for thread in failure_threads:
+    thread.start()
+for thread in failure_threads:
+    thread.join()
+assert len(failure_answers) == 8
+assert timeout_calls == 1, timeout_calls
+assert all(answer["stale"] and answer["partial"] and "TimeoutExpired" in answer["error"] for answer in failure_answers)
+cached_failure = mm.memory_snapshot()
+assert cached_failure["stale"] and cached_failure["partial"] and "TimeoutExpired" in cached_failure["error"]
+assert timeout_calls == 1, timeout_calls
+
 # Eight callers share one refresh; only one docker stats invocation may run.
 mm._snapshot_cache = None
 mm._inspect_cache.clear()

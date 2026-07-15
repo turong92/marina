@@ -247,6 +247,10 @@ def memory_snapshot(force: bool = False) -> dict[str, Any]:
         if _refreshing:
             _cache_condition.wait(timeout=_DOCKER_TIMEOUT_SECONDS + _INSPECT_TIMEOUT_SECONDS)
             if _snapshot_cache:
+                if _refreshing:
+                    return _cache_value(
+                        _snapshot_cache[1], stale=True, error="memory snapshot refresh is still running",
+                    )
                 return _cache_value(_snapshot_cache[1])
             return _empty_snapshot("memory snapshot refresh is still running")
         previous = _snapshot_cache[1] if _snapshot_cache else None
@@ -255,9 +259,10 @@ def memory_snapshot(force: bool = False) -> dict[str, Any]:
         snapshot = _collect_snapshot()
     except Exception as exc:
         error = _error_text(exc)
-        if previous is not None:
-            return _cache_value(previous, stale=True, error=error)
-        return _empty_snapshot(error)
+        failed_snapshot = _cache_value(previous, stale=True, error=error) if previous is not None else _empty_snapshot(error)
+        with _cache_condition:
+            _snapshot_cache = (time.monotonic(), failed_snapshot)
+        return _cache_value(failed_snapshot)
     else:
         with _cache_condition:
             _snapshot_cache = (time.monotonic(), snapshot)
