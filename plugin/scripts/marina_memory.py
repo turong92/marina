@@ -377,13 +377,19 @@ def _pressure_sampler_loop() -> None:
     global _pressure_sampler
     while True:
         _record_pressure_sample()
+        deadline = time.monotonic() + _PRESSURE_SAMPLE_INTERVAL_SECONDS
         with _pressure_condition:
-            if not _pressure_tokens:
-                if _pressure_sampler is threading.current_thread():
-                    _pressure_sampler = None
-                _pressure_condition.notify_all()
-                return
-            _pressure_condition.wait(timeout=_PRESSURE_SAMPLE_INTERVAL_SECONDS)
+            while _pressure_tokens:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                _pressure_condition.wait(timeout=remaining)
+            if _pressure_tokens:
+                continue
+            if _pressure_sampler is threading.current_thread():
+                _pressure_sampler = None
+            _pressure_condition.notify_all()
+            return
 
 
 def start_pressure_observation() -> str:

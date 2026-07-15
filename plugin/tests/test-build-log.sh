@@ -164,6 +164,7 @@ initial_sampled = threading.Event()
 capture_started = threading.Event()
 release_capture = threading.Event()
 finish_returned = threading.Event()
+unexpected_sample = threading.Event()
 sample_calls = 0
 def blocked_sample():
     global sample_calls
@@ -175,6 +176,7 @@ def blocked_sample():
         capture_started.set()
         assert release_capture.wait(2), "blocked sample was not released"
         return {"hostAvailableMb": 3800, "containersMb": 200, "dockerTotalMb": 8192, "partial": False}
+    unexpected_sample.set()
     return {"hostAvailableMb": 3600, "containersMb": 300, "dockerTotalMb": 8192, "partial": False}
 mm._PRESSURE_SAMPLE_INTERVAL_SECONDS = 60
 mm._pressure_sample = blocked_sample
@@ -199,6 +201,7 @@ try:
     assert not finish_returned.wait(0.1), "token active at capture start must wait for that sample"
     release_capture.set()
     capture_thread.join(2)
+    assert not unexpected_sample.wait(1), "condition notification triggered a premature sample"
     finish_thread.join(2)
     assert finish_returned.is_set(), "finish did not return after sample capture"
     assert race_result["sampleCount"] == 2, race_result
