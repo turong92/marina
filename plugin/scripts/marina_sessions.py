@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import CODEX_HOME, LIFECYCLE_BUSY, PORT, _claude_agents_cache, _codex_agents_cache, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_du_cache, _worktree_info_cache, busy_key
+from marina_state import CODEX_HOME, HOST, LIFECYCLE_BUSY, PORT, _claude_agents_cache, _codex_agents_cache, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_du_cache, _worktree_info_cache, busy_key
 from marina_logtext import redact_text
 from marina_cache import cache_category_mb, disk_usage_mb
 from marina_registry import default_attach_of, discover_all_roots, discover_roots, is_source_checkout, project_for, project_label, root_source, subrepos_of
@@ -226,6 +226,27 @@ def origin_allowed(origin: str | None, allow_any_local_port: bool) -> bool:
     if allow_any_local_port:
         return True
     return parts.port == PORT
+
+def host_allowed(host: str | None) -> bool:
+    """DNS 리바인딩 가드 — /api/* 는 Host 가 로컬일 때만.
+
+    origin_allowed 만으로는 못 막는다: 그건 Origin 이 없으면 통과시키는데(curl·same-origin GET),
+    리바인딩된 페이지의 same-origin GET 은 **Origin 을 안 보낸다**. 즉 악성 사이트가 evil.com 을
+    127.0.0.1 로 되돌린 뒤 fetch 하면 그냥 통과했다. POST 는 Origin 을 보내 403 이라 RCE 는 아니지만,
+    유출되는 게 워크트리 경로·에이전트 sid·PTY tid 이고 tid 를 알면 term-stream 으로 살아있는 셸
+    스크롤백(타이핑한 비밀값)까지 간다. Host 는 리바인딩으로 위조할 수 없어 여기서 닫힌다.
+
+    Host 없음은 허용 — 브라우저는 Host 를 항상 보내므로 리바인딩 경로가 아니다(HTTP/1.0 curl·스크립트).
+    CONTROL_HOST 로 바인드 주소를 바꿔 쓰면 그 이름으로 접근하므로 함께 허용한다.
+    """
+    if not host:
+        return True
+    try:
+        hostname = urllib.parse.urlsplit(f"//{host}").hostname
+    except ValueError:
+        return False
+    return hostname in ("127.0.0.1", "localhost", "::1", HOST)
+
 
 def root_for_session_id(value: str) -> Path:
     for root in discover_roots():

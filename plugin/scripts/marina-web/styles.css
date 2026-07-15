@@ -616,21 +616,86 @@
     /* A1 — AGENTS 행 — SERVICES 행(.svc)과 같은 문법이나 클릭 액션이 없어 커서·hover 배경은 뺀다 */
     .svc.agent-row { cursor: default; }   /* 표시용 행 — 클릭 대상 아님(.svc 보다 특이성 높여 override) */
     .svc.agent-row:hover { background: transparent; }
-    .svc.agent-row { cursor: default; }   /* 표시용 행 — 클릭 대상 아님(.svc 보다 특이성 높여 override) */
-    .svc.agent-row:hover { background: transparent; }
-    /* 터미널 탭 — 헤더 스트립(워크트리 선택·↻·⏹) + xterm 본문이 pane 을 꽉 채움 */
-    #tab-term { display: flex; flex-direction: column; }
-    .term-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 5px 8px; border-bottom: 1px solid var(--sys-style-neutral-light); }
-    .term-head select { height: 22px; max-width: 260px; font-size: 11px; border: 1px solid var(--sys-style-neutral-light); border-radius: 6px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); padding: 0 4px; font-family: ui-monospace, Menlo, monospace; }
-    .term-head button { height: 22px; min-width: 24px; border: 1px solid var(--sys-style-neutral-light); border-radius: 6px; background: none; color: var(--sys-cont-neutral-light); font-size: 12px; cursor: pointer; }
-    .term-head button:hover { background: var(--sys-bg-surface-hover); color: var(--sys-cont-neutral-default); }
-    .term-agent-chip { display: inline-flex; align-items: center; gap: 5px; min-width: 0; font-size: 11.5px; color: var(--sys-cont-neutral-default); }
-    .term-agent-chip .term-agent-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 340px; }
     .agent-row .hov-acts button { height: 18px; padding: 0 7px; border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); font-size: 10.5px; cursor: pointer; }
     .agent-row .hov-acts button:hover { color: var(--sys-cont-neutral-default); background: var(--sys-bg-surface-hover); }
-    .term-body { flex: 1; min-height: 0; position: relative; }
+    /* 터미널 탭 — 좌 사이드바(세션 목록) + 우 본문(분할 프리셋 바 + 최대 4분할 그리드) */
+    #tab-term { display: flex; flex-direction: column; }
+    .term-root { display: flex; height: 100%; min-height: 0; }
+    /* 사이드바 = 목록(스크롤) + 하단 붙박이 `＋ 새 셸`. 둘을 가른 이유: termRenderSide 가 목록 innerHTML 을
+       통째로 다시 그리는데 select 가 그 안에 있으면 매 렌더마다 날아간다(형이 열어둔 드롭다운이 닫힌다). */
+    .term-side { flex: none; width: 200px; display: flex; flex-direction: column; min-height: 0;
+                 border-right: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); }
+    .term-side-list { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 1px; padding: 6px; overflow-y: auto; }
+    /* 사이드바 폭 드래그 레일 — 깃 탭 .gs-rail 과 같은 폭·질감. 경계선 위에 겹쳐 얹어(음수 마진)
+       터미널 폭을 안 뺏으면서도 잡을 면적을 준다. */
+    .term-rail { flex: none; width: 5px; margin-left: -3px; cursor: col-resize; }
+    .term-rail:hover, .term-rail:active { background: color-mix(in srgb, var(--sys-cont-primary-default) 30%, transparent); }
+    .term-side-head { flex: none; padding: 6px; border-bottom: 1px solid var(--sys-style-neutral-light); }
+    .term-side-head select { width: 100%; height: 24px; font-size: 11px; border: 1px dashed var(--sys-style-neutral-default);
+                             border-radius: 7px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light);
+                             padding: 0 4px; cursor: pointer; }
+    .term-side-head select:hover { background: var(--sys-bg-surface-hover); color: var(--sys-cont-neutral-default); }
+    .term-grp { font-size: 10px; font-weight: 700; color: var(--sys-cont-neutral-lightest); padding: 7px 6px 3px;
+                letter-spacing: .3px; text-transform: uppercase; }
+    /* 2줄 항목 — 위: 이름(실행 중인 명령) / 아래: 마지막 출력. 세로 스택이라 term-item 은 block,
+       가로 정렬은 안쪽 .term-item-top 이 맡는다. */
+    .term-item { padding: 5px 7px; border-radius: 7px; cursor: pointer;
+                 font-size: 11.5px; color: var(--sys-cont-neutral-light); }
+    .term-item-top { display: flex; align-items: center; gap: 5px; }
+    .term-item:hover { background: var(--sys-bg-surface-hover); }
+    .term-item.shown { background: var(--sys-bg-base); color: var(--sys-cont-neutral-default); }
+    .term-item.focus { background: var(--sys-cont-neutral-default); color: #fff; font-weight: 600; }
+    .term-item .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                     font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
+    /* 부제는 한 줄 고정 — 출력이 길어도 항목 높이가 안 흔들려야 목록이 안 튄다 */
+    .term-sub { margin: 1px 0 0 2px; font-family: ui-monospace, Menlo, monospace; font-size: 10px;
+                color: var(--sys-cont-neutral-lightest); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .term-item.focus .term-sub { color: color-mix(in srgb, currentColor 60%, transparent); }
+    .term-item .x { color: var(--sys-cont-neutral-lightest); font-size: 11px; opacity: 0; }
+    .term-item:hover .x, .term-item.focus .x { opacity: 1; }
+    /* 포커스 칩 안의 ✕·배지는 currentColor 를 따른다 — 아래 .dark 오버라이드 하나로 둘 다 같이 뒤집힌다 */
+    .term-item.focus .x { color: color-mix(in srgb, currentColor 65%, transparent); }
+    /* 손을 얹는 순간이 유일한 구분 기회다 — 이 ✕ 는 세션 종료(프로세스까지, dev 서버도 죽는다).
+       칸 ✕(.term-cell-head .x)는 칸만 비우니 절대 빨갛게 하지 마라 — 그 대비가 오인을 막는다.
+       .term-item.focus .x 와 특이성이 같아 순서로 이긴다 — 이 줄을 위로 옮기지 마라. */
+    .term-item .x:hover { color: var(--sys-cont-negative-default); }
+    .term-slot-badge { flex: none; font-size: 9px; font-weight: 700; border-radius: 4px; padding: 0 3px;
+                       background: color-mix(in srgb, var(--sys-cont-primary-default) 18%, transparent);
+                       color: var(--sys-cont-primary-default); }
+    .term-item.focus .term-slot-badge { background: color-mix(in srgb, currentColor 22%, transparent); color: inherit; }
+    /* 다크에선 --sys-cont-neutral-default 가 near-white 라 #fff 글자가 배경에 묻는다 — .dark button.active 와 같은 처방 */
+    .dark .term-item.focus { color: hsl(228, 14%, 9%); }
+    .term-dot { flex: none; width: 6px; height: 6px; border-radius: 50%; background: var(--st-run); }
+    .term-hint { font-size: 10.5px; color: var(--sys-cont-neutral-lightest); padding: 10px 6px; line-height: 1.5; text-align: center; }
+
+    .term-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+    .term-bar { flex: none; display: flex; align-items: center; gap: 4px; padding: 5px 8px;
+                border-bottom: 1px solid var(--sys-style-neutral-light); }
+    .term-bar button { height: 22px; min-width: 26px; border: 1px solid var(--sys-style-neutral-light); border-radius: 6px;
+                       background: none; color: var(--sys-cont-neutral-light); font-size: 11px; cursor: pointer; }
+    .term-bar button:hover { background: var(--sys-bg-surface-hover); color: var(--sys-cont-neutral-default); }
+    .term-bar button.on { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default);
+                          background: color-mix(in srgb, var(--sys-cont-primary-default) 8%, transparent); }
+    .term-grid { flex: 1; min-height: 0; display: grid; gap: 3px; padding: 3px; background: var(--sys-style-neutral-light); }
+    .term-cell { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-radius: 6px; overflow: hidden;
+                 border: 2px solid transparent; background: var(--sys-bg-surface); }
+    .term-cell.focus { border-color: var(--sys-cont-primary-default); }
+    .term-cell.drop { border-color: var(--sys-cont-primary-default); border-style: dashed; }
+    .term-cell-head { flex: none; display: flex; align-items: center; gap: 5px; padding: 3px 7px; font-size: 10.5px;
+                      color: var(--sys-cont-neutral-lightest); background: var(--sys-bg-base); }
+    .term-cell-head .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .term-cell-head .x { cursor: pointer; opacity: 0; }
+    .term-cell:hover .term-cell-head .x { opacity: 1; }
+    .term-cell-body { flex: 1; min-height: 0; position: relative; }
     .term-wrap { position: absolute; inset: 0; padding: 4px 2px 4px 8px; }
     .term-wrap .xterm { height: 100%; }
+    /* vendor-xterm.css 가 .xterm-viewport 에 overflow-y:scroll 을 박아서 내용이 다 들어가도 15px 트랙이
+       늘 보인다 — 4분할이면 네 개다. overflow 는 그대로 두고(xterm 스크롤 로직이 의존) 트랙만 얇게. */
+    .term-wrap .xterm-viewport { scrollbar-width: thin; scrollbar-color: var(--sys-style-neutral-default) transparent; }
+    .term-wrap .xterm-viewport::-webkit-scrollbar { width: 7px; }
+    .term-wrap .xterm-viewport::-webkit-scrollbar-track { background: transparent; }
+    .term-wrap .xterm-viewport::-webkit-scrollbar-thumb { background: transparent; border-radius: 4px; }
+    .term-cell:hover .xterm-viewport::-webkit-scrollbar-thumb { background: var(--sys-style-neutral-default); }
 
     /* AGENTS 대화 뷰어 — 행 클릭(서비스 행=로그 문법 통일) */
     .agent-modal { display: flex; flex-direction: column; overflow: hidden; }

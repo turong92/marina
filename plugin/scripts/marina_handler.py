@@ -37,8 +37,8 @@ def _apply_now(root: Path, service: str = "") -> None:
         pass
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
-from marina_sessions import agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
-from marina_term import term_input, term_kill, term_open, term_resize, term_stream
+from marina_sessions import agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 
@@ -114,9 +114,15 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
 
-        if parsed.path.startswith("/api/") and not origin_allowed(self.headers.get("origin"), False):
-            self.send_json({"error": "forbidden origin"}, 403)
-            return
+        if parsed.path.startswith("/api/"):
+            # Host 먼저 — origin_allowed 는 Origin 없는 요청을 통과시키는데 DNS 리바인딩된
+            # same-origin GET 이 바로 그 모양이다(브라우저가 Origin 을 안 보낸다).
+            if not host_allowed(self.headers.get("host")):
+                self.send_json({"error": "forbidden host"}, 403)
+                return
+            if not origin_allowed(self.headers.get("origin"), False):
+                self.send_json({"error": "forbidden origin"}, 403)
+                return
 
         if parsed.path == "/api/sessions":
             sessions = [session_payload(root) for root in discover_roots()]
@@ -394,13 +400,27 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(result)
             return
 
-        if parsed.path == "/api/term-stream":   # 터미널 SSE — POST 쪽과 같은 로컬 전용 가드
+        if parsed.path in ("/api/term-stream", "/api/term-list"):   # 터미널 — POST 쪽과 같은 로컬 전용 가드
             if self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host"):
                 self.send_json({"error": "터미널은 로컬 대시보드에서만 쓸 수 있어요"}, 403)
                 return
+            if parsed.path == "/api/term-list":
+                self.send_json(term_list())
+                return
             query = urllib.parse.parse_qs(parsed.query)
+            tids = [t for t in query.get("tid", [""])[0].split(",") if t]
+            froms: dict[str, int] = {}
+            for pair in query.get("from", [""])[0].split(","):       # from=tid:off,tid:off
+                key, sep, value = pair.partition(":")
+                if sep and key:
+                    try:
+                        froms[key] = int(value)
+                    except ValueError:
+                        pass                                          # 잘못된 from 은 버림 → snap 폴백
+                                                                      # (/api/logs 는 같은 실수에 400 을 내지만 여기선 tid 가 여럿 —
+                                                                      #  한 항목 때문에 400 이면 멀쩡한 터미널 스트림까지 죽는다)
             try:
-                term_stream(self, query.get("tid", [""])[0])
+                term_stream(self, tids, froms)
             except ValueError as exc:
                 self.send_json({"error": str(exc)}, 400)
             return
@@ -549,6 +569,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            if not host_allowed(self.headers.get("host")):
+                self.send_json({"error": "forbidden host"}, 403)
+                return
             if not origin_allowed(self.headers.get("origin"), self.path == "/api/console"):
                 self.send_json({"error": "forbidden origin"}, 403)
                 return
