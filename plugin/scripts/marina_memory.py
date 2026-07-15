@@ -17,7 +17,7 @@ from typing import Any
 
 from marina_paths import session_id
 from marina_registry import project_for
-from marina_state import _mc
+from marina_state import _env, _mc
 
 
 _CACHE_TTL_SECONDS = 5.0
@@ -490,7 +490,7 @@ def _configured_reserve_mb(docker_total_mb: int | None) -> int | None:
 
 def _configured_min_free_mb() -> int:
     try:
-        return max(0, int(os.environ.get("MIN_FREE_MB", "4096")))
+        return max(0, int(_env("MIN_FREE_MB", "4096")))
     except ValueError:
         return 4096
 

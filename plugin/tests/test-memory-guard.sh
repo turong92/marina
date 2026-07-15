@@ -30,6 +30,9 @@ with tempfile.TemporaryDirectory() as temp:
     root = Path(temp) / "worktree"
     root.mkdir()
     os.environ["MARINA_HOME"] = str(home)
+    saved_minimums = {name: os.environ.get(name) for name in ("MIN_FREE_MB", "MARINA_MIN_FREE_MB")}
+    os.environ.pop("MIN_FREE_MB", None)
+    os.environ.pop("MARINA_MIN_FREE_MB", None)
     project = {"id": "demo", "kind": "compose", "composeFile": "docker-compose.yml"}
     mm.project_for = lambda candidate: project
     history_path = home / "demo" / "memory-history.json"
@@ -56,6 +59,23 @@ with tempfile.TemporaryDirectory() as temp:
     host_critical = mm.memory_guard(root, ["web"], snapshot=snapshot(host_free=4095))
     assert host_critical["reason"] == "host-critical", host_critical
     assert host_critical["hostFreeMb"] == 4095, host_critical
+
+    os.environ["MIN_FREE_MB"] = "1"
+    os.environ["MARINA_MIN_FREE_MB"] = "17000"
+    prefixed_override = mm.memory_guard(root, ["web"], snapshot=snapshot())
+    assert prefixed_override["reason"] == "host-critical", prefixed_override
+    assert prefixed_override["minFreeMb"] == 17000, prefixed_override
+    os.environ.pop("MIN_FREE_MB", None)
+    os.environ.pop("MARINA_MIN_FREE_MB", None)
+
+    docker_unavailable = mm.memory_guard(root, ["web"], snapshot={
+        "host": {"availableMb": 4095},
+        "docker": {"available": False, "totalMb": None, "usedMb": None},
+        "containers": [],
+    })
+    assert docker_unavailable["reason"] == "host-critical", docker_unavailable
+    assert docker_unavailable["dockerTotalMb"] is None, docker_unavailable
+    assert docker_unavailable["projectedFreeMb"] is None, docker_unavailable
 
     current = mm.memory_guard(root, ["unknown"], snapshot=snapshot(docker_used=12000))
     assert current["reason"] == "docker-current", current
@@ -123,6 +143,12 @@ with tempfile.TemporaryDirectory() as temp:
     ml.start_all(root)
     assert decisions[-1] == (root, ["web", "worker"], False), decisions
     assert commands[-1][0] == ("start", "--web", "--worker"), commands
+
+    for name, value in saved_minimums.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
 
 print("memory guard policy OK")
 PY
