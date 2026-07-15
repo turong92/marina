@@ -39,6 +39,9 @@
     }
 
     function finiteMemoryMb(value) {
+      if (value === null || value === undefined || typeof value === 'boolean') return null;
+      if (typeof value === 'string' && value.trim() === '') return null;
+      if (typeof value !== 'number' && typeof value !== 'string') return null;
       const mb = Number(value);
       return Number.isFinite(mb) ? mb : null;
     }

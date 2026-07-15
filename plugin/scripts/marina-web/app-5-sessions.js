@@ -237,8 +237,13 @@
           if (dot) { dot.className = `wt-dot ${STATE_META[st].dot}`; dot.title = STATE_META[st].title; }
           const port = row.querySelector('[data-port]');
           if (port) { port.textContent = portText(svc); port.title = portTitle(svc); }
-          const rss = row.querySelector('[data-rss]');
-          if (rss) rss.textContent = svc.running && svc.rssMb ? `${svc.rssMb}MB` : '';
+          const memory = serviceMemoryMeta(svc);
+          const memoryEl = row.querySelector('[data-rss]');
+          if (memoryEl) { memoryEl.textContent = memory.current; memoryEl.title = memory.title; }
+          const baseTitle = row.classList.contains('svc-opt')
+            ? '옵션 서비스 — 시작 그룹(x-marina.startGroup) 밖. 필요하면 ▶ 로 개별 시작'
+            : '클릭하면 이 서비스의 로그를 우측에 표시';
+          row.title = serviceRowTitle(svc, baseTitle);
           const up = row.querySelector('[data-uptime]');
           if (up) up.textContent = svc.running ? relTime(svc.logTs) : '';
           const tail = row.querySelector('[data-tail]');

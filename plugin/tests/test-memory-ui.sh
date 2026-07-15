@@ -7,6 +7,8 @@ WEB="$HERE/../scripts/marina-web"
 HTML="$WEB/index.html"
 UTIL="$WEB/app-3-util.js"
 ACTIONS="$WEB/app-5b-actions.js"
+SESSIONS="$WEB/app-5-sessions.js"
+BUILD="$WEB/app-4b-build.js"
 CSS="$WEB/styles.css"
 
 # The old derived RSS/system summary is ambiguous. The toolbar exposes paired,
@@ -43,13 +45,19 @@ rg -q 'oomKilled' "$ACTIONS" || { echo "FAIL: service OOM state missing"; exit 1
 rg -q 'function serviceStateReason' "$ACTIONS" || { echo "FAIL: OOM state reason helper missing"; exit 1; }
 rg -q 'data-rss' "$ACTIONS" || { echo "FAIL: service memory metadata slot missing"; exit 1; }
 rg -q '\.mem-separator' "$CSS" || { echo "FAIL: compact telemetry separator styles missing"; exit 1; }
-
-node - "$UTIL" <<'JS'
+node - "$UTIL" "$ACTIONS" "$SESSIONS" "$BUILD" <<'JS'
 const fs = require('fs');
 const vm = require('vm');
-const source = fs.readFileSync(process.argv[2], 'utf8');
+const [utilSource, actionsSource, sessionsSource, buildSource] = process.argv.slice(2).map(path => fs.readFileSync(path, 'utf8'));
 const requests = [];
 let confirmations = 0;
+function element() {
+  return {
+    textContent: '', hidden: false, title: '', style: {},
+    classList: {toggle() {}, contains() { return false; }},
+  };
+}
+const header = {mem: element(), memDocker: element(), memHost: element(), memSeparator: element(), memBar: element()};
 const lowMemory = {
   blocked: 'low-memory',
   reason: 'docker-projected',
@@ -60,6 +68,12 @@ const lowMemory = {
 };
 const context = {
   console,
+  document: {
+    getElementById: id => header[id],
+    querySelector: () => null,
+  },
+  localStorage: {getItem: () => null, setItem: () => {}},
+  CSS: {escape: value => value},
   fetch: async (path, options) => {
     requests.push({path, body: JSON.parse(options.body)});
     const blocked = requests.length === 1 || requests.length === 3;
@@ -78,16 +92,89 @@ const context = {
   selected: {mode: 'service'},
 };
 vm.createContext(context);
-vm.runInContext(`${source}\nthis.__test = {action, sessionAction, formatMemoryPair};`, context);
+vm.runInContext(utilSource, context);
+vm.runInContext(actionsSource, context);
+vm.runInContext(sessionsSource, context);
+vm.runInContext(buildSource, context);
+vm.runInContext('this.__test = {action, sessionAction, formatMemoryPair, finiteMemoryMb, renderMemory, memoryBlockConfirmation, serviceMemoryMeta, serviceStateReason, buildMemoryPressureHtml, updateServiceStates};', context);
 (async () => {
+  const api = context.__test;
+  for (const value of [null, undefined, '', '   ', NaN, Infinity, -Infinity]) {
+    if (api.finiteMemoryMb(value) !== null) throw new Error(`nullable metric accepted: ${String(value)}`);
+  }
+  api.renderMemory({docker: {usedMb: null, totalMb: null}, host: {availableMb: null, availablePercent: null}});
+  if (!header.mem.hidden || !header.memDocker.hidden || !header.memHost.hidden || /0\.0 GB/.test(`${header.memDocker.textContent}${header.memHost.textContent}`)) {
+    throw new Error('null header metrics invented telemetry');
+  }
+  api.renderMemory({docker: {usedMb: null, totalMb: null}, host: {availableMb: 5120, availablePercent: 50}});
+  if (!header.memDocker.hidden || header.memHost.hidden || header.memHost.textContent !== 'Host available 5.0 GB') {
+    throw new Error('Docker-unavailable header fallback mismatch');
+  }
+  const nullConfirmation = api.memoryBlockConfirmation({reason: 'docker-projected', projectedFreeMb: null, reserveMb: null, estimatedServices: [{service: 'web', memoryMb: null}], unknownServices: []});
+  if (!nullConfirmation.includes('알 수 없음') || /0\.0 GB|undefined|NaN/.test(nullConfirmation)) {
+    throw new Error(`null confirmation invented telemetry: ${nullConfirmation}`);
+  }
+  const nullMeta = api.serviceMemoryMeta({memoryUsageMb: null, memoryPeakMb: undefined, memoryLimitMb: '', oomKilled: null});
+  if (nullMeta.current || nullMeta.title || /0 MB/.test(`${nullMeta.current} ${nullMeta.title}`)) {
+    throw new Error(`null service metadata invented telemetry: ${JSON.stringify(nullMeta)}`);
+  }
+  if (api.buildMemoryPressureHtml({sampleCount: 1, hostAvailableMinMb: null, containersPeakMb: undefined}) !== '') {
+    throw new Error('null build pressure rendered invented telemetry');
+  }
+  if (api.buildMemoryPressureHtml({sampleCount: null, hostAvailableMinMb: 4096, containersPeakMb: 512}) !== '') {
+    throw new Error('null build sample count rendered pressure');
+  }
   if (context.__test.formatMemoryPair(11060, 15972) !== '10.8 / 15.6 GB') throw new Error('compact Docker format mismatch');
-  await context.__test.action('start', '/project', 'web');
-  await context.__test.sessionAction('start-all', {root: '/project'});
+  await api.action('start', '/project', 'web');
+  await api.sessionAction('start-all', {root: '/project'});
   if (confirmations !== 2) throw new Error(`expected two confirmations, got ${confirmations}`);
   if (requests.length !== 4) throw new Error(`expected four lifecycle requests, got ${requests.length}`);
   if (requests[0].body.force !== false || requests[1].body.force !== true) throw new Error('individual retry force contract failed');
   if (requests[2].body.force !== false || requests[3].body.force !== true) throw new Error('start-all retry force contract failed');
+  const dot = element();
+  const port = element();
+  const memory = element();
+  const uptime = element();
+  const tail = element();
+  const row = {
+    ...element(),
+    title: 'stale title',
+    querySelector: selector => ({'.wt-dot': dot, '[data-port]': port, '[data-rss]': memory, '[data-uptime]': uptime, '[data-tail]': tail}[selector] || null),
+  };
+  const card = {
+    classList: {contains() { return false; }},
+    querySelector: selector => selector.startsWith('[data-service-key=') ? row : null,
+    querySelectorAll: () => [],
+  };
+  const freshService = {service: 'web', state: 'error', stateReason: '새 원인', memoryUsageMb: 512, memoryPeakMb: 768, memoryLimitMb: 1024, oomKilled: true, running: false};
+  context.sessions = [{root: '/project', services: [freshService]}];
+  context.document.querySelector = selector => selector.startsWith('[data-root=') ? card : null;
+  context.visibleServices = session => session.services;
+  context.cardState = () => 'error';
+  context.stateCounts = () => '';
+  context.whyLines = () => '';
+  context.wireWhyLinks = () => {};
+  context.fillCardActs = () => {};
+  context.fillSvcActs = () => {};
+  context.svcState = svc => svc.state;
+  context.STATE_META = {error: {dot: 'err', title: '실패'}};
+  context.portText = () => '';
+  context.portTitle = () => '';
+  context.relTime = () => '';
+  context.tailVisible = () => false;
+  context.renderSelection = () => {};
+  api.updateServiceStates();
+  if (memory.textContent !== '512 MB' || !memory.title.includes('피크 768 MB') || !memory.title.includes('제한 1024 MB')) {
+    throw new Error(`partial update retained stale memory metadata: ${memory.textContent} / ${memory.title}`);
+  }
+  if (!row.title.includes('새 원인') || !row.title.includes('OOM 종료 감지')) {
+    throw new Error(`partial update retained stale state reason: ${row.title}`);
+  }
 })().catch(error => { console.error(error.stack || error); process.exit(1); });
 JS
+
+rg -Fq '@media (max-width: 640px)' "$CSS" || { echo "FAIL: narrow header media rule missing"; exit 1; }
+rg -q '\.toolbar \.mem-bar' "$CSS" || { echo "FAIL: narrow header gauge rule missing"; exit 1; }
+rg -q 'flex: 1 1 100%' "$CSS" || { echo "FAIL: narrow telemetry wrapping contract missing"; exit 1; }
 
 echo "PASS test-memory-ui"

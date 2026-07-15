@@ -58,8 +58,8 @@
     }
 
     function buildMemoryPressureHtml(memoryPressure) {
-      const sampleCount = Number(memoryPressure?.sampleCount);
-      if (!Number.isFinite(sampleCount) || sampleCount <= 0) return '';
+      const sampleCount = finiteMemoryMb(memoryPressure?.sampleCount);
+      if (sampleCount === null || sampleCount <= 0) return '';
       const hostMin = finiteMemoryMb(memoryPressure.hostAvailableMinMb);
       const containersPeak = finiteMemoryMb(memoryPressure.containersPeakMb);
       const labels = [];

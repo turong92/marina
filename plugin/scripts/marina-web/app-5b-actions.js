@@ -17,11 +17,15 @@
       if (current !== null) details.push(`현재 ${Math.round(current)} MB`);
       if (peak !== null) details.push(`피크 ${Math.round(peak)} MB`);
       if (limit !== null) details.push(`제한 ${Math.round(limit)} MB`);
-      if (svc.oomKilled === true) details.push('OOM 종료 감지');
       return {
         current: current === null ? '' : `${Math.round(current)} MB`,
         title: details.join(' · '),
       };
+    }
+
+    function serviceRowTitle(svc, baseTitle) {
+      const memory = serviceMemoryMeta(svc);
+      return [baseTitle, memory.title, serviceStateReason(svc)].filter(Boolean).join(' · ');
     }
 
     // 에러/비활성 원인 줄 (콘솔 스펙 D3) — 접힘과 무관하게 카드에 상시. reason 은 백엔드 stateReason.
@@ -251,13 +255,13 @@
       const row = document.createElement('div');
       const st = svcState(svc);
       const memory = serviceMemoryMeta(svc);
-      const stateReason = serviceStateReason(svc);
       const optional = svc.inStartGroup === false && st === 'stopped';   // 시작 그룹 밖 + 꺼짐 — 집계 제외분(딤)
       row.className = 'svc nested' + (disabled ? ' disabled' : '') + (optional ? ' svc-opt' : '');
       row.dataset.serviceKey = `${session.root}::${svc.service}`;
-      row.title = disabled ? 'subrepo 미attach — attach 후 사용 가능'
+      const baseTitle = disabled ? 'subrepo 미attach — attach 후 사용 가능'
                 : optional ? '옵션 서비스 — 시작 그룹(x-marina.startGroup) 밖. 필요하면 ▶ 로 개별 시작'
-                : ['클릭하면 이 서비스의 로그를 우측에 표시', memory.title, stateReason].filter(Boolean).join(' · ');
+                : '클릭하면 이 서비스의 로그를 우측에 표시';
+      row.title = disabled ? baseTitle : serviceRowTitle(svc, baseTitle);
       row.innerHTML = `
         <span class="wt-dot ${disabled ? 'stop' : STATE_META[st].dot}" title="${escapeHtml(disabled ? 'subrepo 미attach' : STATE_META[st].title)}"></span>
         <span class="svc-name"><span>${escapeHtml(svc.service)}</span></span>
