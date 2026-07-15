@@ -256,7 +256,7 @@ git commit -m "feat(compose): rebuild stale images on start"
 - Consumes: final Start/Rebuild behavior from Task 2.
 - Produces: user-facing lifecycle documentation and an updated P0 checklist.
 
-- [ ] **Step 1: Update lifecycle documentation**
+- [x] **Step 1: Update lifecycle documentation**
 
 Document these exact semantics without exposing the internal digest format:
 
@@ -269,11 +269,11 @@ Unknown capture: starts the existing image with a warning.
 
 State that files baked into an image must be declared as Compose Watch `action: rebuild`; Marina does not scan the full context.
 
-- [ ] **Step 2: Update roadmap status**
+- [x] **Step 2: Update roadmap status**
 
 Mark the stale-image pre-start guard complete while leaving Clean Rebuild and memory resource guard pending. Replace the old statement that Watch-off dependency changes always require manual Rebuild.
 
-- [ ] **Step 3: Run documentation and full regression checks**
+- [x] **Step 3: Run documentation and full regression checks**
 
 Run:
 
@@ -284,7 +284,7 @@ for test in plugin/tests/*.sh; do bash "$test"; done
 
 Expected: `git diff --check` emits nothing and every test exits zero or reports its documented environment skip.
 
-- [ ] **Step 4: Inspect the final diff for secret and scope regressions**
+- [x] **Step 4: Inspect the final diff for secret and scope regressions**
 
 Run:
 
@@ -296,7 +296,7 @@ rg -n "TO[D]O|TB[D]|FIX[M]E" docs/superpowers/plans/2026-07-15-stale-image-guard
 
 Expected: only stale-image guard files and previously approved design/plan docs are changed; no placeholder matches.
 
-- [ ] **Step 5: Commit docs**
+- [x] **Step 5: Commit docs**
 
 ```bash
 git add README.md docs/superpowers/specs/2026-07-14-orca-comparison-and-roadmap-design.md docs/superpowers/specs/2026-07-14-compose-watch-standard-dev-design.md

@@ -125,13 +125,15 @@ Watch 선언이 없는 Compose 프로젝트는 현재 동작을 유지한다. Ma
 
 표준성과 시작 속도를 위해 실행 의미를 분리한다.
 
-- **Start**: 기존 이미지가 있으면 그대로 `up -d`; 이미지가 없으면 Compose가 최초 build; 이후 Watch 시작
+- **Start**: 선언된 입력이 마지막 성공 build와 같으면 `up -d`; 다르거나 기록이 없으면 `up -d --build`;
+  이후 Watch 시작
 - **Rebuild**: `up -d --build`; 이후 Watch 시작
 - **Clean Rebuild**: BuildKit cache와 프로젝트가 명시한 cache를 정리한 뒤 rebuild
 
 Watch가 실행 중일 때 dependency 입력이 바뀌면 Compose가 자동 rebuild한다. Watch가 꺼진 동안 branch 전환이나
-pull로 dependency 입력이 바뀐 경우에는 사용자가 Rebuild를 선택해야 한다. 이 제한은 숨기지 않는다. 자동
-pre-start 판정을 추가하려면 fingerprint가 필요하므로 이번 표준 경로의 범위에서 제외한다.
+pull로 Dockerfile, `action: rebuild` 경로, build arg가 바뀌면 다음 Start가 로컬 성공 baseline과 비교해
+`--build`를 자동 적용한다. 프로젝트 설정용 fingerprint schema나 언어별 추론은 추가하지 않으며 build context
+전체도 스캔하지 않는다. 따라서 이미지에 bake되는 입력은 Compose Watch rebuild 경로로 선언해야 한다.
 
 ## 성능 기준
 

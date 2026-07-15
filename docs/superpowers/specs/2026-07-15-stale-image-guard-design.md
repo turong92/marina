@@ -151,6 +151,8 @@ image를 통과시키지는 않는다. Watch 결과를 baseline에 연결하는 
 - 동시에 서로 다른 서비스를 시작해도 lock 안에서 service map을 merge하여 갱신 유실을 막는다.
 - 같은 서비스의 동시 build는 마지막 성공 writer의 동일 시점 snapshot이 남으며 다음 Start에서 다시 검증한다.
 - baseline JSON이 손상되면 기록 없음으로 취급하고 다음 정상 snapshot에서 1회 자동 build로 복구한다.
+- snapshot이 디렉터리를 hash할 때 Marina의 session directory는 제외한다. capture 임시 파일, baseline,
+  lock이 자신의 digest를 바꿔 영구 rebuild를 만드는 자기관찰을 방지한다.
 
 ## 테스트
 
