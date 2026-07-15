@@ -168,6 +168,18 @@ with tempfile.TemporaryDirectory() as temp:
     assert str(external_source) in resolved_inputs["text"], resolved_inputs
     assert not list(stored.parent.glob("*.memory-plan-*"))
 
+    attached_external = root / ".workspace" / "external" / "data"
+    attached_external.mkdir(parents=True)
+    resolved_inputs.clear()
+    compose_svc._docker_compose_config_json = fake_config_reader
+    try:
+        assert compose_svc.compose_start_targets(root, project_with_env, ["web"]) == ["web", "db"]
+    finally:
+        compose_svc._docker_compose_config_json = original_config_reader
+    assert str(attached_external) in resolved_inputs["text"], resolved_inputs
+    assert resolved_inputs["text"].count(str(attached_external)) == 1, resolved_inputs
+    assert f"{root}/{root}" not in resolved_inputs["text"], resolved_inputs
+
     # Lifecycle paths reserve explicit services plus transitive dependencies.
     # Restart has no additional target because it reuses an already-running image.
     ml = importlib.import_module("marina_lifecycle")
