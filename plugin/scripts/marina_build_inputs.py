@@ -21,39 +21,73 @@ def _label(root: Path, path: Path) -> str:
 
 def _is_ignored(path: Path, ignored_paths: tuple[Path, ...]) -> bool:
     try:
-        resolved = path.resolve()
+        absolute = path.parent.resolve() / path.name
     except OSError:
-        resolved = path.absolute()
+        absolute = Path(os.path.abspath(path))
     for ignored in ignored_paths:
         try:
-            resolved.relative_to(ignored)
+            absolute.relative_to(ignored)
             return True
         except ValueError:
             continue
     return False
 
 
+def _update_digest_record(digest: Any, kind: str, *parts: Any) -> None:
+    digest.update(kind.encode("ascii") + b"\0")
+    for part in parts:
+        data = part if isinstance(part, bytes) else str(part).encode("utf-8")
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+
+
+def _file_digest(path: Path) -> bytes:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.digest()
+
+
 def _path_digest(path: Path, ignored_paths: tuple[Path, ...] = ()) -> str:
     if _is_ignored(path, ignored_paths):
         return "ignored"
-    if not path.exists():
+    try:
+        path_stat = path.lstat()
+    except FileNotFoundError:
         return "missing"
     digest = hashlib.sha256()
-    if path.is_file():
-        with path.open("rb") as handle:
-            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                digest.update(chunk)
+    mode = stat.S_IMODE(path_stat.st_mode)
+    if stat.S_ISLNK(path_stat.st_mode):
+        _update_digest_record(digest, "link", mode, os.readlink(path))
+        return "link:" + digest.hexdigest()
+    if stat.S_ISREG(path_stat.st_mode):
+        _update_digest_record(digest, "file", mode, _file_digest(path))
         return "file:" + digest.hexdigest()
-    if not path.is_dir():
-        return "other"
+    if not stat.S_ISDIR(path_stat.st_mode):
+        _update_digest_record(digest, "other", path_stat.st_mode)
+        return "other:" + digest.hexdigest()
     for directory, dirnames, filenames in os.walk(path):
         directory_path = Path(directory)
         relative_directory = directory_path.relative_to(path).as_posix()
-        digest.update(f"d\0{relative_directory}\n".encode())
-        dirnames[:] = sorted(
-            name for name in dirnames
-            if not _is_ignored(directory_path / name, ignored_paths)
+        directory_stat = directory_path.lstat()
+        _update_digest_record(
+            digest, "dir", relative_directory, stat.S_IMODE(directory_stat.st_mode)
         )
+        traversable = []
+        for dirname in sorted(dirnames):
+            item = directory_path / dirname
+            if _is_ignored(item, ignored_paths):
+                continue
+            item_stat = item.lstat()
+            if stat.S_ISLNK(item_stat.st_mode):
+                _update_digest_record(
+                    digest, "link", item.relative_to(path).as_posix(),
+                    stat.S_IMODE(item_stat.st_mode), os.readlink(item),
+                )
+            else:
+                traversable.append(dirname)
+        dirnames[:] = traversable
         for filename in sorted(filenames):
             item = directory_path / filename
             if _is_ignored(item, ignored_paths):
@@ -62,15 +96,11 @@ def _path_digest(path: Path, ignored_paths: tuple[Path, ...] = ()) -> str:
             rel = item.relative_to(path).as_posix()
             mode = stat.S_IMODE(item_stat.st_mode)
             if stat.S_ISLNK(item_stat.st_mode):
-                digest.update(f"l\0{rel}\0{mode:o}\0{os.readlink(item)}\n".encode())
+                _update_digest_record(digest, "link", rel, mode, os.readlink(item))
             elif stat.S_ISREG(item_stat.st_mode):
-                digest.update(f"f\0{rel}\0{mode:o}\0".encode())
-                with item.open("rb") as handle:
-                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                        digest.update(chunk)
-                digest.update(b"\n")
+                _update_digest_record(digest, "file", rel, mode, _file_digest(item))
             else:
-                digest.update(f"o\0{rel}\0{item_stat.st_mode:o}\n".encode())
+                _update_digest_record(digest, "other", rel, item_stat.st_mode)
     return "dir:" + digest.hexdigest()
 
 

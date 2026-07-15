@@ -25,6 +25,7 @@ echo "docker $*" >> "$DOCKER_LOG"
 case "$*" in
   "compose version --short") echo "2.40.3" ;;
   info) exit 0 ;;
+  "image inspect --format={{.Id}} "*) echo "sha256:watch-image" ;;
   *"config --format json"*)
     if [[ "${WATCH_CONFIG_FAIL_AFTER_UP:-}" == "1" && -e "$WATCH_UP_DONE" ]]; then exit 9; fi
     if [[ "${WATCH_DELAY_CONFIG_AFTER_UP:-}" == "1" && -e "$WATCH_UP_DONE" ]]; then
@@ -39,25 +40,43 @@ case "$*" in
 be}" ;;
   *"ps --all --services"*) printf 'web\noptional\nbe\n' ;;
   *"ps --format json"*) echo '[]' ;;
+  *"images --format json web"*)
+    echo '[{"ID":"sha256:watch-image","Repository":"web-image","Tag":"latest"}]' ;;
   *"logs -f"*) exec sleep 30 ;;
   *"up -d"*)
+    if [[ "${ASSERT_WATCH_STOPPED:-}" == 1 && -s "${WATCH_PID_FILE:-}" ]]; then
+      old_pid="$(head -n 1 "$WATCH_PID_FILE")"
+      [[ -z "$old_pid" ]] || ! kill -0 "$old_pid" 2>/dev/null || exit 25
+    fi
     : > "$WATCH_UP_DONE"
     if [[ "${WATCH_DELAY_UP:-}" == "1" ]]; then
       : > "$WATCH_UP_BARRIER"
       sleep 1
     fi
+    if [[ "${WATCH_LONG_UP:-}" == "1" ]]; then
+      : > "$WATCH_UP_BARRIER"
+      sleep 2
+    fi
+    if [[ "${BLOCK_WATCH_REFRESH:-}" == 1 ]]; then
+      ln -s "$WATCH_LOCK_OWNER_PID" "$(dirname "$WATCH_PID_FILE")/compose.watch.lock"
+    fi
+    [[ "${FAIL_UP:-}" != 1 ]] || exit 26
     exit 0
     ;;
   *"watch --no-up "*)
     echo "$$" >> "$WATCH_PIDS"
     echo "WATCH-$*"
     if [[ "${WATCH_IGNORE_TERM:-}" == "1" ]]; then
-      exec python3 -c 'import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(30)'
+      trap '' TERM
+      while :; do sleep 1; done
     fi
     if [[ "${WATCH_WITH_CHILD:-}" == "1" ]]; then
-      exec python3 -c 'import os,subprocess,sys,time; child=subprocess.Popen(["sleep","30"]); open(sys.argv[1],"a").write(str(child.pid)+"\n"); time.sleep(30)' "$WATCH_CHILD_PIDS"
+      sleep 30 &
+      child=$!
+      printf '%s\n' "$child" >> "$WATCH_CHILD_PIDS"
+      wait "$child"
     fi
-    exec sleep 30
+    while :; do sleep 1; done
     ;;
   *) exit 0 ;;
 esac
@@ -80,6 +99,7 @@ cat > "$DOCKER_CONFIG_FIXTURE" <<'JSON'
   "services": {
     "web": {
       "image": "web-image",
+      "build": {"context": ".", "dockerfile": "Dockerfile"},
       "develop": {
         "watch": [
           {"action": "sync", "path": "/tmp/src", "target": "/app/src"}
@@ -103,6 +123,7 @@ P="$TMP/project"
 mkdir -p "$P"
 P="$(cd "$P" && pwd -P)"
 cp "$DOCKER_CONFIG_FIXTURE" "$P/docker-compose.yml"
+printf 'FROM scratch\n' > "$P/Dockerfile"
 bash "$SH" project add "$P" --compose "$P/docker-compose.yml" >/dev/null
 mrun() {
   (cd "$P" && MARINA_HOME="$MARINA_HOME" PATH="$TMP/bin:$PATH" \
@@ -126,6 +147,7 @@ wait_for_pid() {
 mrun start --all >/dev/null
 SD="$P/.workspace/marina/main"
 WATCH_PID_FILE="$SD/compose.watch.pid"
+export WATCH_PID_FILE
 wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: project watcher not running"; exit 1; }
 watch_pid_count="$(find "$SD" -name '*.watch.pid' -type f | wc -l | tr -d ' ')"
 [[ "$watch_pid_count" == "1" ]] || { echo "FAIL: expected one project watcher, found $watch_pid_count"; exit 1; }
@@ -133,10 +155,81 @@ grep -q "watch --no-up web" "$DOCKER_LOG" || { echo "FAIL: compose watch command
 first_pid="$(head -n 1 "$WATCH_PID_FILE")"
 
 mrun start --all >/dev/null
-wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: replacement watcher not running"; exit 1; }
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher missing after fast Start"; exit 1; }
 second_pid="$(head -n 1 "$WATCH_PID_FILE")"
-[[ "$first_pid" != "$second_pid" ]] || { echo "FAIL: watcher pid not replaced"; exit 1; }
-kill -0 "$first_pid" 2>/dev/null && { echo "FAIL: old watcher still alive"; exit 1; } || true
+[[ "$first_pid" == "$second_pid" ]] || { echo "FAIL: fast Start replaced unchanged watcher"; exit 1; }
+kill -0 "$first_pid" 2>/dev/null || { echo "FAIL: fast Start stopped watcher"; exit 1; }
+
+perl -0pi -e 's#/tmp/src#/tmp/src-v2#g' "$DOCKER_CONFIG_FIXTURE"
+cp "$DOCKER_CONFIG_FIXTURE" "$P/docker-compose.yml"
+mrun start --web >/dev/null
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher missing after Watch config change"; exit 1; }
+config_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$config_pid" != "$second_pid" ]] || { echo "FAIL: Watch config change kept stale watcher"; exit 1; }
+second_pid="$config_pid"
+
+# A refresh that passed its early active-build check must re-check under the
+# Watch lock before starting, because a build can begin during config lookup.
+rm -f "$WATCH_UP_DONE" "$WATCH_CONFIG_BARRIER" "$WATCH_UP_BARRIER"
+WATCH_DELAY_CONFIG_AFTER_UP=1 mrun start --web >/dev/null &
+stale_refresh_job=$!
+for _ in $(seq 1 50); do [[ -e "$WATCH_CONFIG_BARRIER" ]] && break; sleep 0.1; done
+[[ -e "$WATCH_CONFIG_BARRIER" ]] || { echo "FAIL: stale refresh barrier not reached"; exit 1; }
+printf '# race build\n' >> "$P/Dockerfile"
+ASSERT_WATCH_STOPPED=1 WATCH_LONG_UP=1 mrun start --web >/dev/null &
+race_build_job=$!
+for _ in $(seq 1 50); do [[ -e "$WATCH_UP_BARRIER" ]] && break; sleep 0.1; done
+[[ -e "$WATCH_UP_BARRIER" ]] || { echo "FAIL: race build barrier not reached"; exit 1; }
+wait "$stale_refresh_job"
+watch_restarted_during_build=0
+[[ ! -e "$WATCH_PID_FILE" ]] || watch_restarted_during_build=1
+wait "$race_build_job"
+[[ "$watch_restarted_during_build" == 0 ]] || { echo "FAIL: refresh restarted Watch during active build"; exit 1; }
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after race build"; exit 1; }
+second_pid="$(head -n 1 "$WATCH_PID_FILE")"
+
+printf '# stale\n' >> "$P/Dockerfile"
+ASSERT_WATCH_STOPPED=1 mrun start --web >/dev/null
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after stale build"; exit 1; }
+stale_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$stale_pid" != "$second_pid" ]] || { echo "FAIL: stale build did not replace watcher"; exit 1; }
+second_pid="$stale_pid"
+
+printf '# failed stale build\n' >> "$P/Dockerfile"
+if ASSERT_WATCH_STOPPED=1 FAIL_UP=1 mrun start --web >/dev/null 2>&1; then
+  echo "FAIL: forced stale build failure succeeded"
+  exit 1
+fi
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after failed build"; exit 1; }
+failed_build_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$failed_build_pid" != "$second_pid" ]] || { echo "FAIL: failed build did not restore watcher"; exit 1; }
+second_pid="$failed_build_pid"
+
+# Failed builds intentionally leave the baseline stale. A successful retry
+# advances it so the following ps/config failure checks exercise fast Start.
+ASSERT_WATCH_STOPPED=1 mrun start --web >/dev/null
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after build retry"; exit 1; }
+retry_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$retry_pid" != "$second_pid" ]] || { echo "FAIL: build retry did not replace watcher"; exit 1; }
+second_pid="$retry_pid"
+
+# A failed Watch refresh must not replace the original Compose up exit code.
+printf '# blocked refresh\n' >> "$P/Dockerfile"
+sleep 30 &
+watch_lock_owner=$!
+set +e
+ASSERT_WATCH_STOPPED=1 FAIL_UP=1 BLOCK_WATCH_REFRESH=1 WATCH_LOCK_OWNER_PID="$watch_lock_owner" \
+  mrun start --web >/dev/null 2>&1
+blocked_refresh_rc=$?
+set -e
+rm -f "$SD/compose.watch.lock"
+kill "$watch_lock_owner" 2>/dev/null || true
+wait "$watch_lock_owner" 2>/dev/null || true
+[[ "$blocked_refresh_rc" == 26 ]] || { echo "FAIL: refresh failure replaced up rc with $blocked_refresh_rc"; exit 1; }
+
+mrun start --web >/dev/null
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after blocked refresh retry"; exit 1; }
+second_pid="$(head -n 1 "$WATCH_PID_FILE")"
 
 rm -f "$WATCH_UP_DONE"
 WATCH_PS_FAIL=1 mrun start --web >/dev/null
@@ -184,7 +277,7 @@ wait "$unrelated_pid" 2>/dev/null || true
 WATCH_IGNORE_TERM=1 mrun start --web >/dev/null
 wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: stubborn watcher not running"; exit 1; }
 stubborn_pid="$(head -n 1 "$WATCH_PID_FILE")"
-mrun stop --web >/dev/null
+DOCKER_RUNNING_SERVICES=be mrun stop --web >/dev/null
 if kill -0 "$stubborn_pid" 2>/dev/null; then
   kill -9 "$stubborn_pid" 2>/dev/null || true
   echo "FAIL: watcher survived service stop"
@@ -205,7 +298,7 @@ while IFS= read -r p; do
   [[ -n "$p" ]] && kill -0 "$p" 2>/dev/null && alive=$((alive + 1))
 done < "$WATCH_PIDS"
 [[ "$alive" == "1" ]] || { echo "FAIL: concurrent starts left $alive watcher processes"; exit 1; }
-mrun stop --web >/dev/null
+DOCKER_RUNNING_SERVICES=be mrun stop --web >/dev/null
 
 # Stop signals the full watcher process group, including descendants.
 : > "$WATCH_CHILD_PIDS"
@@ -213,7 +306,7 @@ WATCH_WITH_CHILD=1 mrun start --web >/dev/null
 for _ in $(seq 1 50); do [[ -s "$WATCH_CHILD_PIDS" ]] && break; sleep 0.1; done
 child_pid="$(head -n 1 "$WATCH_CHILD_PIDS")"
 [[ -n "$child_pid" ]] || { echo "FAIL: watcher child was not created"; exit 1; }
-mrun stop --web >/dev/null
+DOCKER_RUNNING_SERVICES=be mrun stop --web >/dev/null
 if kill -0 "$child_pid" 2>/dev/null; then
   kill -9 "$child_pid" 2>/dev/null || true
   echo "FAIL: watcher child survived service stop"

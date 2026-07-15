@@ -29,7 +29,7 @@ echo '{"services":{"a":{"ports":[{"target":"8080-8090","published":"8080"}]}}}' 
 
 # isolation breakers + build_overlay 중화 + ps parse — 함수 직접
 python3 - "$CP" "$TMP" <<'PY'
-import importlib.util, sys, os, json, time
+import importlib.util, sys, os, json, subprocess, time
 from types import SimpleNamespace
 spec=importlib.util.spec_from_file_location("mc", sys.argv[1]); mc=importlib.util.module_from_spec(spec); spec.loader.exec_module(mc)
 T=sys.argv[2]
@@ -132,6 +132,53 @@ ps='[{"Service":"web","Publishers":[{"URL":"127.0.0.1","TargetPort":80,"Publishe
 assert mc.parse_ps_ports(ps)=={"web":[55001],"be":[55002]}, mc.parse_ps_ports(ps)
 assert mc._json_rows('[{"ID":"a"},{"ID":"b"}]') == [{"ID":"a"},{"ID":"b"}]
 assert mc._json_rows('{"ID":"a"}\n{"ID":"b"}\n') == [{"ID":"a"},{"ID":"b"}]
+
+# Concurrent invocations keep immutable overlays even when the canonical Watch
+# overlay advances to a newer invocation.
+overlay_session=os.path.join(T,"overlay-session")
+canonical_one,private_one=mc._write_invocation_overlay(overlay_session,"services:\n  api: {}\n")
+canonical_two,private_two=mc._write_invocation_overlay(overlay_session,"services:\n  web: {}\n")
+assert canonical_one==canonical_two
+assert open(private_one,encoding="utf-8").read()=="services:\n  api: {}\n"
+assert open(private_two,encoding="utf-8").read()=="services:\n  web: {}\n"
+assert open(canonical_two,encoding="utf-8").read()=="services:\n  web: {}\n"
+os.unlink(private_one); os.unlink(private_two)
+
+# An effective build pauses only a verified Marina-owned project watcher. The
+# lock publication is atomic and does not stay held for the whole build slot.
+watch_session=os.path.join(T,"watch-session")
+os.makedirs(watch_session,exist_ok=True)
+unrelated=subprocess.Popen(["sleep","30"],start_new_session=True)
+unrelated_stamp=subprocess.check_output(
+    ["ps","-p",str(unrelated.pid),"-o","lstart="],text=True
+).strip()
+open(os.path.join(watch_session,"compose.watch.pid"),"w").write(
+    f"{unrelated.pid}\n{' '.join(unrelated_stamp.split())}\n"
+)
+with mc._effective_build_slot(watch_session, enabled=True, project_dir=T):
+    assert unrelated.poll() is None, "matching PID/stamp without watcher command was killed"
+    assert not os.path.exists(os.path.join(watch_session,"compose.watch.pid"))
+    assert not os.path.lexists(os.path.join(watch_session,"compose.watch.lock"))
+unrelated.terminate(); unrelated.wait(timeout=1)
+
+watch_script=os.path.join(T,"owned-docker")
+open(watch_script,"w").write("#!/usr/bin/env bash\nwhile :; do sleep 1; done\n")
+os.chmod(watch_script,0o700)
+watcher=subprocess.Popen(
+    [watch_script,"compose","--project-directory",T,"watch","--no-up","web"],
+    start_new_session=True,
+)
+watch_stamp=subprocess.check_output(
+    ["ps","-p",str(watcher.pid),"-o","lstart="],text=True
+).strip()
+open(os.path.join(watch_session,"compose.watch.pid"),"w").write(
+    f"{watcher.pid}\n{' '.join(watch_stamp.split())}\n"
+)
+with mc._effective_build_slot(watch_session, enabled=True, project_dir=T):
+    watcher.wait(timeout=1)
+    with mc._compose_watch_lock(watch_session):
+        assert os.path.islink(os.path.join(watch_session,"compose.watch.lock"))
+assert not os.path.lexists(os.path.join(watch_session,"compose.watch.lock"))
 # 엮기 — _normalize_forward/_legacy_host_forward 상세는 test-compose-forward.sh 소관(중복 유지비 제거)
 # 엮기 — _auto_service_forward: compose 가 서빙하는 포트 → 그 서비스 (자동 서비스타겟)
 assert mc._auto_service_forward({"services":{"be":{"ports":[{"target":8081,"published":"8081"}]},"fe":{"ports":[{"target":3000}]},"redis":{"image":"r"}}})=={"8081":"be","3000":"fe"}

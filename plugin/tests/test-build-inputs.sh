@@ -187,6 +187,44 @@ os.utime(dependency_file, ns=(original_stat.st_atime_ns, original_stat.st_mtime_
 directory_after = build_input_snapshot(root, directory_config, ["directory"], {}, key)
 assert directory_before != directory_after
 
+directory_mode_before = directory_after
+dependency_dir.chmod(0o700)
+directory_mode_after = build_input_snapshot(root, directory_config, ["directory"], {}, key)
+assert directory_mode_before != directory_mode_after
+
+linked_a = root / "linked-a"
+linked_b = root / "linked-b"
+linked_a.mkdir()
+linked_b.mkdir()
+(linked_a / "value.txt").write_text("same", encoding="utf-8")
+(linked_b / "value.txt").write_text("same", encoding="utf-8")
+linked_dir = dependency_dir / "linked"
+linked_dir.symlink_to(linked_a, target_is_directory=True)
+symlink_before = build_input_snapshot(root, directory_config, ["directory"], {}, key)
+linked_dir.unlink()
+linked_dir.symlink_to(linked_b, target_is_directory=True)
+symlink_after = build_input_snapshot(root, directory_config, ["directory"], {}, key)
+assert symlink_before != symlink_after
+
+session_target = root / "session-target"
+session_target.mkdir()
+(session_target / "one").mkdir()
+(session_target / "two").mkdir()
+ignored_link = dependency_dir / "session-link"
+ignored_link.symlink_to(session_target / "one", target_is_directory=True)
+ignored_link_config = json.loads(json.dumps(directory_config))
+ignored_before = build_input_snapshot(
+    root, ignored_link_config, ["directory"], {}, key,
+    ignored_paths=[session_target],
+)
+ignored_link.unlink()
+ignored_link.symlink_to(session_target / "two", target_is_directory=True)
+ignored_after = build_input_snapshot(
+    root, ignored_link_config, ["directory"], {}, key,
+    ignored_paths=[session_target],
+)
+assert ignored_before != ignored_after
+
 concurrent_path = root / "concurrent" / "build-baseline.json"
 snapshots = []
 for index in range(8):

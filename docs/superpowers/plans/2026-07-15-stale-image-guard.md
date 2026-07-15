@@ -4,7 +4,7 @@
 
 **Goal:** Keep repeated Compose Start fast while automatically applying `--build` when declared build inputs differ from the last successful build.
 
-**Architecture:** Extend the existing secret-safe build input module with a per-session, service-merged build baseline and a pure build-decision function. Capture the current snapshot once at the Compose submit boundary, use it for both the Build Timeline handoff and stale decision, and update the baseline only after a successful effective build.
+**Architecture:** Extend the existing secret-safe build input module with a per-session, service-merged build baseline and a pure build-decision function. Capture at the Compose submit boundary for the Build Timeline and stale decision, then capture again after an effective build. Advance the baseline only when the inputs stayed stable and the resulting local image IDs verify.
 
 **Tech Stack:** Python 3 standard library (`fcntl`, `json`, `tempfile`, `pathlib`), Bash integration tests, Docker Compose command dispatch.
 
@@ -17,6 +17,21 @@
 - Update the baseline only after a successful command that actually used `--build`.
 - Image-only services do not participate in stale-image decisions.
 - Baseline and lock files must use mode `0600`, service-level merge, and atomic replacement.
+
+## Review Hardening Checklist
+
+- [x] Compare the baseline image ref with the current local Docker image ID, including A-to-B-to-A input changes.
+- [x] Serialize overlapping builds of the same service while retaining parallelism across different services.
+- [x] Use immutable per-invocation overlays so concurrent Compose calls cannot rewrite each other's submitted config.
+- [x] Re-capture inputs after build and verify Compose image IDs against their image refs before advancing baseline.
+- [x] Pause Marina-owned Compose Watch for an active build generation and restore it after success or failure.
+- [x] Keep different services building in parallel with PID-stamped active tokens; serialize only overlapping services.
+- [x] Publish Watch locks atomically and verify PID stamp, project, command, and PGID before terminating a watcher.
+- [x] Keep an unchanged watcher alive across fast Start and preserve the original Compose exit code if refresh fails.
+- [x] Re-check active builds under the Watch lock before spawn and compare resolved Compose model signatures.
+- [x] Restore the previous watch service set when post-build Watch refresh cannot query Compose.
+- [x] Hash directory contents with unambiguous records, including directory modes and directory symlinks.
+- [x] Reject malformed baseline structures and keep timeout/error capture paths best-effort.
 
 ---
 

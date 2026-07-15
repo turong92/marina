@@ -17,6 +17,8 @@ case "$*" in
   *"config --format json"*) echo "APP_ENV_AT_CONFIG=${APP_ENV:-MISSING}" >> "$DOCKER_LOG"; cat "$DOCKER_CONFIG_FIXTURE" ;;
   *"images --format json api"*)
     echo "[{\"ID\":\"sha256:${COMPOSE_IMAGE_ID:-image-a}\",\"Repository\":\"proj-api\",\"Tag\":\"latest\"}]" ;;
+  *"images --format json worker"*)
+    echo "[{\"ID\":\"sha256:${COMPOSE_IMAGE_ID:-image-a}\",\"Repository\":\"proj-worker\",\"Tag\":\"latest\"}]" ;;
   *"ps --format json"*) cat "$DOCKER_PS_FIXTURE" ;;
   *"up -d"*)
     [[ -s "${MARINA_BUILD_INPUT_SNAPSHOT:-}" ]] || { echo "snapshot missing before compose up" >&2; exit 23; }
@@ -29,6 +31,7 @@ case "$*" in
         : > "$UP_PROBE.overlap"
       fi
     fi
+    [[ -z "${MUTATE_FILE:-}" ]] || printf '# changed during build\n' >> "$MUTATE_FILE"
     [[ "${FAIL_UP:-0}" != 1 ]] || exit 24 ;;
   *) exit 0 ;;
 esac
@@ -68,7 +71,8 @@ grep -q "APP_ENV_AT_CONFIG=local" "$DOCKER_LOG" || { echo "FAIL: env not at conf
 SD="$P/.workspace/marina/main"
 grep -q '!override' "$SD/marina-overlay.yml" || { echo "FAIL: overlay missing !override"; cat "$SD/marina-overlay.yml"; exit 1; }
 grep -q '127.0.0.1::80' "$SD/marina-overlay.yml" || { echo "FAIL: overlay localhost target"; exit 1; }
-grep -q -- "-f $SD/marina-overlay.yml" "$DOCKER_LOG" || { echo "FAIL: overlay not passed to up"; exit 1; }
+grep -q -- "-f $SD/marina-overlay\." "$DOCKER_LOG" || { echo "FAIL: invocation overlay not passed to up"; exit 1; }
+[[ -f "$SD/marina-overlay.yml" ]] || { echo "FAIL: canonical Watch overlay missing"; exit 1; }
 
 # rebuild --all → 같은 up 경로에서 명시적으로 --build
 : > "$DOCKER_LOG"; mrun rebuild --all >/dev/null
@@ -85,11 +89,14 @@ grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: restart must not force --bui
 # build 서비스는 마지막 성공 build baseline과 비교해 필요한 Start에만 --build.
 mkdir -p "$P/api"
 printf 'FROM scratch\n' > "$P/api/Dockerfile.local"
+mkdir -p "$P/worker"
+printf 'FROM scratch\n' > "$P/worker/Dockerfile.local"
 cat > "$TMP/cfg.json" <<JSON
 {"services":{
   "web":{"image":"nginx","ports":[{"target":80,"published":"3000","protocol":"tcp"}]},
   "be":{"image":"temurin","ports":[{"target":8081,"published":"8081","protocol":"tcp"}]},
-  "api":{"build":{"context":"$P/api","dockerfile":"Dockerfile.local","args":{"TOKEN":"raw-build-secret"}}}
+  "api":{"build":{"context":"$P/api","dockerfile":"Dockerfile.local","args":{"TOKEN":"raw-build-secret"}}},
+  "worker":{"build":{"context":"$P/worker","dockerfile":"Dockerfile.local"}}
 }}
 JSON
 SD="$P/.workspace/marina/main"
@@ -148,6 +155,25 @@ for _ in $(seq 1 200); do [[ -d "$UP_PROBE" ]] && break; sleep 0.01; done
 SLOW_UP=1 mrun start --api >/dev/null 2>&1 & second_start=$!
 wait "$first_start" "$second_start"
 [[ ! -e "$UP_PROBE.overlap" ]] || { echo "FAIL: same-service Starts overlapped compose up"; exit 1; }
+
+# 서로 다른 build 서비스는 project Watch coordination 때문에 직렬화되지 않는다.
+mrun start --worker >/dev/null
+printf '# parallel api\n' >> "$P/api/Dockerfile.local"
+printf '# parallel worker\n' >> "$P/worker/Dockerfile.local"
+rm -rf "$UP_PROBE" "$UP_PROBE.overlap"
+MARINA_BUILD_INPUT_SNAPSHOT="$TMP/api-input.json" SLOW_UP=1 mrun start --api >/dev/null 2>&1 & api_start=$!
+for _ in $(seq 1 200); do [[ -d "$UP_PROBE" ]] && break; sleep 0.01; done
+[[ -d "$UP_PROBE" ]] || { echo "FAIL: api parallel Start did not enter up"; exit 1; }
+MARINA_BUILD_INPUT_SNAPSHOT="$TMP/worker-input.json" SLOW_UP=1 mrun start --worker >/dev/null 2>&1 & worker_start=$!
+wait "$api_start" "$worker_start"
+[[ -e "$UP_PROBE.overlap" ]] || { echo "FAIL: different build services were serialized"; exit 1; }
+
+# Build 도중 선언 입력이 바뀌면 pre-build snapshot과 post-build image를 baseline으로 묶지 않는다.
+rm -f "$SD/build-baseline.json"
+MUTATE_FILE="$P/api/Dockerfile.local" mrun start --api >/dev/null
+[[ ! -e "$SD/build-baseline.json" ]] || { echo "FAIL: changed-during-build inputs advanced baseline"; exit 1; }
+: > "$DOCKER_LOG"; mrun start --api >/dev/null
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: changed-during-build input was not retried"; cat "$DOCKER_LOG"; exit 1; }
 
 # stop --web → stop web (down 아님)
 : > "$DOCKER_LOG"; mrun stop --web >/dev/null

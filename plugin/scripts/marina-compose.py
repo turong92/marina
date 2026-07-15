@@ -805,17 +805,63 @@ def label_argv(project_name, verb_args):
     return ["docker", "compose", "-p", project_name] + list(verb_args)
 
 
-def docker_config_json(stored, project_dir, project_name, env) -> dict:
+def docker_config_json(stored, project_dir, project_name, env, overlay=None) -> dict:
     """stored compose 완전 해석(상대→절대, ${VAR} 보간). env 가 보간에 쓰임(P1). 출력은 저장 안 함."""
-    out = subprocess.check_output(
-        ["docker", "compose", "-f", stored, "--project-directory", project_dir,
-         "-p", project_name, "config", "--format", "json"],
-        text=True, env=env)
+    argv = ["docker", "compose", "-f", stored]
+    if overlay and os.path.exists(overlay) and os.path.getsize(overlay) > 0:
+        argv += ["-f", overlay]
+    argv += ["--project-directory", project_dir, "-p", project_name,
+             "config", "--format", "json"]
+    out = subprocess.check_output(argv, text=True, env=env)
     return json.loads(out)
 
 
 def _overlay_path(session_dir):
     return os.path.join(session_dir, "marina-overlay.yml")
+
+
+def _write_invocation_overlay(session_dir, overlay_text):
+    session = Path(session_dir)
+    session.mkdir(parents=True, exist_ok=True)
+    canonical = Path(_overlay_path(session_dir))
+    if not overlay_text.strip():
+        try:
+            canonical.unlink()
+        except FileNotFoundError:
+            pass
+        return None, None
+
+    fd, invocation = tempfile.mkstemp(prefix="marina-overlay.", suffix=".yml", dir=str(session))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(overlay_text)
+        fd = None
+        canonical_fd, canonical_tmp = tempfile.mkstemp(
+            prefix=canonical.name + ".", dir=str(session)
+        )
+        try:
+            os.fchmod(canonical_fd, 0o600)
+            with os.fdopen(canonical_fd, "w", encoding="utf-8") as handle:
+                handle.write(overlay_text)
+            canonical_fd = None
+            os.replace(canonical_tmp, canonical)
+        finally:
+            if canonical_fd is not None:
+                os.close(canonical_fd)
+            try:
+                os.unlink(canonical_tmp)
+            except FileNotFoundError:
+                pass
+        return str(canonical), invocation
+    except Exception:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(invocation)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def _env_with(overrides):
@@ -867,7 +913,7 @@ def _write_build_input_handoff(path, project_dir, config, requested, build_args,
         pass
 
 
-def _capture_build_inputs(a, config, requested, build_args):
+def _capture_build_inputs(a, config, requested, build_args, publish_handoff=True):
     session_dir = Path(a.session_dir)
     private_path = ""
     fd = None
@@ -890,7 +936,8 @@ def _capture_build_inputs(a, config, requested, build_args):
             except OSError:
                 pass
         payload = dict(UNKNOWN_BUILD_INPUTS)
-        _publish_build_input_handoff(payload)
+        if publish_handoff:
+            _publish_build_input_handoff(payload)
         return payload
 
     payload = dict(UNKNOWN_BUILD_INPUTS)
@@ -937,7 +984,8 @@ def _capture_build_inputs(a, config, requested, build_args):
             if reaped and status == 0:
                 payload = read_build_input_snapshot(Path(private_path))
 
-        _publish_build_input_handoff(payload)
+        if publish_handoff:
+            _publish_build_input_handoff(payload)
         return payload
     finally:
         try:
@@ -965,16 +1013,28 @@ def _inspect_baseline_images(baseline, services):
         ref = image.get("ref") if isinstance(image, dict) else ""
         if not isinstance(ref, str) or not ref:
             continue
-        try:
-            image_id = subprocess.check_output(
-                ["docker", "image", "inspect", "--format={{.Id}}", ref],
-                text=True,
-                stderr=subprocess.DEVNULL,
-            ).strip().splitlines()[0]
-        except (FileNotFoundError, IndexError, subprocess.CalledProcessError):
-            image_id = "missing"
+        image_id = _inspect_image_ref(ref)
         identities[service] = {"ref": ref, "id": image_id or "missing"}
     return identities
+
+
+def _inspect_image_ref(ref):
+    try:
+        return subprocess.check_output(
+            ["docker", "image", "inspect", "--format={{.Id}}", ref],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip().splitlines()[0]
+    except (FileNotFoundError, IndexError, subprocess.CalledProcessError):
+        return "missing"
+
+
+def _verified_image_identities(identities):
+    return {
+        service: identity
+        for service, identity in identities.items()
+        if _inspect_image_ref(identity.get("ref") or "") == identity.get("id")
+    }
 
 
 def _compose_image_identities(stored, overlay, project_dir, project_name, services, env):
@@ -1028,6 +1088,238 @@ def _build_service_locks(session_dir, services):
                 os.close(fd)
 
 
+class ComposeWatchLockError(RuntimeError):
+    pass
+
+
+def _process_stamp(pid):
+    try:
+        stamp = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "lstart="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""
+    return " ".join(stamp.split())
+
+
+def _process_running(pid):
+    try:
+        status = subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "stat="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return False
+    return bool(status) and not status.startswith("Z")
+
+
+def _process_command(pid):
+    try:
+        return subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "command="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip()
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return ""
+
+
+def _process_group(pid):
+    try:
+        return int(subprocess.check_output(
+            ["ps", "-p", str(pid), "-o", "pgid="],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        ).strip())
+    except (FileNotFoundError, ValueError, subprocess.CalledProcessError):
+        return 0
+
+
+def _watch_process_owned(pid, recorded_stamp, project_dir):
+    if not recorded_stamp or _process_stamp(pid) != recorded_stamp:
+        return False
+    if _process_group(pid) != pid:
+        return False
+    command = _process_command(pid)
+    return (
+        ("--project-dir" in command or "--project-directory" in command)
+        and str(project_dir) in command
+        and (
+            "marina-compose.py watch" in command
+            or ("docker" in command and "watch --no-up" in command)
+        )
+    )
+
+
+def _watch_lock_owner(lock):
+    try:
+        if lock.is_symlink():
+            return int(os.readlink(lock))
+        return int((lock / "owner").read_text(encoding="ascii").strip())
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+        return 0
+
+
+def _remove_watch_lock(lock):
+    if lock.is_symlink() or lock.is_file():
+        lock.unlink()
+        return
+    try:
+        (lock / "owner").unlink()
+    except FileNotFoundError:
+        pass
+    lock.rmdir()
+
+
+@contextmanager
+def _compose_watch_lock(session_dir):
+    lock = Path(session_dir) / "compose.watch.lock"
+    owner = os.getpid()
+    deadline = time.monotonic() + 5.0
+    while True:
+        try:
+            os.symlink(str(owner), lock)
+            break
+        except FileExistsError:
+            current_owner = _watch_lock_owner(lock)
+            if not current_owner or not _process_running(current_owner):
+                try:
+                    _remove_watch_lock(lock)
+                except OSError:
+                    pass
+                continue
+            if time.monotonic() >= deadline:
+                raise ComposeWatchLockError(f"Compose Watch lock timeout: {lock}")
+            time.sleep(0.05)
+    try:
+        yield
+    finally:
+        if _watch_lock_owner(lock) == owner:
+            try:
+                _remove_watch_lock(lock)
+            except OSError:
+                pass
+
+
+def _stop_compose_watch_for_build(session_dir, project_dir):
+    pid_file = Path(session_dir) / "compose.watch.pid"
+    try:
+        lines = pid_file.read_text(encoding="utf-8").splitlines()
+        pid = int(lines[0])
+        recorded_stamp = " ".join(lines[1].split()) if len(lines) > 1 else ""
+    except (FileNotFoundError, IndexError, ValueError):
+        pid = 0
+        recorded_stamp = ""
+    if pid and _watch_process_owned(pid, recorded_stamp, project_dir):
+        try:
+            os.killpg(pid, signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            pass
+        stop_deadline = time.monotonic() + 3.0
+        while _process_running(pid) and time.monotonic() < stop_deadline:
+            time.sleep(0.1)
+        if _process_running(pid):
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            kill_deadline = time.monotonic() + 1.0
+            while _process_running(pid) and time.monotonic() < kill_deadline:
+                time.sleep(0.05)
+        if _process_running(pid):
+            raise ComposeWatchLockError(
+                f"Compose Watch process did not stop: {pid}"
+            )
+    try:
+        pid_file.unlink()
+    except FileNotFoundError:
+        pass
+
+
+@contextmanager
+def _build_state_lock(session_dir):
+    session = Path(session_dir)
+    session.mkdir(parents=True, exist_ok=True)
+    path = session / ".compose-build-state.lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    os.chmod(path, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield session / ".compose-build-active"
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+
+
+def _active_build_tokens(active_dir):
+    active_dir.mkdir(parents=True, exist_ok=True)
+    active = []
+    for token in active_dir.iterdir():
+        if not token.is_file():
+            continue
+        try:
+            lines = token.read_text(encoding="ascii").splitlines()
+            pid = int(lines[0])
+            stamp = " ".join(lines[1].split())
+        except (IndexError, OSError, ValueError):
+            pid = 0
+            stamp = ""
+        if pid and stamp and _process_stamp(pid) == stamp:
+            active.append(token)
+        else:
+            try:
+                token.unlink()
+            except FileNotFoundError:
+                pass
+    return active
+
+
+def _has_active_builds(session_dir):
+    with _build_state_lock(session_dir) as active_dir:
+        return bool(_active_build_tokens(active_dir))
+
+
+@contextmanager
+def _effective_build_slot(session_dir, enabled, project_dir):
+    if not enabled:
+        yield
+        return
+
+    token_path = None
+    try:
+        with _compose_watch_lock(session_dir):
+            with _build_state_lock(session_dir) as active_dir:
+                first = not _active_build_tokens(active_dir)
+                fd, token_name = tempfile.mkstemp(prefix=f"{os.getpid()}.", dir=str(active_dir))
+                token_path = Path(token_name)
+                try:
+                    os.fchmod(fd, 0o600)
+                    stamp = _process_stamp(os.getpid())
+                    if not stamp:
+                        raise ComposeWatchLockError("active build process stamp unavailable")
+                    os.write(fd, f"{os.getpid()}\n{stamp}\n".encode("ascii"))
+                finally:
+                    os.close(fd)
+                if first:
+                    _stop_compose_watch_for_build(session_dir, project_dir)
+        yield
+    finally:
+        if token_path is not None:
+            with _build_state_lock(session_dir) as active_dir:
+                try:
+                    token_path.unlink()
+                except FileNotFoundError:
+                    pass
+                _active_build_tokens(active_dir)
+
+
+def cmd_build_active(a):
+    return 0 if _has_active_builds(a.session_dir) else 1
+
+
 def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_args):
     grouped, _ = start_group_requested(
         xm, list(a.service or []), config.get("services") or {}
@@ -1051,77 +1343,86 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
         if isinstance((svc_cfg.get(service) or {}).get("build"), dict)
     ]
     with _build_service_locks(a.session_dir, build_services):
-        os.makedirs(a.session_dir, exist_ok=True)
-        overlay = _overlay_path(a.session_dir)
-        if overlay_text.strip():
-            with open(overlay, "w", encoding="utf-8") as handle:
-                handle.write(overlay_text)
-        else:
-            try:
-                os.remove(overlay)
-            except OSError:
-                pass
-            overlay = None
-
-        forward = overlay_conn.get("forward") or {}
-        sidecars = [
-            f"{service}-bind"
-            for service in requested
-            if (svc_cfg.get(service) or {}).get("build")
-            and _forward_for_service(
-                forward, service, _served_ports(svc_cfg.get(service) or {})
+        _canonical_overlay, overlay = _write_invocation_overlay(a.session_dir, overlay_text)
+        try:
+            forward = overlay_conn.get("forward") or {}
+            sidecars = [
+                f"{service}-bind"
+                for service in requested
+                if (svc_cfg.get(service) or {}).get("build")
+                and _forward_for_service(
+                    forward, service, _served_ports(svc_cfg.get(service) or {})
+                )
+            ]
+            current_inputs = _capture_build_inputs(a, config, requested, build_args)
+            baseline_path = Path(a.session_dir) / "build-baseline.json"
+            baseline = read_build_baseline(baseline_path)
+            decision_inputs = attach_image_identities(
+                current_inputs,
+                _inspect_baseline_images(baseline, current_inputs.get("services") or {}),
             )
-        ]
-        current_inputs = _capture_build_inputs(a, config, requested, build_args)
-        baseline_path = Path(a.session_dir) / "build-baseline.json"
-        baseline = read_build_baseline(baseline_path)
-        decision_inputs = attach_image_identities(
-            current_inputs,
-            _inspect_baseline_images(baseline, current_inputs.get("services") or {}),
-        )
-        effective_build, build_reasons = build_decision(
-            decision_inputs,
-            baseline,
-            explicit=bool(a.build),
-        )
-        if current_inputs.get("status") != "ok":
-            if a.build:
-                sys.stderr.write("warning: build 입력을 확인하지 못했습니다; Rebuild는 계속하지만 baseline은 갱신하지 않습니다.\n")
-            else:
-                sys.stderr.write("warning: build 입력을 확인하지 못해 기존 이미지로 시작합니다; 문제가 있으면 Rebuild를 실행하세요.\n")
-        elif effective_build and not a.build:
-            for reason in build_reasons:
-                print(f"stale image: {_build_reason_text(reason)}; Start에 --build 자동 적용")
-        argv = up_argv(
-            a.stored, overlay, a.project_dir, name, requested + sidecars,
-            build=effective_build,
-        )
-        print("compose: " + " ".join(argv))
-        rc = subprocess.call(argv, env=env)
-        if rc == 0:
-            if effective_build and current_inputs.get("status") == "ok":
+            effective_build, build_reasons = build_decision(
+                decision_inputs,
+                baseline,
+                explicit=bool(a.build),
+            )
+            if current_inputs.get("status") != "ok":
+                if a.build:
+                    sys.stderr.write("warning: build 입력을 확인하지 못했습니다; Rebuild는 계속하지만 baseline은 갱신하지 않습니다.\n")
+                else:
+                    sys.stderr.write("warning: build 입력을 확인하지 못해 기존 이미지로 시작합니다; 문제가 있으면 Rebuild를 실행하세요.\n")
+            elif effective_build and not a.build:
+                for reason in build_reasons:
+                    print(f"stale image: {_build_reason_text(reason)}; Start에 --build 자동 적용")
+            argv = up_argv(
+                a.stored, overlay, a.project_dir, name, requested + sidecars,
+                build=effective_build,
+            )
+            print("compose: " + " ".join(argv))
+            try:
+                with _effective_build_slot(
+                    a.session_dir, effective_build, a.project_dir
+                ):
+                    rc = subprocess.call(argv, env=env)
+                    if rc == 0 and effective_build and current_inputs.get("status") == "ok":
+                        try:
+                            post_inputs = _capture_build_inputs(
+                                a, config, requested, build_args,
+                                publish_handoff=False,
+                            )
+                            identities = _compose_image_identities(
+                                a.stored, overlay, a.project_dir, name,
+                                current_inputs.get("services") or {}, env,
+                            )
+                            verified = _verified_image_identities(identities)
+                            expected_services = set(current_inputs.get("services") or {})
+                            if post_inputs == current_inputs and expected_services == set(verified):
+                                merge_build_baseline(
+                                    baseline_path,
+                                    attach_image_identities(post_inputs, verified),
+                                )
+                            else:
+                                sys.stderr.write(
+                                    "warning: build 중 입력 또는 image ID가 바뀌어 baseline을 갱신하지 않습니다; "
+                                    "다음 Start에서 다시 build합니다.\n"
+                                )
+                        except OSError as exc:
+                            sys.stderr.write(f"warning: build baseline 저장 실패; 다음 Start에서 다시 확인합니다: {exc}\n")
+            except ComposeWatchLockError as exc:
+                sys.stderr.write(f"error: {exc}; build를 시작하지 않습니다.\n")
+                return 2
+            if rc == 0:
+                summary = _forward_summary(_applied_forward(svc_cfg, requested, forward))
+                if summary:
+                    print(summary)
+                _show_ports(name)
+            return rc
+        finally:
+            if overlay:
                 try:
-                    identities = _compose_image_identities(
-                        a.stored, overlay, a.project_dir, name,
-                        current_inputs.get("services") or {}, env,
-                    )
-                    merge_build_baseline(
-                        baseline_path,
-                        attach_image_identities(current_inputs, identities),
-                    )
-                    missing_images = sorted(set(current_inputs.get("services") or {}) - set(identities))
-                    if missing_images:
-                        sys.stderr.write(
-                            "warning: build 이미지 ID 확인 실패; 다음 Start에서 다시 build합니다: "
-                            + ", ".join(missing_images) + "\n"
-                        )
-                except OSError as exc:
-                    sys.stderr.write(f"warning: build baseline 저장 실패; 다음 Start에서 다시 확인합니다: {exc}\n")
-            summary = _forward_summary(_applied_forward(svc_cfg, requested, forward))
-            if summary:
-                print(summary)
-            _show_ports(name)
-        return rc
+                    os.unlink(overlay)
+                except FileNotFoundError:
+                    pass
 
 
 def cmd_up(a):
@@ -1241,11 +1542,22 @@ def cmd_watchable(a):
     env = _env_with(a.env)
     name = compose_project_name(a.project_id, a.session)
     try:
-        config = docker_config_json(a.stored, a.project_dir, name, env)
+        session_dir = getattr(a, "session_dir", None)
+        overlay = _overlay_path(session_dir) if session_dir else None
+        config = docker_config_json(a.stored, a.project_dir, name, env, overlay)
     except (FileNotFoundError, subprocess.CalledProcessError, json.JSONDecodeError) as exc:
         sys.stderr.write(f"error: Compose Watch 서비스 판정 실패: {exc}\n")
         return 2
-    for service in watchable_services(config, list(a.service or [])):
+    services = watchable_services(config, list(a.service or []))
+    if getattr(a, "with_signature", False):
+        payload = json.dumps(
+            {"config": config, "services": services},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        print("@signature:" + hashlib.sha256(payload.encode("utf-8")).hexdigest())
+    for service in services:
         print(service)
     return 0
 
@@ -1340,8 +1652,9 @@ def main(argv=None):
     p = sub.add_parser("xmarina"); p.add_argument("--stored", required=True); p.add_argument("--key"); p.set_defaults(fn=cmd_xmarina)
     p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.set_defaults(fn=cmd_up)
     p = sub.add_parser("prebuild-run"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--legacy-prebuild"); p.add_argument("--compose-version", required=True); p.set_defaults(fn=cmd_prebuild_run)
-    p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
+    p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir"); p.add_argument("--with-signature", action="store_true"); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
     p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
+    p = sub.add_parser("build-active"); p.add_argument("--session-dir", required=True); p.set_defaults(fn=cmd_build_active)
     p = sub.add_parser("down"); name_args(p); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
     p = sub.add_parser("stop"); name_args(p); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_stop)
     p = sub.add_parser("restart"); name_args(p); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_restart)

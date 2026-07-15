@@ -151,40 +151,51 @@ _compose_process_stamp() {  # PID 재사용 판별용 OS process start time.
 }
 
 _compose_watch_owned() {  # $1=pid, $2=service, $3=recorded process stamp
-  local p="$1" service="$2" recorded="${3:-}" current cmd
+  local p="$1" service="$2" recorded="${3:-}" current cmd pgid
   [[ "$p" =~ ^[0-9]+$ ]] && kill -0 "$p" 2>/dev/null || return 1
   if [[ -n "$recorded" ]]; then
     current="$(_compose_process_stamp "$p")"
-    [[ -n "$current" && "$current" == "$recorded" ]]
-    return
+    [[ -n "$current" && "$current" == "$recorded" ]] || return 1
   fi
-  # Upgrade compatibility for legacy one-line PID files: only kill a process whose command is still our watcher.
+  pgid="$(ps -p "$p" -o pgid= 2>/dev/null | tr -d ' ' || true)"
+  [[ "$pgid" == "$p" ]] || return 1
+  # Stamp 일치만으로는 PID 재사용을 배제할 수 없으므로 command와 project도 항상 확인한다.
   cmd="$(ps -p "$p" -o command= 2>/dev/null || true)"
   [[ -n "${ROOT:-}" ]] || return 1
-  case " $cmd " in
-    *" --project-dir $ROOT "*|*" --project-directory $ROOT "*) ;;
-    *) return 1 ;;
-  esac
+  [[ "$cmd" == *"--project-dir"* || "$cmd" == *"--project-directory"* ]] || return 1
+  [[ "$cmd" == *"$ROOT"* ]] || return 1
   [[ "$cmd" == *"marina-compose.py watch"* \
     || "$cmd" == *"docker compose"*"watch --no-up"* ]]
 }
 
-_compose_watch_lock() {  # $1=lock directory
+_compose_watch_lock() {  # $1=atomic owner symlink
   local lock="$1" owner
   for _ in $(seq 1 100); do
-    if mkdir "$lock" 2>/dev/null; then
-      printf '%s\n' "$$" > "$lock/owner"
+    if ln -s "$$" "$lock" 2>/dev/null; then
       return 0
     fi
-    owner="$(cat "$lock/owner" 2>/dev/null || true)"
+    if [[ -L "$lock" ]]; then owner="$(readlink "$lock" 2>/dev/null || true)"
+    else owner="$(cat "$lock/owner" 2>/dev/null || true)"
+    fi
     if [[ ! "$owner" =~ ^[0-9]+$ ]] || ! kill -0 "$owner" 2>/dev/null; then
-      rm -rf "$lock"
+      if [[ -L "$lock" ]]; then rm -f "$lock"; else rm -rf "$lock"; fi
       continue
     fi
     sleep 0.05
   done
   echo "warning: Compose Watch lock timeout: $lock" >&2
   return 1
+}
+
+_compose_watch_unlock() {  # $1=lock acquired by this shell
+  local lock="$1" owner
+  if [[ -L "$lock" ]]; then
+    owner="$(readlink "$lock" 2>/dev/null || true)"
+    [[ "$owner" == "$$" ]] && rm -f "$lock"
+  elif [[ -d "$lock" ]]; then
+    owner="$(cat "$lock/owner" 2>/dev/null || true)"
+    [[ "$owner" == "$$" ]] && rm -rf "$lock"
+  fi
 }
 
 _compose_watch_now_ns() {
@@ -203,14 +214,19 @@ _compose_watch_mark_stop() {  # $1=service, empty means stop --all
   tmp="$target.tmp.$$"
   printf '%s\n' "$now" > "$tmp"
   mv "$tmp" "$target"
-  rm -rf "$lock"
+  _compose_watch_unlock "$lock"
 }
 
 _compose_watch_stop_unlocked() {  # $1=service
-  local service="$1" sd f p recorded
+  local service="$1" sd f services_file signature_file p recorded
   sd="$(session_dir)"
   f="$sd/${service}.watch.pid"
-  [[ -f "$f" ]] || return 0
+  services_file="$sd/${service}.watch.services"
+  signature_file="$sd/${service}.watch.signature"
+  if [[ ! -f "$f" ]]; then
+    rm -f "$services_file" "$signature_file"
+    return 0
+  fi
   p="$(sed -n '1p' "$f" 2>/dev/null || true)"
   recorded="$(sed -n '2p' "$f" 2>/dev/null || true)"
   if _compose_watch_owned "$p" "$service" "$recorded"; then
@@ -223,14 +239,16 @@ _compose_watch_stop_unlocked() {  # $1=service
       kill -KILL -- "-$p" 2>/dev/null || true
     fi
   fi
-  rm -f "$f"
+  rm -f "$f" "$services_file" "$signature_file"
 }
 
 _compose_watch_start() {  # $1=service, $2...=foreground watch command
   local service="$1"; shift
-  local sd tpf log_path lock intent_lock all_stop service_stop watched watched_stop rc=0
+  local sd tpf services_file signature_file log_path lock intent_lock all_stop service_stop watched watched_stop rc=0 active_rc=0
   sd="$(session_dir)"
   tpf="$sd/${service}.watch.pid"
+  services_file="$sd/${service}.watch.services"
+  signature_file="$sd/${service}.watch.signature"
   log_path="$sd/${service}.watch.log"
   lock="$sd/${service}.watch.lock"
   intent_lock="$sd/.watch.intent.lock"
@@ -240,20 +258,31 @@ _compose_watch_start() {  # $1=service, $2...=foreground watch command
   if [[ "${MARINA_WATCH_STARTED_NS:-}" =~ ^[0-9]+$ ]] \
     && { [[ "$all_stop" =~ ^[0-9]+$ && "$all_stop" -gt "$MARINA_WATCH_STARTED_NS" ]] \
       || [[ "$service_stop" =~ ^[0-9]+$ && "$service_stop" -gt "$MARINA_WATCH_STARTED_NS" ]]; }; then
-    rm -rf "$intent_lock"
+    _compose_watch_unlock "$intent_lock"
     return 0
   fi
   if [[ "${MARINA_WATCH_STARTED_NS:-}" =~ ^[0-9]+$ ]]; then
     for watched in ${MARINA_WATCH_SERVICES:-}; do
       watched_stop="$(cat "$sd/${watched}.watch.stop" 2>/dev/null || echo 0)"
       if [[ "$watched_stop" =~ ^[0-9]+$ && "$watched_stop" -gt "$MARINA_WATCH_STARTED_NS" ]]; then
-        rm -rf "$intent_lock"
+        _compose_watch_unlock "$intent_lock"
         return 0
       fi
     done
   fi
   if ! _compose_watch_lock "$lock"; then
-    rm -rf "$intent_lock"
+    _compose_watch_unlock "$intent_lock"
+    return 1
+  fi
+  python3 "$SCRIPT_DIR/marina-compose.py" build-active --session-dir "$sd" >/dev/null 2>&1 || active_rc=$?
+  if [[ "$active_rc" -eq 0 ]]; then
+    _compose_watch_unlock "$lock"
+    _compose_watch_unlock "$intent_lock"
+    return 0
+  elif [[ "$active_rc" -ne 1 ]]; then
+    echo "warning: active build 확인 실패 — Compose Watch 시작 건너뜀" >&2
+    _compose_watch_unlock "$lock"
+    _compose_watch_unlock "$intent_lock"
     return 1
   fi
   _compose_watch_stop_unlocked "$service"
@@ -272,7 +301,20 @@ _compose_watch_start() {  # $1=service, $2...=foreground watch command
     if [[ -n "$stamp" ]]; then
       tmp="$tpf.tmp.$$"
       printf '%s\n%s\n' "$p" "$stamp" > "$tmp"
+      chmod 600 "$tmp"
       mv "$tmp" "$tpf"
+      if [[ "$service" == "compose" && -n "${MARINA_WATCH_SERVICES:-}" ]]; then
+        tmp="$services_file.tmp.$$"
+        for watched in $MARINA_WATCH_SERVICES; do printf '%s\n' "$watched"; done > "$tmp"
+        chmod 600 "$tmp"
+        mv "$tmp" "$services_file"
+        if [[ -n "${MARINA_WATCH_SIGNATURE:-}" ]]; then
+          tmp="$signature_file.tmp.$$"
+          printf '%s\n' "$MARINA_WATCH_SIGNATURE" > "$tmp"
+          chmod 600 "$tmp"
+          mv "$tmp" "$signature_file"
+        fi
+      fi
     else
       echo "warning: Compose Watch가 시작 직후 종료됨: $service ($log_path)" >&2
     fi
@@ -281,8 +323,8 @@ _compose_watch_start() {  # $1=service, $2...=foreground watch command
   else
     rc=$?
   fi
-  rm -rf "$lock"
-  rm -rf "$intent_lock"
+  _compose_watch_unlock "$lock"
+  _compose_watch_unlock "$intent_lock"
   return "$rc"
 }
 
@@ -294,7 +336,7 @@ _compose_watch_stop() {  # $1=service (없으면 전체). 항상 0 반환.
     lock="$sd/${service}.watch.lock"
     _compose_watch_lock "$lock" || return 0
     _compose_watch_stop_unlocked "$service"
-    rm -rf "$lock"
+    _compose_watch_unlock "$lock"
   else
     shopt -s nullglob
     for f in "$sd"/*.watch.pid; do
