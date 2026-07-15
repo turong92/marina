@@ -535,6 +535,26 @@ x-marina:
 - 로그 뷰어 — run 히스토리·검색·실시간 스트리밍(start 때 `docker compose logs -f` 를 `run-NNN.log` 로 캡처).
 - 빌드 로그 — run별 총 시간, BuildKit·Gradle 단계, cache hit 수, 가장 오래 걸린 단계를 원문 로그 위에서 요약.
 
+### 메모리 보호
+
+- 대시보드는 가능한 경우 `Docker 사용량 / Docker 용량`과 `Host available`을 따로 표시한다. 서비스별
+  메모리는 Compose project/service 라벨로 현재 worktree에 연결한 `docker stats` 관측값이다.
+- 기존 내부 `MIN_FREE_MB` 임계값은 사용자가 `MARINA_MIN_FREE_MB` 환경변수로 설정한다(기본 4096 MiB).
+  호스트 여유 메모리가 이 값보다 낮으면 Start/Rebuild를 경고하고 차단한다.
+- Docker 쪽에는 별도 여유분 `MARINA_DOCKER_RESERVE_MB`가 있다. 설정하지 않으면 Docker 용량의 20%와
+  4096 MiB 중 큰 값을 사용한다. 실행 중인 컨테이너 사용량과, 같은 project/service에서 로컬로 학습한
+  high-water 메모리 이력을 합산해 새 서비스 기동 후의 여유분을 추정한다. 이력은 이 머신의 Marina 상태에만
+  저장되며, 환경변수·로그·팀 공유 데이터는 저장하지 않는다.
+- 호스트 임계값 또는 예상 Docker 여유분이 위험하면 작업 전에 이유와 큰 예상 서비스를 보여 준다. 사용자가
+  확인하면 동일 작업을 `force=true`로 다시 실행한다. 강제 실행은 경고를 무시하는 명시적 선택일 뿐 Compose
+  메모리 제한을 바꾸거나 다른 worktree를 멈추지 않는다.
+- Docker를 사용할 수 없으면 대시보드는 이를 표시하고 기존 host-only 보호로 안전하게 폴백한다. 일시적인
+  메트릭 수집 실패는 가능한 마지막 snapshot을 stale로 표시한다. 추정 이력이 없는 서비스는 `unknown`으로
+  알리되 그 사실만으로 차단하지 않는다.
+- BuildKit 메모리는 Docker driver에 따라 일반 컨테이너 통계로 완전히 보이지 않을 수 있다. 빌드 중 기록되는
+  값은 호스트 최소 여유 메모리와 일반 컨테이너 최대 사용량 등의 **관측된 pressure**이며, 정확한 BuildKit
+  메모리 할당이라고 주장하지 않는다.
+
 ---
 
 ## 업데이트
