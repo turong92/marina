@@ -476,3 +476,81 @@ def estimate_services(root: Path, service_names: list[str], snapshot: dict) -> t
         confidence = "same-image" if image_id and image_id == entry.get("imageId") else "same-service"
         estimated.append({"service": name, "memoryMb": entry["peakMb"], "confidence": confidence})
     return estimated, unknown
+
+
+def _configured_reserve_mb(docker_total_mb: int | None) -> int | None:
+    override = os.environ.get("MARINA_DOCKER_RESERVE_MB")
+    if override not in (None, ""):
+        try:
+            return max(0, int(override))
+        except ValueError:
+            pass
+    return max(4096, round(docker_total_mb * 0.20)) if docker_total_mb is not None else None
+
+
+def _configured_min_free_mb() -> int:
+    try:
+        return max(0, int(os.environ.get("MIN_FREE_MB", "4096")))
+    except ValueError:
+        return 4096
+
+
+def memory_guard(
+    root: Path,
+    service_names: list[str],
+    force: bool = False,
+    snapshot: dict | None = None,
+) -> dict[str, Any] | None:
+    """Return a structured memory block before a lifecycle operation, or ``None``.
+
+    Docker's current working set is always considered. Learned high-water usage is
+    added only for requested services that are not already running in this session.
+    """
+    if force:
+        return None
+    snapshot = snapshot if isinstance(snapshot, dict) else memory_snapshot(force=True)
+    host = snapshot.get("host") if isinstance(snapshot.get("host"), dict) else {}
+    docker = snapshot.get("docker") if isinstance(snapshot.get("docker"), dict) else {}
+    host_free = host.get("availableMb")
+    docker_total = docker.get("totalMb")
+    docker_used = docker.get("usedMb")
+    host_free = int(host_free) if isinstance(host_free, (int, float)) else None
+    docker_total = int(docker_total) if isinstance(docker_total, (int, float)) else None
+    docker_used = int(docker_used) if isinstance(docker_used, (int, float)) else None
+    reserve = _configured_reserve_mb(docker_total)
+    min_free = _configured_min_free_mb()
+
+    names = list(dict.fromkeys(str(name) for name in service_names if str(name)))
+    project = project_for(root)
+    project_id = str((project or {}).get("id") or "")
+    try:
+        project_name = _mc().compose_project_name(project_id, session_id(root)) if project_id else ""
+        running = set(_service_memory(snapshot, project_name)) if project_name else set()
+    except Exception:
+        running = set()
+    stopped_names = [name for name in names if name not in running]
+    estimated, unknown = estimate_services(root, stopped_names, snapshot)
+    additional = sum(int(item["memoryMb"]) for item in estimated)
+    current_free = docker_total - docker_used if docker_total is not None and docker_used is not None else None
+    projected_free = current_free - additional if current_free is not None else None
+    decision = {
+        "blocked": "low-memory",
+        "hostFreeMb": host_free,
+        "dockerTotalMb": docker_total,
+        "dockerUsedMb": docker_used,
+        "estimatedAdditionalMb": additional,
+        "reserveMb": reserve,
+        "projectedFreeMb": projected_free,
+        "estimatedServices": estimated,
+        "unknownServices": unknown,
+        # Keep the existing host-only response readable to older callers.
+        "freeMb": host_free,
+        "minFreeMb": min_free,
+    }
+    if host_free is not None and host_free < min_free:
+        return {**decision, "reason": "host-critical"}
+    if current_free is not None and reserve is not None and current_free < reserve:
+        return {**decision, "reason": "docker-current"}
+    if projected_free is not None and reserve is not None and projected_free < reserve:
+        return {**decision, "reason": "docker-projected"}
+    return None

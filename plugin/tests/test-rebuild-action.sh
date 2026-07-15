@@ -14,8 +14,10 @@ import marina_lifecycle as ml
 from marina_state import LIFECYCLE_BUSY, busy_key
 
 calls = []
+guard_calls = []
 ml._marina_cli_logged = lambda root, *args, **kwargs: calls.append((root, args, kwargs))
 ml.refresh_gateway = lambda: None
+ml.memory_guard = lambda root, services, force=False: guard_calls.append((root, services, force)) or None
 
 root = Path("/tmp/marina-rebuild-test")
 result = ml.rebuild_service(root, "web", force=True)
@@ -27,11 +29,13 @@ for _ in range(50):
 assert calls, "rebuild did not invoke marina CLI"
 assert calls[0][1] == ("rebuild", "--web"), calls
 assert calls[0][2].get("timeout") == ml.LIFECYCLE_TIMEOUT, calls
+assert guard_calls == [(root, ["web"], True)], guard_calls
 print("rebuild lifecycle OK")
 PY
 
 grep -q 'rebuild_service' "$SCRIPTS/marina_handler.py" || { echo "FAIL: handler does not import rebuild_service"; exit 1; }
 grep -q 'self.path == "/api/rebuild"' "$SCRIPTS/marina_handler.py" || { echo "FAIL: /api/rebuild route missing"; exit 1; }
+grep -q 'start_all(root, force=bool(body.get("force")))' "$SCRIPTS/marina_handler.py" || { echo "FAIL: /api/start-all does not pass force"; exit 1; }
 grep -q "action('rebuild', session.root, svc.service)" "$SCRIPTS/marina-web/app-5b-actions.js" || { echo "FAIL: Compose service Rebuild menu missing"; exit 1; }
 grep -q "svc.busy === 'rebuild' ? 'rebuilding…'" "$SCRIPTS/marina-web/app-5-sessions.js" || { echo "FAIL: rebuilding status text missing"; exit 1; }
 grep -q '빌드 로그 — rebuild의 prebuild·docker build 출력' "$SCRIPTS/marina-web/app-5b-actions.js" || { echo "FAIL: build log label still describes restart as a build"; exit 1; }

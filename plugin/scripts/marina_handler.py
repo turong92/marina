@@ -1047,7 +1047,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/api/start-all":
-                self.send_json(start_all(root))
+                self.send_json(start_all(root, force=bool(body.get("force"))))
                 return
 
             if self.path == "/api/cleanup":

@@ -24,7 +24,9 @@ from marina_registry import discover_roots, has_attached_subrepos, is_source_che
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
 from marina_logtext import redact_text
-from marina_sessions import git_output, session_payload, system_memory, worktree_status
+from marina_sessions import git_output, session_payload, worktree_status
+from marina_memory import memory_guard
+from marina_compose_svc import _compose_services
 
 def stop_external(root: Path, service: str, port: int) -> dict[str, Any]:
     """'외부 :<port>'(marina 컨테이너가 아닌 호스트 프로세스가 서비스 포트 점유 — IDE/터미널 직접 실행) 정지.
@@ -129,9 +131,37 @@ def _spawn_lifecycle(key: str, op: str, fn) -> dict[str, Any]:
     return {"starting": True, "op": op}
 
 
-def start_all(root: Path) -> dict[str, Any]:
-    return _spawn_lifecycle(busy_key(root, "--all"), "start",
-                            lambda: _marina_cli_logged(root, "start", "--all", timeout=LIFECYCLE_TIMEOUT))   # compose_main → ensure+pre-build+ up -d. 출력은 'build' 로그 run 으로(대시보드 노출)
+def _stopped_start_targets(root: Path) -> list[str]:
+    """Return stopped services selected by the dashboard's start-group policy."""
+    project = project_for(root)
+    if not project:
+        return []
+    try:
+        services = _compose_services(root, project)
+    except Exception:
+        return []
+    return [
+        str(service["service"])
+        for service in services
+        if isinstance(service, dict)
+        and service.get("service")
+        and not service.get("running")
+        and service.get("inStartGroup") is not False
+    ]
+
+
+def start_all(root: Path, force: bool = False) -> dict[str, Any]:
+    targets = _stopped_start_targets(root)
+    block = memory_guard(root, targets, force=force)
+    if block:
+        return block
+    if not targets:
+        return {"starting": False, "op": "start", "alreadyRunning": True}
+    args = tuple(f"--{service}" for service in targets)
+    return _spawn_lifecycle(
+        busy_key(root, "--all"), "start",
+        lambda: _marina_cli_logged(root, "start", *args, timeout=LIFECYCLE_TIMEOUT),
+    )
 
 def cleanup_session(root: Path) -> dict[str, Any]:
     stop_all(root)
@@ -262,19 +292,8 @@ def detach_subrepo_action(root: Path, subrepo: str, force: bool = False, stop_se
         return res
     return {"ok": True, "detached": subrepo, **res}
 
-def memory_block(force: bool) -> dict[str, Any] | None:
-    # 가용 메모리가 기준 미만이면 시작을 막는다 (UI confirm 후 force=true 로 재시도 가능)
-    if force:
-        return None
-    info = system_memory()
-    free_mb = info.get("freeMb")
-    min_free = int(_env("MIN_FREE_MB", "4096"))
-    if free_mb is not None and free_mb < min_free:
-        return {"blocked": "low-memory", "freeMb": free_mb, "minFreeMb": min_free}
-    return None
-
 def start_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
-    block = memory_block(force)
+    block = memory_guard(root, [service], force=force)
     if block:
         return block
 
@@ -292,11 +311,14 @@ def start_service(root: Path, service: str, force: bool = False) -> dict[str, An
     return _spawn_lifecycle(busy_key(root, service), "start", _do_start)
 
 def restart_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
+    block = memory_guard(root, [], force=force)
+    if block:
+        return block
     return _spawn_lifecycle(busy_key(root, service), "restart",
                             lambda: _marina_cli_logged(root, "restart", f"--{service}", timeout=LIFECYCLE_TIMEOUT))
 
 def rebuild_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
-    block = memory_block(force)
+    block = memory_guard(root, [service], force=force)
     if block:
         return block
     return _spawn_lifecycle(busy_key(root, service), "rebuild",
