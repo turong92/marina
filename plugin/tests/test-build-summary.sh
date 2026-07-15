@@ -172,6 +172,7 @@ failed_log = Path(sys.argv[3])
 write_build_meta(failed_log, {"status": "failed", "op": "rebuild"})
 failed = build_summary(failed_log)
 assert failed["status"] == "failed", failed
+assert failed["memoryPressure"] is None, failed
 assert len(failed["steps"]) == 2, failed
 assert failed["steps"][0]["durationSec"] == 133.0, failed
 assert all(step["failed"] for step in failed["steps"]), failed

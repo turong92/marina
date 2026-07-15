@@ -21,6 +21,17 @@ from marina_registry import external_repos_for, source_root_for, subrepos_of, pr
 from marina_build_inputs import read_build_input_snapshot
 from marina_memory import finish_pressure_observation, start_pressure_observation
 
+
+def _partial_memory_pressure() -> dict[str, Any]:
+    return {
+        "hostAvailableMinMb": None,
+        "containersPeakMb": None,
+        "dockerTotalMb": None,
+        "sampleCount": 0,
+        "partial": True,
+    }
+
+
 def script(root: Path) -> Path:
     # 런처는 이 레포의 전역 marina.sh — worktree 위치와 무관 (구 SCRIPT_REL = 워크스페이스 내부 사본 탐색 제거).
     return MARINA_SCRIPT
@@ -229,8 +240,13 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
     rc = None
     tail = ""
     timed_out = False
-    pressure_token = start_pressure_observation()
+    pressure_token = None
+    memory_pressure = _partial_memory_pressure()
     try:
+        try:
+            pressure_token = start_pressure_observation()
+        except Exception:
+            pass
         write_build_meta(log_path, meta)
         with open(log_path, "a", encoding="utf-8") as fh:
             fh.write(f"$ marina {' '.join(args)}\n")
@@ -252,7 +268,11 @@ def _marina_cli_logged(root: Path, *args: str, timeout: float = 120, extra_env: 
                 raise
     finally:
         ended_at = time.time()
-        memory_pressure = finish_pressure_observation(pressure_token)
+        if pressure_token is not None:
+            try:
+                memory_pressure = finish_pressure_observation(pressure_token)
+            except Exception:
+                pass
         inputs = read_build_input_snapshot(snapshot_path)
         try:
             snapshot_path.unlink()

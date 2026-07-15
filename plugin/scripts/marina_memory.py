@@ -33,6 +33,7 @@ _pressure_condition = threading.Condition()
 _pressure_tokens: dict[str, list[dict[str, Any]]] = {}
 _pressure_sampler: threading.Thread | None = None
 _pressure_sampling = False
+_pressure_capture_tokens: set[str] = set()
 _pressure_token_sequence = 0
 
 
@@ -342,13 +343,14 @@ def _pressure_sample() -> dict[str, Any]:
 
 def _record_pressure_sample() -> None:
     """Capture one shared sample and append it to every currently active token."""
-    global _pressure_sampling
+    global _pressure_capture_tokens, _pressure_sampling
     with _pressure_condition:
         while _pressure_sampling:
             _pressure_condition.wait()
         if not _pressure_tokens:
             return
         _pressure_sampling = True
+        _pressure_capture_tokens = set(_pressure_tokens)
     try:
         try:
             sample = _pressure_sample()
@@ -360,10 +362,13 @@ def _record_pressure_sample() -> None:
                 "partial": True,
             }
         with _pressure_condition:
-            for samples in _pressure_tokens.values():
-                samples.append(dict(sample))
+            for token in _pressure_capture_tokens:
+                samples = _pressure_tokens.get(token)
+                if samples is not None:
+                    samples.append(dict(sample))
     finally:
         with _pressure_condition:
+            _pressure_capture_tokens = set()
             _pressure_sampling = False
             _pressure_condition.notify_all()
 
@@ -394,7 +399,12 @@ def start_pressure_observation() -> str:
                 name="marina-pressure-observer",
                 daemon=True,
             )
-            _pressure_sampler.start()
+            try:
+                _pressure_sampler.start()
+            except Exception:
+                _pressure_tokens.pop(token, None)
+                _pressure_sampler = None
+                raise
         _pressure_condition.notify_all()
     return token
 
@@ -414,13 +424,18 @@ def _pressure_summary(samples: list[dict[str, Any]]) -> dict[str, Any]:
 
 def finish_pressure_observation(token: str) -> dict[str, Any]:
     """Stop one build observation and return only its observed interval summary."""
-    with _pressure_condition:
-        needs_sample = token in _pressure_tokens and not _pressure_tokens[token]
-    if needs_sample:
-        _record_pressure_sample()
-    with _pressure_condition:
-        samples = _pressure_tokens.pop(token, [])
-        _pressure_condition.notify_all()
+    samples: list[dict[str, Any]] = []
+    try:
+        with _pressure_condition:
+            while _pressure_sampling and token in _pressure_capture_tokens:
+                _pressure_condition.wait()
+            needs_sample = token in _pressure_tokens and not _pressure_tokens[token]
+        if needs_sample:
+            _record_pressure_sample()
+    finally:
+        with _pressure_condition:
+            samples = _pressure_tokens.pop(token, [])
+            _pressure_condition.notify_all()
     return _pressure_summary(samples)
 
 

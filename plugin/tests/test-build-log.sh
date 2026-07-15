@@ -91,6 +91,28 @@ assert timeout_meta["status"] == "timeout", timeout_meta
 assert timeout_meta["memoryPressure"]["hostAvailableMinMb"] == 3700, timeout_meta
 assert finished_pressure_tokens == ["pressure-1", "pressure-2", "pressure-3"], finished_pressure_tokens
 
+# Telemetry must not prevent a lifecycle command from running or finalizing.
+mc.script = lambda r: runner
+mc.start_pressure_observation = lambda: (_ for _ in ()).throw(RuntimeError("start telemetry unavailable"))
+mc.finish_pressure_observation = lambda token: (_ for _ in ()).throw(RuntimeError("finish should not run"))
+mc._marina_cli_logged(root, "start", "--telemetry-start", timeout=30)
+start_failure_log = mp.selected_log(root, "build", "run-004.log")
+start_failure_meta = mb.read_build_meta(start_failure_log)
+assert "start --telemetry-start" in start_failure_log.read_text(encoding="utf-8"), start_failure_log.read_text(encoding="utf-8")
+assert start_failure_meta["status"] == "success", start_failure_meta
+assert start_failure_meta["memoryPressure"]["partial"] is True, start_failure_meta
+assert start_failure_meta["memoryPressure"]["sampleCount"] == 0, start_failure_meta
+
+mc.start_pressure_observation = lambda: "finish-fails"
+mc.finish_pressure_observation = lambda token: (_ for _ in ()).throw(RuntimeError("finish telemetry unavailable"))
+mc._marina_cli_logged(root, "start", "--telemetry-finish", timeout=30)
+finish_failure_log = mp.selected_log(root, "build", "run-005.log")
+finish_failure_meta = mb.read_build_meta(finish_failure_log)
+assert "start --telemetry-finish" in finish_failure_log.read_text(encoding="utf-8"), finish_failure_log.read_text(encoding="utf-8")
+assert finish_failure_meta["status"] == "success", finish_failure_meta
+assert finish_failure_meta["memoryPressure"]["partial"] is True, finish_failure_meta
+assert finish_failure_meta["memoryPressure"]["sampleCount"] == 0, finish_failure_meta
+
 # Tokens share one daemon sampler but summarize only their own active intervals.
 original_interval = mm._PRESSURE_SAMPLE_INTERVAL_SECONDS
 original_sample = mm._pressure_sample
@@ -119,6 +141,7 @@ try:
 finally:
     mm._PRESSURE_SAMPLE_INTERVAL_SECONDS = original_interval
     mm._pressure_sample = original_sample
+shared_sampler.join(2)
 assert first_pressure == {
     "hostAvailableMinMb": 3800,
     "containersPeakMb": 200,
@@ -133,6 +156,66 @@ assert second_pressure == {
     "sampleCount": 2,
     "partial": True,
 }, second_pressure
+
+# A sample belongs to tokens active when capture begins, not when it completes.
+original_interval = mm._PRESSURE_SAMPLE_INTERVAL_SECONDS
+original_sample = mm._pressure_sample
+initial_sampled = threading.Event()
+capture_started = threading.Event()
+release_capture = threading.Event()
+finish_returned = threading.Event()
+sample_calls = 0
+def blocked_sample():
+    global sample_calls
+    sample_calls += 1
+    if sample_calls == 1:
+        initial_sampled.set()
+        return {"hostAvailableMb": 4000, "containersMb": 100, "dockerTotalMb": 8192, "partial": False}
+    if sample_calls == 2:
+        capture_started.set()
+        assert release_capture.wait(2), "blocked sample was not released"
+        return {"hostAvailableMb": 3800, "containersMb": 200, "dockerTotalMb": 8192, "partial": False}
+    return {"hostAvailableMb": 3600, "containersMb": 300, "dockerTotalMb": 8192, "partial": False}
+mm._PRESSURE_SAMPLE_INTERVAL_SECONDS = 60
+mm._pressure_sample = blocked_sample
+capture_thread = None
+finish_thread = None
+race_sampler = None
+second_race_token = None
+try:
+    first_race_token = mm.start_pressure_observation()
+    assert initial_sampled.wait(2), "sampler did not take its initial sample"
+    race_sampler = mm._pressure_sampler
+    capture_thread = threading.Thread(target=mm._record_pressure_sample)
+    capture_thread.start()
+    assert capture_started.wait(2), "manual capture did not start"
+    second_race_token = mm.start_pressure_observation()
+    race_result = {}
+    def finish_first_token():
+        race_result.update(mm.finish_pressure_observation(first_race_token))
+        finish_returned.set()
+    finish_thread = threading.Thread(target=finish_first_token)
+    finish_thread.start()
+    assert not finish_returned.wait(0.1), "token active at capture start must wait for that sample"
+    release_capture.set()
+    capture_thread.join(2)
+    finish_thread.join(2)
+    assert finish_returned.is_set(), "finish did not return after sample capture"
+    assert race_result["sampleCount"] == 2, race_result
+    with mm._pressure_condition:
+        assert mm._pressure_tokens[second_race_token] == [], "mid-capture token received an older sample"
+finally:
+    release_capture.set()
+    if capture_thread is not None:
+        capture_thread.join(2)
+    if finish_thread is not None:
+        finish_thread.join(2)
+    if second_race_token is not None:
+        mm.finish_pressure_observation(second_race_token)
+    if race_sampler is not None:
+        race_sampler.join(2)
+    mm._PRESSURE_SAMPLE_INTERVAL_SECONDS = original_interval
+    mm._pressure_sample = original_sample
 # Concurrent lifecycle requests must receive distinct build runs and handoff paths.
 concurrent_root = Path(sys.argv[2]) / "concurrent"; concurrent_root.mkdir()
 mp._session_id_cache[str(concurrent_root)] = "main"
