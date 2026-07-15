@@ -3,13 +3,21 @@ from __future__ import annotations
 
 import copy
 import datetime as dt
+import fcntl
 import json
+import os
 import platform
 import re
 import subprocess
+import tempfile
 import threading
 import time
+from pathlib import Path
 from typing import Any
+
+from marina_paths import session_id
+from marina_registry import project_for
+from marina_state import _mc
 
 
 _CACHE_TTL_SECONDS = 5.0
@@ -19,6 +27,7 @@ _cache_condition = threading.Condition()
 _refreshing = False
 _snapshot_cache: tuple[float, dict[str, Any]] | None = None
 _inspect_cache: dict[str, dict[str, Any]] = {}
+_HISTORY_MAX_SERVICES = 200
 
 
 def _run(args: list[str], timeout: float) -> str:
@@ -280,3 +289,190 @@ def system_memory() -> dict[str, Any]:
         "freeMb": host.get("availableMb"),
         "freePercent": host.get("availablePercent"),
     }
+
+
+def _memory_history_path(project_id: str) -> Path:
+    home = Path(os.environ.get("MARINA_HOME") or (Path.home() / ".marina"))
+    return home / project_id / "memory-history.json"
+
+
+def _history_payload(value: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(value, dict) or value.get("version") != 1:
+        return {}
+    services = value.get("services")
+    if not isinstance(services, dict):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for name, entry in services.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            peak = int(entry.get("peakMb"))
+        except (TypeError, ValueError):
+            continue
+        if peak < 0:
+            continue
+        out[str(name)] = {
+            "peakMb": peak,
+            "imageId": entry.get("imageId") if isinstance(entry.get("imageId"), str) else None,
+            "observedAt": str(entry.get("observedAt") or ""),
+        }
+    return out
+
+
+def _read_memory_history(path: Path) -> dict[str, dict[str, Any]]:
+    try:
+        return _history_payload(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_memory_history(path: Path, services: dict[str, dict[str, Any]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "services": services}
+    fd, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=str(path.parent))
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(payload, handle, ensure_ascii=False, sort_keys=True)
+            handle.write("\n")
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
+
+
+def _bounded_history(services: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    ranked = sorted(
+        services.items(), key=lambda item: (str(item[1].get("observedAt") or ""), item[0]), reverse=True,
+    )[:_HISTORY_MAX_SERVICES]
+    return dict(ranked)
+
+
+def _observe_memory_history(project_id: str, observations: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Merge observed service usage under a cross-process lock and atomically persist it."""
+    if not project_id:
+        return {}
+    path = _memory_history_path(project_id)
+    if not observations:
+        return _read_memory_history(path)
+    lock_path = path.with_name("memory-history.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        services = _read_memory_history(path)
+        observed_at = _captured_at()
+        for name, observation in observations.items():
+            usage = observation.get("memoryUsageMb")
+            try:
+                usage = int(usage)
+            except (TypeError, ValueError):
+                continue
+            if usage < 0:
+                continue
+            previous = services.get(name) or {}
+            previous_peak = int(previous.get("peakMb") or 0)
+            peak = max(previous_peak, usage)
+            # A lower sample from a rebuilt image is only a same-service estimate;
+            # keep the image identity that actually produced the retained peak.
+            image_id = (
+                observation.get("imageId") or previous.get("imageId")
+                if usage >= previous_peak
+                else previous.get("imageId")
+            )
+            services[name] = {
+                "peakMb": peak,
+                "imageId": image_id if isinstance(image_id, str) else None,
+                "observedAt": observed_at,
+            }
+        services = _bounded_history(services)
+        _write_memory_history(path, services)
+        return services
+    except OSError:
+        return _read_memory_history(path)
+    finally:
+        try:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        finally:
+            os.close(lock_fd)
+
+
+def _service_memory(snapshot: dict[str, Any], project_name: str) -> dict[str, dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    containers = snapshot.get("containers") if isinstance(snapshot, dict) else None
+    for container in containers if isinstance(containers, list) else []:
+        if not isinstance(container, dict) or container.get("composeProject") != project_name:
+            continue
+        service = container.get("composeService")
+        if isinstance(service, str) and service:
+            grouped.setdefault(service, []).append(container)
+
+    mapped: dict[str, dict[str, Any]] = {}
+    for service, containers in grouped.items():
+        usages = [int(value) for row in containers if isinstance((value := row.get("memoryUsageMb")), (int, float))]
+        limits = [int(value) for row in containers if isinstance((value := row.get("memoryLimitMb")), (int, float)) and value > 0]
+        usage = sum(usages) if usages else None
+        limit = sum(limits) if limits else None
+        oom_values = [row.get("oomKilled") for row in containers if isinstance(row.get("oomKilled"), bool)]
+        image_ids = {row.get("imageId") for row in containers if isinstance(row.get("imageId"), str) and row.get("imageId")}
+        mapped[service] = {
+            "memoryUsageMb": usage,
+            "memoryLimitMb": limit,
+            "memoryPercent": int(usage * 100 / limit) if usage is not None and limit else None,
+            "oomKilled": True if any(oom_values) else False if oom_values else None,
+            "imageId": next(iter(image_ids)) if len(image_ids) == 1 else None,
+        }
+    return mapped
+
+
+def enrich_session_memory(root: Path, project: dict, services: list[dict], snapshot: dict) -> None:
+    """Mutate one Compose session's service payloads with its matching snapshot and peaks."""
+    project_id = str((project or {}).get("id") or "")
+    try:
+        project_name = _mc().compose_project_name(project_id, session_id(root))
+        current = _service_memory(snapshot, project_name)
+    except Exception:
+        current = {}
+    try:
+        history = _observe_memory_history(project_id, current)
+    except Exception:
+        history = _read_memory_history(_memory_history_path(project_id)) if project_id else {}
+    for service in services:
+        if not isinstance(service, dict):
+            continue
+        name = str(service.get("service") or "")
+        observed = current.get(name) or {}
+        historical = history.get(name) or {}
+        usage = observed.get("memoryUsageMb")
+        service["memoryUsageMb"] = usage
+        service["memoryPeakMb"] = historical.get("peakMb")
+        service["memoryLimitMb"] = observed.get("memoryLimitMb")
+        service["memoryPercent"] = observed.get("memoryPercent")
+        service["oomKilled"] = observed.get("oomKilled")
+        service["rssMb"] = round(usage) if isinstance(usage, (int, float)) else None
+
+
+def estimate_services(root: Path, service_names: list[str], snapshot: dict) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return learned high-water estimates and explicit unknown services for one worktree."""
+    project = project_for(root)
+    project_id = str((project or {}).get("id") or "")
+    if not project_id:
+        return [], list(service_names)
+    history = _read_memory_history(_memory_history_path(project_id))
+    current = _service_memory(snapshot, _mc().compose_project_name(project_id, session_id(root)))
+    estimated: list[dict[str, Any]] = []
+    unknown: list[str] = []
+    for name in service_names:
+        entry = history.get(name)
+        if not entry:
+            unknown.append(name)
+            continue
+        image_id = (current.get(name) or {}).get("imageId")
+        confidence = "same-image" if image_id and image_id == entry.get("imageId") else "same-service"
+        estimated.append({"service": name, "memoryMb": entry["peakMb"], "confidence": confidence})
+    return estimated, unknown

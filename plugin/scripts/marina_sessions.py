@@ -23,6 +23,7 @@ from marina_cache import cache_category_mb, disk_usage_mb
 from marina_registry import default_attach_of, discover_all_roots, discover_roots, is_source_checkout, project_for, project_label, root_source, subrepos_of
 from marina_paths import ensure_current_log, log_run_payload, read_config, read_meta, service_log, session_dir, session_id
 from marina_compose_svc import _compose_services, _log_tail_line, compose_service_names, compose_service_subrepos, missing_env_vars
+from marina_memory import enrich_session_memory, memory_snapshot
 
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(["git", *args], cwd=str(cwd), text=True, stderr=subprocess.STDOUT)
@@ -153,10 +154,12 @@ def svc_state(s: dict):
     return "stopped", None
 
 
-def session_payload(root: Path) -> dict[str, Any]:
+def session_payload(root: Path, memory: dict[str, Any] | None = None) -> dict[str, Any]:
     project = project_for(root)
     kind = (project or {}).get("kind", "compose")
     services = _compose_services(root, project) if kind == "compose" else []
+    if kind == "compose":
+        enrich_session_memory(root, project or {}, services, memory if isinstance(memory, dict) else memory_snapshot())
     # 기동/재시작 진행·실패 상태 머지 — start 는 백그라운드(prebuild+빌드 수 분)라 폴링이 이걸로 "기동 중"을 그린다(새로고침에도 유지).
     all_busy = LIFECYCLE_BUSY.get(busy_key(root, "--all"))
     for s in services:

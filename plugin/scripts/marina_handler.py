@@ -37,6 +37,7 @@ def _apply_now(root: Path, service: str = "") -> None:
         pass
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
+from marina_memory import memory_snapshot
 from marina_sessions import agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
@@ -125,10 +126,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
         if parsed.path == "/api/sessions":
-            sessions = [session_payload(root) for root in discover_roots()]
+            memory = memory_snapshot()
+            sessions = [session_payload(root, memory=memory) for root in discover_roots()]
             for item in sessions:
                 item["webPortConflictWith"] = []
-            self.send_json({"sessions": sessions, "memory": system_memory()})
+            self.send_json({"sessions": sessions, "memory": memory})
             return
 
         if parsed.path == "/api/worktrees":
