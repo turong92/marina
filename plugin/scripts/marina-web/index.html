@@ -16,7 +16,7 @@
   <header>
     <h1><span class="brand-mark" aria-hidden="true"><img class="bm-light" src="/web/marina-mark-light.png" alt="" /><img class="bm-dark" src="/web/marina-mark-dark.png" alt="" /></span>Marina <span class="brand-sub">dev sessions</span></h1>
     <div class="toolbar">
-      <div class="mem" id="mem" hidden title="dev = marina 추적 서비스의 RSS 합 / 시스템 = OS 전체 사용량(브라우저·IDE 등 모든 앱 포함, memory_pressure 기준이라 활동 모니터 수치와 다를 수 있음). 가용 4GB 미만이면 적색 + 서비스 시작 차단"><span id="memText"></span><span class="mem-bar"><i id="memBar"></i></span></div>
+      <div class="mem" id="mem" hidden title="Docker는 실행 중인 컨테이너의 관측 사용량이고, Host available은 OS가 지금 사용할 수 있는 메모리예요. Host 여유가 4GB 미만이면 적색 + 서비스 시작 차단"><span id="memDocker" hidden></span><span class="mem-separator" id="memSeparator" hidden>·</span><span id="memHost" hidden></span><span class="mem-bar"><i id="memBar"></i></span></div>
       <button id="refresh" title="새로고침 — 세션·디스크 분석(du) 전체 재계산">↻</button>
       <div class="settings-wrap">
         <button id="settingsBtn" title="설정 — 테마·알림">⚙</button>

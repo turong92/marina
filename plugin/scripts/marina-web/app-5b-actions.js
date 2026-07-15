@@ -3,12 +3,33 @@
     // app-5-sessions.js 다음 로드. 상태 모델(STATE_META·svcState 등)은 app-5-sessions.js 참조(전역).
 
 
+    function serviceStateReason(svc) {
+      return [svc.stateReason, svc.oomKilled === true ? 'OOM 종료 감지' : '']
+        .filter(Boolean)
+        .join(' · ');
+    }
+
+    function serviceMemoryMeta(svc) {
+      const current = finiteMemoryMb(svc.memoryUsageMb);
+      const peak = finiteMemoryMb(svc.memoryPeakMb);
+      const limit = finiteMemoryMb(svc.memoryLimitMb);
+      const details = [];
+      if (current !== null) details.push(`현재 ${Math.round(current)} MB`);
+      if (peak !== null) details.push(`피크 ${Math.round(peak)} MB`);
+      if (limit !== null) details.push(`제한 ${Math.round(limit)} MB`);
+      if (svc.oomKilled === true) details.push('OOM 종료 감지');
+      return {
+        current: current === null ? '' : `${Math.round(current)} MB`,
+        title: details.join(' · '),
+      };
+    }
+
     // 에러/비활성 원인 줄 (콘솔 스펙 D3) — 접힘과 무관하게 카드에 상시. reason 은 백엔드 stateReason.
     function whyLines(session) {
       const svcWhy = visibleServices(session).map(svc => {
         const st = svcState(svc);
         if (st !== 'error' && st !== 'degraded') return '';
-        const reason = escapeHtml((svc.stateReason || (st === 'error' ? '실패' : '비활성')).slice(0, 160));
+        const reason = escapeHtml((serviceStateReason(svc) || (st === 'error' ? '실패' : '비활성')).slice(0, 160));
         const logsTarget = svc.busyError ? 'build' : svc.service;   // 기동 실패 원인은 build 로그에 있다
         const acts = st === 'error'
           ? `<a data-why-logs="${escapeHtml(logsTarget)}">${svc.busyError ? '빌드 로그' : '로그'}</a> · <a data-why-retry="${escapeHtml(svc.service)}">재시도</a>`
@@ -229,18 +250,20 @@
     function makeSvcRow(session, svc, disabled) {   // Orca 문법 서비스 행 (콘솔 스펙 D3·D6·D7) — 상태점·이름·우측 모노포트·hover 클러스터
       const row = document.createElement('div');
       const st = svcState(svc);
+      const memory = serviceMemoryMeta(svc);
+      const stateReason = serviceStateReason(svc);
       const optional = svc.inStartGroup === false && st === 'stopped';   // 시작 그룹 밖 + 꺼짐 — 집계 제외분(딤)
       row.className = 'svc nested' + (disabled ? ' disabled' : '') + (optional ? ' svc-opt' : '');
       row.dataset.serviceKey = `${session.root}::${svc.service}`;
       row.title = disabled ? 'subrepo 미attach — attach 후 사용 가능'
                 : optional ? '옵션 서비스 — 시작 그룹(x-marina.startGroup) 밖. 필요하면 ▶ 로 개별 시작'
-                : '클릭하면 이 서비스의 로그를 우측에 표시';
+                : ['클릭하면 이 서비스의 로그를 우측에 표시', memory.title, stateReason].filter(Boolean).join(' · ');
       row.innerHTML = `
         <span class="wt-dot ${disabled ? 'stop' : STATE_META[st].dot}" title="${escapeHtml(disabled ? 'subrepo 미attach' : STATE_META[st].title)}"></span>
         <span class="svc-name"><span>${escapeHtml(svc.service)}</span></span>
         ${(svc.profile ?? '') !== '' ? `<span class="svc-chip-prof" title="profile (marina 주입)">${escapeHtml(String(svc.profile))}</span>` : ''}
         <span class="svc-right">
-          <span class="mono-port" data-rss>${svc.running && svc.rssMb ? `${svc.rssMb}MB` : ''}</span>
+          <span class="mono-port" data-rss title="${escapeHtml(memory.title)}">${memory.current}</span>
           <span class="mono-port" data-port title="${escapeHtml(portTitle(svc))}">${escapeHtml(portText(svc))}</span>
           <span class="mono-port svc-uptime" data-uptime title="마지막 로그 시각 기준">${svc.running ? escapeHtml(relTime(svc.logTs)) : ''}</span>
           <span class="hov-acts" data-svc-acts></span>

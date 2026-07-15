@@ -57,6 +57,18 @@
       </details>`;
     }
 
+    function buildMemoryPressureHtml(memoryPressure) {
+      const sampleCount = Number(memoryPressure?.sampleCount);
+      if (!Number.isFinite(sampleCount) || sampleCount <= 0) return '';
+      const hostMin = finiteMemoryMb(memoryPressure.hostAvailableMinMb);
+      const containersPeak = finiteMemoryMb(memoryPressure.containersPeakMb);
+      const labels = [];
+      if (hostMin !== null) labels.push(`Host 최소 ${formatMemoryGb(hostMin)}`);
+      if (containersPeak !== null) labels.push(`컨테이너 피크 ${formatMemoryGb(containersPeak)}`);
+      if (!labels.length) return '';
+      return `<span class="build-pressure" data-build-pressure title="빌드 중 관측한 호스트/컨테이너 압력입니다.">관측 압력 · ${escapeHtml(labels.join(' · '))}</span>`;
+    }
+
     function renderBuildSummary(data) {
       const el = document.getElementById('buildSummary');
       const steps = Array.isArray(data.steps) ? data.steps : [];
@@ -79,6 +91,7 @@
           <strong>${fmtBuildSeconds(data.durationSec)}</strong>
           <span>${bottleneck}</span>
           <span class="build-summary-cache">cache ${Number(data.cacheHits) || 0} · run ${Number(data.cacheMisses) || 0}</span>
+          ${buildMemoryPressureHtml(data.memoryPressure)}
         </div>
         ${buildReasonsHtml(reasons)}
         <div class="build-steps">${steps.map(step => buildStepHtml(step, maxSeconds)).join('')}</div>`;

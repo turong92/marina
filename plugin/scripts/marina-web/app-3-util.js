@@ -38,38 +38,83 @@
       });
     }
 
+    function finiteMemoryMb(value) {
+      const mb = Number(value);
+      return Number.isFinite(mb) ? mb : null;
+    }
+
+    function formatMemoryGb(value) {
+      const mb = finiteMemoryMb(value);
+      return mb === null ? '알 수 없음' : `${(mb / 1024).toFixed(1)} GB`;
+    }
+
+    function formatMemoryPair(usedMb, totalMb) {
+      return `${(usedMb / 1024).toFixed(1)} / ${(totalMb / 1024).toFixed(1)} GB`;
+    }
+
+    function memoryBlockConfirmation(block) {
+      const reason = {
+        'host-critical': `Host available ${formatMemoryGb(block.hostFreeMb)}가 시작 기준 ${formatMemoryGb(block.minFreeMb)}보다 낮아 시작을 막았어.`,
+        'docker-current': `Docker 여유가 이미 예약 ${formatMemoryGb(block.reserveMb)}보다 낮아 시작을 막았어.`,
+        'docker-projected': '이 서비스를 시작하면 Docker 여유가 예약치 아래로 내려가 시작을 막았어.',
+      }[block?.reason] || '메모리 여유가 부족해 시작을 막았어.';
+      const estimates = (Array.isArray(block?.estimatedServices) ? block.estimatedServices : [])
+        .map(item => ({service: String(item?.service || '').trim(), memoryMb: finiteMemoryMb(item?.memoryMb)}))
+        .filter(item => item.service && item.memoryMb !== null)
+        .sort((a, b) => b.memoryMb - a.memoryMb)
+        .slice(0, 3);
+      const unknown = (Array.isArray(block?.unknownServices) ? block.unknownServices : [])
+        .map(service => String(service || '').trim())
+        .filter(Boolean);
+      const estimateLine = estimates.length
+        ? `큰 추정: ${estimates.map(item => `${item.service} ${formatMemoryGb(item.memoryMb)}`).join(', ')}`
+        : '큰 추정: 기록된 서비스 메모리 없음';
+      const unknownLine = unknown.length ? `알 수 없는 서비스: ${unknown.join(', ')}` : '알 수 없는 서비스: 없음';
+      return `${reason}\n예상 Docker 여유 ${formatMemoryGb(block?.projectedFreeMb)} / 예약 ${formatMemoryGb(block?.reserveMb)}\n${estimateLine}\n${unknownLine}\n그래도 강제로 시작할까?`;
+    }
+
     async function action(type, root, service, force = false) {
       const result = await api(`/api/${type}`, {
         method: 'POST',
         headers: {'content-type': 'application/json'},
         body: JSON.stringify({root, service, force})
       });
-      if (result?.blocked === 'low-memory') {
-        const freeGb = (result.freeMb / 1024).toFixed(1);
-        const minGb = (result.minFreeMb / 1024).toFixed(1);
-        if (confirm(`메모리 여유가 ${freeGb}GB뿐이라 시작을 막았어 (기준 ${minGb}GB).\n다른 세션을 먼저 정리하는 걸 추천. 그래도 시작할까?`)) {
+      if (result?.blocked === 'low-memory' && !force) {
+        if (confirm(memoryBlockConfirmation(result))) {
           return action(type, root, service, true);
         }
         return;
       }
+      if (result?.blocked === 'low-memory') return;
       await load({force: true});
       selectLog(root, service, 'current', selected?.mode ?? 'service');
     }
 
-    function renderMemory(memory, sessionList) {
+    function renderMemory(memory) {
       const box = document.getElementById('mem');
-      if (!memory || memory.freePercent == null) { box.hidden = true; return; }
-      box.hidden = false;
-      // "시스템"은 OS 전체(브라우저·IDE 등 모든 앱 포함) — dev 서비스 합과 단위가 다르다는
-      // 혼동이 있어 둘을 분리 표기. dev = marina 가 추적 중인 서비스 RSS 합.
-      const usedPercent = 100 - memory.freePercent;
-      const usedGb = ((memory.totalMb - memory.freeMb) / 1024).toFixed(1);
-      const totalGb = Math.round(memory.totalMb / 1024);
-      const devMb = (sessionList ?? []).reduce((sum, s) => sum + s.services.reduce((a, svc) => a + (svc.running && svc.rssMb ? svc.rssMb : 0), 0), 0);
-      const devPart = devMb ? `dev ${(devMb / 1024).toFixed(1)}GB · ` : '';
-      document.getElementById('memText').textContent = `${devPart}시스템 ${usedGb}/${totalGb}GB (${usedPercent}%)`;
+      const docker = memory?.docker && typeof memory.docker === 'object' ? memory.docker : {};
+      const host = memory?.host && typeof memory.host === 'object' ? memory.host : {};
+      const dockerUsed = finiteMemoryMb(docker.usedMb);
+      const dockerTotal = finiteMemoryMb(docker.totalMb);
+      const hostAvailable = finiteMemoryMb(host.availableMb);
+      const dockerText = dockerUsed !== null && dockerTotal !== null && dockerTotal > 0
+        ? `Docker ${formatMemoryPair(dockerUsed, dockerTotal)}`
+        : '';
+      const hostText = hostAvailable !== null ? `Host available ${formatMemoryGb(hostAvailable)}` : '';
+      const dockerEl = document.getElementById('memDocker');
+      const hostEl = document.getElementById('memHost');
+      const separator = document.getElementById('memSeparator');
+      dockerEl.textContent = dockerText;
+      hostEl.textContent = hostText;
+      dockerEl.hidden = !dockerText;
+      hostEl.hidden = !hostText;
+      separator.hidden = !dockerText || !hostText;
+      box.hidden = !dockerText && !hostText;
+      const usedPercent = dockerUsed !== null && dockerTotal !== null && dockerTotal > 0
+        ? Math.max(0, Math.min(100, (dockerUsed / dockerTotal) * 100))
+        : (finiteMemoryMb(host.availablePercent) === null ? 0 : Math.max(0, Math.min(100, 100 - host.availablePercent)));
       document.getElementById('memBar').style.width = `${usedPercent}%`;
-      box.classList.toggle('warn', memory.freeMb < 4096);
+      box.classList.toggle('warn', hostAvailable !== null && hostAvailable < 4096);
     }
 
     let worktreeData = [];
@@ -120,12 +165,19 @@
       await load({force: true});
     }
 
-    async function sessionAction(type, session) {
-      await api(`/api/${type}`, {
+    async function sessionAction(type, session, force = false) {
+      const result = await api(`/api/${type}`, {
         method: 'POST',
         headers: {'content-type': 'application/json'},
-        body: JSON.stringify({root: session.root})
+        body: JSON.stringify({root: session.root, force})
       });
+      if (result?.blocked === 'low-memory' && !force) {
+        if (confirm(memoryBlockConfirmation(result))) {
+          return sessionAction(type, session, true);
+        }
+        return;
+      }
+      if (result?.blocked === 'low-memory') return;
       await load({force: true});
     }
 
