@@ -368,6 +368,30 @@ def _docker_compose_config_json(sp: Path, root: Path) -> tuple[dict | None, str]
         return None, "config json 파싱 실패"
 
 
+def compose_start_targets(root: Path, project: dict, requested: list[str]) -> list[str]:
+    """Resolve actual Compose start targets, including startGroup and dependencies.
+
+    Lifecycle safety checks must fail explicitly when config cannot be resolved;
+    treating that failure as an empty target set would incorrectly report that
+    everything is already running.
+    """
+    try:
+        stored = MARINA_HOME / str(project["id"]) / project.get("composeFile", "docker-compose.yml")
+    except KeyError as exc:
+        raise ValueError("project id 없음") from exc
+    if not stored.exists():
+        raise ValueError(f"보관 compose 없음: {stored}")
+    config, error = _docker_compose_config_json(stored, root)
+    if config is None:
+        raise ValueError(f"compose config 해석 실패: {error}")
+    try:
+        xmarina = _mc().xmarina_for_stored(str(stored)) or {}
+        targets, _skipped, _unknown = _mc().resolved_start_targets(config, xmarina, list(requested))
+    except Exception as exc:
+        raise ValueError(f"compose 시작 대상 해석 실패: {exc}") from exc
+    return list(dict.fromkeys(str(target) for target in targets if str(target)))
+
+
 def weave_map(root: Path, project: dict) -> dict:
     """엮기(forward) 최종 맵 — `marina up` 과 동일한 병합 우선순위(legacy hostForward < 자동 서비스타겟 < 명시
     forward(backing.json < x-marina))를 marina-compose.py 순수 함수로 재계산(연결 탭 P3 데이터 소스). docker 는

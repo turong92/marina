@@ -58,6 +58,7 @@
     function memoryBlockConfirmation(block) {
       const reason = {
         'host-critical': `Host available ${formatMemoryGb(block.hostFreeMb)}가 시작 기준 ${formatMemoryGb(block.minFreeMb)}보다 낮아 시작을 막았어.`,
+        'docker-unknown': 'Docker 메모리 측정이 불완전해 안전하게 시작 여부를 판단할 수 없어 막았어.',
         'docker-current': `Docker 여유가 이미 예약 ${formatMemoryGb(block.reserveMb)}보다 낮아 시작을 막았어.`,
         'docker-projected': '이 서비스를 시작하면 Docker 여유가 예약치 아래로 내려가 시작을 막았어.',
       }[block?.reason] || '메모리 여유가 부족해 시작을 막았어.';

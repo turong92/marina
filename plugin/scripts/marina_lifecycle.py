@@ -25,8 +25,8 @@ from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
 from marina_logtext import redact_text
 from marina_sessions import git_output, session_payload, worktree_status
-from marina_memory import memory_guard
-from marina_compose_svc import _compose_services
+from marina_memory import acquire_memory_reservation, release_memory_reservation
+from marina_compose_svc import _compose_services, compose_start_targets
 
 def stop_external(root: Path, service: str, port: int) -> dict[str, Any]:
     """'외부 :<port>'(marina 컨테이너가 아닌 호스트 프로세스가 서비스 포트 점유 — IDE/터미널 직접 실행) 정지.
@@ -105,14 +105,24 @@ def stop_all(root: Path) -> dict[str, Any]:
 LIFECYCLE_TIMEOUT = int(_env("LIFECYCLE_TIMEOUT", "1800"))   # start/restart 백그라운드 실행 상한 — prebuild(gradle)+첫 이미지 빌드가 몇 분 걸림(120s 로 죽이던 버그 수정)
 
 
-def _spawn_lifecycle(key: str, op: str, fn) -> dict[str, Any]:
+_lifecycle_spawn_lock = threading.Lock()
+
+
+def _spawn_lifecycle(
+    key: str,
+    op: str,
+    fn,
+    reservation_token: str | None = None,
+) -> dict[str, Any]:
     """긴 lifecycle(start/restart)을 백그라운드 스레드로 — API 는 즉시 응답, 진행/실패는
     LIFECYCLE_BUSY 로 폴링 payload 에 실린다(대시보드가 120s 타임아웃으로 빌드를 죽이던 버그의 근본 수정).
     이미 진행 중이면 중복 기동 거부. 실패 항목은 다음 시도/정지 때 청소."""
-    cur = LIFECYCLE_BUSY.get(key)
-    if cur and "error" not in cur:
-        return {"busy": True, "op": cur.get("op")}
-    LIFECYCLE_BUSY[key] = {"op": op, "ts": time.time()}
+    with _lifecycle_spawn_lock:
+        cur = LIFECYCLE_BUSY.get(key)
+        if cur and "error" not in cur:
+            release_memory_reservation(reservation_token)
+            return {"busy": True, "op": cur.get("op")}
+        LIFECYCLE_BUSY[key] = {"op": op, "ts": time.time()}
 
     def _run():
         try:
@@ -126,8 +136,15 @@ def _spawn_lifecycle(key: str, op: str, fn) -> dict[str, Any]:
             LIFECYCLE_BUSY[key] = {"op": op, "error": f"{op} timed out ({LIFECYCLE_TIMEOUT}s)", "endedTs": time.time()}
         except Exception as exc:
             LIFECYCLE_BUSY[key] = {"op": op, "error": redact_text(str(exc))[-500:], "endedTs": time.time()}
+        finally:
+            release_memory_reservation(reservation_token)
 
-    threading.Thread(target=_run, daemon=True, name=f"lifecycle-{op}").start()
+    try:
+        threading.Thread(target=_run, daemon=True, name=f"lifecycle-{op}").start()
+    except Exception:
+        LIFECYCLE_BUSY.pop(key, None)
+        release_memory_reservation(reservation_token)
+        raise
     return {"starting": True, "op": op}
 
 
@@ -135,24 +152,20 @@ def _stopped_start_targets(root: Path) -> list[str]:
     """Return stopped services selected by the dashboard's start-group policy."""
     project = project_for(root)
     if not project:
-        return []
-    try:
-        services = _compose_services(root, project)
-    except Exception:
-        return []
-    return [
-        str(service["service"])
+        raise ValueError("등록된 프로젝트를 찾을 수 없습니다")
+    planned = compose_start_targets(root, project, [])
+    services = _compose_services(root, project)
+    running = {
+        str(service.get("service"))
         for service in services
-        if isinstance(service, dict)
-        and service.get("service")
-        and not service.get("running")
-        and service.get("inStartGroup") is not False
-    ]
+        if isinstance(service, dict) and service.get("service") and service.get("running")
+    }
+    return [service for service in planned if service not in running]
 
 
 def start_all(root: Path, force: bool = False) -> dict[str, Any]:
     targets = _stopped_start_targets(root)
-    block = memory_guard(root, targets, force=force)
+    block, reservation = acquire_memory_reservation(root, targets, force=force)
     if block:
         return block
     if not targets:
@@ -161,6 +174,7 @@ def start_all(root: Path, force: bool = False) -> dict[str, Any]:
     return _spawn_lifecycle(
         busy_key(root, "--all"), "start",
         lambda: _marina_cli_logged(root, "start", *args, timeout=LIFECYCLE_TIMEOUT),
+        reservation_token=reservation,
     )
 
 def cleanup_session(root: Path) -> dict[str, Any]:
@@ -293,36 +307,47 @@ def detach_subrepo_action(root: Path, subrepo: str, force: bool = False, stop_se
     return {"ok": True, "detached": subrepo, **res}
 
 def start_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
-    block = memory_guard(root, [service], force=force)
-    if block:
-        return block
-
     # 구버전은 foreground 모드 + 자체 로그 fd 로 띄워서 (1) 시작마다 로그 run 이 2개 생기고
     # (2) fd 가 누수됐다. CLI start 경로로 일원화 — 로그·pid 관리는 marina.sh 가 전담.
     session_dir(root).mkdir(parents=True, exist_ok=True)
     env = marina_env(root)
     # codex worktree 는 dashboard 기동 시 prepare 완료 — claude worktree 는 미attach 면 start 가 attach 수행
     env["MARINA_SKIP_PREPARE"] = "1" if has_attached_subrepos(root) else "0"
+    project = project_for(root)
+    if not project:
+        raise ValueError("등록된 프로젝트를 찾을 수 없습니다")
+    targets = compose_start_targets(root, project, [service])
+    block, reservation = acquire_memory_reservation(root, targets, force=force)
+    if block:
+        return block
 
     def _do_start():
         _marina_cli_logged(root, "start", f"--{service}", timeout=LIFECYCLE_TIMEOUT,
                            extra_env={"MARINA_SKIP_PREPARE": env["MARINA_SKIP_PREPARE"]})
 
-    return _spawn_lifecycle(busy_key(root, service), "start", _do_start)
+    return _spawn_lifecycle(
+        busy_key(root, service), "start", _do_start, reservation_token=reservation,
+    )
 
 def restart_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
-    block = memory_guard(root, [], force=force)
+    block, reservation = acquire_memory_reservation(root, [], force=force)
     if block:
         return block
     return _spawn_lifecycle(busy_key(root, service), "restart",
-                            lambda: _marina_cli_logged(root, "restart", f"--{service}", timeout=LIFECYCLE_TIMEOUT))
+                            lambda: _marina_cli_logged(root, "restart", f"--{service}", timeout=LIFECYCLE_TIMEOUT),
+                            reservation_token=reservation)
 
 def rebuild_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
-    block = memory_guard(root, [service], force=force)
+    project = project_for(root)
+    if not project:
+        raise ValueError("등록된 프로젝트를 찾을 수 없습니다")
+    targets = compose_start_targets(root, project, [service])
+    block, reservation = acquire_memory_reservation(root, targets, force=force)
     if block:
         return block
     return _spawn_lifecycle(busy_key(root, service), "rebuild",
-                            lambda: _marina_cli_logged(root, "rebuild", f"--{service}", timeout=LIFECYCLE_TIMEOUT))
+                            lambda: _marina_cli_logged(root, "rebuild", f"--{service}", timeout=LIFECYCLE_TIMEOUT),
+                            reservation_token=reservation)
 
 def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
     by_category = cache_items_by_category(root)

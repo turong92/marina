@@ -15,9 +15,15 @@ from marina_state import LIFECYCLE_BUSY, busy_key
 
 calls = []
 guard_calls = []
+released = []
 ml._marina_cli_logged = lambda root, *args, **kwargs: calls.append((root, args, kwargs))
 ml.refresh_gateway = lambda: None
-ml.memory_guard = lambda root, services, force=False: guard_calls.append((root, services, force)) or None
+ml.project_for = lambda root: {"id": "demo", "composeFile": "docker-compose.yml"}
+ml.compose_start_targets = lambda root, project, services: [*services, "db"]
+ml.acquire_memory_reservation = lambda root, services, force=False: (
+    guard_calls.append((root, services, force)) or (None, "reservation-1")
+)
+ml.release_memory_reservation = lambda token: released.append(token)
 
 root = Path("/tmp/marina-rebuild-test")
 result = ml.rebuild_service(root, "web", force=True)
@@ -29,7 +35,8 @@ for _ in range(50):
 assert calls, "rebuild did not invoke marina CLI"
 assert calls[0][1] == ("rebuild", "--web"), calls
 assert calls[0][2].get("timeout") == ml.LIFECYCLE_TIMEOUT, calls
-assert guard_calls == [(root, ["web"], True)], guard_calls
+assert guard_calls == [(root, ["web", "db"], True)], guard_calls
+assert released == ["reservation-1"], released
 print("rebuild lifecycle OK")
 PY
 

@@ -155,10 +155,10 @@ or service category. If Docker metrics are unavailable, the UI explicitly falls 
 
 - Docker unavailable: retain host-only behavior and expose `docker.available=false`.
 - `docker stats` timeout: serve the last snapshot as stale; never stall all session polling.
-- Parse failure for one container: omit that container and mark the snapshot partial.
+- Running-container stats 누락: snapshot을 partial로 표시하고 Docker 사용량을 미확정으로 둔다.
 - No history: show current usage and `estimate unavailable`; do not invent a number.
-- Concurrent starts: each guard refreshes under a single-flight lock and evaluates against the newest snapshot.
-- Forced operation: bypasses both host and Docker blocks but still records the warning decision in build metadata.
+- Concurrent starts: single-flight snapshot과 process-wide pending reservation을 함께 평가한다.
+- Forced operation: host와 Docker 차단을 우회하지만 현재 작업에만 적용되며 별도 audit log로 저장하지 않는다.
 - Existing `MIN_FREE_MB` remains supported; the new Docker reserve has its own environment variable.
 
 ## Testing

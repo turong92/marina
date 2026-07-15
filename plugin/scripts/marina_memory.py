@@ -35,6 +35,9 @@ _pressure_sampler: threading.Thread | None = None
 _pressure_sampling = False
 _pressure_capture_tokens: set[str] = set()
 _pressure_token_sequence = 0
+_reservation_lock = threading.Lock()
+_memory_reservations: dict[str, int] = {}
+_reservation_sequence = 0
 
 
 def _run(args: list[str], timeout: float) -> str:
@@ -149,44 +152,89 @@ def _labels(row: dict[str, Any]) -> dict[str, str]:
     return labels
 
 
+def _same_container_id(left: str, right: str) -> bool:
+    return bool(left and right) and (left == right or left.startswith(right) or right.startswith(left))
+
+
+def _row_for_id(rows: list[dict[str, Any]], container_id: str) -> dict[str, Any]:
+    for row in rows:
+        candidate = str(row.get("ID") or row.get("Id") or "")
+        if _same_container_id(candidate, container_id):
+            return row
+    return {}
+
+
+def _inspect_many(container_ids: list[str]) -> dict[str, dict[str, Any]]:
+    """Inspect all uncached containers in one bounded Docker call."""
+    ids = list(dict.fromkeys(container_id for container_id in container_ids if container_id))
+    result = {container_id: _inspect_cache[container_id] for container_id in ids if container_id in _inspect_cache}
+    missing = [container_id for container_id in ids if container_id not in result]
+    if missing:
+        rows = _json_rows(_run(["docker", "inspect", *missing], _INSPECT_TIMEOUT_SECONDS))
+        for container_id in missing:
+            details = _row_for_id(rows, container_id)
+            if details:
+                _inspect_cache[container_id] = details
+                result[container_id] = details
+    return result
+
+
 def _inspect(container_id: str) -> dict[str, Any]:
-    cached = _inspect_cache.get(container_id)
-    if cached is not None:
-        return cached
-    rows = _json_rows(_run(["docker", "inspect", container_id], _INSPECT_TIMEOUT_SECONDS))
-    details = rows[0] if rows else {}
-    _inspect_cache[container_id] = details
-    return details
+    return _inspect_many([container_id]).get(container_id, {})
 
 
-def _container_rows(docker_total_mb: int | None) -> tuple[list[dict[str, Any]], bool, list[str]]:
+def _container_rows(
+    docker_total_mb: int | None,
+) -> tuple[list[dict[str, Any]], bool, list[str], bool]:
     stats_rows = _json_rows(_run(["docker", "stats", "--no-stream", "--format", "{{json .}}"], _DOCKER_TIMEOUT_SECONDS))
-    ps_rows = _json_rows(_run(["docker", "ps", "--format", "{{json .}}"], _DOCKER_TIMEOUT_SECONDS))
-    ps_by_id = {str(row.get("ID") or row.get("Id") or ""): row for row in ps_rows}
+    ps_rows = _json_rows(_run(["docker", "ps", "--all", "--format", "{{json .}}"], _DOCKER_TIMEOUT_SECONDS))
     containers: list[dict[str, Any]] = []
     partial = False
+    usage_complete = True
     errors: list[str] = []
-    for stat in stats_rows:
-        container_id = str(stat.get("ID") or stat.get("Id") or "")
+
+    candidate_ids = [str(row.get("ID") or row.get("Id") or "") for row in stats_rows]
+    for row in ps_rows:
+        container_id = str(row.get("ID") or row.get("Id") or "")
+        labels = _labels(row)
+        state = str(row.get("State") or row.get("Status") or "").lower()
+        is_compose = bool(labels.get("com.docker.compose.project") and labels.get("com.docker.compose.service"))
+        if state == "running" or is_compose:
+            candidate_ids.append(container_id)
+    candidate_ids = list(dict.fromkeys(container_id for container_id in candidate_ids if container_id))
+    try:
+        inspected = _inspect_many(candidate_ids)
+    except Exception as exc:
+        inspected = {}
+        partial = True
+        errors.append(_error_text(exc))
+
+    for container_id in candidate_ids:
+        stat = _row_for_id(stats_rows, container_id)
+        ps_row = _row_for_id(ps_rows, container_id)
+        details = inspected.get(container_id, {})
+        labels = _labels(ps_row)
+        labels.update(_labels((details.get("Config") or {}).get("Labels") or {}))
+        state = details.get("State") if isinstance(details.get("State"), dict) else {}
+        state_name = str(state.get("Status") or ps_row.get("State") or ps_row.get("Status") or "").lower()
+        running = bool(stat) or state_name == "running"
+        oom_killed = state.get("OOMKilled") if details else None
+        is_compose = bool(labels.get("com.docker.compose.project") and labels.get("com.docker.compose.service"))
+        if not running and not (is_compose and oom_killed is True):
+            continue
+
         usage_text, _, stats_limit_text = str(stat.get("MemUsage") or stat.get("MemUsageBytes") or "").partition("/")
         usage_mb = parse_size_mb(usage_text.strip())
         stat_limit_mb = parse_size_mb(stats_limit_text.strip())
-        ps_row = ps_by_id.get(container_id, {})
-        labels = _labels(ps_row)
-        details: dict[str, Any] = {}
-        if container_id:
-            try:
-                details = _inspect(container_id)
-                labels.update(_labels((details.get("Config") or {}).get("Labels") or {}))
-            except Exception as exc:
-                partial = True
-                errors.append(_error_text(exc))
+        if running and usage_mb is None:
+            partial = True
+            usage_complete = False
+            errors.append(f"missing docker stats for {container_id}")
         host_config = details.get("HostConfig") if isinstance(details.get("HostConfig"), dict) else {}
         configured_bytes = host_config.get("Memory")
         configured_limit_mb = int(configured_bytes) // (1024**2) if configured_bytes else None
         effective_limit_mb = configured_limit_mb or docker_total_mb or stat_limit_mb
         percent = int(usage_mb * 100 / effective_limit_mb) if usage_mb is not None and effective_limit_mb else None
-        state = details.get("State") if isinstance(details.get("State"), dict) else {}
         containers.append({
             "id": container_id,
             "name": stat.get("Name") or stat.get("Names") or ps_row.get("Names") or None,
@@ -195,10 +243,12 @@ def _container_rows(docker_total_mb: int | None) -> tuple[list[dict[str, Any]], 
             "memoryUsageMb": usage_mb,
             "memoryLimitMb": effective_limit_mb,
             "memoryPercent": percent,
-            "oomKilled": state.get("OOMKilled") if details else None,
+            "running": running,
+            "oneOff": str(labels.get("com.docker.compose.oneoff") or "").lower() in {"1", "true", "yes"},
+            "oomKilled": oom_killed,
             "imageId": details.get("Image") if details else None,
         })
-    return containers, partial, errors
+    return containers, partial, errors, usage_complete
 
 
 def _error_text(exc: Exception) -> str:
@@ -209,10 +259,17 @@ def _captured_at() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _empty_snapshot(error: str | None = None) -> dict[str, Any]:
+def _empty_snapshot(error: str | None = None, host: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
-        "host": host_memory(),
-        "docker": {"totalMb": None, "usedMb": None, "availableMb": None, "serverOs": None, "available": False},
+        "host": host if isinstance(host, dict) else host_memory(),
+        "docker": {
+            "totalMb": None,
+            "usedMb": None,
+            "availableMb": None,
+            "serverOs": None,
+            "available": False,
+            "usageComplete": False,
+        },
         "containers": [],
         "stale": False,
         "partial": error is not None,
@@ -221,21 +278,25 @@ def _empty_snapshot(error: str | None = None) -> dict[str, Any]:
     }
 
 
-def _collect_snapshot() -> dict[str, Any]:
-    snapshot = _empty_snapshot()
+def _collect_snapshot(host: dict[str, Any] | None = None) -> dict[str, Any]:
+    snapshot = _empty_snapshot(host=host)
     info_rows = _json_rows(_run(["docker", "info", "--format", "{{json .}}"], _DOCKER_TIMEOUT_SECONDS))
     info = info_rows[0] if info_rows else {}
     total_bytes = info.get("MemTotal")
     total_mb = round(int(total_bytes) / (1024**2)) if total_bytes is not None else None
-    containers, partial, errors = _container_rows(total_mb)
-    used_mb = sum(row["memoryUsageMb"] for row in containers if row["memoryUsageMb"] is not None)
+    containers, partial, errors, usage_complete = _container_rows(total_mb)
+    used_mb = (
+        sum(row["memoryUsageMb"] for row in containers if row["memoryUsageMb"] is not None)
+        if usage_complete else None
+    )
     snapshot.update({
         "docker": {
             "totalMb": total_mb,
             "usedMb": used_mb,
-            "availableMb": max(0, total_mb - used_mb) if total_mb is not None else None,
+            "availableMb": max(0, total_mb - used_mb) if total_mb is not None and used_mb is not None else None,
             "serverOs": info.get("OperatingSystem"),
             "available": bool(info_rows),
+            "usageComplete": usage_complete,
         },
         "containers": containers,
         "partial": partial,
@@ -272,10 +333,17 @@ def memory_snapshot(force: bool = False) -> dict[str, Any]:
         previous = _snapshot_cache[1] if _snapshot_cache else None
         _refreshing = True
     try:
-        snapshot = _collect_snapshot()
+        fresh_host = host_memory()
+        snapshot = _collect_snapshot(fresh_host)
     except Exception as exc:
         error = _error_text(exc)
-        failed_snapshot = _cache_value(previous, stale=True, error=error) if previous is not None else _empty_snapshot(error)
+        failed_snapshot = (
+            _cache_value(previous, stale=True, error=error)
+            if previous is not None else _empty_snapshot(error, host=locals().get("fresh_host"))
+        )
+        if isinstance(locals().get("fresh_host"), dict):
+            failed_snapshot["host"] = copy.deepcopy(fresh_host)
+            failed_snapshot["capturedAt"] = _captured_at()
         with _cache_condition:
             _snapshot_cache = (time.monotonic(), failed_snapshot)
         return _cache_value(failed_snapshot)
@@ -520,6 +588,7 @@ def _observe_memory_history(project_id: str, observations: dict[str, dict[str, A
         os.chmod(lock_path, 0o600)
         fcntl.flock(lock_fd, fcntl.LOCK_EX)
         services = _read_memory_history(path)
+        original = copy.deepcopy(services)
         observed_at = _captured_at()
         for name, observation in observations.items():
             usage = observation.get("memoryUsageMb")
@@ -531,11 +600,17 @@ def _observe_memory_history(project_id: str, observations: dict[str, dict[str, A
                 continue
             previous = services.get(name) or {}
             previous_peak = int(previous.get("peakMb") or 0)
+            observed_image = observation.get("imageId") if isinstance(observation.get("imageId"), str) else None
+            retained_image = observed_image or previous.get("imageId")
+            if previous and usage < previous_peak:
+                continue
+            if previous and usage == previous_peak and retained_image == previous.get("imageId"):
+                continue
             peak = max(previous_peak, usage)
             # A lower sample from a rebuilt image is only a same-service estimate;
             # keep the image identity that actually produced the retained peak.
             image_id = (
-                observation.get("imageId") or previous.get("imageId")
+                retained_image
                 if usage >= previous_peak
                 else previous.get("imageId")
             )
@@ -545,7 +620,8 @@ def _observe_memory_history(project_id: str, observations: dict[str, dict[str, A
                 "observedAt": observed_at,
             }
         services = _bounded_history(services)
-        _write_memory_history(path, services)
+        if services != original:
+            _write_memory_history(path, services)
         return services
     except OSError:
         return _read_memory_history(path)
@@ -560,7 +636,11 @@ def _service_memory(snapshot: dict[str, Any], project_name: str) -> dict[str, di
     grouped: dict[str, list[dict[str, Any]]] = {}
     containers = snapshot.get("containers") if isinstance(snapshot, dict) else None
     for container in containers if isinstance(containers, list) else []:
-        if not isinstance(container, dict) or container.get("composeProject") != project_name:
+        if (
+            not isinstance(container, dict)
+            or container.get("composeProject") != project_name
+            or container.get("oneOff") is True
+        ):
             continue
         service = container.get("composeService")
         if isinstance(service, str) and service:
@@ -568,17 +648,20 @@ def _service_memory(snapshot: dict[str, Any], project_name: str) -> dict[str, di
 
     mapped: dict[str, dict[str, Any]] = {}
     for service, containers in grouped.items():
-        usages = [int(value) for row in containers if isinstance((value := row.get("memoryUsageMb")), (int, float))]
-        limits = [int(value) for row in containers if isinstance((value := row.get("memoryLimitMb")), (int, float)) and value > 0]
+        running_rows = [row for row in containers if row.get("running") is True]
+        metric_rows = running_rows or containers
+        usages = [int(value) for row in metric_rows if isinstance((value := row.get("memoryUsageMb")), (int, float))]
+        limits = [int(value) for row in metric_rows if isinstance((value := row.get("memoryLimitMb")), (int, float)) and value > 0]
         usage = sum(usages) if usages else None
         limit = sum(limits) if limits else None
         oom_values = [row.get("oomKilled") for row in containers if isinstance(row.get("oomKilled"), bool)]
-        image_ids = {row.get("imageId") for row in containers if isinstance(row.get("imageId"), str) and row.get("imageId")}
+        image_ids = {row.get("imageId") for row in metric_rows if isinstance(row.get("imageId"), str) and row.get("imageId")}
         mapped[service] = {
             "memoryUsageMb": usage,
             "memoryLimitMb": limit,
             "memoryPercent": int(usage * 100 / limit) if usage is not None and limit else None,
             "oomKilled": True if any(oom_values) else False if oom_values else None,
+            "running": bool(running_rows),
             "imageId": next(iter(image_ids)) if len(image_ids) == 1 else None,
         }
     return mapped
@@ -649,20 +732,12 @@ def _configured_min_free_mb() -> int:
         return 4096
 
 
-def memory_guard(
+def _memory_evaluation(
     root: Path,
     service_names: list[str],
-    force: bool = False,
-    snapshot: dict | None = None,
-) -> dict[str, Any] | None:
-    """Return a structured memory block before a lifecycle operation, or ``None``.
-
-    Docker's current working set is always considered. Learned high-water usage is
-    added only for requested services that are not already running in this session.
-    """
-    if force:
-        return None
-    snapshot = snapshot if isinstance(snapshot, dict) else memory_snapshot(force=True)
+    snapshot: dict,
+    pending_additional_mb: int = 0,
+) -> tuple[dict[str, Any], str | None]:
     host = snapshot.get("host") if isinstance(snapshot.get("host"), dict) else {}
     docker = snapshot.get("docker") if isinstance(snapshot.get("docker"), dict) else {}
     host_free = host.get("availableMb")
@@ -679,20 +754,25 @@ def memory_guard(
     project_id = str((project or {}).get("id") or "")
     try:
         project_name = _mc().compose_project_name(project_id, session_id(root)) if project_id else ""
-        running = set(_service_memory(snapshot, project_name)) if project_name else set()
+        running = {
+            name for name, value in _service_memory(snapshot, project_name).items()
+            if value.get("running") is True
+        } if project_name else set()
     except Exception:
         running = set()
     stopped_names = [name for name in names if name not in running]
     estimated, unknown = estimate_services(root, stopped_names, snapshot)
     additional = sum(int(item["memoryMb"]) for item in estimated)
     current_free = docker_total - docker_used if docker_total is not None and docker_used is not None else None
-    projected_free = current_free - additional if current_free is not None else None
+    pending = max(0, int(pending_additional_mb))
+    projected_free = current_free - additional - pending if current_free is not None else None
     decision = {
         "blocked": "low-memory",
         "hostFreeMb": host_free,
         "dockerTotalMb": docker_total,
         "dockerUsedMb": docker_used,
         "estimatedAdditionalMb": additional,
+        "pendingAdditionalMb": pending,
         "reserveMb": reserve,
         "projectedFreeMb": projected_free,
         "estimatedServices": estimated,
@@ -702,9 +782,57 @@ def memory_guard(
         "minFreeMb": min_free,
     }
     if host_free is not None and host_free < min_free:
-        return {**decision, "reason": "host-critical"}
+        return decision, "host-critical"
+    usage_complete = docker.get("usageComplete")
+    if usage_complete is None:
+        usage_complete = docker_used is not None
+    if bool(docker.get("available")) and (snapshot.get("stale") or usage_complete is False):
+        return decision, "docker-unknown"
     if current_free is not None and reserve is not None and current_free < reserve:
-        return {**decision, "reason": "docker-current"}
+        return decision, "docker-current"
     if projected_free is not None and reserve is not None and projected_free < reserve:
-        return {**decision, "reason": "docker-projected"}
-    return None
+        return decision, "docker-projected"
+    return decision, None
+
+
+def memory_guard(
+    root: Path,
+    service_names: list[str],
+    force: bool = False,
+    snapshot: dict | None = None,
+) -> dict[str, Any] | None:
+    """Return a structured memory block before a lifecycle operation, or ``None``."""
+    if force:
+        return None
+    current = snapshot if isinstance(snapshot, dict) else memory_snapshot(force=True)
+    decision, reason = _memory_evaluation(root, service_names, current)
+    return {**decision, "reason": reason} if reason else None
+
+
+def acquire_memory_reservation(
+    root: Path,
+    service_names: list[str],
+    force: bool = False,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Atomically evaluate projected pressure and reserve learned startup usage."""
+    global _reservation_sequence
+    snapshot = memory_snapshot(force=True)
+    with _reservation_lock:
+        pending = sum(_memory_reservations.values())
+        decision, reason = _memory_evaluation(root, service_names, snapshot, pending)
+        if reason and not force:
+            return {**decision, "reason": reason}, None
+        amount = max(0, int(decision.get("estimatedAdditionalMb") or 0))
+        if amount == 0:
+            return None, None
+        _reservation_sequence += 1
+        token = f"memory-{_reservation_sequence}"
+        _memory_reservations[token] = amount
+        return None, token
+
+
+def release_memory_reservation(token: str | None) -> None:
+    if not token:
+        return
+    with _reservation_lock:
+        _memory_reservations.pop(token, None)

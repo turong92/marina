@@ -35,6 +35,7 @@ rg -q 'projectedFreeMb' "$UTIL" || { echo "FAIL: projected memory confirmation m
 rg -q 'estimatedServices' "$UTIL" || { echo "FAIL: largest estimated services missing"; exit 1; }
 rg -q 'unknownServices' "$UTIL" || { echo "FAIL: unknown services confirmation missing"; exit 1; }
 rg -q 'docker-projected' "$UTIL" || { echo "FAIL: projected-pressure reason copy missing"; exit 1; }
+rg -q 'docker-unknown' "$UTIL" || { echo "FAIL: incomplete-Docker reason copy missing"; exit 1; }
 
 # Service rows place current use in the existing right metadata slot and retain
 # peak/limit/OOM detail in a title. OOM augments the normalized state reason.

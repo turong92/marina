@@ -37,12 +37,14 @@ stats = '\n'.join((
     '{"ID":"def456","Name":"demo-worker-1","MemUsage":"638MiB / 15.6GiB","MemPerc":"3.99%"}',
 ))
 ps = '\n'.join((
-    '{"ID":"abc123","Names":"demo-web-1","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}',
-    '{"ID":"def456","Names":"demo-worker-1","Labels":"com.docker.compose.project=demo,com.docker.compose.service=worker"}',
+    '{"ID":"abc123","Names":"demo-web-1","State":"running","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}',
+    '{"ID":"def456","Names":"demo-worker-1","State":"running","Labels":"com.docker.compose.project=demo,com.docker.compose.service=worker"}',
+    '{"ID":"oom789","Names":"demo-crashed-1","State":"exited","Labels":"com.docker.compose.project=demo,com.docker.compose.service=crashed"}',
 ))
 inspect = {
     "abc123": '{"Id":"abc123","State":{"OOMKilled":false},"HostConfig":{"Memory":0},"Config":{"Labels":{"com.docker.compose.project":"demo","com.docker.compose.service":"web"}}}',
     "def456": '{"Id":"def456","State":{"OOMKilled":true},"HostConfig":{"Memory":1073741824},"Config":{"Labels":{"com.docker.compose.project":"demo","com.docker.compose.service":"worker"}}}',
+    "oom789": '{"Id":"oom789","State":{"Status":"exited","OOMKilled":true},"HostConfig":{"Memory":536870912},"Config":{"Labels":{"com.docker.compose.project":"demo","com.docker.compose.service":"crashed"}}}',
 }
 calls = []
 
@@ -55,7 +57,7 @@ def fake_run(args, timeout):
     if args[:2] == ["docker", "ps"]:
         return ps
     if args[:2] == ["docker", "inspect"]:
-        return inspect[args[-1]]
+        return '[' + ','.join(inspect[item] for item in args[2:]) + ']'
     raise AssertionError(args)
 
 mm._run = fake_run
@@ -69,19 +71,45 @@ assert snapshot["containers"][0]["composeService"] == "web"
 assert snapshot["containers"][0]["oomKilled"] is False
 assert snapshot["containers"][1]["memoryLimitMb"] == 1024
 assert snapshot["containers"][1]["oomKilled"] is True
+crashed = next(row for row in snapshot["containers"] if row["composeService"] == "crashed")
+assert crashed["running"] is False and crashed["oomKilled"] is True
 assert snapshot["partial"] is False and snapshot["stale"] is False and snapshot["error"] is None
 assert snapshot["capturedAt"]
 assert all(timeout > 0 for _, timeout in calls)
+inspect_calls = [args for args, _ in calls if args[:2] == ("docker", "inspect")]
+assert len(inspect_calls) == 1 and set(inspect_calls[0][2:]) == {"abc123", "def456", "oom789"}, inspect_calls
 
 # A refresh failure returns the prior snapshot marked stale instead of raising.
 def timeout_run(args, timeout):
     raise subprocess.TimeoutExpired(args, timeout)
 
 mm._run = timeout_run
+mm.host_memory = lambda: {"totalMb": 32000, "availableMb": 2048, "availablePercent": 6}
 stale = mm.memory_snapshot(force=True)
 assert stale["stale"] is True and stale["partial"] is True
 assert stale["error"] and "TimeoutExpired" in stale["error"]
 assert stale["containers"] == snapshot["containers"]
+assert stale["host"]["availableMb"] == 2048, stale["host"]
+
+# Missing stats for a running container is incomplete telemetry, never a valid 0 MiB sample.
+def incomplete_run(args, timeout):
+    if args[:2] == ["docker", "info"]:
+        return info
+    if args[:2] == ["docker", "stats"]:
+        return ""
+    if args[:2] == ["docker", "ps"]:
+        return '{"ID":"abc123","Names":"demo-web-1","State":"running","Labels":"com.docker.compose.project=demo,com.docker.compose.service=web"}'
+    if args[:2] == ["docker", "inspect"]:
+        return '[' + inspect["abc123"] + ']'
+    raise AssertionError(args)
+
+mm._run = incomplete_run
+mm._snapshot_cache = None
+mm._inspect_cache.clear()
+incomplete = mm.memory_snapshot(force=True)
+assert incomplete["partial"] is True, incomplete
+assert incomplete["docker"]["usageComplete"] is False, incomplete
+assert incomplete["docker"]["usedMb"] is None, incomplete
 
 # A shared failed refresh marks every waiting caller stale, then caches that failure.
 mm._snapshot_cache = (time.monotonic() - mm._CACHE_TTL_SECONDS - 1, snapshot)

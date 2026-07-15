@@ -34,9 +34,21 @@ with tempfile.TemporaryDirectory() as temp:
             {
                 "composeProject": root_project,
                 "composeService": "web",
+                "running": True,
                 "memoryUsageMb": 9144,
                 "memoryLimitMb": 16000,
                 "memoryPercent": 57,
+                "oomKilled": False,
+                "imageId": "sha256:web-v1",
+            },
+            {
+                "composeProject": root_project,
+                "composeService": "web",
+                "running": True,
+                "oneOff": True,
+                "memoryUsageMb": 1000,
+                "memoryLimitMb": 16000,
+                "memoryPercent": 6,
                 "oomKilled": False,
                 "imageId": "sha256:web-v1",
             },
@@ -104,6 +116,17 @@ with tempfile.TemporaryDirectory() as temp:
     assert history["services"]["web"]["imageId"] == "sha256:web-v1"
     assert len(history["services"]) <= mm._HISTORY_MAX_SERVICES
     assert not list(history_path.parent.glob("memory-history.json.*"))
+
+    writes = []
+    original_write = mm._write_memory_history
+    mm._write_memory_history = lambda path, services: writes.append((path, services))
+    try:
+        mm._observe_memory_history("demo", {"web": {
+            "memoryUsageMb": 1024, "imageId": "sha256:web-v2",
+        }})
+    finally:
+        mm._write_memory_history = original_write
+    assert writes == [], writes
 
     estimated, unknown = mm.estimate_services(other_root, ["web", "old-api", "new-api"], snapshot)
     assert estimated == [

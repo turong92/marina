@@ -20,7 +20,7 @@ session_id = importlib.import_module("marina_paths").session_id
 def snapshot(*, host_free=16000, docker_used=11060, containers=None):
     return {
         "host": {"availableMb": host_free},
-        "docker": {"totalMb": 16000, "usedMb": docker_used},
+        "docker": {"totalMb": 16000, "usedMb": docker_used, "available": True, "usageComplete": True},
         "containers": containers or [],
     }
 
@@ -39,6 +39,8 @@ with tempfile.TemporaryDirectory() as temp:
     history_path.parent.mkdir(parents=True)
     history_path.write_text(json.dumps({"version": 1, "services": {
         "web": {"peakMb": 9144, "imageId": "sha256:web", "observedAt": "2026-07-15T00:00:00Z"},
+        "api": {"peakMb": 3000, "imageId": "sha256:api", "observedAt": "2026-07-15T00:00:00Z"},
+        "worker": {"peakMb": 3000, "imageId": "sha256:worker", "observedAt": "2026-07-15T00:00:00Z"},
     }}), encoding="utf-8")
 
     projected = mm.memory_guard(root, ["web"], snapshot=snapshot())
@@ -84,10 +86,27 @@ with tempfile.TemporaryDirectory() as temp:
 
     assert mm.memory_guard(root, ["unknown"], snapshot=snapshot()) is None
 
+    incomplete = mm.memory_guard(root, ["unknown"], snapshot={
+        **snapshot(),
+        "partial": True,
+        "docker": {"totalMb": 16000, "usedMb": None, "available": True, "usageComplete": False},
+    })
+    assert incomplete["reason"] == "docker-unknown", incomplete
+
+    mm.memory_snapshot = lambda force=False: snapshot(docker_used=7000)
+    first_block, first_token = mm.acquire_memory_reservation(root, ["api"])
+    assert first_block is None and first_token, (first_block, first_token)
+    second_block, second_token = mm.acquire_memory_reservation(root, ["worker"])
+    assert second_block["reason"] == "docker-projected", second_block
+    assert second_block["pendingAdditionalMb"] == 3000, second_block
+    assert second_token is None
+    mm.release_memory_reservation(first_token)
+
     project_name = mc.compose_project_name(project["id"], session_id(root))
     running = mm.memory_guard(root, ["web"], snapshot=snapshot(containers=[{
         "composeProject": project_name,
         "composeService": "web",
+        "running": True,
         "memoryUsageMb": 9144,
         "imageId": "sha256:web",
     }]))
@@ -105,24 +124,42 @@ with tempfile.TemporaryDirectory() as temp:
     assert overridden["reason"] == "docker-current", overridden
     assert overridden["reserveMb"] == 5000, overridden
 
-    # Lifecycle paths pass only stopped targets to the policy. Restart has no
-    # additional target because it reuses an already-running image.
+    compose_svc = importlib.import_module("marina_compose_svc")
+    compose_svc.MARINA_HOME = home
+    stored = home / "demo" / "docker-compose.yml"
+    stored.write_text("services:\n  web:\n    image: demo\n  db:\n    image: postgres\n", encoding="utf-8")
+    original_config_reader = compose_svc._docker_compose_config_json
+    compose_svc._docker_compose_config_json = lambda path, candidate: ({
+        "services": {
+            "web": {"image": "demo", "depends_on": {"db": {"condition": "service_started"}}},
+            "db": {"image": "postgres"},
+        },
+    }, "")
+    try:
+        assert compose_svc.compose_start_targets(root, project, ["web"]) == ["web", "db"]
+    finally:
+        compose_svc._docker_compose_config_json = original_config_reader
+
+    # Lifecycle paths reserve explicit services plus transitive dependencies.
+    # Restart has no additional target because it reuses an already-running image.
     ml = importlib.import_module("marina_lifecycle")
     decisions, commands = [], []
-    ml.memory_guard = lambda candidate, names, force=False: decisions.append(
-        (candidate, names, force)
-    ) or None
+    ml.compose_start_targets = lambda candidate, proj, names: [*names, "db"] if names else ["web", "api", "db"]
+    ml.acquire_memory_reservation = lambda candidate, names, force=False: (
+        decisions.append((candidate, names, force)) or (None, f"token-{len(decisions)}")
+    )
+    ml.release_memory_reservation = lambda token: None
     ml._marina_cli_logged = lambda candidate, *args, **kwargs: commands.append((args, kwargs))
     ml.refresh_gateway = lambda: None
-    ml._spawn_lifecycle = lambda key, op, fn: (fn(), {"starting": True, "op": op})[1]
+    ml._spawn_lifecycle = lambda key, op, fn, reservation_token=None: (fn(), {"starting": True, "op": op})[1]
     ml.project_for = lambda candidate: project
 
     ml.start_service(root, "web")
     ml.rebuild_service(root, "web", force=True)
     ml.restart_service(root, "web")
     assert decisions[:3] == [
-        (root, ["web"], False),
-        (root, ["web"], True),
+        (root, ["web", "db"], False),
+        (root, ["web", "db"], True),
         (root, [], False),
     ], decisions
 
@@ -132,17 +169,28 @@ with tempfile.TemporaryDirectory() as temp:
         {"service": "worker", "running": False, "inStartGroup": False},
     ]
     ml.start_all(root, force=True)
-    assert decisions[-1] == (root, ["web"], True), decisions
-    assert commands[-1][0] == ("start", "--web"), commands
+    assert decisions[-1] == (root, ["web", "db"], True), decisions
+    assert commands[-1][0] == ("start", "--web", "--db"), commands
 
     ml._compose_services = lambda candidate, proj: [
         {"service": "web", "running": False, "inStartGroup": True},
         {"service": "api", "running": True, "inStartGroup": True},
         {"service": "worker", "running": False, "inStartGroup": True},
     ]
+    ml.compose_start_targets = lambda candidate, proj, names: ["web", "api", "worker", "db"]
     ml.start_all(root)
-    assert decisions[-1] == (root, ["web", "worker"], False), decisions
-    assert commands[-1][0] == ("start", "--web", "--worker"), commands
+    assert decisions[-1] == (root, ["web", "worker", "db"], False), decisions
+    assert commands[-1][0] == ("start", "--web", "--worker", "--db"), commands
+
+    ml.compose_start_targets = lambda candidate, proj, names: (_ for _ in ()).throw(
+        ValueError("compose config failed")
+    )
+    try:
+        ml.start_all(root)
+    except ValueError as exc:
+        assert "compose config failed" in str(exc)
+    else:
+        raise AssertionError("start_all must not report alreadyRunning after config failure")
 
     for name, value in saved_minimums.items():
         if value is None:
