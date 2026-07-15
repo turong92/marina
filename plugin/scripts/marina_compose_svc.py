@@ -390,6 +390,7 @@ def compose_start_targets(root: Path, project: dict, requested: list[str]) -> li
     except OSError as exc:
         raise ValueError(f"compose 파일 읽기 실패: {exc}") from exc
     resolved_source = source
+    external_markers: dict[str, str] = {}
     for index, external in enumerate(project.get("externalRepos") or []):
         if not isinstance(external, dict):
             continue
@@ -400,9 +401,13 @@ def compose_start_targets(root: Path, project: dict, requested: list[str]) -> li
         attached = root / ".workspace" / "external" / name
         replacement = attached if attached.exists() else Path(source_path).expanduser()
         marker = f"__MARINA_MEMORY_EXTERNAL_{index}__"
-        resolved_source = resolved_source.replace(f"./.workspace/external/{name}", marker)
-        resolved_source = resolved_source.replace(f".workspace/external/{name}", marker)
-        resolved_source = resolved_source.replace(marker, str(replacement))
+        pattern = re.compile(
+            rf"(?<![A-Za-z0-9_.-])(?:\./)?\.workspace/external/{re.escape(name)}(?=/|[\s\"']|$)"
+        )
+        resolved_source = pattern.sub(marker, resolved_source)
+        external_markers[marker] = str(replacement)
+    for marker, replacement in external_markers.items():
+        resolved_source = resolved_source.replace(marker, replacement)
 
     plan_file = stored
     temporary: str | None = None

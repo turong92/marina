@@ -132,8 +132,15 @@ with tempfile.TemporaryDirectory() as temp:
     external_source = Path(temp) / "external-source"
     external_source.mkdir()
     (external_source / "docker-compose.yml").write_text("services:\n  db:\n    image: postgres\n", encoding="utf-8")
+    api_source = Path(temp) / "api-source"
+    api_v2_source = Path(temp) / "api-v2-source"
+    api_source.mkdir()
+    api_v2_source.mkdir()
     stored.write_text(
-        "include:\n  - ./.workspace/external/data/docker-compose.yml\n"
+        "include:\n"
+        "  - ./.workspace/external/data/docker-compose.yml\n"
+        "  - ./.workspace/external/api/docker-compose.yml\n"
+        "  - ./.workspace/external/api-v2/docker-compose.yml\n"
         "services:\n  web:\n    image: ${PROFILE:?PROFILE required}\n",
         encoding="utf-8",
     )
@@ -141,7 +148,11 @@ with tempfile.TemporaryDirectory() as temp:
         **project,
         "composeEnvVar": "PROFILE",
         "composeEnvDefault": "local",
-        "externalRepos": [{"name": "data", "source": str(external_source)}],
+        "externalRepos": [
+            {"name": "data", "source": str(external_source)},
+            {"name": "api", "source": str(api_source)},
+            {"name": "api-v2", "source": str(api_v2_source)},
+        ],
     }
     resolved_inputs = {}
     def fake_config_reader(path, candidate, env=None):
@@ -166,10 +177,16 @@ with tempfile.TemporaryDirectory() as temp:
             os.environ["MARINA_COMPOSE_ENV"] = old_compose_env
     assert resolved_inputs["env"]["PROFILE"] == "test-profile", resolved_inputs
     assert str(external_source) in resolved_inputs["text"], resolved_inputs
+    assert str(api_source) + "/docker-compose.yml" in resolved_inputs["text"], resolved_inputs
+    assert str(api_v2_source) + "/docker-compose.yml" in resolved_inputs["text"], resolved_inputs
     assert not list(stored.parent.glob("*.memory-plan-*"))
 
     attached_external = root / ".workspace" / "external" / "data"
     attached_external.mkdir(parents=True)
+    attached_api = root / ".workspace" / "external" / "api"
+    attached_api_v2 = root / ".workspace" / "external" / "api-v2"
+    attached_api.mkdir()
+    attached_api_v2.mkdir()
     resolved_inputs.clear()
     compose_svc._docker_compose_config_json = fake_config_reader
     try:
@@ -178,6 +195,10 @@ with tempfile.TemporaryDirectory() as temp:
         compose_svc._docker_compose_config_json = original_config_reader
     assert str(attached_external) in resolved_inputs["text"], resolved_inputs
     assert resolved_inputs["text"].count(str(attached_external)) == 1, resolved_inputs
+    assert str(attached_api) + "/docker-compose.yml" in resolved_inputs["text"], resolved_inputs
+    assert str(attached_api_v2) + "/docker-compose.yml" in resolved_inputs["text"], resolved_inputs
+    assert resolved_inputs["text"].count(str(attached_api) + "/docker-compose.yml") == 1, resolved_inputs
+    assert resolved_inputs["text"].count(str(attached_api_v2) + "/docker-compose.yml") == 1, resolved_inputs
     assert f"{root}/{root}" not in resolved_inputs["text"], resolved_inputs
 
     # Lifecycle paths reserve explicit services plus transitive dependencies.
