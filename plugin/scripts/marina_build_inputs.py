@@ -18,7 +18,23 @@ def _label(root: Path, path: Path) -> str:
         return path.name
 
 
-def _path_digest(path: Path) -> str:
+def _is_ignored(path: Path, ignored_paths: tuple[Path, ...]) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+    for ignored in ignored_paths:
+        try:
+            resolved.relative_to(ignored)
+            return True
+        except ValueError:
+            continue
+    return False
+
+
+def _path_digest(path: Path, ignored_paths: tuple[Path, ...] = ()) -> str:
+    if _is_ignored(path, ignored_paths):
+        return "ignored"
     if not path.exists():
         return "missing"
     digest = hashlib.sha256()
@@ -30,9 +46,15 @@ def _path_digest(path: Path) -> str:
     if not path.is_dir():
         return "other"
     for directory, dirnames, filenames in os.walk(path):
-        dirnames.sort()
+        directory_path = Path(directory)
+        dirnames[:] = sorted(
+            name for name in dirnames
+            if not _is_ignored(directory_path / name, ignored_paths)
+        )
         for filename in sorted(filenames):
-            item = Path(directory) / filename
+            item = directory_path / filename
+            if _is_ignored(item, ignored_paths):
+                continue
             try:
                 stat = item.stat()
                 rel = item.relative_to(path).as_posix()
@@ -58,8 +80,10 @@ def build_input_snapshot(
     selected: list[str],
     extra_build_args: dict[str, dict[str, Any]],
     key: bytes,
+    ignored_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     root = Path(root).resolve()
+    ignored = tuple(Path(path).resolve() for path in (ignored_paths or []))
     services = config.get("services") or {}
     names = selected
     result: dict[str, Any] = {"version": 1, "status": "ok", "services": {}}
@@ -72,7 +96,7 @@ def build_input_snapshot(
             continue
         context = _absolute(root, str(build.get("context") or "."))
         dockerfile = _absolute(context, str(build.get("dockerfile") or "Dockerfile"))
-        dockerfiles = {_label(root, dockerfile): _path_digest(dockerfile)}
+        dockerfiles = {_label(root, dockerfile): _path_digest(dockerfile, ignored)}
         rebuild: dict[str, str] = {}
         develop = service.get("develop") or {}
         watch = develop.get("watch") if isinstance(develop, dict) else []
@@ -82,7 +106,7 @@ def build_input_snapshot(
             path = _absolute(root, str(rule["path"]))
             if path.resolve() == dockerfile.resolve():
                 continue
-            rebuild[_label(root, path)] = _path_digest(path)
+            rebuild[_label(root, path)] = _path_digest(path, ignored)
         args = dict(build.get("args") or {}) if isinstance(build.get("args"), dict) else {}
         local_args = extra_build_args.get(name) or {}
         if isinstance(local_args, dict):

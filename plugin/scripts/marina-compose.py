@@ -17,17 +17,36 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
 try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로드(테스트)에서도 sibling 해석되게.
     from marina_dockerfile import is_profile_var
-    from marina_build_inputs import build_input_snapshot, load_build_input_key, write_build_input_snapshot
+    from marina_build_inputs import (
+        build_decision,
+        build_input_snapshot,
+        load_build_input_key,
+        merge_build_baseline,
+        read_build_baseline,
+        read_build_input_snapshot,
+        write_build_input_snapshot,
+    )
+    from marina_logtext import redact_text
     import marina_prebuild
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from marina_dockerfile import is_profile_var
-    from marina_build_inputs import build_input_snapshot, load_build_input_key, write_build_input_snapshot
+    from marina_build_inputs import (
+        build_decision,
+        build_input_snapshot,
+        load_build_input_key,
+        merge_build_baseline,
+        read_build_baseline,
+        read_build_input_snapshot,
+        write_build_input_snapshot,
+    )
+    from marina_logtext import redact_text
     import marina_prebuild
 
 
@@ -806,18 +825,12 @@ def _show_ports(project_name):
 BUILD_INPUT_CAPTURE_TIMEOUT_SEC = 0.5
 
 
-def _write_unknown_build_input_handoff(path):
-    try:
-        write_build_input_snapshot(Path(path), {"version": 1, "status": "unknown"})
-    except OSError:
-        pass
-
-
-def _write_build_input_handoff(path, project_dir, config, requested, build_args):
+def _write_build_input_handoff(path, project_dir, config, requested, build_args, ignored_paths=None):
     try:
         home = Path(os.environ.get("MARINA_HOME") or (Path.home() / ".marina"))
         payload = build_input_snapshot(
-            Path(project_dir), config, requested, build_args, load_build_input_key(home)
+            Path(project_dir), config, requested, build_args, load_build_input_key(home),
+            ignored_paths=ignored_paths,
         )
     except Exception:
         payload = {"version": 1, "status": "unknown"}
@@ -827,48 +840,76 @@ def _write_build_input_handoff(path, project_dir, config, requested, build_args)
         pass
 
 
-def _capture_build_input_handoff(a, config, requested, build_args):
-    path = os.environ.get("MARINA_BUILD_INPUT_SNAPSHOT", "").strip()
-    if not path:
-        return
+def _capture_build_inputs(a, config, requested, build_args):
+    session_dir = Path(a.session_dir)
+    session_dir.mkdir(parents=True, exist_ok=True)
+    fd, private_path = tempfile.mkstemp(prefix=".build-input-capture.", dir=str(session_dir))
+    os.fchmod(fd, 0o600)
+    os.close(fd)
+    os.unlink(private_path)
+    payload = {"version": 1, "status": "unknown"}
     try:
-        pid = os.fork()
-    except (AttributeError, OSError):
-        _write_unknown_build_input_handoff(path)
-        return
-    if pid == 0:
         try:
-            _write_build_input_handoff(path, a.project_dir, config, requested, build_args)
-        finally:
-            os._exit(0)
+            pid = os.fork()
+        except (AttributeError, OSError):
+            pid = None
+        if pid == 0:
+            try:
+                _write_build_input_handoff(
+                    private_path, a.project_dir, config, requested, build_args,
+                    ignored_paths=[session_dir],
+                )
+            finally:
+                os._exit(0)
+        if pid is not None:
+            deadline = time.monotonic() + BUILD_INPUT_CAPTURE_TIMEOUT_SEC
+            reaped = False
+            status = 1
+            try:
+                while time.monotonic() < deadline:
+                    try:
+                        waited, status = os.waitpid(pid, os.WNOHANG)
+                    except ChildProcessError:
+                        reaped = True
+                        status = 0 if Path(private_path).is_file() else 1
+                        break
+                    if waited == pid:
+                        reaped = True
+                        break
+                    time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+            finally:
+                if not reaped:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except OSError:
+                        pass
+                    try:
+                        _, status = os.waitpid(pid, 0)
+                    except OSError:
+                        pass
+            if reaped and status == 0:
+                payload = read_build_input_snapshot(Path(private_path))
 
-    deadline = time.monotonic() + BUILD_INPUT_CAPTURE_TIMEOUT_SEC
-    reaped = False
-    status = 1
-    try:
-        while time.monotonic() < deadline:
+        handoff = os.environ.get("MARINA_BUILD_INPUT_SNAPSHOT", "").strip()
+        if handoff:
             try:
-                waited, status = os.waitpid(pid, os.WNOHANG)
-            except ChildProcessError:
-                reaped = True
-                status = 0 if Path(path).is_file() else 1
-                break
-            if waited == pid:
-                reaped = True
-                break
-            time.sleep(min(0.01, max(0.0, deadline - time.monotonic())))
+                write_build_input_snapshot(Path(handoff), payload)
+            except OSError:
+                pass
+        return payload
     finally:
-        if not reaped:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
-            try:
-                _, status = os.waitpid(pid, 0)
-            except OSError:
-                pass
-    if not reaped or status != 0 or not Path(path).is_file():
-        _write_unknown_build_input_handoff(path)
+        try:
+            os.unlink(private_path)
+        except FileNotFoundError:
+            pass
+
+
+def _build_reason_text(reason):
+    service = " ".join(str(reason.get("service") or "").split())
+    label = " ".join(str(reason.get("label") or "build 입력").split())
+    change = " ".join(str(reason.get("change") or "changed").split())
+    subject = " ".join(value for value in (service, label) if value)
+    return redact_text(f"{subject} {change}".strip())
 
 
 def cmd_up(a):
@@ -964,11 +1005,33 @@ def cmd_up(a):
     sidecars = [f"{svc}-bind"                                      # 엮기 사이드카는 overlay 에만 있어 requested 엔 없음 → up 대상에 명시 추가(코덱스 #1). 앱(build) 서비스마다 1개(받을 포트가 있을 때만).
                 for svc in requested
                 if (svc_cfg.get(svc) or {}).get("build") and _forward_for_service(forward, svc, _served_ports(svc_cfg.get(svc) or {}))]
-    argv = up_argv(a.stored, op, a.project_dir, name, requested + sidecars, build=bool(a.build))
-    _capture_build_input_handoff(a, config, requested, build_args)
+    current_inputs = _capture_build_inputs(a, config, requested, build_args)
+    baseline_path = Path(a.session_dir) / "build-baseline.json"
+    effective_build, build_reasons = build_decision(
+        current_inputs,
+        read_build_baseline(baseline_path),
+        explicit=bool(a.build),
+    )
+    if current_inputs.get("status") != "ok":
+        if a.build:
+            sys.stderr.write("warning: build 입력을 확인하지 못했습니다; Rebuild는 계속하지만 baseline은 갱신하지 않습니다.\n")
+        else:
+            sys.stderr.write("warning: build 입력을 확인하지 못해 기존 이미지로 시작합니다; 문제가 있으면 Rebuild를 실행하세요.\n")
+    elif effective_build and not a.build:
+        for reason in build_reasons:
+            print(f"stale image: {_build_reason_text(reason)}; Start에 --build 자동 적용")
+    argv = up_argv(
+        a.stored, op, a.project_dir, name, requested + sidecars,
+        build=effective_build,
+    )
     print("compose: " + " ".join(argv))
     rc = subprocess.call(argv, env=env)                            # P1: same env to up
     if rc == 0:
+        if effective_build and current_inputs.get("status") == "ok":
+            try:
+                merge_build_baseline(baseline_path, current_inputs)
+            except OSError as exc:
+                sys.stderr.write(f"warning: build baseline 저장 실패; 다음 Start에서 다시 확인합니다: {exc}\n")
         summary = _forward_summary(_applied_forward(svc_cfg, requested, forward))   # 사이드카가 실제 받는 것만
         if summary:
             print(summary)

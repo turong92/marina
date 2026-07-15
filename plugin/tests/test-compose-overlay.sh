@@ -58,15 +58,35 @@ assert mc._parse_build_args(["bad","svc=noeq",""])=={}, "malformed skipped"
 handoff=os.path.join(T,"build-inputs.json"); os.environ["MARINA_BUILD_INPUT_SNAPSHOT"]=handoff
 os.environ["MARINA_HOME"]=os.path.join(T,"home")
 os.makedirs(os.path.join(T,"capture"),exist_ok=True); open(os.path.join(T,"capture","Dockerfile"),"w").write("FROM scratch\n")
-mc._capture_build_input_handoff(
-    SimpleNamespace(project_dir=T),
+captured=mc._capture_build_inputs(
+    SimpleNamespace(project_dir=T,session_dir=os.path.join(T,"session")),
     {"services":{"web":{"build":{"context":os.path.join(T,"capture"),"dockerfile":"Dockerfile"}}}},
     ["web"], {"web":{"TOKEN":"must-not-reach-handoff"}},
 )
-raw=open(handoff,encoding="utf-8").read(); captured=json.loads(raw)
+raw=open(handoff,encoding="utf-8").read()
 assert "must-not-reach-handoff" not in raw, raw
+assert json.loads(raw)==captured, (raw,captured)
 assert captured["services"]["web"]["buildArgs"]["TOKEN"], captured
 assert os.stat(handoff).st_mode & 0o777 == 0o600, oct(os.stat(handoff).st_mode)
+# The private handoff must not fingerprint itself when a rebuild directory
+# contains Marina's session directory.
+session_dir=os.path.join(T,"session")
+self_observing_config={"services":{"web":{
+    "build":{"context":os.path.join(T,"capture"),"dockerfile":"Dockerfile"},
+    "develop":{"watch":[{"action":"rebuild","path":session_dir}]},
+}}}
+self_first=mc._capture_build_inputs(
+    SimpleNamespace(project_dir=T,session_dir=session_dir), self_observing_config, ["web"], {}
+)
+self_second=mc._capture_build_inputs(
+    SimpleNamespace(project_dir=T,session_dir=session_dir), self_observing_config, ["web"], {}
+)
+assert self_first==self_second, (self_first,self_second)
+mc.merge_build_baseline(os.path.join(session_dir,"build-baseline.json"), self_first)
+self_after_baseline=mc._capture_build_inputs(
+    SimpleNamespace(project_dir=T,session_dir=session_dir), self_observing_config, ["web"], {}
+)
+assert self_first==self_after_baseline, (self_first,self_after_baseline)
 # A stalled rebuild-path scan is best-effort: bound it and let Compose proceed
 # with an unknown snapshot rather than consuming the lifecycle timeout.
 original_snapshot=mc.build_input_snapshot
@@ -75,11 +95,12 @@ def stalled_snapshot(*args, **kwargs):
     time.sleep(0.75)
     return {"version":1,"status":"ok","services":{}}
 mc.build_input_snapshot=stalled_snapshot
-started=time.monotonic(); mc._capture_build_input_handoff(
-    SimpleNamespace(project_dir=T), {"services":{}}, [], {}
+started=time.monotonic(); unknown=mc._capture_build_inputs(
+    SimpleNamespace(project_dir=T,session_dir=os.path.join(T,"session")), {"services":{}}, [], {}
 ); elapsed=time.monotonic()-started
 mc.build_input_snapshot=original_snapshot
 assert elapsed < 0.5, elapsed
+assert unknown == {"version":1,"status":"unknown"}, unknown
 assert json.load(open(handoff,encoding="utf-8")) == {"version":1,"status":"unknown"}
 ps='[{"Service":"web","Publishers":[{"URL":"127.0.0.1","TargetPort":80,"PublishedPort":55001,"Protocol":"tcp"},{"PublishedPort":0}]},{"Service":"be","Publishers":[{"PublishedPort":55002}]}]'
 assert mc.parse_ps_ports(ps)=={"web":[55001],"be":[55002]}, mc.parse_ps_ports(ps)

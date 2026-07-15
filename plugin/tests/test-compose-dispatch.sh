@@ -17,7 +17,8 @@ case "$*" in
   *"ps --format json"*) cat "$DOCKER_PS_FIXTURE" ;;
   *"up -d"*)
     [[ -s "${MARINA_BUILD_INPUT_SNAPSHOT:-}" ]] || { echo "snapshot missing before compose up" >&2; exit 23; }
-    rm -f "$MARINA_BUILD_INPUT_SNAPSHOT" ;;
+    rm -f "$MARINA_BUILD_INPUT_SNAPSHOT"
+    [[ "${FAIL_UP:-0}" != 1 ]] || exit 24 ;;
   *) exit 0 ;;
 esac
 EOF
@@ -69,6 +70,52 @@ mrun ports 2>/dev/null | grep -q "web=55001" || { echo "FAIL: live ps ports"; ex
 : > "$DOCKER_LOG"; mrun restart --web >/dev/null
 grep -q "compose .*up -d --remove-orphans web" "$DOCKER_LOG" || { echo "FAIL: restart up not routed"; cat "$DOCKER_LOG"; exit 1; }
 grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: restart must not force --build"; cat "$DOCKER_LOG"; exit 1; } || true
+
+# build 서비스는 마지막 성공 build baseline과 비교해 필요한 Start에만 --build.
+mkdir -p "$P/api"
+printf 'FROM scratch\n' > "$P/api/Dockerfile.local"
+cat > "$TMP/cfg.json" <<JSON
+{"services":{
+  "web":{"image":"nginx","ports":[{"target":80,"published":"3000","protocol":"tcp"}]},
+  "be":{"image":"temurin","ports":[{"target":8081,"published":"8081","protocol":"tcp"}]},
+  "api":{"build":{"context":"$P/api","dockerfile":"Dockerfile.local","args":{"TOKEN":"raw-build-secret"}}}
+}}
+JSON
+SD="$P/.workspace/marina/main"
+
+: > "$DOCKER_LOG"; first_out="$(mrun start --api 2>&1)"
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: first build service Start must build"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "stale image:" <<<"$first_out" || { echo "FAIL: first automatic build reason missing"; echo "$first_out"; exit 1; }
+[[ -f "$SD/build-baseline.json" ]] || { echo "FAIL: successful build baseline missing"; exit 1; }
+
+: > "$DOCKER_LOG"; mrun start --api >/dev/null
+grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: repeated Start not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: unchanged Start must stay fast"; cat "$DOCKER_LOG"; exit 1; } || true
+: > "$DOCKER_LOG"; mrun restart --api >/dev/null
+grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: unchanged Restart not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: unchanged Restart must stay fast"; cat "$DOCKER_LOG"; exit 1; } || true
+
+printf '# changed\n' >> "$P/api/Dockerfile.local"
+: > "$DOCKER_LOG"; changed_out="$(mrun start --api 2>&1)"
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: changed Dockerfile must auto-build"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "Dockerfile.local" <<<"$changed_out" || { echo "FAIL: changed Dockerfile reason missing"; echo "$changed_out"; exit 1; }
+if grep -Eq 'raw-build-secret|file:|hmac' <<<"$changed_out"; then
+  echo "FAIL: automatic build output exposed secret or digest"; echo "$changed_out"; exit 1
+fi
+
+printf '# changed again\n' >> "$P/api/Dockerfile.local"
+: > "$DOCKER_LOG"
+if FAIL_UP=1 mrun start --api >/dev/null 2>&1; then echo "FAIL: forced compose failure succeeded"; exit 1; fi
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: failed stale Start did not attempt build"; cat "$DOCKER_LOG"; exit 1; }
+: > "$DOCKER_LOG"; mrun start --api >/dev/null
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: failed build advanced baseline"; cat "$DOCKER_LOG"; exit 1; }
+
+: > "$DOCKER_LOG"; mrun rebuild --api >/dev/null
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: explicit Rebuild must always build"; cat "$DOCKER_LOG"; exit 1; }
+
+: > "$DOCKER_LOG"; mrun start --web >/dev/null
+grep -q "compose .*up -d --remove-orphans web" "$DOCKER_LOG" || { echo "FAIL: image-only Start not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: image-only Start must not auto-build"; cat "$DOCKER_LOG"; exit 1; } || true
 
 # stop --web → stop web (down 아님)
 : > "$DOCKER_LOG"; mrun stop --web >/dev/null

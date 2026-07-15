@@ -32,7 +32,7 @@
 - Produces: `read_build_baseline(path: Path) -> dict[str, Any] | None`.
 - Produces: `merge_build_baseline(path: Path, current: dict[str, Any]) -> None`.
 
-- [ ] **Step 1: Write failing decision tests**
+- [x] **Step 1: Write failing decision tests**
 
 Add assertions showing that same inputs stay fast, changed Dockerfile/rebuild/build-arg values build, missing service baseline builds once, explicit rebuild always builds, and `unknown` does not auto-build:
 
@@ -52,13 +52,13 @@ assert build_decision({"version": 1, "status": "unknown"}, before) == (False, [
 ])
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `bash plugin/tests/test-build-inputs.sh`
 
 Expected: import failure for `build_decision`, `read_build_baseline`, or `merge_build_baseline`.
 
-- [ ] **Step 3: Implement the pure decision**
+- [x] **Step 3: Implement the pure decision**
 
 Reuse `compare_build_inputs` so the decision contains only safe projected reasons:
 
@@ -72,7 +72,7 @@ def build_decision(current, baseline, explicit=False):
     return bool(reasons), reasons
 ```
 
-- [ ] **Step 4: Add failing baseline persistence tests**
+- [x] **Step 4: Add failing baseline persistence tests**
 
 Test missing/corrupt reads, `0600` permissions, selective service merge, and concurrent writers preserving all services:
 
@@ -91,13 +91,13 @@ with ThreadPoolExecutor(max_workers=2) as executor:
 assert set(read_build_baseline(baseline_path)["services"]) == {"api", "web"}
 ```
 
-- [ ] **Step 5: Run the focused test and verify RED**
+- [x] **Step 5: Run the focused test and verify RED**
 
 Run: `bash plugin/tests/test-build-inputs.sh`
 
 Expected: persistence assertions fail because baseline functions do not exist.
 
-- [ ] **Step 6: Implement locked atomic baseline merge**
+- [x] **Step 6: Implement locked atomic baseline merge**
 
 Create the parent directory, lock `<path>.lock` with `fcntl.LOCK_EX`, read a valid existing service map or start empty, merge only current services, and call `write_build_input_snapshot` while holding the lock. Reject `unknown` snapshots without changing the file.
 
@@ -117,13 +117,13 @@ def merge_build_baseline(path: Path, current: dict[str, Any]) -> None:
         os.close(lock_fd)
 ```
 
-- [ ] **Step 7: Run the focused test and verify GREEN**
+- [x] **Step 7: Run the focused test and verify GREEN**
 
 Run: `bash plugin/tests/test-build-inputs.sh`
 
 Expected: `PASS test-build-inputs`.
 
-- [ ] **Step 8: Commit baseline behavior**
+- [x] **Step 8: Commit baseline behavior**
 
 ```bash
 git add plugin/scripts/marina_build_inputs.py plugin/tests/test-build-inputs.sh
@@ -143,7 +143,7 @@ git commit -m "feat(build): track successful build baseline"
 - Produces: `_build_reason_text(reason: dict[str, str]) -> str` containing service/label/change only.
 - Keeps: Build Timeline handoff at `MARINA_BUILD_INPUT_SNAPSHOT` using the same captured snapshot.
 
-- [ ] **Step 1: Write failing capture-return tests**
+- [x] **Step 1: Write failing capture-return tests**
 
 Update the direct capture test to assert the captured snapshot is returned and still written to the handoff. Keep the stalled capture assertion and require it to return `unknown` within the bound:
 
@@ -156,23 +156,23 @@ unknown = mc._capture_build_inputs(args, {"services": {}}, [], {})
 assert unknown == {"version": 1, "status": "unknown"}
 ```
 
-- [ ] **Step 2: Run the focused test and verify RED**
+- [x] **Step 2: Run the focused test and verify RED**
 
 Run: `bash plugin/tests/test-compose-overlay.sh`
 
 Expected: `AttributeError` because `_capture_build_inputs` does not exist.
 
-- [ ] **Step 3: Refactor bounded capture to return one snapshot**
+- [x] **Step 3: Refactor bounded capture to return one snapshot**
 
 Have the fork write to a private temporary capture path under the session directory, read it in the parent, copy the sanitized payload to the optional Build Timeline handoff, and return the payload. Preserve the 500ms kill/reap behavior and remove the private temporary file in all paths.
 
-- [ ] **Step 4: Run the focused test and verify GREEN**
+- [x] **Step 4: Run the focused test and verify GREEN**
 
 Run: `bash plugin/tests/test-compose-overlay.sh`
 
 Expected: `PASS test-compose-overlay`.
 
-- [ ] **Step 5: Write failing dispatch tests for first, repeated, changed, failed, and image-only starts**
+- [x] **Step 5: Write failing dispatch tests for first, repeated, changed, failed, and image-only starts**
 
 Change the fixture to include one build service with a Dockerfile and one image-only service. Assert this sequence:
 
@@ -191,13 +191,13 @@ mrun start --db       # image-only: no --build
 
 Also assert the build log/output contains no `file:`, `hmac`, or raw build arg values.
 
-- [ ] **Step 6: Run the focused dispatch test and verify RED**
+- [x] **Step 6: Run the focused dispatch test and verify RED**
 
 Run: `bash plugin/tests/test-compose-dispatch.sh`
 
 Expected: first or changed Start lacks `--build`, and no baseline file is created.
 
-- [ ] **Step 7: Implement effective build orchestration**
+- [x] **Step 7: Implement effective build orchestration**
 
 At the existing submit boundary:
 
@@ -223,7 +223,7 @@ if rc == 0 and effective_build and current.get("status") == "ok":
 
 Reason formatting must use only `kind`, `service`, `label`, and `change`; explicit Rebuild need not print a stale warning.
 
-- [ ] **Step 8: Run focused regression tests and verify GREEN**
+- [x] **Step 8: Run focused regression tests and verify GREEN**
 
 Run:
 
@@ -238,7 +238,7 @@ bash plugin/tests/test-build-summary-api.sh
 
 Expected: each command prints its `PASS` line.
 
-- [ ] **Step 9: Commit Compose integration**
+- [x] **Step 9: Commit Compose integration**
 
 ```bash
 git add plugin/scripts/marina-compose.py plugin/tests/test-compose-overlay.sh plugin/tests/test-compose-dispatch.sh
