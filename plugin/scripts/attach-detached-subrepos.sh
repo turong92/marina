@@ -8,6 +8,7 @@
 #   MARINA_SUBREPOS="repo-a repo-b"     # 붙일 서브레포 (없으면 레지스트리)
 #   BRANCH_PREFIX=codex
 #   SYNC_IDEA=true
+#   MARINA_ATTACH_BASE=origin/main      # 새 브랜치의 시작점 (기본: 그 레포 원격의 기본 브랜치)
 # (heavy/gitignored 디렉토리·설정 symlink 은 marina.sh 의 선언형 links 로 이동 — 여기선 안 함)
 
 set -euo pipefail
@@ -237,8 +238,45 @@ worktree_id() {
   printf '%s\n' "$base"
 }
 
+# 기준 원격 하나 고르기. checkout.defaultRemote(git 관례) → origin → 유일한 원격 → 없음(1).
+# origin 우선은 git 자신의 관례이며, 개인 fork 가 함께 등록된 레포에서 정본을 집는다.
+pick_remote() {
+  local src="$1" pref remotes
+  pref="$(git -C "$src" config --get checkout.defaultRemote 2>/dev/null || true)"
+  if [[ -n "$pref" ]] && git -C "$src" remote get-url "$pref" >/dev/null 2>&1; then
+    printf '%s\n' "$pref"; return 0
+  fi
+  git -C "$src" remote get-url origin >/dev/null 2>&1 && { printf 'origin\n'; return 0; }
+  remotes="$(git -C "$src" remote 2>/dev/null)"
+  [[ "$(grep -c . <<<"$remotes" 2>/dev/null || echo 0)" == 1 ]] && { printf '%s\n' "$remotes"; return 0; }
+  return 1
+}
+
+# 원격 refs 를 최신화. 브랜치를 고르기 "전에" 해야 방금 push 된 원격 브랜치도 이어받을 수 있다.
+# 실패해도 attach 는 계속하되(오프라인 등), 조용히 넘기지 않는다 — stale 을 모르고 쓰는 게 이 함수가 막는 문제다.
+sync_remote() {
+  local src="$1" rmt="$2"
+  git -C "$src" fetch -q "$rmt" || echo "warn: fetch $rmt 실패 — 캐시된 ref 로 진행(오래됐을 수 있음)" >&2
+  # <remote>/HEAD 는 clone 시점 스냅샷이고 fetch 로는 갱신되지 않는다(git<2.47 은 followRemoteHEAD 도 없음).
+  # set-head -a 로 원격에 직접 물어야 기본 브랜치 변경이 반영된다.
+  git -C "$src" remote set-head "$rmt" -a >/dev/null 2>&1 || true
+}
+
+# 새 브랜치의 시작점. MARINA_ATTACH_BASE → 원격의 기본 브랜치(<remote>/HEAD) → HEAD.
+# <remote>/HEAD 기본값은 레포가 스스로 선언한 기본 브랜치라 marina 가 브랜치 정책을 갖지 않는다.
+# HEAD 는 source 체크아웃이 우연히 서 있는 곳이라 stale·detached 를 그대로 물려준다 — 폴백으로만.
+resolve_base() {
+  local src="$1" rmt="${2:-}" base="${MARINA_ATTACH_BASE:-}"
+  if [[ -z "$base" && -n "$rmt" ]]; then
+    base="$(git -C "$src" symbolic-ref -q --short "refs/remotes/$rmt/HEAD" 2>/dev/null || true)"
+  fi
+  git -C "$src" rev-parse --verify -q "${base:-x}^{commit}" >/dev/null 2>&1 || base=HEAD
+  printf '%s\n' "$base"
+}
+
 attach_subrepo() {
   local repo="$1" branch="$2" src="$SOURCE_ROOT/$repo" dst="$DEST_ROOT/$repo"
+  local base rmt
 
   if [[ -d "$src" && -d "$dst" && "$(cd "$src" && pwd -P)" == "$(cd "$dst" && pwd -P)" ]]; then
     echo "skip attach (source is dest): $repo"
@@ -262,13 +300,30 @@ attach_subrepo() {
 
   if [[ "$(git -C "$dst" branch --show-current)" == "$branch" ]]; then
     echo "skip branch (current): $repo [$branch]"
-  elif git -C "$dst" show-ref --verify --quiet "refs/heads/$branch"; then
+    return 0
+  fi
+
+  if git -C "$dst" rev-parse --verify -q "refs/heads/$branch" >/dev/null; then
     echo "switch: $repo [$branch]"
     git -C "$dst" switch "$branch"
-  else
-    echo "create branch: $repo [$branch]"
-    git -C "$dst" switch -c "$branch"
+    return 0
   fi
+
+  # 로컬에 없다 = 원격에서 이어받거나 새로 만든다. 어느 쪽이든 최신 원격 ref 가 먼저 필요하다.
+  rmt="$(pick_remote "$src" || true)"
+  [[ -n "$rmt" ]] && sync_remote "$src" "$rmt"
+
+  # 원격에 같은 이름이 있으면 그걸 이어받는다(시작점을 타지 않는다). 원격이 여러 개라 DWIM 이 모호할 수
+  # 있으므로 pick_remote 가 고른 원격을 명시한다 — 안 그러면 남의 브랜치를 못 찾고 새로 만들어 갈라진다.
+  if [[ -n "$rmt" ]] && git -C "$dst" rev-parse --verify -q "refs/remotes/$rmt/$branch" >/dev/null; then
+    echo "track: $repo [$branch] from $rmt/$branch"
+    git -C "$dst" switch -c "$branch" --track "$rmt/$branch"
+    return 0
+  fi
+
+  base="$(resolve_base "$src" "$rmt")"
+  echo "create branch: $repo [$branch] from $base"
+  git -C "$dst" switch -c "$branch" "$base"
 }
 
 attach_external() {

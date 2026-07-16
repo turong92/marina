@@ -54,6 +54,15 @@ compose 와 설정은 전부 `~/.marina` 에 보관된다.
   `marina worktree create` 로 시작한다. detached/codex 루트는 `<prefix>/<id>` 폴백. 프로젝트 밖에서 만들려면
   `--project <id>`(레지스트리로 root 조회). attach 대상은 `marina project default <id> a,b,c` 의 defaultAttach
   로 좁힌다(예: compose 서브레포 be/ai/web 만 — 등록 서브레포가 그보다 많을 때).
+- **새 브랜치는 그 레포 원격의 기본 브랜치에서 딴다**. attach 가 서브레포에 없는 브랜치를 만들 때 시작점은
+  `<remote>/HEAD`(= 레포가 스스로 선언한 기본 브랜치)다. 서브레포마다 다를 수 있고(web=main, ai=dev 처럼)
+  각자 자기 것을 따른다. 원격은 `checkout.defaultRemote` → `origin` → 유일한 원격 순으로 고른다(개인 fork 가
+  같이 등록돼 있어도 정본을 집는다). 시작점 직전에 fetch 하므로 **main checkout 을 언제 pull 했든 무관하게
+  최신에서 시작**한다. 추적(upstream)도 자동으로 걸려 이후 `git status` 가 `[behind N]` 을 알려준다.
+  기존 브랜치면(로컬·원격 어느 쪽이든) 시작점을 안 타고 그 브랜치를 그대로 쓴다 — 원격에만 있으면 추적 브랜치로 이어받는다.
+  다른 데서 시작하려면 `MARINA_ATTACH_BASE=origin/release-x`. 원격이 없는 레포는 `HEAD` 폴백.
+  (**동작 변경**: 예전엔 새 브랜치가 main checkout 의 로컬 `HEAD` 에서 태어났다 — 그게 stale·detached 면 그대로 물려받았다.
+  로컬 미push 커밋 위에 쌓는 워크플로였다면 `MARINA_ATTACH_BASE=HEAD` 로 옛 동작을 유지한다.)
 - **compose 환경변수 = `composeEnvVar`/`composeEnvDefault`**. compose 의 `${APP_ENV:-local}` 같은 보간에
   넣는 값 하나다. 시작할 때 `MARINA_COMPOSE_ENV` 로 덮을 수 있다.
 - **links/symlink = 호스트 worktree 편의 기능**. `node_modules`, `.venv`, 빌드 산출물, local 설정 파일을
