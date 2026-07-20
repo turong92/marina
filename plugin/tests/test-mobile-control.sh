@@ -447,6 +447,14 @@ grep -q 'address=http://devbox.example.test:3900/mobile' <<<"$status_out" || { e
 grep -q "login-url=http://devbox.example.test:3900/mobile?token=$new_token" <<<"$status_out" || { echo "FAIL: mobile status should show login URL: $status_out"; exit 1; }
 grep -q 'phone access: network-bind' <<<"$status_out" || { echo "FAIL: mobile status should explain network bind: $status_out"; exit 1; }
 
+cat > "$CLI_HOME/dashboard-bind.env" <<'EOF'
+MARINA_CONTROL_HOST=0.0.0.0
+MARINA_CONTROL_PORT=43900
+EOF
+persisted_status="$(MARINA_HOME="$CLI_HOME" "$SCR/marina-entrypoint.sh" mobile status devbox.example.test)"
+grep -q 'address=http://devbox.example.test:43900/mobile' <<<"$persisted_status" || { echo "FAIL: mobile status should use persisted dashboard port: $persisted_status"; exit 1; }
+grep -q 'phone access: network-bind' <<<"$persisted_status" || { echo "FAIL: mobile status should use persisted dashboard bind: $persisted_status"; exit 1; }
+
 doctor_out="$(MARINA_HOME="$CLI_HOME" MARINA_CONTROL_HOST=127.0.0.1 MARINA_CONTROL_PORT=$PORT "$SCR/marina-entrypoint.sh" mobile doctor devbox.example.test)"
 grep -q 'mobile doctor' <<<"$doctor_out" || { echo "FAIL: mobile doctor missing heading: $doctor_out"; exit 1; }
 grep -q 'dashboard-http=ok' <<<"$doctor_out" || { echo "FAIL: mobile doctor should confirm dashboard HTTP: $doctor_out"; exit 1; }

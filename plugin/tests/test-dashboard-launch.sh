@@ -94,8 +94,34 @@ JSON
   rm -rf "$TMP"
 }
 
+assert_bind_survives_restart() {
+  local TMP; TMP="$(mktemp -d)"
+  export MARINA_HOME="$TMP/.marina" HOME="$TMP" CLAUDE_CONFIG_DIR="$TMP/.claude"
+  mkdir -p "$CLAUDE_CONFIG_DIR/plugins"
+  cat > "$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json" <<JSON
+{ "plugins": { "marina@marina-dev": [ { "installPath": "$TMP/plug" } ] } }
+JSON
+  local FAKE="$TMP/fakebin"; mkdir -p "$FAKE"
+  printf '#!/usr/bin/env bash\necho Darwin\n' > "$FAKE/uname"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE/launchctl"
+  chmod +x "$FAKE/"*
+
+  PATH="$FAKE:$PATH" MARINA_CONTROL_HOST=0.0.0.0 MARINA_CONTROL_PORT=43900 MARINA_DRY_RUN=1 bash "$DASH" start >/dev/null
+  PATH="$FAKE:$PATH" MARINA_DRY_RUN=1 bash "$DASH" start >/dev/null
+
+  local P="$MARINA_HOME/marina.dashboard.plist"
+  grep -A1 '<key>MARINA_CONTROL_HOST</key>' "$P" | grep -q '<string>0.0.0.0</string>' || {
+    echo "FAIL[bind]: network bind was reset on restart"; exit 1;
+  }
+  grep -A1 '<key>MARINA_CONTROL_PORT</key>' "$P" | grep -q '<string>43900</string>' || {
+    echo "FAIL[bind]: custom port was reset on restart"; exit 1;
+  }
+  rm -rf "$TMP"
+}
+
 run_case Linux  systemd
 run_case Darwin launchd
 assert_no_versioned_path_in_plist
 assert_dev_launcher_prefers_baked_source
+assert_bind_survives_restart
 echo "PASS test-dashboard-launch"

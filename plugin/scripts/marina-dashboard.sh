@@ -21,8 +21,28 @@ PLIST_FILE="$DASHBOARD_DIR/$LABEL.plist"
 LAUNCHER="$DASHBOARD_DIR/dashboard-launch.sh"
 SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
 SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/marina-dashboard.service"
-HOST="${MARINA_CONTROL_HOST:-localhost}"
-PORT="${MARINA_CONTROL_PORT:-3900}"
+BIND_FILE="$DASHBOARD_DIR/dashboard-bind.env"
+
+persisted_control_value() {
+  local key="$1" value=""
+  if [[ -f "$BIND_FILE" ]]; then
+    value="$(sed -n "s/^${key}=//p" "$BIND_FILE" | tail -n 1)"
+  fi
+  if [[ -z "$value" && -f "$PLIST_FILE" ]]; then
+    value="$(awk -v marker="<key>${key}</key>" '
+      index($0, marker) { getline; gsub(/^.*<string>|<\/string>.*$/, ""); print; exit }
+    ' "$PLIST_FILE")"
+  fi
+  if [[ -z "$value" && -f "$SYSTEMD_UNIT" ]]; then
+    value="$(sed -n "s/^Environment=${key}=//p" "$SYSTEMD_UNIT" | tail -n 1)"
+  fi
+  printf '%s' "$value"
+}
+
+HOST="${MARINA_CONTROL_HOST:-$(persisted_control_value MARINA_CONTROL_HOST)}"
+PORT="${MARINA_CONTROL_PORT:-$(persisted_control_value MARINA_CONTROL_PORT)}"
+HOST="${HOST:-localhost}"
+PORT="${PORT:-3900}"
 CODEX_WORKTREES_ROOT="${CODEX_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
 MARINA_GATEWAY="${MARINA_GATEWAY:-}"            # 게이트웨이 옵트인(빈=off) — supervised 기동에도 전파(코덱스 P2)
 MARINA_GATEWAY_PORT="${MARINA_GATEWAY_PORT:-3902}"   # 비특권 기본(권한·:80 충돌 회피, marina_state 와 일치) — 빈 문자열 export 로 데몬 int('') 크래시 방지(코덱스 P1)
@@ -138,6 +158,13 @@ EOF
 
 write_launcher() { marina_emit_launcher "$LAUNCHER" dashboard; }
 
+persist_bind() {
+  local tmp="$BIND_FILE.tmp.$$"
+  umask 077
+  printf 'MARINA_CONTROL_HOST=%s\nMARINA_CONTROL_PORT=%s\n' "$HOST" "$PORT" > "$tmp"
+  mv "$tmp" "$BIND_FILE"
+}
+
 supervisor() {
   if [[ "$(uname -s)" == "Darwin" ]] && command -v launchctl >/dev/null 2>&1; then
     echo launchd
@@ -182,6 +209,7 @@ start_nohup() {
 start() {
   mkdir -p "$DASHBOARD_DIR"
   write_launcher
+  persist_bind
   local sup listeners; sup="$(supervisor)"
   echo "supervisor=$sup"
 

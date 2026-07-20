@@ -19,6 +19,21 @@ CLI="$SCRIPT_DIR/marina_cli.py"
 # shellcheck source=/dev/null
 source "$RESOLVE"
 
+dashboard_bind_value() {
+  local key="$1" fallback="$2" value="" file="${MARINA_HOME:-$HOME/.marina}/dashboard-bind.env"
+  case "$key" in
+    MARINA_CONTROL_HOST) value="${MARINA_CONTROL_HOST:-}" ;;
+    MARINA_CONTROL_PORT) value="${MARINA_CONTROL_PORT:-}" ;;
+  esac
+  if [[ -z "$value" && -f "$file" ]]; then
+    value="$(sed -n "s/^${key}=//p" "$file" | tail -n 1)"
+  fi
+  printf '%s' "${value:-$fallback}"
+}
+
+dashboard_control_host() { dashboard_bind_value MARINA_CONTROL_HOST localhost; }
+dashboard_control_port() { dashboard_bind_value MARINA_CONTROL_PORT 3900; }
+
 exec_session_with_env() {
   local py="${MARINA_PYTHON:-}"
   [[ -n "$py" ]] || py="$(command -v python3 || echo /usr/bin/python3)"
@@ -51,7 +66,7 @@ EOF
 
 print_dashboard_url() {
   echo
-  echo "Dashboard: http://${MARINA_CONTROL_HOST:-localhost}:${MARINA_CONTROL_PORT:-3900}"
+  echo "Dashboard: http://$(dashboard_control_host):$(dashboard_control_port)"
   echo
 }
 
@@ -88,7 +103,8 @@ mobile_detect_host() {
     echo "$MARINA_MOBILE_HOST"
     return
   fi
-  local host="${MARINA_CONTROL_HOST:-localhost}" guess
+  local host; host="$(dashboard_control_host)"
+  local guess
   case "$host" in
     localhost|127.*|::1|0.0.0.0|::|"")
       if command -v tailscale >/dev/null 2>&1; then
@@ -112,7 +128,7 @@ mobile_base_url() {
     host="${host%/mobile}"
     echo "${host%/}"
   else
-    port="${MARINA_CONTROL_PORT:-3900}"
+    port="$(dashboard_control_port)"
     echo "http://$host:$port"
   fi
 }
@@ -128,7 +144,7 @@ mobile_print_url() {
 }
 
 mobile_access_hint() {
-  local host="${MARINA_CONTROL_HOST:-localhost}" port="${MARINA_CONTROL_PORT:-3900}"
+  local host port; host="$(dashboard_control_host)"; port="$(dashboard_control_port)"
   case "$host" in
     localhost|127.*|::1)
       echo "phone access: local-only dashboard bind ($host:$port). Use Tailscale/tunnel, or restart dashboard with MARINA_CONTROL_HOST=0.0.0.0 on a trusted network."
@@ -158,7 +174,7 @@ mobile_print_status() {
 }
 
 mobile_probe_dashboard() {
-  local host="${MARINA_CONTROL_HOST:-localhost}" port="${MARINA_CONTROL_PORT:-3900}" base code
+  local host port base code; host="$(dashboard_control_host)"; port="$(dashboard_control_port)"
   case "$host" in
     0.0.0.0|::|"") host="127.0.0.1" ;;
   esac
@@ -265,7 +281,7 @@ case "$command" in
     esac
     ;;
   open)
-    url="http://${MARINA_CONTROL_HOST:-localhost}:${MARINA_CONTROL_PORT:-3900}"
+    url="http://$(dashboard_control_host):$(dashboard_control_port)"
     if command -v open >/dev/null 2>&1; then open "$url"        # macOS
     elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$url"  # Linux
     else echo "$url"
