@@ -274,6 +274,35 @@ resolve_base() {
   printf '%s\n' "$base"
 }
 
+# 이미 존재하는 브랜치를 재사용할 때(아래 switch/current 경로), 그 브랜치가 "작업 없이" 원격 기본
+# 브랜치보다 뒤처졌으면 안전하게 최신화한다. Claude/Codex 앱은 stale 로컬 HEAD 에서 워크트리 브랜치를
+# 먼저 만들어 두므로(born-stale), 신규-브랜치 경로의 fetch-fresh 보장이 우회된다 — 그 틈을 여기서 막는다.
+# 안전 규칙(작업 보존 최우선):
+#   · 고유 커밋 0 + clean + 뒤처짐 → <remote>/HEAD 로 fast-forward (잃을 작업 없음 → 자동)
+#   · 고유 커밋 있음(진짜 작업)     → 손대지 않음(뒤처짐은 작업 중 정상)
+#   · 고유 커밋 0 + uncommitted     → FF 보류, 경고만 (편집 중일 수 있음)
+# MARINA_ATTACH_BASE 로 base 를 명시 pin 했으면 사용자 의도 존중 → 건너뜀.
+freshen_existing_branch() {
+  local dst="$1" src="$2" label="$3" rmt fresh behind ahead
+  [[ -z "${MARINA_ATTACH_BASE:-}" ]] || return 0
+  rmt="$(pick_remote "$src" || true)"
+  [[ -n "$rmt" ]] || return 0
+  sync_remote "$src" "$rmt"
+  fresh="$(git -C "$dst" symbolic-ref -q --short "refs/remotes/$rmt/HEAD" 2>/dev/null || true)"
+  { [[ -n "$fresh" ]] && git -C "$dst" rev-parse --verify -q "$fresh^{commit}" >/dev/null 2>&1; } || return 0
+  behind="$(git -C "$dst" rev-list --count "HEAD..$fresh" 2>/dev/null || echo 0)"
+  [[ "$behind" -gt 0 ]] || return 0                     # 뒤처지지 않음 → 손 안 댐
+  ahead="$(git -C "$dst" rev-list --count "$fresh..HEAD" 2>/dev/null || echo 0)"
+  [[ "$ahead" -eq 0 ]] || return 0                      # 고유 커밋(작업) → 조용히 존중
+  if [[ -n "$(git -C "$dst" status --porcelain 2>/dev/null)" ]]; then
+    echo "warn: $label 가 $fresh 보다 $behind 커밋 뒤 + uncommitted 변경 — 자동 최신화 보류(작업 보존). 커밋/스태시 후 재부착하면 최신화됩니다." >&2
+    return 0
+  fi
+  echo "freshen: $label $behind 커밋 뒤 (작업 없음·clean) → $fresh 로 fast-forward"
+  git -C "$dst" merge --ff-only "$fresh" >/dev/null 2>&1 \
+    || echo "warn: $label fast-forward 실패 — 수동 확인 필요" >&2
+}
+
 attach_subrepo() {
   local repo="$1" branch="$2" src="$SOURCE_ROOT/$repo" dst="$DEST_ROOT/$repo"
   local base rmt
@@ -300,12 +329,14 @@ attach_subrepo() {
 
   if [[ "$(git -C "$dst" branch --show-current)" == "$branch" ]]; then
     echo "skip branch (current): $repo [$branch]"
+    freshen_existing_branch "$dst" "$src" "$repo [$branch]"
     return 0
   fi
 
   if git -C "$dst" rev-parse --verify -q "refs/heads/$branch" >/dev/null; then
     echo "switch: $repo [$branch]"
     git -C "$dst" switch "$branch"
+    freshen_existing_branch "$dst" "$src" "$repo [$branch]"
     return 0
   fi
 

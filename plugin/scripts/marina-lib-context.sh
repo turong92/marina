@@ -98,6 +98,18 @@ worktree_create() {
     echo "기존 브랜치 체크아웃: $branch"
     git -C "$src" worktree add "$wt" "$branch" || die "worktree add 실패"
   else
+    if [[ -z "$base" ]]; then
+      # 명시 base 없으면 원격 기본 브랜치 최신에서 딴다(born-stale 방지) — 로컬 HEAD 가 stale 이어도
+      # 새 브랜치는 origin/HEAD 에서 태어난다. 원격 없거나 fetch 실패 시 로컬 HEAD 폴백.
+      local _rmt _fresh
+      _rmt="$(git -C "$src" remote get-url origin >/dev/null 2>&1 && echo origin || git -C "$src" remote 2>/dev/null | head -1)"
+      if [[ -n "$_rmt" ]]; then
+        git -C "$src" fetch -q "$_rmt" 2>/dev/null || echo "warn: fetch $_rmt 실패 — 로컬 ref 로 진행(오래됐을 수 있음)" >&2
+        git -C "$src" remote set-head "$_rmt" -a >/dev/null 2>&1 || true
+        _fresh="$(git -C "$src" symbolic-ref -q --short "refs/remotes/$_rmt/HEAD" 2>/dev/null || true)"
+        { [[ -n "$_fresh" ]] && git -C "$src" rev-parse --verify -q "$_fresh^{commit}" >/dev/null 2>&1; } && base="$_fresh"
+      fi
+    fi
     echo "새 브랜치 생성: $branch${base:+ (base=$base)}"
     git -C "$src" worktree add -b "$branch" "$wt" ${base:+"$base"} || die "worktree add 실패"
   fi
