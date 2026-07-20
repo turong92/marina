@@ -117,6 +117,7 @@ read -r -d '' rules <<EOF || true
 · 정지:   $caller stop <서비스>      (전체는 --all)
 · 재시작: $caller restart <서비스>   (전체는 --all)
 · 상태·포트: $caller status      · 로그: $caller logs <서비스>
+· 브라우저 접근: 반드시 게이트웨이 도메인 http://<워크트리>.<프로젝트>.localhost:3902 ($caller gateway config 로 확인). $caller status 의 매핑 포트(127.0.0.1:5xxxx)로 직접 붙지 말 것 — 재시작마다 포트가 바뀌어 로그인 쿠키·origin 이 소멸한다. 게이트웨이는 포트 재할당을 자동 추적하는 안정 origin.
 문제 해결:
 · 포트 충돌은 자동으로 빈 포트로 이동 — 실제 포트는 $caller status 로 확인
 · compose 정의(서비스·env·마운트) 변경: 대시보드 ✎ compose 편집·위저드 또는 $caller project add <path> --compose

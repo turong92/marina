@@ -13,7 +13,16 @@ description: Use when starting, stopping, or restarting a dev server, or checkin
 - 정지/재시작: `marina stop <서비스>` · `marina restart <서비스>`
 - 상태·실제 포트: `marina status` — 호스트 포트는 Docker 자동할당이라 워크트리마다 다르다. 포트는 항상 여기서 확인.
 - 로그: `marina logs <서비스>`
-- 브라우저 URL: 게이트웨이 `http://<워크트리>.<프로젝트>.localhost:3902` (`marina gateway status` 로 확인)
+
+## 브라우저 접근 — 게이트웨이 도메인만 (매핑 포트 금지)
+
+브라우저 QA·미리보기·e2e 는 **반드시 게이트웨이 도메인**으로 접근한다:
+
+- 웹: `http://<워크트리>.<프로젝트>.localhost:3902` (예: `http://my-feature-1a2b3c.mdc-main.localhost:3902`)
+- 기타 서비스: `http://<워크트리>-<서비스>.<프로젝트>.localhost:3902`
+- 도메인↔현재 포트 매핑: `marina gateway config` · 게이트웨이 상태: `marina gateway status`
+
+`marina status` 의 매핑 포트(`127.0.0.1:5xxxx`)로 직접 붙지 말 것 — 컨테이너 재시작마다 포트가 재할당돼 **origin 이 바뀌고 로그인 쿠키·세션이 통째로 소멸**한다(사용자가 다시 로그인해야 함). 게이트웨이는 포트 재할당을 자동 추적하는 안정 origin 이라 재시작 후에도 세션이 유지된다. 매핑 포트는 curl 헬스체크 같은 무상태 확인에만 쓴다.
 
 ## 문제 해결
 
