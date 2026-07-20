@@ -140,14 +140,15 @@ def _reap_idle() -> None:
 # resume 명령을 셸 문자열이 아니라 argv 로 조립 → 셸 인용/인젝션 걱정 원천 제거. `--` 로 옵션 종료해
 # sid 가 CLI 플래그로 해석되는 것도 차단(codex P2). sid 정규식은 leading `-` 도 금지(이중 안전).
 _AGENT_CLIS = {
-    "claude": lambda sid: ["claude", "--resume", "--", sid],
-    "codex": lambda sid: ["codex", "resume", "--", sid],
+    "claude": lambda sid, prompt="": ["claude", "--resume", sid, prompt] if prompt else ["claude", "--resume", "--", sid],
+    "codex": lambda sid, prompt="": ["codex", "resume", sid, prompt] if prompt else ["codex", "resume", "--", sid],
 }
 _SID_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}")
 
 
 def term_open(root: Path, cols: int = 80, rows: int = 24,
-              agent_source: str = "", agent_sid: str = "") -> dict[str, Any]:
+              agent_source: str = "", agent_sid: str = "",
+              agent_prompt: str = "") -> dict[str, Any]:
     """root 워크트리에 새 PTY 세션을 연다(셸은 매번 새로 — 같은 워크트리에 여러 개 가능).
     기본은 $SHELL -il, agent_source/sid 를 주면 그 CLI 세션에 resume 으로 붙는다(살아있으면 재사용 — 이중 실행 방지)."""
     _reap_idle()
@@ -162,8 +163,8 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
             raise ValueError("unknown agent source")
         if not _SID_RE.fullmatch(agent_sid or ""):
             raise ValueError("invalid session id")
-        cmd = _AGENT_CLIS[agent_source](agent_sid)
-        key = f"{cwd}::agent:{agent_source}:{agent_sid}"
+        cmd = _AGENT_CLIS[agent_source](agent_sid, agent_prompt)
+        key = "" if agent_prompt else f"{cwd}::agent:{agent_source}:{agent_sid}"
         agent = {"source": agent_source, "sid": agent_sid}
     with _lock:
         if key:                                  # 에이전트만 재사용 — resume 이중 실행 방지
@@ -247,7 +248,7 @@ def term_resize(tid: str, cols: int, rows: int) -> dict[str, Any]:
 
 # 사이드바 라벨용 — "셸 1" 은 어느 게 어느 건지 안 알려준다. tmux 가 창 이름을 실행 중인 프로그램으로
 # 짓는 것과 같은 이유로, 지금 포그라운드에 있는 명령을 이름으로 쓴다.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_ANSI_RE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 _OSC_RE = re.compile(r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")   # 터미널 제목 설정 등 — 화면에 안 보이는 것
 # 뒤에 아무것도 안 붙은 프롬프트("… %", "… $", "…>") — 입력 대기 상태라 부제로 쓸 값이 없다
 _BARE_PROMPT_RE = re.compile(r"[%$#>]\s*$")

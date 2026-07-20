@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Keep repeated Compose Start fast while automatically applying `--build` when declared build inputs differ from the last successful build.
+**Goal:** Keep Compose Start fast while warning when declared build inputs differ from the last successful build, so users can run an explicit Rebuild.
 
 **Architecture:** Extend the existing secret-safe build input module with a per-session, service-merged build baseline and a pure build-decision function. Capture at the Compose submit boundary for the Build Timeline and stale decision, then capture again after an effective build. Advance the baseline only when the inputs stayed stable and the resulting local image IDs verify.
 
@@ -13,7 +13,7 @@
 - Use only Dockerfile, Compose `develop.watch` entries with `action: rebuild`, and final build args as freshness inputs.
 - Do not scan the full build context or infer language-specific manifests.
 - Never expose raw build arg values, digests, or HMAC values in logs or public APIs.
-- Keep snapshot capture bounded at 500ms; `unknown` must warn and continue without automatic build.
+- Keep snapshot capture bounded at 500ms; `unknown` must warn and continue without build.
 - Update the baseline only after a successful command that actually used `--build`.
 - Image-only services do not participate in stale-image decisions.
 - Baseline and lock files must use mode `0600`, service-level merge, and atomic replacement.
@@ -49,7 +49,7 @@
 
 - [x] **Step 1: Write failing decision tests**
 
-Add assertions showing that same inputs stay fast, changed Dockerfile/rebuild/build-arg values build, missing service baseline builds once, explicit rebuild always builds, and `unknown` does not auto-build:
+Add assertions showing that same inputs stay fast, changed Dockerfile/rebuild/build-arg values are reported as stale, missing service baseline reports a rebuild hint, explicit rebuild always builds, and `unknown` does not build:
 
 ```python
 should_build, reasons = build_decision(after, before)
@@ -192,13 +192,14 @@ Expected: `PASS test-compose-overlay`.
 Change the fixture to include one build service with a Dockerfile and one image-only service. Assert this sequence:
 
 ```bash
-mrun start --api      # no baseline: --build
+mrun start --api      # no baseline: no --build, prints rebuild hint
+mrun rebuild --api    # creates baseline with --build
 mrun start --api      # baseline exists: no --build
 printf '# changed\n' >> "$P/api/Dockerfile"
-mrun start --api      # changed: --build and safe reason in output
+mrun start --api      # changed: no --build, safe reason and rebuild hint in output
 printf '# changed again\n' >> "$P/api/Dockerfile"
 FAIL_UP=1 mrun start --api || true
-# same input must still be stale because failed build did not advance baseline
+# same input must still be stale because Start did not advance baseline
 mrun start --api
 mrun rebuild --api    # explicit --build even when unchanged
 mrun start --db       # image-only: no --build
@@ -219,14 +220,15 @@ At the existing submit boundary:
 ```python
 current = _capture_build_inputs(a, config, requested, build_args)
 baseline_path = Path(a.session_dir) / "build-baseline.json"
-effective_build, reasons = build_decision(
+needs_rebuild, reasons = build_decision(
     current, read_build_baseline(baseline_path), explicit=bool(a.build)
 )
+effective_build = bool(a.build)
 if current.get("status") != "ok":
     sys.stderr.write("warning: build 입력을 확인하지 못해 기존 이미지로 시작합니다; 문제가 있으면 Rebuild를 실행하세요.\n")
-elif effective_build and not a.build:
+elif needs_rebuild and not a.build:
     for reason in reasons:
-        print("stale image: " + _build_reason_text(reason) + "; Start에 --build 자동 적용")
+        print("stale image: " + _build_reason_text(reason) + "; run `marina rebuild --<svc>`")
 argv = up_argv(
     a.stored, op, a.project_dir, name, requested + sidecars,
     build=effective_build,
@@ -257,7 +259,7 @@ Expected: each command prints its `PASS` line.
 
 ```bash
 git add plugin/scripts/marina-compose.py plugin/tests/test-compose-overlay.sh plugin/tests/test-compose-dispatch.sh
-git commit -m "feat(compose): rebuild stale images on start"
+git commit -m "feat(compose): warn on stale build inputs"
 ```
 
 ### Task 3: Documentation And Full Regression
@@ -277,7 +279,7 @@ Document these exact semantics without exposing the internal digest format:
 
 ```text
 Start/Restart: declared build inputs match the last successful build -> fast up.
-Start/Restart: Dockerfile, Compose Watch rebuild path, or build arg changed -> automatic --build.
+Start/Restart: Dockerfile, Compose Watch rebuild path, or build arg changed -> fast up with a Rebuild hint.
 Rebuild: always evaluates the build.
 Unknown capture: starts the existing image with a warning.
 ```
@@ -315,7 +317,7 @@ Expected: only stale-image guard files and previously approved design/plan docs 
 
 ```bash
 git add README.md docs/superpowers/specs/2026-07-14-orca-comparison-and-roadmap-design.md docs/superpowers/specs/2026-07-14-compose-watch-standard-dev-design.md
-git commit -m "docs(build): explain automatic stale rebuilds"
+git commit -m "docs(build): explain stale rebuild guidance"
 ```
 
 ### Task 4: Review Correctness Hardening

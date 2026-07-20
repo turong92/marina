@@ -38,6 +38,7 @@ JSON
     grep -q "$MARINA_HOME/dashboard-launch.sh" "$P" || { echo "FAIL: plist not pointing at launcher"; exit 1; }
     grep -q 'marina-control.py' "$P" && { echo "FAIL: plist still references control.py"; exit 1; }
     grep -A1 -q '<key>MARINA_GATEWAY_ADMIN</key>' "$P" || { echo "FAIL: gateway admin env missing"; exit 1; }
+    grep -A1 -q '<key>KeepAlive</key>' "$P" || { echo "FAIL: launchd plist should restart dashboard after exit"; exit 1; }
   fi
   rm -rf "$TMP"
 }
@@ -71,7 +72,8 @@ assert_dev_launcher_prefers_baked_source() {
   local TMP; TMP="$(mktemp -d)"
   export MARINA_HOME="$TMP/.marina" HOME="$TMP" CLAUDE_CONFIG_DIR="$TMP/.claude"
   local DEV="$TMP/dev/marina/plugin/scripts" CACHE="$TMP/cache/marina-dev/marina/deadbeef/scripts"
-  mkdir -p "$DEV" "$CACHE" "$TMP/dev/marina/.git" "$CLAUDE_CONFIG_DIR/plugins"
+  mkdir -p "$DEV" "$CACHE" "$TMP/dev/marina" "$CLAUDE_CONFIG_DIR/plugins"
+  printf 'gitdir: /tmp/marina-worktree-gitdir\n' > "$TMP/dev/marina/.git"
   cp "$HERE/../scripts/marina-dashboard.sh" "$HERE/../scripts/marina-resolve.sh" "$DEV/"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$TMP/dev/marina/plugin/scripts/marina-entrypoint.sh"
   printf 'print("DEV_CONTROL")\n' > "$TMP/dev/marina/plugin/scripts/marina-control.py"

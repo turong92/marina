@@ -314,12 +314,18 @@
       const {session, service: svc} = serviceMeta(root, service);
       const actualService = mode === 'console' ? 'console' : service;
       selected = {root, service, run, mode};
-      expandedRoots.add(root);
+      expandRoot(root);
       document.getElementById('selectedRoot').textContent = root;
       document.getElementById('selectedLabel').textContent = `${session?.alias || session?.id || '-'} / ${service} / ${mode === 'console' ? 'browser console' : 'server log'}`;
       const isWeb = service === 'web';
       document.getElementById('logModeTabs').classList.toggle('visible', isWeb);
-      document.getElementById('openWeb').hidden = !isWeb;
+      const openWeb = document.getElementById('openWeb');
+      const openUrl = isWeb ? preferredServiceUrl(session, svc) : null;
+      const openKind = isWeb ? preferredServiceUrlKind(session, svc) : null;
+      openWeb.hidden = !openUrl;
+      openWeb.title = openKind === 'gateway'
+        ? `게이트웨이로 열기 — ${openUrl}`
+        : openKind === 'host' ? `임시 호스트 포트로 열기 — ${openUrl}` : '이 세션의 web을 브라우저로 열기';
       for (const btn of document.querySelectorAll('[data-log-mode]')) btn.classList.toggle('active', btn.dataset.logMode === mode);
       renderRunSelect(session, service, mode, run);
       render();

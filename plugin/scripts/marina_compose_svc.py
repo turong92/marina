@@ -17,7 +17,7 @@ from typing import Any
 import importlib.util as _ilu
 
 from marina_state import MARINA_HOME, _SUBREPO_MAP_CACHE, _bin, _mc
-from marina_dockerfile import _detect_injections, _prebuild_suggest, detect_profile_var, is_profile_var
+from marina_dockerfile import _detect_injections, _prebuild_suggest, detect_profile_var, dockerfile_doctor, is_profile_var
 from marina_paths import log_run_payload, service_log, session_id
 
 def _docker_cmd(*args: str) -> list[str]:
@@ -576,6 +576,7 @@ def compose_resolved_view(root: Path, project: dict) -> dict:
             "source": ("직접 정의/스캐폴드" if name in direct else "include (서브레포 compose)"),
             "marinaBuildArgs": _mba,
             "injections": _inj,
+            "doctor": dockerfile_doctor(df_text or ""),
             "prebuild": prebuild,
             "prebuildSuggest": (_prebuild_suggest(pb_dir) if (pb_dir and pb_dir.is_dir()) else ""),
             **_service_profile(_inj["args"], _mba, _stored_ba),

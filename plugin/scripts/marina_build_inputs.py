@@ -394,3 +394,39 @@ def merge_build_baseline(path: Path, current: dict[str, Any]) -> None:
         )
     finally:
         os.close(lock_fd)
+
+
+def remove_build_baseline_services(path: Path, services: list[str]) -> None:
+    names = {str(service) for service in services if service}
+    if not names:
+        return
+    path = Path(path)
+    lock_path = path.with_name(path.name + ".lock")
+    lock_fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    try:
+        os.chmod(lock_path, 0o600)
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        previous = read_build_baseline(path)
+        if not previous:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+            return
+        remaining = {
+            service: inputs
+            for service, inputs in previous["services"].items()
+            if service not in names
+        }
+        if remaining:
+            write_build_input_snapshot(
+                path,
+                {"version": 1, "status": "ok", "services": remaining},
+            )
+        else:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+    finally:
+        os.close(lock_fd)

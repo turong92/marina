@@ -39,6 +39,109 @@ def _detect_injections(text: str) -> dict:
                or (ln.lstrip().startswith("#") and re.search(r"\bAWS_|credential|secret", ln, re.I))][:5]
     return {"args": args, "requiredArgs": required, "artifacts": artifacts, "runtime": runtime}
 
+_INSTALL_PATTERNS = (
+    r"\bnpm\s+(?:ci|install)\b",
+    r"\bpnpm\s+install\b",
+    r"\byarn\s+(?:install|add)\b",
+    r"\bpip3?\s+install\b",
+    r"\bpoetry\s+install\b",
+    r"\bbundle\s+install\b",
+    r"\bgo\s+mod\s+download\b",
+    r"\bmvn\s+(?:dependency:go-offline|package|install)\b",
+    r"\bgradle(?:w)?\s+.*\b(?:build|assemble)\b",
+)
+_INSTALL_RE = re.compile("|".join(f"(?:{p})" for p in _INSTALL_PATTERNS), re.I)
+_HEAVY_DEP_RE = re.compile(
+    r"\b(playwright|chromium|chrome|ffmpeg|torch|tensorflow|opencv(?:-python)?|scikit-learn)\b",
+    re.I,
+)
+
+def _logical_dockerfile_lines(text: str) -> list[tuple[int, str]]:
+    lines: list[tuple[int, str]] = []
+    pending = ""
+    start = 0
+    for idx, raw in enumerate((text or "").splitlines(), 1):
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if not pending:
+            start = idx
+        pending += (" " if pending else "") + stripped.rstrip("\\").strip()
+        if stripped.endswith("\\"):
+            continue
+        lines.append((start, pending))
+        pending = ""
+    if pending:
+        lines.append((start, pending))
+    return lines
+
+def _docker_instruction(line: str) -> tuple[str, str]:
+    match = re.match(r"^\s*([A-Za-z]+)\s+(.*)$", line)
+    return (match.group(1).upper(), match.group(2).strip()) if match else ("", "")
+
+def _copy_sources(args: str) -> list[str]:
+    text = re.sub(r"--[A-Za-z0-9_-]+(?:=(?:\"[^\"]+\"|'[^']+'|\S+))?", "", args).strip()
+    if text.startswith("["):
+        try:
+            value = json.loads(text)
+            return [str(item) for item in value[:-1]] if isinstance(value, list) and len(value) >= 2 else []
+        except json.JSONDecodeError:
+            return []
+    try:
+        parts = shlex.split(text)
+    except ValueError:
+        parts = text.split()
+    return parts[:-1] if len(parts) >= 2 else []
+
+def _is_broad_copy(args: str) -> bool:
+    return any(src.strip().rstrip("/") in (".", "./") for src in _copy_sources(args))
+
+def dockerfile_doctor(text: str) -> list[dict[str, Any]]:
+    """Dockerfile cache hygiene 진단. 읽기 전용 lint라 프로젝트별 schema 없이 재사용 가능하다."""
+    findings: list[dict[str, Any]] = []
+    broad_copy_line: int | None = None
+    for line_no, line in _logical_dockerfile_lines(text):
+        inst, args = _docker_instruction(line)
+        if inst in ("COPY", "ADD") and "--from=" not in args.lower() and _is_broad_copy(args):
+            broad_copy_line = broad_copy_line or line_no
+        if inst != "RUN":
+            continue
+        is_install = bool(_INSTALL_RE.search(args))
+        if broad_copy_line and is_install:
+            findings.append({
+                "code": "copy-before-install",
+                "severity": "high",
+                "line": line_no,
+                "title": "source COPY 뒤 dependency install",
+                "detail": "manifest 파일만 먼저 COPY하고 install한 뒤 source COPY를 뒤로 옮기면 소스 수정이 dependency layer를 깨지 않습니다.",
+            })
+        if is_install and "--mount=type=cache" not in args:
+            findings.append({
+                "code": "missing-cache-mount",
+                "severity": "medium",
+                "line": line_no,
+                "title": "dependency install cache mount 없음",
+                "detail": "BuildKit cache mount를 쓰면 같은 dependency 입력에서 package manager 다운로드 캐시를 재사용할 수 있습니다.",
+            })
+        if re.search(r"\bapt-get\s+(?:update|install)\b", args) and "/var/lib/apt/lists" not in args and "apt-get clean" not in args:
+            findings.append({
+                "code": "apt-cache-not-cleaned",
+                "severity": "medium",
+                "line": line_no,
+                "title": "apt cache 정리 없음",
+                "detail": "apt-get install과 같은 RUN에서 /var/lib/apt/lists를 지우면 불필요한 image layer 증가를 줄일 수 있습니다.",
+            })
+        heavy = sorted({match.group(1).lower() for match in _HEAVY_DEP_RE.finditer(args)})
+        if heavy:
+            findings.append({
+                "code": "heavy-dependency",
+                "severity": "info",
+                "line": line_no,
+                "title": "무거운 의존성 항상 설치",
+                "detail": f"{', '.join(heavy)} 설치가 항상 실행됩니다. 빌드가 느리면 프로젝트 Dockerfile에서 stage/build arg로 분리할 후보입니다.",
+            })
+    return findings
+
 # profile(환경 선택) 변수 후보 — 우선순위 순. 프레임워크 표준 + mdc 관용(PROFILE).
 # marina 는 이 중 그 서비스 Dockerfile 이 실제 선언한 ARG 를 profile 변수로 본다(추측 아님).
 PROFILE_VAR_CANDIDATES = [

@@ -1,5 +1,5 @@
     // app-5b-actions.js — 세션 카드 액션(P4 분할 2/3): hover 액션 클러스터(fillSvcActs/fillCardActs)·⋯메뉴(openActMenu
-    // /cardMenuItems)·수명주기 플로우(stopAllFlow/clearCacheFlow/removeWorktreeFlow)·원인줄 배선(wireWhyLinks)·서비스 행(makeSvcRow).
+    // /cardMenuItems)·수명주기 플로우(stopAllFlow/clearCacheFlow/clearImagesFlow/removeWorktreeFlow)·원인줄 배선(wireWhyLinks)·서비스 행(makeSvcRow).
     // app-5-sessions.js 다음 로드. 상태 모델(STATE_META·svcState 등)은 app-5-sessions.js 참조(전역).
 
 
@@ -55,6 +55,7 @@
       for (const a of svcActions(svc)) {
         const btn = document.createElement('button');
         btn.textContent = a.icon; btn.title = a.title; btn.dataset.act = a.act;
+        if (a.act !== 'restart') btn.classList.add('svc-lifecycle-action');
         btn.setAttribute('aria-label', a.title.split(' — ')[0]);
         btn.onclick = (event) => {
           event.stopPropagation();
@@ -83,14 +84,19 @@
     }
     function svcMenuItems(session, svc) {
       const items = [];
-      const gwUrl = gatewayUrlFor(session, svc);
-      if (gwUrl) {
-        items.push({ label: `🌐 게이트웨이로 열기 — ${gwUrl.replace(/^https?:\/\//, '')}`, run: () => window.open(gwUrl, '_blank') });
-        items.push({ label: '⧉ 게이트웨이 주소 복사', run: () => navigator.clipboard.writeText(gwUrl) });
+      const preferredUrl = preferredServiceUrl(session, svc);
+      const preferredKind = preferredServiceUrlKind(session, svc);
+      if (preferredUrl) {
+        const label = preferredKind === 'gateway' ? '🌐 게이트웨이로 열기' : '↗ 임시 호스트 포트로 열기';
+        items.push({ label: `${label} — ${preferredUrl.replace(/^https?:\/\//, '')}`, run: () => openServiceInBrowser(session, svc) });
       }
-      if (svc.running && svc.port) items.push({ label: `↗ 호스트포트로 열기 — 127.0.0.1:${svc.port}`, run: () => window.open(`http://127.0.0.1:${svc.port}`, '_blank') });
+      if (preferredKind === 'gateway') {
+        items.push({ label: '⧉ 게이트웨이 주소 복사', run: () => navigator.clipboard.writeText(preferredUrl) });
+      }
+      if (preferredKind === 'gateway' && svc.running && svc.port) items.push({ label: `↗ 호스트포트로 열기 — 127.0.0.1:${svc.port}`, run: () => window.open(`http://127.0.0.1:${svc.port}`, '_blank', 'noopener') });
       if (session.kind === 'compose') {
         items.push({ label: 'Rebuild — Docker image 빌드 후 재기동', run: () => action('rebuild', session.root, svc.service) });
+        items.push({ label: 'Clean Rebuild — Docker cache 없이 다시 빌드', run: () => action('clean-rebuild', session.root, svc.service) });
         items.push({ label: 'ⓘ 구성 보기 — Dockerfile·포트·env·build args', run: () => openServiceConfig(session.root, svc.service) });
       }
       return items;
@@ -145,6 +151,35 @@
       actMenuEl = menu;
       setTimeout(() => document.addEventListener('click', closeActMenu, { once: true }), 0);
     }
+    function gbFromMb(value) {
+      return `${((Number(value) || 0) / 1024).toFixed(1)}GB`;
+    }
+    function cacheBreakdownText(wt) {
+      const entries = Object.entries(wt?.cacheCats || {})
+        .filter(([, mb]) => Number(mb) > 0)
+        .sort((a, b) => Number(b[1]) - Number(a[1]))
+        .slice(0, 5);
+      return entries.length
+        ? entries.map(([name, mb]) => `  - ${name}: ${gbFromMb(mb)}`).join('\n')
+        : '  - 없음';
+    }
+    function showDiskView(session, wt) {
+      const docker = wt?.dockerDisk || {};
+      const lines = [
+        `${session.alias || session.id} 디스크`,
+        `worktree 폴더: ${wt?.diskMb == null ? '계산 중' : gbFromMb(wt.diskMb)}`,
+        `재생성 캐시: ${gbFromMb(wt?.cacheMb)}`,
+        `build 이미지: ${gbFromMb(wt?.imageMb)}`,
+        '',
+        '캐시 breakdown',
+        cacheBreakdownText(wt),
+        '',
+        `Docker 전체 images: ${gbFromMb(docker.imagesMb)}`,
+        `Docker 전체 BuildKit: ${gbFromMb(docker.buildCacheMb)}`,
+        `Docker 전체 volumes: ${gbFromMb(docker.volumesMb)}`,
+      ];
+      alert(lines.join('\n'));
+    }
     // 카드 ⋯ 메뉴 항목 + 수명주기 플로우 — 구 상시 버튼(✎·♻·✕·전체시작/정지 스트립)을 흡수 (콘솔 스펙 D7)
     function cardMenuItems(session) {
       const wt = worktreeData.find(w => w.root === session.root);
@@ -154,7 +189,9 @@
       items.push({ label: '⎇ 깃 — 이 워크트리 브랜치·커밋 그래프 (깃 탭)', run: () => openGitTab(session.root, wt?.branches?.[wt?.projectLabel] || '') });   // 깃 탭 기본 레포탭=root — root 레포 브랜치로 필터
       items.push({ label: '↔ link — main 의 deps/config 를 이 worktree 로', run: () => openLinksModal(session) });
       if (session.kind === 'compose') items.push({ label: '✎ compose 편집 — 보관된 docker-compose.yml 수정', run: () => openComposeEdit(wt?.projectRoot || session.root) });   // 워크트리 카드여도 프로젝트 루트로 — 워크트리 신규등록 버그 방지
-      if (wt && wt.cacheMb > 50) items.push({ label: `♻ 캐시 정리 (${(wt.cacheMb / 1024).toFixed(1)}GB) — 재생성 캐시 전체 회수`, run: () => clearCacheFlow(session, wt) });
+      if (wt) items.push({ label: `ⓘ 디스크 보기 — 캐시 ${gbFromMb(wt.cacheMb)} · 이미지 ${gbFromMb(wt.imageMb)}`, run: () => showDiskView(session, wt) });
+      if (wt && wt.cacheMb > 50) items.push({ label: `♻ 캐시 정리 (${gbFromMb(wt.cacheMb)}) — 재생성 캐시 전체 회수`, run: () => clearCacheFlow(session, wt) });
+      if (wt && wt.imageMb > 50) items.push({ label: `▣ 이미지 정리 (${gbFromMb(wt.imageMb)}) — 이 worktree build image 삭제`, run: () => clearImagesFlow(session, wt) });
       if (session.source !== 'main') items.push({ label: '✕ worktree 삭제 — 미머지 브랜치는 보존', run: () => removeWorktreeFlow(session, wt) });
       return items;
     }
@@ -185,6 +222,17 @@
         body: JSON.stringify({root: session.root})
       });
       alert(`캐시 ${((result.freedMb || 0) / 1024).toFixed(1)}GB 회수`);
+      await loadWorktrees(true);
+      await load({force: true});
+    }
+    async function clearImagesFlow(session, wt) {
+      const imageGb = gbFromMb(wt?.imageMb);
+      if (!confirm(`${session.alias || session.id} 의 build 이미지(${imageGb})를 지울까?\n다음 start/rebuild 때 필요한 이미지는 다시 빌드돼.`)) return;
+      const result = await api('/api/clear-images', {
+        method: 'POST', headers: {'content-type': 'application/json'},
+        body: JSON.stringify({root: session.root})
+      });
+      alert(`이미지 ${gbFromMb(result.freedMb)} 회수`);
       await loadWorktrees(true);
       await load({force: true});
     }

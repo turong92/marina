@@ -268,7 +268,7 @@
     }
 
     async function load({force = false, passive = false} = {}) {
-      loadGatewayState();   // 1회 lazy(env 고정) — 카드 게이트웨이 URL 표시용
+      await loadGatewayState();   // 기본 열기 URL을 정하기 전에 Caddy 가용성을 확정한다.
       const data = await api('/api/sessions');
       renderMemory(data.memory, data.sessions);
       const nextSessions = data.sessions;
@@ -429,6 +429,7 @@
     document.getElementById('collapseAll').onclick = () => {
       if (expandedRoots.size) expandedRoots.clear();
       else for (const session of sessions) expandedRoots.add(session.root);
+      persistExpandedRoots();
       render();
     };
     // 레일 = IDE 식 분할 핸들 — 드래그(4px+)로 좌측 패널 폭 조절(--aside-w, localStorage 기억),
@@ -562,9 +563,8 @@
     document.querySelectorAll('[data-ws-tab]').forEach(b => { if (!b.disabled) b.onclick = () => setWsTab(b.dataset.wsTab); });
     document.getElementById('openWeb').onclick = () => {
       if (!selected) return;
-      const {session} = serviceMeta(selected.root, selected.service);
-      const web = session?.services.find(item => item.service === 'web');
-      if (web?.port) window.open(`http://localhost:${web.port}/`, '_blank');
+      const {session, service: svc} = serviceMeta(selected.root, selected.service);
+      if (session && svc) openServiceInBrowser(session, svc);
     };
     document.getElementById('followLog').onclick = () => {
       followLog = !followLog;
@@ -651,7 +651,7 @@
     document.addEventListener('scroll', hideTip, {capture: true, passive: true});
     document.addEventListener('click', hideTip, true);
 
-    // ── AGENTS 행 클릭 뷰어 — 서비스 행=로그 탭과 같은 "누르면 바로 열림" 문법(형 통일). 대화 끝부분(user/assistant 텍스트만) ──
+    // ── AGENTS 행 클릭 뷰어 — 최신부터 열고 이전 메시지는 byte cursor 로 계속 prepend. ──
     async function openAgentTranscript(session, agent) {
       const ex = document.getElementById('agentModalBack'); if (ex) ex.remove();
       const back = document.createElement('div');
@@ -660,7 +660,8 @@
       back.innerHTML = `<div class="links-modal agent-modal">
         <div class="links-modal-head"><strong><span class="agent-src ${isCodex ? 'codex' : 'claude'}">${isCodex ? 'Codex' : 'Claude'}</span> ${escapeHtml(agent.title)}</strong>
           <button class="links-modal-x" title="닫기 (Esc)">✕</button></div>
-        <div class="config-label" style="margin-bottom:8px">대화 끝부분 — 도구 호출/결과는 생략, 민감정보는 로그처럼 마스킹</div>
+        <div class="config-label" style="margin-bottom:8px">대화 기록 — 도구 호출/결과는 생략, 민감정보는 로그처럼 마스킹</div>
+        <button class="agent-older-btn" data-agent-older hidden>이전 메시지</button>
         <div class="agent-turns" data-agent-turns>불러오는 중…</div>
       </div>`;
       document.body.appendChild(back);
@@ -670,16 +671,45 @@
       back.querySelector('.links-modal-x').onclick = close;
       back.onclick = (e) => { if (e.target === back) close(); };   // 읽기 전용 뷰어 — 바깥 클릭 닫기 허용
       const body = back.querySelector('[data-agent-turns]');
-      try {
-        const d = await api(`/api/agent-transcript?root=${enc(session.root)}&source=${enc(agent.source)}&sid=${enc(agent.sid)}`);
-        const turns = d.turns || [];
-        body.innerHTML = turns.length ? turns.map(t => `
+      const older = back.querySelector('[data-agent-older]');
+      let cursor = null;
+      let loading = false;
+      const turnsHtml = (turns) => turns.map(t => `
           <div class="agent-turn ${t.role === 'user' ? 'user' : 'ai'}">
             <span class="turn-role">${t.role === 'user' ? '나' : (isCodex ? 'Codex' : 'Claude')}</span>
             <div class="turn-text">${escapeHtml(t.text)}</div>
-          </div>`).join('') : '<div class="config-label">표시할 대화가 없어요 (도구 호출만 있었거나 빈 세션)</div>';
-        body.scrollTop = body.scrollHeight;   // 최신이 아래 — 로그처럼 끝으로
-      } catch (e) { body.innerHTML = `<div class="git-err">${escapeHtml(e.message)}</div>`; }
+          </div>`).join('');
+      async function loadOlderAgentTurns(initial = false) {
+        if (loading) return;
+        loading = true;
+        older.disabled = true;
+        older.textContent = '불러오는 중';
+        try {
+          const before = !initial && cursor != null ? `&before=${enc(cursor)}` : '';
+          const d = await api(`/api/agent-transcript?root=${enc(session.root)}&source=${enc(agent.source)}&sid=${enc(agent.sid)}${before}`);
+          const turns = d.turns || [];
+          if (initial) {
+            body.innerHTML = turns.length ? turnsHtml(turns) : '<div class="config-label">표시할 대화가 없어요 (도구 호출만 있었거나 빈 세션)</div>';
+            body.scrollTop = body.scrollHeight;
+          } else if (turns.length) {
+            const oldHeight = body.scrollHeight;
+            const oldTop = body.scrollTop;
+            body.insertAdjacentHTML('afterbegin', turnsHtml(turns));
+            body.scrollTop = oldTop + body.scrollHeight - oldHeight;
+          }
+          cursor = d.cursor ?? null;
+          older.hidden = !d.hasMore;
+        } catch (e) {
+          if (initial) body.innerHTML = `<div class="git-err">${escapeHtml(e.message)}</div>`;
+          else showToast(`이전 메시지 실패 · ${e.message}`, 'err');
+        } finally {
+          loading = false;
+          older.disabled = false;
+          older.textContent = '이전 메시지';
+        }
+      }
+      older.onclick = () => loadOlderAgentTurns(false);
+      await loadOlderAgentTurns(true);
     }
 
     let pollTimer = null;

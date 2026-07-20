@@ -65,7 +65,7 @@ for bad in [("evil", "abcd1234"), ("claude", "../x"), ("claude", "a"), ("codex",
         raise AssertionError(f"검증 뚫림: {bad}")
     except ValueError:
         pass
-mt._AGENT_CLIS["fake"] = lambda sid: ["sh", "-c", f"echo FAKE_{sid}; sleep 2"]   # argv 리스트(셸 문자열 조립 폐지)
+mt._AGENT_CLIS["fake"] = lambda sid, prompt="": ["python3", "-c", "import sys,time; print('FAKE_'+sys.argv[1]+'_'+sys.argv[2]); time.sleep(2)", sid, prompt]   # argv 리스트(셸 문자열 조립 폐지)
 d6 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0001")
 assert not d6["reused"] and mt._by_tid[d3["tid"]].key == "" and mt._by_tid[d6["tid"]].key, "셸은 키 없음·에이전트만 키 보유"
 assert {s["tid"]: s for s in mt.term_list()["sessions"]}[d6["tid"]]["agent"] == {"source": "fake", "sid": "sid0001"}, "에이전트 세션은 agent 필드가 실려야"
@@ -86,6 +86,23 @@ d8 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0001")
 assert not d8["reused"] and d8["tid"] != d6["tid"], "에이전트 kill 후엔 새 세션(_by_key 청소)"
 mt.term_kill(d8["tid"])
 mt.term_kill(d3["tid"])
+
+# 모바일/원격 제어처럼 prompt 를 같이 넘기는 attach 는 TUI stdin 에 키를 쓰지 않고
+# CLI 의 prompt 인자로 시작한다. 같은 sid 라도 매 전송이 새 턴이어야 하므로 재사용하지 않는다.
+p1 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0003", agent_prompt="HELLO")
+p2 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0003", agent_prompt="AGAIN")
+assert not p1["reused"] and not p2["reused"] and p1["tid"] != p2["tid"], "prompt attach 는 기존 TUI 재사용 금지"
+for dct, want in [(p1, b"FAKE_sid0003_HELLO"), (p2, b"FAKE_sid0003_AGAIN")]:
+    term = mt._by_tid[dct["tid"]]
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        with term.cond:
+            if want in bytes(term.history):
+                break
+        time.sleep(0.2)
+    else:
+        raise AssertionError(f"prompt attach 출력 미도착: {want!r} / {bytes(term.history)[-300:]!r}")
+    mt.term_kill(dct["tid"])
 
 # ── 죽은 세션 수거 — exit 한 셸의 시체가 history(최대 256KB)를 문 채 남으면 안 된다 ──
 d9 = mt.term_open(Path(tmp), 80, 24)
@@ -147,6 +164,7 @@ while time.time() < deadline:
 else:
     raise AssertionError(f"preview 미도착: {row.get('preview')!r}")
 assert "\x1b[" not in row["preview"], f"preview 에 ANSI 가 남음(사이드바에 제어문자가 새 나온다): {row['preview']!r}"
+assert mt._ANSI_RE.sub("", "\x1b[0 qREADY") == "READY", "CSI cursor-style escape(ESC[0 q) 잔여 0 q 제거"
 assert "\b" not in row["preview"], f"preview 에 백스페이스가 남음: {row['preview']!r}"
 assert row.get("fg") in (None, ""), f"유휴 셸은 fg 가 없어야(zsh 를 이름으로 쓰면 알아볼 게 없다): {row.get('fg')!r}"
 # 유휴여도 이름이 있어야 한다 — "셸 1" 은 어느 게 어느 건지 안 알려준다(형).

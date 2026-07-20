@@ -163,12 +163,12 @@ compose_main() {
 
   # no-arg 가드(네이티브와 동일 취지) — docker 유무 전에 인자 실수부터.
   case "$command" in
-    start|stop|restart|rebuild)
+    start|stop|restart|rebuild|clean-rebuild)
       [[ $# -gt 0 ]] || { echo "usage: marina $command <--service..|--all>   (전체 스택은 --all)" >&2; exit 2; } ;;
   esac
 
   command -v docker >/dev/null 2>&1 || die "compose 실행엔 docker 필요 — 설치·기동 후 다시."
-  if [[ "$command" == "start" || "$command" == "restart" || "$command" == "rebuild" ]]; then
+  if [[ "$command" == "start" || "$command" == "restart" || "$command" == "rebuild" || "$command" == "clean-rebuild" ]]; then
     docker info >/dev/null 2>&1 || die "docker 데몬 미가동 (docker info 실패) — 기동 후 다시."
     local ver; ver="$(docker compose version --short 2>/dev/null || true)"
     if [[ -n "$ver" && "$(printf '2.24.4\n%s\n' "$ver" | sort -V | head -n1)" != "2.24.4" ]]; then
@@ -188,7 +188,7 @@ compose_main() {
   local -a nameargs=(--project-id "$pid" --session "$sid")
 
   case "$command" in
-    start|stop|restart|rebuild)
+    start|stop|restart|rebuild|clean-rebuild)
       [[ -f "$stored" ]] || die "compose 파일 없음: $stored  (marina project add --compose <file> 로 등록)"
       local -a svcs=() envargs=() a; local x cname
       for a in "$@"; do
@@ -278,10 +278,11 @@ PY
 	      local -a connarg=()   # ⑥ 연결 주입 설정 → marina-compose 가 weave forward 를 적용
 	      [[ -f "$MARINA_HOME/$pid/backing.json" ]] && connarg=(--connectivity "$MARINA_HOME/$pid/backing.json")
 	      case "$command" in
-	        start|rebuild)
+	        start|rebuild|clean-rebuild)
 	          local -a build_mode=()
 	          local up_rc=0
 	          [[ "$command" == "rebuild" ]] && build_mode=(--build)
+	          [[ "$command" == "clean-rebuild" ]] && build_mode=(--build --clean-build)
 	          python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" \
 	            ${svcs[@]+"${svcs[@]}"} ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} ${build_mode[@]+"${build_mode[@]}"} || up_rc=$?
           cname="$(python3 "$cp" name "${nameargs[@]}")"
@@ -351,5 +352,5 @@ PY
     *) die "compose: 미지원 명령 $command" ;;
   esac
   # start/restart 성공 직후(여기 도달=up 성공): 게이트웨이 자동 기동 + 라우트 반영(CLI 경로도 대시보드와 동일 UX)
-  case "$command" in start|restart|rebuild) python3 "$SCRIPT_DIR/marina-control.py" gateway-ensure >/dev/null 2>&1 || true ;; esac
+  case "$command" in start|restart|rebuild|clean-rebuild) python3 "$SCRIPT_DIR/marina-control.py" gateway-ensure >/dev/null 2>&1 || true ;; esac
 }

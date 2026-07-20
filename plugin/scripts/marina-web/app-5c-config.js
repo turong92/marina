@@ -102,6 +102,8 @@
           <div style="color:var(--sys-cont-negative-default);font-weight:700;margin-bottom:4px">⚠️ 외부 주입 필요 (marina 가 감지)</div>
           <ul style="margin:0;padding-left:18px;line-height:1.6;color:var(--sys-cont-neutral-default)">${injItems.join('')}</ul></div>`;
       }
+      const doctor = dockerfileDoctorItems(s.doctor || []);
+      if (doctor) html += doctor;
       if (s.profileVar) {   // ⚙️ profile — 그 서비스가 받는 환경선택 변수(감지). build arg + 런타임 env 로 주입.
         const pvId = 'pv-' + s.service.replace(/[^a-z0-9_-]/gi, '_');
         html += `<div style="margin:0 0 12px"><div style="color:${muted};margin-bottom:4px">⚙️ profile <span title="이 서비스가 받는 환경 선택 변수(${escapeHtml(s.profileVar)}) — marina 가 build arg + 런타임 env 로 주입(compose 안 건드림). 변경 시 다음 시작에 재빌드.">(${escapeHtml(s.profileVar)})</span></div>
@@ -134,6 +136,19 @@
         html += `<div style="margin:0 0 12px;border:1px dashed var(--sys-style-neutral-default);border-radius:8px;padding:8px 10px;color:${muted};font-size:12px;line-height:1.6">🐳 Dockerfile${dfPathHtml} 을 못 읽었습니다 — 현재 체크아웃에 이 파일이 없을 수 있어요(예: <code>Dockerfile.local</code> 이 다른 브랜치에만 있는 경우, 서브레포 브랜치를 맞추세요). 경로 자체는 compose 의 build.dockerfile 에서 바꿉니다(✎).</div>`;
       }
       return html;
+    }
+    function dockerfileDoctorItems(items) {
+      if (!items.length) return '';
+      const colorFor = (sev) => sev === 'high' ? 'var(--sys-cont-negative-default)' : 'var(--st-boot)';
+      const rows = items.map(item => {
+        const color = colorFor(item.severity);
+        const line = item.line ? `L${escapeHtml(String(item.line))} · ` : '';
+        return `<li><b style="color:${color}">${line}${escapeHtml(item.title || item.code)}</b> <span style="color:var(--sys-cont-neutral-lightest)">(${escapeHtml(item.code || '')})</span><br><span>${escapeHtml(item.detail || '')}</span></li>`;
+      }).join('');
+      return `<div style="margin:0 0 12px;border:1px solid var(--st-boot);border-radius:8px;padding:8px 10px">
+        <div style="color:var(--st-boot);font-weight:700;margin-bottom:4px">Dockerfile Doctor</div>
+        <ul style="margin:0;padding-left:18px;line-height:1.6;color:var(--sys-cont-neutral-default)">${rows}</ul>
+      </div>`;
     }
     function highlightVars(text) {   // Dockerfile 변수 하이라이트 — escape 후 ${VAR}/$VAR 참조 + ARG/ENV 선언 이름
       let h = escapeHtml(text);

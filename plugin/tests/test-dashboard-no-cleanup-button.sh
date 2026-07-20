@@ -19,4 +19,14 @@ if ! grep -q "clearCacheFlow" "$CARDS"; then
   exit 1
 fi
 
+if ! grep -q "clearImagesFlow" "$CARDS"; then
+  echo "FAIL: image clear action is missing from session cards (⋯ menu)"
+  exit 1
+fi
+
+grep -q '"/api/clear-images"' "$ROOT/plugin/scripts/marina_handler.py" || {
+  echo "FAIL: /api/clear-images route missing"
+  exit 1
+}
+
 echo "PASS test-dashboard-no-cleanup-button"

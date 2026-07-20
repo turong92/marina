@@ -38,10 +38,11 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
-from marina_sessions import agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_mobile import mobile_catalog, mobile_request_ok, mobile_send, mobile_state, render_mobile_html
+from marina_sessions import activate_agent_payloads, agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
-from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
+from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
 
@@ -71,6 +72,49 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == "/mobile":
+            data = render_mobile_html().encode("utf-8")
+            self.send_response(200)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("cache-control", "no-store, no-cache, must-revalidate")
+            self.send_header("content-length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path in ("/mobile/api/state", "/api/mobile-state"):
+            if not mobile_request_ok(self, parsed):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            self.send_json(mobile_state(refresh=query.get("refresh", ["0"])[0] == "1"))
+            return
+        if parsed.path == "/mobile/api/catalog":
+            if not mobile_request_ok(self, parsed):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                self.send_json(mobile_catalog(root, query.get("source", [""])[0], query.get("q", [""])[0]))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+        if parsed.path == "/mobile/api/transcript":
+            if not mobile_request_ok(self, parsed):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                raw_before = query.get("before", [""])[0]
+                before = int(raw_before) if raw_before else None
+                payload = agent_transcript(root, query.get("source", [""])[0],
+                                           query.get("sid", [""])[0], before=before, limit=40)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
+            return
         if parsed.path == "/api/gateway-status":
             light = urllib.parse.parse_qs(parsed.query).get("light", ["0"])[0] == "1"   # light=1: enabled/port 만(routes=비싼 스냅샷 생략 — 카드 URL 계산용)
             out = {"enabled": _GATEWAY_ON, "caddy": bool(_gw().caddy_bin()), "port": _GATEWAY_PORT}
@@ -140,6 +184,14 @@ class Handler(BaseHTTPRequestHandler):
             titles = claude_session_titles(refresh)       # Claude 데스크톱 (20s 캐시)
             codex_titles = codex_session_titles(refresh)  # Codex (60s 캐시)
             roots = discover_all_roots(refresh)
+            live_agents_by_root: dict[str, set[tuple[str, str]]] = {}
+            for term in term_list().get("sessions", []):
+                agent = term.get("agent") if isinstance(term.get("agent"), dict) else None
+                if not agent:
+                    continue
+                key = (str(agent.get("source") or ""), str(agent.get("sid") or ""))
+                if all(key):
+                    live_agents_by_root.setdefault(str(term.get("root") or ""), set()).add(key)
             # 깃 배지 계산은 root 당 ~0.3s(전부 git subprocess 대기)라 직렬로는 root 수에 비례 —
             # root 끼리 독립이니 병렬 프리컴퓨트(실측 14 roots 4.4s→0.8s). 오버레이는 캐시 히트라 직렬 유지.
             with ThreadPoolExecutor(max_workers=8) as pool:
@@ -153,7 +205,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif str(root) in codex_titles:
                     info["sessionTitle"] = codex_titles[str(root)]
                     info["titleSource"] = "codex"
-                agents = agents_payload(root, refresh)   # A1 — 카드 AGENTS 섹션(같은 titles 캐시 리듬에 편승)
+                agents = activate_agent_payloads(agents_payload(root, refresh), live_agents_by_root.get(str(root), set()))
                 if agents:
                     info["agents"] = agents
                 worktrees.append(info)
@@ -431,7 +483,10 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             try:
                 root = safe_root(query.get("root", [""])[0])
-                payload = agent_transcript(root, query.get("source", [""])[0], query.get("sid", [""])[0])
+                raw_before = query.get("before", [""])[0]
+                before = int(raw_before) if raw_before else None
+                payload = agent_transcript(root, query.get("source", [""])[0],
+                                           query.get("sid", [""])[0], before=before, limit=40)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return
@@ -571,6 +626,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:  # noqa: N802
         try:
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path in ("/mobile/api/send", "/api/mobile-send"):
+                if not mobile_request_ok(self, parsed):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                self.send_json(mobile_send(self.read_json()))
+                return
             if not host_allowed(self.headers.get("host")):
                 self.send_json({"error": "forbidden host"}, 403)
                 return
@@ -1062,6 +1124,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(clear_worktree_cache(root, str(body.get("category", "all"))))
                 return
 
+            if self.path == "/api/clear-images":
+                self.send_json(clear_worktree_images(root))
+                return
+
             if self.path == "/api/git-commit":   # 깃 탭 WIP 커밋(P2) — root 는 워크트리, main 체크아웃은 백엔드가 거부
                 files = body.get("files")
                 if not isinstance(files, list) or not all(isinstance(f, str) for f in files):
@@ -1146,6 +1212,8 @@ class Handler(BaseHTTPRequestHandler):
                 result = restart_service(root, service, force=force)
             elif self.path == "/api/rebuild":
                 result = rebuild_service(root, service, force=force)
+            elif self.path == "/api/clean-rebuild":
+                result = clean_rebuild_service(root, service, force=force)
             else:
                 self.send_json({"error": "not found"}, 404)
                 return

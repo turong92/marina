@@ -19,7 +19,7 @@ import importlib.util as _ilu
 import threading
 
 from marina_state import LIFECYCLE_BUSY, MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_du_cache, _worktree_info_cache, busy_key
-from marina_cache import cache_items_by_category, disk_usage_mb, docker_volume_rm
+from marina_cache import cache_items_by_category, compose_build_image_items, disk_usage_mb, docker_image_rm, docker_volume_rm
 from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
@@ -349,6 +349,18 @@ def rebuild_service(root: Path, service: str, force: bool = False) -> dict[str, 
                             lambda: _marina_cli_logged(root, "rebuild", f"--{service}", timeout=LIFECYCLE_TIMEOUT),
                             reservation_token=reservation)
 
+def clean_rebuild_service(root: Path, service: str, force: bool = False) -> dict[str, Any]:
+    project = project_for(root)
+    if not project:
+        raise ValueError("등록된 프로젝트를 찾을 수 없습니다")
+    targets = compose_start_targets(root, project, [service])
+    block, reservation = acquire_memory_reservation(root, targets, force=force)
+    if block:
+        return block
+    return _spawn_lifecycle(busy_key(root, service), "clean-rebuild",
+                            lambda: _marina_cli_logged(root, "clean-rebuild", f"--{service}", timeout=LIFECYCLE_TIMEOUT),
+                            reservation_token=reservation)
+
 def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
     by_category = cache_items_by_category(root)
     if category != "all" and category not in by_category:
@@ -380,6 +392,21 @@ def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
             label = str(item.get("volume") or item.get("name") or item.get("path") or "cache")
             removed.append(f"{label} (실패: {exc})")
     _worktree_info_cache.pop(str(root), None)
+    _worktree_du_cache.pop(str(root), None)
+    return {"removed": removed, "freedMb": freed}
+
+def clear_worktree_images(root: Path) -> dict[str, Any]:
+    items = compose_build_image_items(root)
+    removed: list[str] = []
+    freed = 0
+    for item in items:
+        image_id = str(item.get("imageId") or "")
+        if not image_id:
+            continue
+        size = int(item.get("sizeMb") or 0)
+        docker_image_rm(image_id)
+        removed.append(image_id)
+        freed += size
     _worktree_du_cache.pop(str(root), None)
     return {"removed": removed, "freedMb": freed}
 

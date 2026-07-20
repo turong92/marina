@@ -9,26 +9,31 @@
 
     // ── AGENTS 섹션 (A1) — 이 워크트리에서 도는 Claude/Codex 세션 가시화. SERVICES 와 완전 동일 문법(형 통일 지시):
     // 접힘도 카드 펼침(expandedRoots)을 그대로 따르고, 행 클릭 = 대화 내용 뷰어(openAgentTranscript).
-    function agentActive(ts) {   // 최근 2분 이내 활동 — ⟳ boot 아크(서비스 '기동중' 재사용)
+    function agentActive(ts) {   // 구버전 payload 폴백 — 새 payload 는 native agent.status 사용
       return !!ts && (Date.now() / 1000 - ts) < 120;
     }
-    function agentsSummary(agents) {   // 접힘 요약 — 활성 개수만(0 이면 빈칸, SERVICES stateCounts 와 같은 톤)
-      const active = (agents || []).filter(a => agentActive(a.ts)).length;
-      return active ? `<span class="c-boot">⟳ ${active}</span>` : '';
+    function agentState(agent) { return agent.status || (agentActive(agent.ts) ? 'working' : 'idle'); }
+    function agentsSummary(agents) {
+      const states = (agents || []).map(agentState);
+      const working = states.filter(state => state === 'working').length;
+      const attention = states.filter(state => ['waiting', 'completed', 'failed'].includes(state)).length;
+      return [working ? `<span class="c-boot">⟳ ${working}</span>` : '', attention ? `<span class="c-err">▤ ${attention}</span>` : ''].filter(Boolean).join(' · ');
     }
-    function renderAgentRow(agent) {   // 상태점 + source 텍스트칩(CC/CX, 이모지 금지) + title + 우측 relTime, 아래 preview(.svc-tail 재사용)
-      const active = agentActive(agent.ts);
+    function renderAgentRow(agent) {
+      const state = agentState(agent);
+      const meta = AGENT_STATUS_META[state] || AGENT_STATUS_META.idle;
       const isCodex = agent.source === 'codex';
       const openable = !!agent.sid;   // 세션 식별자 있어야 attach/열람 가능(만료·구버전 rollout 은 표시만)
       return `
-        <div class="svc nested agent-row${openable ? '' : ' disabled'}" data-agent-row data-agent-ts="${agent.ts}"${openable ? ` data-agent-sid="${escapeHtml(agent.sid)}" data-agent-source="${escapeHtml(agent.source)}"` : ''}
-          title="${openable ? '클릭=터미널로 이 세션에 붙기(resume)' + (active ? ' — 지금 다른 곳에서 활성일 수 있어요(동시 attach 주의)' : '') : '세션 원본을 못 찾음 — 표시만'}">
-          <span class="wt-dot ${active ? 'boot' : 'stop'}" title="${active ? '최근 2분 내 활동' : '비활성'}"></span>
+        <div class="svc nested agent-row agent-${state}${openable ? '' : ' disabled'}" data-agent-row data-agent-ts="${agent.statusTs || agent.ts}"${openable ? ` data-agent-sid="${escapeHtml(agent.sid)}" data-agent-source="${escapeHtml(agent.source)}"` : ''}
+          title="${openable ? `클릭=터미널로 이 세션에 붙기(resume) · ${meta.title}` : '세션 원본을 못 찾음 — 표시만'}">
+          <span class="wt-dot ${meta.dot}" title="${meta.title}"></span>
           <span class="agent-src ${isCodex ? 'codex' : 'claude'}">${isCodex ? 'Codex' : 'Claude'}</span>
           <span class="svc-name"><span title="${escapeHtml(agent.title)}">${escapeHtml(agent.title)}</span></span>
           <span class="svc-right">
             ${openable ? `<span class="hov-acts"><button data-agent-peek title="대화 내용만 읽기(attach 없이)">대화</button></span>` : ''}
-            <span class="mono-port svc-uptime" data-agent-relts>${escapeHtml(relTime(agent.ts))}</span>
+            <span class="agent-state-label">${meta.label}</span>
+            <span class="mono-port svc-uptime" data-agent-relts>${escapeHtml(relTime(agent.statusTs || agent.ts))}</span>
           </span>
           ${agent.preview ? `<span class="svc-tail" title="${escapeHtml(agent.preview)}">${escapeHtml(agent.preview)}</span>` : ''}
         </div>`;
@@ -99,7 +104,7 @@
     }
     function portText(svc) {                 // 내부→호스트 표기 (콘솔 스펙 D6) — 상태별 대체 텍스트
       const st = svcState(svc);
-      if (st === 'starting') return svc.busy === 'rebuild' ? 'rebuilding…' : (svc.busy === 'restart' ? 'restarting…' : 'starting…');
+      if (st === 'starting') return svc.busy === 'clean-rebuild' ? 'clean rebuilding…' : (svc.busy === 'rebuild' ? 'rebuilding…' : (svc.busy === 'restart' ? 'restarting…' : 'starting…'));
       if (st === 'error') return svc.busyError ? 'failed' : (svc.exitCode ? `exit ${svc.exitCode}` : 'unhealthy');
       if (st === 'degraded') return '';
       if ((svc.port ?? '') === '') return '';
@@ -285,6 +290,7 @@
       if (selectedProjectId && !projectIds.includes(selectedProjectId)) selectedProjectId = null;
       if (!selectedProjectId && projectIds.length) selectedProjectId = projectIds[0];
       renderSwitcher();
+      renderAgentInbox();
       // 빈 레지스트리(R1) — 모달을 강제로 열지 않고 #sessions 안에 대문 CTA 카드로 안내. 첫 worktree 로드 완료 후에만(로딩 중 스퓨리어스 방지)
       if (worktreesLoaded && !projectIds.length) {
         sessionsEl.innerHTML = `
@@ -402,8 +408,7 @@
         `;
         card.querySelector('.session-head').onclick = (event) => {
           if (event.target.closest('button,input,select,summary,details,[data-alias-display]')) return;
-          if (expandedRoots.has(session.root)) expandedRoots.delete(session.root);
-          else expandedRoots.add(session.root);
+          toggleExpandedRoot(session.root);
           render();
         };
         const aliasInput = card.querySelector('[data-alias]');
@@ -437,15 +442,13 @@
         const sectToggle = card.querySelector('[data-sect-toggle]');
         if (sectToggle) sectToggle.onclick = (e) => {
           e.stopPropagation();
-          if (expandedRoots.has(session.root)) expandedRoots.delete(session.root);
-          else expandedRoots.add(session.root);
+          toggleExpandedRoot(session.root);
           render();
         };
         const agentsToggle = card.querySelector('[data-agents-toggle]');   // SERVICES 라벨과 동일 — 카드 펼침 토글(형 통일)
         if (agentsToggle) agentsToggle.onclick = (e) => {
           e.stopPropagation();
-          if (expandedRoots.has(session.root)) expandedRoots.delete(session.root);
-          else expandedRoots.add(session.root);
+          toggleExpandedRoot(session.root);
           render();
         };
         card.querySelectorAll('[data-agent-row][data-agent-sid]').forEach((row, i) => {   // 행 클릭 = 터미널 attach(오르카), '대화' = 읽기 전용 뷰어

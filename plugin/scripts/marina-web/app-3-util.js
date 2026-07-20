@@ -56,7 +56,7 @@
     }
 
     function memoryBlockConfirmation(block, type = 'start') {
-      const operation = ({start: '시작', 'start-all': '전체 시작', restart: '재시작', rebuild: '재빌드'})[type] || '실행';
+      const operation = ({start: '시작', 'start-all': '전체 시작', restart: '재시작', rebuild: '재빌드', 'clean-rebuild': '클린 재빌드'})[type] || '실행';
       const reason = {
         'host-critical': `Host available ${formatMemoryGb(block.hostFreeMb)}가 기준 ${formatMemoryGb(block.minFreeMb)}보다 낮아 ${operation}을 막았어.`,
         'docker-unknown': `Docker 메모리 측정이 불완전해 안전하게 판단할 수 없어 ${operation}을 막았어.`,
@@ -140,6 +140,22 @@
       const host = gwIsPrimary(session.services, svc.service) ? `${wid}.${pid}.localhost` : `${wid}-${gwDomainLabel(svc.service)}.${pid}.localhost`;
       const suffix = (gatewayState.port && gatewayState.port !== 80) ? `:${gatewayState.port}` : '';
       return `http://${host}${suffix}/`;
+    }
+    function hostPortUrlFor(svc) {
+      return svc?.running && String(svc.port || '').trim() ? `http://localhost:${svc.port}/` : null;
+    }
+    function preferredServiceUrl(session, svc) {
+      return gatewayUrlFor(session, svc) || hostPortUrlFor(svc);
+    }
+    function preferredServiceUrlKind(session, svc) {
+      if (gatewayUrlFor(session, svc)) return 'gateway';
+      return hostPortUrlFor(svc) ? 'host' : null;
+    }
+    function openServiceInBrowser(session, svc) {
+      const url = preferredServiceUrl(session, svc);
+      if (!url) return null;
+      window.open(url, '_blank', 'noopener');
+      return url;
     }
     async function loadGatewayState() {
       if (gatewayState.loaded) return;

@@ -20,6 +20,8 @@ case "$*" in
   *"images --format json worker"*)
     echo "[{\"ID\":\"sha256:${COMPOSE_IMAGE_ID:-image-a}\",\"Repository\":\"proj-worker\",\"Tag\":\"latest\"}]" ;;
   *"ps --format json"*) cat "$DOCKER_PS_FIXTURE" ;;
+  *"build --no-cache api"*)
+    [[ "${FAIL_CLEAN_BUILD:-0}" != 1 ]] || exit 25 ;;
   *"up -d"*)
     [[ -s "${MARINA_BUILD_INPUT_SNAPSHOT:-}" ]] || { echo "snapshot missing before compose up" >&2; exit 23; }
     rm -f "$MARINA_BUILD_INPUT_SNAPSHOT"
@@ -86,7 +88,7 @@ mrun ports 2>/dev/null | grep -q "web=55001" || { echo "FAIL: live ps ports"; ex
 grep -q "compose .*up -d --remove-orphans web" "$DOCKER_LOG" || { echo "FAIL: restart up not routed"; cat "$DOCKER_LOG"; exit 1; }
 grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: restart must not force --build"; cat "$DOCKER_LOG"; exit 1; } || true
 
-# build 서비스는 마지막 성공 build baseline과 비교해 필요한 Start에만 --build.
+# build 서비스는 마지막 성공 build baseline과 비교해 낡은 이미지를 안내하되 Start에는 --build를 붙이지 않는다.
 mkdir -p "$P/api"
 printf 'FROM scratch\n' > "$P/api/Dockerfile.local"
 mkdir -p "$P/worker"
@@ -102,8 +104,14 @@ JSON
 SD="$P/.workspace/marina/main"
 
 : > "$DOCKER_LOG"; first_out="$(mrun start --api 2>&1)"
-grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: first build service Start must build"; cat "$DOCKER_LOG"; exit 1; }
-grep -q "stale image:" <<<"$first_out" || { echo "FAIL: first automatic build reason missing"; echo "$first_out"; exit 1; }
+grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: first build service Start not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: first build service Start must not auto-build"; cat "$DOCKER_LOG"; exit 1; } || true
+grep -q "stale image:" <<<"$first_out" || { echo "FAIL: first stale image reason missing"; echo "$first_out"; exit 1; }
+grep -q "marina rebuild --api" <<<"$first_out" || { echo "FAIL: first stale image rebuild hint missing"; echo "$first_out"; exit 1; }
+[[ ! -f "$SD/build-baseline.json" ]] || { echo "FAIL: Start without build advanced baseline"; exit 1; }
+
+: > "$DOCKER_LOG"; mrun rebuild --api >/dev/null
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: explicit Rebuild must build"; cat "$DOCKER_LOG"; exit 1; }
 [[ -f "$SD/build-baseline.json" ]] || { echo "FAIL: successful build baseline missing"; exit 1; }
 python3 - "$SD/build-baseline.json" <<'PY'
 import json,sys
@@ -121,26 +129,43 @@ grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: un
 grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: unchanged Restart must stay fast"; cat "$DOCKER_LOG"; exit 1; } || true
 
 # Watch가 B를 build한 뒤 선언 입력이 baseline A로 되돌아온 ABA도 실제 image ID로 감지한다.
-: > "$DOCKER_LOG"; INSPECT_IMAGE_ID=image-b COMPOSE_IMAGE_ID=image-a mrun start --api >/dev/null
-grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: external image ABA must auto-build"; cat "$DOCKER_LOG"; exit 1; }
+: > "$DOCKER_LOG"; image_out="$(INSPECT_IMAGE_ID=image-b COMPOSE_IMAGE_ID=image-a mrun start --api 2>&1)"
+grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: external image ABA Start not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: external image ABA Start must not auto-build"; cat "$DOCKER_LOG"; exit 1; } || true
+grep -q "실제 Docker 이미지" <<<"$image_out" || { echo "FAIL: external image ABA reason missing"; echo "$image_out"; exit 1; }
 
 printf '# changed\n' >> "$P/api/Dockerfile.local"
 : > "$DOCKER_LOG"; changed_out="$(mrun start --api 2>&1)"
-grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: changed Dockerfile must auto-build"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: changed Dockerfile Start not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: changed Dockerfile Start must not auto-build"; cat "$DOCKER_LOG"; exit 1; } || true
 grep -q "Dockerfile.local" <<<"$changed_out" || { echo "FAIL: changed Dockerfile reason missing"; echo "$changed_out"; exit 1; }
+grep -q "marina rebuild --api" <<<"$changed_out" || { echo "FAIL: changed Dockerfile rebuild hint missing"; echo "$changed_out"; exit 1; }
 if grep -Eq 'raw-build-secret|file:|hmac' <<<"$changed_out"; then
-  echo "FAIL: automatic build output exposed secret or digest"; echo "$changed_out"; exit 1
+  echo "FAIL: stale image output exposed secret or digest"; echo "$changed_out"; exit 1
 fi
 
 printf '# changed again\n' >> "$P/api/Dockerfile.local"
 : > "$DOCKER_LOG"
 if FAIL_UP=1 mrun start --api >/dev/null 2>&1; then echo "FAIL: forced compose failure succeeded"; exit 1; fi
-grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: failed stale Start did not attempt build"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: failed stale Start not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: failed stale Start must not auto-build"; cat "$DOCKER_LOG"; exit 1; } || true
 : > "$DOCKER_LOG"; mrun start --api >/dev/null
-grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: failed build advanced baseline"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: stale Start retry not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: failed stale Start advanced baseline"; cat "$DOCKER_LOG"; exit 1; } || true
 
 : > "$DOCKER_LOG"; mrun rebuild --api >/dev/null
 grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: explicit Rebuild must always build"; cat "$DOCKER_LOG"; exit 1; }
+
+: > "$DOCKER_LOG"
+if FAIL_CLEAN_BUILD=1 mrun clean-rebuild --api >/dev/null 2>&1; then echo "FAIL: forced clean rebuild build failure succeeded"; exit 1; fi
+grep -q "compose .*build --no-cache api" "$DOCKER_LOG" || { echo "FAIL: clean rebuild did not run no-cache build"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "compose .*up -d" "$DOCKER_LOG" && { echo "FAIL: failed clean rebuild still ran up"; cat "$DOCKER_LOG"; exit 1; } || true
+[[ ! -e "$SD/build-baseline.json" ]] || { echo "FAIL: failed clean rebuild kept stale baseline"; exit 1; }
+
+: > "$DOCKER_LOG"; mrun clean-rebuild --api >/dev/null
+grep -q "compose .*build --no-cache api" "$DOCKER_LOG" || { echo "FAIL: clean rebuild missing no-cache build"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: clean rebuild did not start with build"; cat "$DOCKER_LOG"; exit 1; }
+[[ -f "$SD/build-baseline.json" ]] || { echo "FAIL: clean rebuild did not refresh baseline"; exit 1; }
 
 : > "$DOCKER_LOG"; mrun start --web >/dev/null
 grep -q "compose .*up -d --remove-orphans web" "$DOCKER_LOG" || { echo "FAIL: image-only Start not routed"; cat "$DOCKER_LOG"; exit 1; }
@@ -170,10 +195,11 @@ wait "$api_start" "$worker_start"
 
 # Build 도중 선언 입력이 바뀌면 pre-build snapshot과 post-build image를 baseline으로 묶지 않는다.
 rm -f "$SD/build-baseline.json"
-MUTATE_FILE="$P/api/Dockerfile.local" mrun start --api >/dev/null
+MUTATE_FILE="$P/api/Dockerfile.local" mrun rebuild --api >/dev/null
 [[ ! -e "$SD/build-baseline.json" ]] || { echo "FAIL: changed-during-build inputs advanced baseline"; exit 1; }
 : > "$DOCKER_LOG"; mrun start --api >/dev/null
-grep -q "compose .*up -d --build --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: changed-during-build input was not retried"; cat "$DOCKER_LOG"; exit 1; }
+grep -q "compose .*up -d --remove-orphans api" "$DOCKER_LOG" || { echo "FAIL: changed-during-build stale Start not routed"; cat "$DOCKER_LOG"; exit 1; }
+grep -q -- "--build" "$DOCKER_LOG" && { echo "FAIL: changed-during-build Start must not auto-build"; cat "$DOCKER_LOG"; exit 1; } || true
 
 # stop --web → stop web (down 아님)
 : > "$DOCKER_LOG"; mrun stop --web >/dev/null

@@ -12,10 +12,120 @@
     let matchView = false;
     let sessionSignature = '';
     const openLinksRoots = new Set();
-    const expandedRoots = new Set();
+    const EXPANDED_ROOTS_KEY = 'marinaExpandedRoots';
+    function loadExpandedRoots() {
+      try {
+        const roots = JSON.parse(localStorage.getItem(EXPANDED_ROOTS_KEY) || '[]');
+        return new Set(Array.isArray(roots) ? roots.filter(root => typeof root === 'string') : []);
+      } catch {
+        return new Set();
+      }
+    }
+    const expandedRoots = loadExpandedRoots();
+    function persistExpandedRoots() {
+      localStorage.setItem(EXPANDED_ROOTS_KEY, JSON.stringify([...expandedRoots]));
+    }
+    function toggleExpandedRoot(root) {
+      if (expandedRoots.has(root)) expandedRoots.delete(root);
+      else expandedRoots.add(root);
+      persistExpandedRoots();
+    }
+    function expandRoot(root) {
+      if (expandedRoots.has(root)) return;
+      expandedRoots.add(root);
+      persistExpandedRoots();
+    }
     const subrepoOpen = new Map();   // `${root}::${subrepo}` → bool (펼침). 미설정이면 attached=펼침 기본.
     let selectedProjectId = localStorage.getItem('marinaSelectedProject') || null;
     let switcherOpen = false;
+    const AGENT_INBOX_READ_KEY = 'marinaAgentInboxRead';
+    const AGENT_STATUS_META = {
+      working:   { dot: 'boot', label: '작업 중', title: '에이전트가 현재 작업 중' },
+      waiting:   { dot: 'part', label: '응답 대기', title: '응답을 마치고 다음 입력을 기다리는 중' },
+      completed: { dot: 'run',  label: '완료', title: '작업을 마치고 세션이 종료됨' },
+      failed:    { dot: 'bad',  label: '실패', title: '작업이 오류 또는 중단으로 끝남' },
+      idle:      { dot: 'stop', label: '유휴', title: '현재 상태를 확인할 이벤트가 없음' },
+    };
+    let agentInboxOpen = false;
+    function loadAgentInboxRead() {
+      try {
+        const ids = JSON.parse(localStorage.getItem(AGENT_INBOX_READ_KEY) || '[]');
+        return new Set(Array.isArray(ids) ? ids.filter(id => typeof id === 'string') : []);
+      } catch { return new Set(); }
+    }
+    const agentInboxRead = loadAgentInboxRead();
+    function agentInboxEventId(agent) {
+      return `${agent.source || ''}:${agent.sid || ''}:${agent.status || 'idle'}:${agent.statusTs || agent.ts || 0}`;
+    }
+    function agentInboxEntries() {
+      const actionable = new Set(['waiting', 'completed', 'failed']);
+      const entries = [];
+      for (const wt of worktreeData) {
+        for (const agent of (wt.agents || [])) {
+          if (!agent.sid || !actionable.has(agent.status)) continue;
+          entries.push({ ...agent, root: wt.root, projectId: wt.projectId,
+            projectLabel: wt.projectLabel || wt.projectId || 'Project', eventId: agentInboxEventId(agent) });
+        }
+      }
+      return entries.sort((a, b) => Number(b.statusTs || b.ts || 0) - Number(a.statusTs || a.ts || 0)).slice(0, 50);
+    }
+    function persistAgentInboxRead() {
+      localStorage.setItem(AGENT_INBOX_READ_KEY, JSON.stringify([...agentInboxRead].slice(-300)));
+    }
+    function markAgentInboxRead(eventId) {
+      agentInboxRead.add(eventId);
+      persistAgentInboxRead();
+    }
+    function openAgentInboxItem(eventId) {
+      const entry = agentInboxEntries().find(item => item.eventId === eventId);
+      if (!entry) return;
+      markAgentInboxRead(eventId);
+      agentInboxOpen = false;
+      selectedProjectId = entry.projectId || selectedProjectId;
+      if (selectedProjectId) localStorage.setItem('marinaSelectedProject', selectedProjectId);
+      render();
+      if (typeof openAgentTerminal === 'function') openAgentTerminal(entry.root, entry);
+    }
+    function renderAgentInbox() {
+      const button = document.getElementById('agentInboxBtn');
+      const count = document.getElementById('agentInboxCount');
+      const panel = document.getElementById('agentInboxPanel');
+      if (!button || !count || !panel) return;
+      const entries = agentInboxEntries();
+      const unread = entries.filter(item => !agentInboxRead.has(item.eventId)).length;
+      count.hidden = unread === 0;
+      count.textContent = unread > 99 ? '99+' : String(unread);
+      button.classList.toggle('has-unread', unread > 0);
+      button.title = unread ? `에이전트 Inbox · 새 작업 ${unread}개` : '에이전트 Inbox';
+      button.setAttribute('aria-expanded', agentInboxOpen ? 'true' : 'false');
+      panel.hidden = !agentInboxOpen;
+      if (!agentInboxOpen) return;
+      let lastProject = null;
+      panel.innerHTML = entries.length ? entries.map(item => {
+        const project = item.projectLabel || 'Project';
+        const group = project !== lastProject ? `<div class="agent-inbox-group">${escapeHtml(project)}</div>` : '';
+        lastProject = project;
+        const meta = AGENT_STATUS_META[item.status] || AGENT_STATUS_META.idle;
+        const read = agentInboxRead.has(item.eventId);
+        return `${group}<button class="agent-inbox-item${read ? ' read' : ' unread'}" data-agent-inbox-id="${escapeHtml(item.eventId)}">
+          <span class="wt-dot ${meta.dot}" aria-hidden="true"></span>
+          <span class="agent-src ${item.source === 'codex' ? 'codex' : 'claude'}">${item.source === 'codex' ? 'CX' : 'CC'}</span>
+          <span class="agent-inbox-copy"><b>${escapeHtml(item.title || item.sid)}</b><small>${escapeHtml(meta.label)} · ${escapeHtml(relTime(item.statusTs || item.ts))}</small></span>
+        </button>`;
+      }).join('') : '<div class="agent-inbox-empty">확인할 에이전트 작업이 없습니다.</div>';
+      panel.querySelectorAll('[data-agent-inbox-id]').forEach(item => {
+        item.onclick = event => { event.stopPropagation(); openAgentInboxItem(item.dataset.agentInboxId); };
+      });
+    }
+
+    document.getElementById('agentInboxBtn').onclick = event => {
+      event.stopPropagation();
+      agentInboxOpen = !agentInboxOpen;
+      renderAgentInbox();
+    };
+    document.addEventListener('click', event => {
+      if (agentInboxOpen && !event.target.closest('#agentInboxWrap')) { agentInboxOpen = false; renderAgentInbox(); }
+    });
 
     // 인라인 토스트 — 네이티브 alert 대체(R5, Orca 톤). kind: 'ok' | 'err' | '' (기본=info). 3s 후 자동 소멸.
     function showToast(msg, kind) {

@@ -129,6 +129,8 @@ write_plist() {
   <string>$LOG_FILE</string>
   <key>RunAtLoad</key>
   <true/>
+  <key>KeepAlive</key>
+  <true/>
 </dict>
 </plist>
 EOF

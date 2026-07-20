@@ -25,6 +25,7 @@ from marina_build_inputs import (
     load_build_input_key,
     merge_build_baseline,
     read_build_baseline,
+    remove_build_baseline_services,
 )
 
 root = Path(sys.argv[2])
@@ -134,6 +135,13 @@ assert read_build_baseline(baseline_path) == before
 assert baseline_path.stat().st_mode & 0o777 == 0o600
 lock_path = baseline_path.with_name(baseline_path.name + ".lock")
 assert lock_path.stat().st_mode & 0o777 == 0o600
+other_snapshot = {"version": 1, "status": "ok", "services": {"worker": before["services"]["api"]}}
+merge_build_baseline(baseline_path, other_snapshot)
+remove_build_baseline_services(baseline_path, ["api"])
+trimmed = read_build_baseline(baseline_path)
+assert trimmed is not None and set(trimmed["services"]) == {"worker"}, trimmed
+remove_build_baseline_services(baseline_path, ["worker"])
+assert not baseline_path.exists(), "removing final service should delete baseline"
 
 corrupt_path = root / "session" / "corrupt.json"
 corrupt_path.write_text("not json", encoding="utf-8")

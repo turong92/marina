@@ -34,6 +34,7 @@ try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로
         merge_build_baseline,
         read_build_baseline,
         read_build_input_snapshot,
+        remove_build_baseline_services,
         write_build_input_snapshot,
     )
     from marina_logtext import redact_text
@@ -49,6 +50,7 @@ except ImportError:
         merge_build_baseline,
         read_build_baseline,
         read_build_input_snapshot,
+        remove_build_baseline_services,
         write_build_input_snapshot,
     )
     from marina_logtext import redact_text
@@ -739,6 +741,16 @@ def up_argv(stored, overlay, project_dir, project_name, services, build=False):
     return a + list(services)
 
 
+def build_argv(stored, overlay, project_dir, project_name, services, no_cache=False):
+    a = ["docker", "compose", "-f", stored]
+    if overlay and os.path.exists(overlay) and os.path.getsize(overlay) > 0:
+        a += ["-f", overlay]
+    a += ["--project-directory", project_dir, "-p", project_name, "build"]
+    if no_cache:
+        a.append("--no-cache")
+    return a + list(services)
+
+
 def watchable_services(config: dict, requested: list[str]) -> list[str]:
     """Compose develop.watch가 선언된 요청 서비스만 결정적으로 반환한다."""
     services = config.get("services") if isinstance(config.get("services"), dict) else {}
@@ -1000,6 +1012,15 @@ def _build_reason_text(reason):
     change = " ".join(str(reason.get("change") or "changed").split())
     subject = " ".join(value for value in (service, label) if value)
     return redact_text(f"{subject} {change}".strip())
+
+
+def _rebuild_hint_for_reason(reason, build_services):
+    service = " ".join(str(reason.get("service") or "").split())
+    candidates = [service] if service else list(build_services)
+    candidates = [item for item in candidates if item]
+    if not candidates:
+        return "marina rebuild --all"
+    return "marina rebuild " + " ".join(f"--{item}" for item in candidates)
 
 
 def _inspect_baseline_images(baseline, services):
@@ -1361,19 +1382,28 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                 current_inputs,
                 _inspect_baseline_images(baseline, current_inputs.get("services") or {}),
             )
-            effective_build, build_reasons = build_decision(
+            clean_build = bool(getattr(a, "clean_build", False))
+            explicit_build = bool(a.build or clean_build)
+            needs_rebuild, build_reasons = build_decision(
                 decision_inputs,
                 baseline,
-                explicit=bool(a.build),
+                explicit=explicit_build,
             )
+            effective_build = explicit_build
             if current_inputs.get("status") != "ok":
-                if a.build:
+                if effective_build:
                     sys.stderr.write("warning: build 입력을 확인하지 못했습니다; Rebuild는 계속하지만 baseline은 갱신하지 않습니다.\n")
                 else:
                     sys.stderr.write("warning: build 입력을 확인하지 못해 기존 이미지로 시작합니다; 문제가 있으면 Rebuild를 실행하세요.\n")
-            elif effective_build and not a.build:
+            elif needs_rebuild and not a.build:
                 for reason in build_reasons:
-                    print(f"stale image: {_build_reason_text(reason)}; Start에 --build 자동 적용")
+                    print(
+                        "stale image: "
+                        + _build_reason_text(reason)
+                        + "; run `"
+                        + _rebuild_hint_for_reason(reason, build_services)
+                        + "`"
+                    )
             argv = up_argv(
                 a.stored, overlay, a.project_dir, name, requested + sidecars,
                 build=effective_build,
@@ -1383,7 +1413,18 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                 with _effective_build_slot(
                     a.session_dir, effective_build, a.project_dir
                 ):
-                    rc = subprocess.call(argv, env=env)
+                    if clean_build:
+                        remove_build_baseline_services(baseline_path, build_services)
+                    rc = 0
+                    if clean_build and build_services:
+                        clean_argv = build_argv(
+                            a.stored, overlay, a.project_dir, name,
+                            build_services, no_cache=True,
+                        )
+                        print("compose: " + " ".join(clean_argv))
+                        rc = subprocess.call(clean_argv, env=env)
+                    if rc == 0:
+                        rc = subprocess.call(argv, env=env)
                     if rc == 0 and effective_build and current_inputs.get("status") == "ok":
                         try:
                             post_inputs = _capture_build_inputs(
@@ -1404,7 +1445,7 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                             else:
                                 sys.stderr.write(
                                     "warning: build 중 입력 또는 image ID가 바뀌어 baseline을 갱신하지 않습니다; "
-                                    "다음 Start에서 다시 build합니다.\n"
+                                    "다음 Start에서 다시 Rebuild 안내를 표시합니다.\n"
                                 )
                         except OSError as exc:
                             sys.stderr.write(f"warning: build baseline 저장 실패; 다음 Start에서 다시 확인합니다: {exc}\n")
@@ -1650,7 +1691,7 @@ def main(argv=None):
     p = sub.add_parser("overlay"); p.set_defaults(fn=cmd_overlay)
     p = sub.add_parser("psports"); p.set_defaults(fn=cmd_psports)
     p = sub.add_parser("xmarina"); p.add_argument("--stored", required=True); p.add_argument("--key"); p.set_defaults(fn=cmd_xmarina)
-    p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.set_defaults(fn=cmd_up)
+    p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.add_argument("--clean-build", action="store_true"); p.set_defaults(fn=cmd_up)
     p = sub.add_parser("prebuild-run"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--legacy-prebuild"); p.add_argument("--compose-version", required=True); p.set_defaults(fn=cmd_prebuild_run)
     p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir"); p.add_argument("--with-signature", action="store_true"); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
     p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)

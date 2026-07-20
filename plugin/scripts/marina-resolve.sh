@@ -16,7 +16,8 @@ def ok(p):
     return bool(p) and os.path.isfile(os.path.join(p, "scripts", "marina-entrypoint.sh"))
 def is_dev(p):
     p = os.path.realpath(os.path.expanduser(p or ""))
-    return os.path.basename(p) == "plugin" and os.path.isdir(os.path.join(os.path.dirname(p), ".git"))
+    git = os.path.join(os.path.dirname(p), ".git")
+    return os.path.basename(p) == "plugin" and (os.path.isdir(git) or os.path.isfile(git))
 cands = []
 if len(sys.argv) > 1 and is_dev(sys.argv[1]):
     cands.append(sys.argv[1])   # source checkout launcher: keep serving the editable dev tree
@@ -64,7 +65,8 @@ def ok(p):
     return bool(p) and os.path.isfile(os.path.join(p, "scripts", "marina-entrypoint.sh"))
 def is_dev(p):
     p = os.path.realpath(os.path.expanduser(p or ""))
-    return os.path.basename(p) == "plugin" and os.path.isdir(os.path.join(os.path.dirname(p), ".git"))
+    git = os.path.join(os.path.dirname(p), ".git")
+    return os.path.basename(p) == "plugin" and (os.path.isdir(git) or os.path.isfile(git))
 cands = []
 if len(sys.argv) > 1 and is_dev(sys.argv[1]):
     cands.append(sys.argv[1])   # source checkout launcher: keep serving the editable dev tree

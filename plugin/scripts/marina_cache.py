@@ -176,6 +176,118 @@ def docker_volume_rm(name: str) -> bool:
     subprocess.check_output(_docker_cmd("volume", "rm", name), text=True, stderr=subprocess.STDOUT, timeout=30)
     return True
 
+def docker_image_rm(image_id: str) -> bool:
+    subprocess.check_output(_docker_cmd("image", "rm", image_id), text=True, stderr=subprocess.STDOUT, timeout=30)
+    return True
+
+def _json_docs(value: str) -> list[Any]:
+    text = (value or "").strip()
+    if not text:
+        return []
+    docs: list[Any] = []
+    try:
+        docs.append(json.loads(text))
+    except json.JSONDecodeError:
+        for line in text.splitlines():
+            try:
+                docs.append(json.loads(line))
+            except json.JSONDecodeError:
+                pass
+    return docs
+
+def _section_size_mb(doc: dict[str, Any], *keys: str) -> int:
+    total = 0
+    for key in keys:
+        section = doc.get(key)
+        if isinstance(section, dict):
+            section = section.values()
+        if isinstance(section, list):
+            for item in section:
+                if not isinstance(item, dict):
+                    continue
+                usage = item.get("UsageData") if isinstance(item.get("UsageData"), dict) else {}
+                total += _parse_size_mb(item.get("Size") or item.get("SizeBytes") or usage.get("Size"))
+    return total
+
+def docker_disk_summary() -> dict[str, int]:
+    try:
+        out = subprocess.check_output(
+            _docker_cmd("system", "df", "-v", "--format", "json"),
+            text=True, stderr=subprocess.DEVNULL, timeout=12,
+        )
+    except Exception:
+        return {"imagesMb": 0, "buildCacheMb": 0, "volumesMb": 0}
+    summary = {"imagesMb": 0, "buildCacheMb": 0, "volumesMb": 0}
+    for doc in _json_docs(out):
+        if not isinstance(doc, dict):
+            continue
+        summary["imagesMb"] += _section_size_mb(doc, "Images", "images")
+        summary["buildCacheMb"] += _section_size_mb(doc, "BuildCache", "Buildkit", "buildCache")
+        summary["volumesMb"] += _section_size_mb(doc, "Volumes", "volumes")
+        row_type = str(doc.get("Type") or doc.get("TYPE") or "").lower()
+        row_size = _parse_size_mb(doc.get("Size") or doc.get("TotalSize") or doc.get("SIZE"))
+        if "image" in row_type:
+            summary["imagesMb"] += row_size
+        elif "build" in row_type:
+            summary["buildCacheMb"] += row_size
+        elif "volume" in row_type:
+            summary["volumesMb"] += row_size
+    return summary
+
+def _compose_base_args(project: dict[str, Any], root: Path, stored: Path) -> list[str]:
+    return [
+        *_docker_cmd("compose", "-f", str(stored)),
+        "--project-directory", str(root),
+        "-p", _mc().compose_project_name(str(project.get("id") or ""), session_id(root)),
+    ]
+
+def _build_service_names(data: dict[str, Any]) -> list[str]:
+    services = data.get("services") if isinstance(data.get("services"), dict) else {}
+    return sorted(
+        str(name)
+        for name, service in services.items()
+        if isinstance(service, dict) and service.get("build")
+    )
+
+def compose_build_image_items(root: Path) -> list[dict[str, Any]]:
+    project, stored = _stored_compose_path(root)
+    if not project or stored is None or not stored.exists():
+        return []
+    _project, data = _load_stored_compose(root)
+    base = _compose_base_args(project, root, stored)
+    items: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for service in _build_service_names(data):
+        try:
+            out = subprocess.check_output(
+                [*base, "images", "--format", "json", service],
+                text=True, stderr=subprocess.DEVNULL, timeout=12,
+            )
+        except Exception:
+            continue
+        for doc in _json_docs(out):
+            rows = doc if isinstance(doc, list) else [doc]
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                image_id = str(row.get("ID") or row.get("ImageID") or "").strip()
+                if not image_id or image_id in seen:
+                    continue
+                seen.add(image_id)
+                repository = str(row.get("Repository") or row.get("Name") or "")
+                tag = str(row.get("Tag") or "")
+                usage = row.get("UsageData") if isinstance(row.get("UsageData"), dict) else {}
+                items.append({
+                    "type": "image",
+                    "category": "images",
+                    "service": str(row.get("Service") or service),
+                    "imageId": image_id,
+                    "repository": repository,
+                    "tag": tag,
+                    "sizeMb": _parse_size_mb(row.get("Size") or row.get("SizeBytes") or usage.get("Size")),
+                })
+    return items
+
 def _compose_cache_volumes(root: Path, project: dict[str, Any] | None, data: dict[str, Any]) -> list[dict[str, Any]]:
     if not project:
         return []

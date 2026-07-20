@@ -51,6 +51,8 @@ services:
       - db_data:/var/lib/postgresql/data
   api:
     build: ./api
+  redis:
+    image: redis:7
 volumes:
   web_node: {}
   web_next: {}
@@ -62,6 +64,7 @@ import marina_lifecycle
 
 existing = {"proj-main_web_node", "proj-main_web_next", "proj-main_db_data"}
 removed = []
+removed_images = []
 
 marina_cache.docker_volume_exists = lambda name: name in existing
 marina_cache.docker_volume_sizes_mb = lambda names=None: {
@@ -70,7 +73,35 @@ marina_cache.docker_volume_sizes_mb = lambda names=None: {
     "proj-main_db_data": 999,
 }
 marina_cache.docker_volume_rm = lambda name: removed.append(name) or True
+marina_cache.docker_image_rm = lambda image_id: removed_images.append(image_id) or True
 marina_lifecycle.docker_volume_rm = marina_cache.docker_volume_rm
+marina_lifecycle.docker_image_rm = marina_cache.docker_image_rm
+
+def fake_check_output(args, **kwargs):
+    text = " ".join(str(arg) for arg in args)
+    if args and str(args[0]) == "du":
+        return "2048\t/path\n"
+    if "system df" in text:
+        return json.dumps({
+            "Images": [{"Size": "3.5GB"}],
+            "BuildCache": [{"Size": "12GB"}],
+            "Volumes": [{"Name": "proj-main_web_next", "Size": "80MB"}],
+        })
+    if "images --format json web" in text:
+        return json.dumps([{
+            "Service": "web",
+            "ID": "sha256:web",
+            "Repository": "proj-web",
+            "Tag": "latest",
+            "Size": "512MB",
+        }])
+    if "images --format json api" in text:
+        return ""
+    if "images --format json redis" in text:
+        raise AssertionError("image-only services must not be inspected for cleanup")
+    raise AssertionError(f"unexpected docker command: {text}")
+
+marina_cache.subprocess.check_output = fake_check_output
 
 items = marina_cache.cache_items_by_category(project_root)
 assert "web_node" in items and "web_next" in items, items
@@ -91,6 +122,27 @@ assert result["freedMb"] == 120, result
 result = marina_lifecycle.clear_worktree_cache(project_root, "api_cache")
 assert not (project_root / "api" / ".cache").exists(), result
 assert result["freedMb"] > 0, result
+
+summary = marina_cache.docker_disk_summary()
+assert summary == {"imagesMb": 3584, "buildCacheMb": 12288, "volumesMb": 80}, summary
+
+images = marina_cache.compose_build_image_items(project_root)
+assert images == [{
+    "type": "image",
+    "category": "images",
+    "service": "web",
+    "imageId": "sha256:web",
+    "repository": "proj-web",
+    "tag": "latest",
+    "sizeMb": 512,
+}], images
+
+marina_lifecycle._worktree_du_cache[str(project_root)] = (0, 1, {}, 512, {})
+result = marina_lifecycle.clear_worktree_images(project_root)
+assert result["removed"] == ["sha256:web"], result
+assert result["freedMb"] == 512, result
+assert removed_images == ["sha256:web"], removed_images
+assert str(project_root) not in marina_lifecycle._worktree_du_cache
 
 print("ok cache discovery")
 PY

@@ -23,6 +23,12 @@ grep -q "나머지 시작" "$J" || { echo "FAIL: 섞임 카드 ▶(나머지 시
 grep -q "marinaCardOrder" "$J" || { echo "FAIL: 카드 순서 저장(marinaCardOrder) 없음"; exit 1; }
 grep -q "wireCardDrag" "$J" || { echo "FAIL: 카드 D&D 배선 없음"; exit 1; }
 ! grep -q "activityTs(b) - activityTs(a)" "$J" || { echo "FAIL: 최근순 자동 정렬 잔재 — 카드가 스스로 움직이면 안 됨"; exit 1; }
+# 대시보드 재기동/새로고침 뒤에도 펼친 서비스 카드가 접히지 않아야 한다.
+grep -q "marinaExpandedRoots" "$HERE/../scripts/marina-web/app-1-core.js" || { echo "FAIL: 서비스 카드 펼침 상태 저장 없음"; exit 1; }
+grep -q "toggleExpandedRoot" "$J" || { echo "FAIL: 카드 펼침 토글이 저장 헬퍼를 거치지 않음"; exit 1; }
+# 서비스별 수명주기 버튼(▶/⏹)은 hover 없이도 직접 누를 수 있어야 한다.
+grep -q "svc-lifecycle-action" "$HERE/../scripts/marina-web/app-5b-actions.js" || { echo "FAIL: 서비스 개별 시작/정지 버튼 식별자 없음"; exit 1; }
+grep -q "\.svc \.hov-acts > \.svc-lifecycle-action" "$HERE/../scripts/marina-web/styles.css" || { echo "FAIL: 서비스 개별 시작/정지 버튼 상시 노출 CSS 없음"; exit 1; }
 # 문법 검사 — 전 웹 JS 파일 (node 없으면 스킵)
 if command -v node >/dev/null 2>&1; then
   for f in "$HERE/../scripts/marina-web/"app-*.js; do

@@ -216,7 +216,7 @@
       body.innerHTML = `${warn}${restartNote}<div class="conn-graph-wrap"><svg viewBox="0 0 ${w} ${h}" width="100%" style="max-width:${w}px;height:auto" role="img" aria-label="연결 다이어그램 — 내 컴퓨터(브라우저·인프라)와 Docker 격리 서비스">${edges}${nodes}</svg></div>`;
 
       body.querySelectorAll('[data-conn-svc]').forEach(el => { el.onclick = (e) => { e.stopPropagation(); selectLog(root, el.dataset.connSvc); }; });
-      body.querySelectorAll('[data-conn-open]').forEach(el => { el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); window.open(el.dataset.connOpen, '_blank'); }; });
+      body.querySelectorAll('[data-conn-open]').forEach(el => { el.onclick = (e) => { e.preventDefault(); e.stopPropagation(); window.open(el.dataset.connOpen, '_blank', 'noopener'); }; });
       // 호스트 포트 클릭 = 복사(런마다 바뀌니 그때그때 집어가게)
       body.querySelectorAll('[data-conn-copy]').forEach(el => {
         el.onclick = async (e) => {

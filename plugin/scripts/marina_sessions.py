@@ -2,6 +2,7 @@
 from __future__ import annotations
 import glob
 import json
+import mmap
 import os
 import re
 import shlex
@@ -12,6 +13,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -19,7 +21,7 @@ import importlib.util as _ilu
 
 from marina_state import CODEX_HOME, HOST, LIFECYCLE_BUSY, PORT, _claude_agents_cache, _codex_agents_cache, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_du_cache, _worktree_info_cache, busy_key
 from marina_logtext import redact_text
-from marina_cache import cache_category_mb, disk_usage_mb
+from marina_cache import cache_category_mb, compose_build_image_items, disk_usage_mb, docker_disk_summary
 from marina_registry import default_attach_of, discover_all_roots, discover_roots, is_source_checkout, project_for, project_label, root_source, subrepos_of
 from marina_paths import ensure_current_log, log_run_payload, read_config, read_meta, service_log, session_dir, session_id
 from marina_compose_svc import _compose_services, _log_tail_line, compose_service_names, compose_service_subrepos, missing_env_vars
@@ -285,21 +287,25 @@ WORKTREE_DU_TTL = 600.0
 _du_inflight: set[str] = set()
 _du_lock = threading.Lock()
 
-def _compute_du(root: Path, is_main: bool) -> tuple[float, Any, dict[str, int]]:
+def _compute_du(root: Path, is_main: bool) -> tuple[float, Any, dict[str, int], int, dict[str, int]]:
     # main 체크아웃 전체 du 는 수백 GB 라 비싸고 UI 에서도 안 씀 → 스킵
-    return (time.time(), None if is_main else disk_usage_mb(root), cache_category_mb(root))
+    image_mb = sum(int(item.get("sizeMb") or 0) for item in compose_build_image_items(root))
+    return (time.time(), None if is_main else disk_usage_mb(root), cache_category_mb(root), image_mb, docker_disk_summary())
 
-def _du_info(root: Path, is_main: bool, refresh: bool) -> tuple[Any, dict[str, int]]:
-    """(diskMb, cacheCats) — 있던 값은 즉시 주고 갱신은 백그라운드. 응답을 du 가 못 막게.
+def _du_info(root: Path, is_main: bool, refresh: bool) -> tuple[Any, dict[str, int], int, dict[str, int]]:
+    """(diskMb, cacheCats, imageMb, dockerDisk) — 있던 값은 즉시 주고 갱신은 백그라운드. 응답을 du 가 못 막게.
     동기 계산은 캐시가 아예 없는 refresh(=캐시 정리 직후 loadWorktrees(true) 가 새 용량을 기대) 뿐."""
     key = str(root)
     cached = _worktree_du_cache.get(key)
+    if cached and len(cached) == 3:
+        cached = (cached[0], cached[1], cached[2], 0, {"imagesMb": 0, "buildCacheMb": 0, "volumesMb": 0})
+        _worktree_du_cache[key] = cached
     if cached and not refresh and time.time() - cached[0] < WORKTREE_DU_TTL:
-        return cached[1], cached[2]
+        return cached[1], cached[2], cached[3], cached[4]
     if cached is None and refresh:
         info = _compute_du(root, is_main)
         _worktree_du_cache[key] = info
-        return info[1], info[2]
+        return info[1], info[2], info[3], info[4]
     with _du_lock:
         spawn = key not in _du_inflight
         if spawn:
@@ -313,8 +319,8 @@ def _du_info(root: Path, is_main: bool, refresh: bool) -> tuple[Any, dict[str, i
                     _du_inflight.discard(key)
         threading.Thread(target=_calc, daemon=True).start()
     if cached:
-        return cached[1], cached[2]   # 만료된 값이라도 공백보단 낫다 — 다음 폴이 새 값을 집어감
-    return None, {}
+        return cached[1], cached[2], cached[3], cached[4]   # 만료된 값이라도 공백보단 낫다 — 다음 폴이 새 값을 집어감
+    return None, {}, 0, {"imagesMb": 0, "buildCacheMb": 0, "volumesMb": 0}
 
 # Claude 데스크톱 앱의 세션 타이틀 — worktree 정체성으로 사용 (LLM 자동생성, 유저 수정 가능).
 # CLI(터미널 claude)는 이 파일을 안 만들므로 비어 있으면 headSubject→해시 폴백.
@@ -420,6 +426,8 @@ AGENT_PREVIEW_TAIL_BYTES = 16 * 1024   # preview 는 파일 끝만 읽는다 —
 
 AGENT_PREVIEW_LEN = 80
 
+AGENT_STATE_TAIL_BYTES = 1024 * 1024
+
 def _claude_project_slug(root: Path) -> str:
     return re.sub(r"[/.]", "-", str(root))
 
@@ -454,6 +462,85 @@ def _jsonl_last_assistant_preview(path: Path) -> str:
                 if snippet:
                     return snippet[:AGENT_PREVIEW_LEN]
     return ""
+
+
+def _agent_event_ts(obj: dict[str, Any], fallback: float) -> int:
+    raw = obj.get("timestamp")
+    if isinstance(raw, (int, float)):
+        return int(raw)
+    if isinstance(raw, str) and raw:
+        try:
+            return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+        except ValueError:
+            pass
+    payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+    for key in ("completed_at", "started_at"):
+        value = payload.get(key)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return int(fallback)
+
+
+def _agent_state_rows(path: Path) -> tuple[list[dict[str, Any]], float]:
+    try:
+        stat = path.stat()
+        with path.open("rb") as fh:
+            if stat.st_size > AGENT_STATE_TAIL_BYTES:
+                fh.seek(stat.st_size - AGENT_STATE_TAIL_BYTES)
+            raw = fh.read()
+    except OSError:
+        return [], 0
+    rows: list[dict[str, Any]] = []
+    for line in raw.decode("utf-8", errors="ignore").splitlines():
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows, stat.st_mtime
+
+
+def agent_status(path: Path, source: str, terminal_active: bool = False) -> dict[str, Any]:
+    """Normalize native Claude/Codex turn boundaries without reading an entire rollout."""
+    rows, mtime = _agent_state_rows(path)
+    ended = "waiting" if terminal_active else "completed"
+    if source == "codex":
+        for obj in reversed(rows):
+            payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+            event = payload.get("type") if obj.get("type") == "event_msg" else None
+            ts = _agent_event_ts(obj, mtime)
+            if event == "task_complete":
+                return {"status": ended, "statusTs": ts}
+            if event == "turn_aborted":
+                reason = str(payload.get("reason") or "aborted")
+                return {"status": "failed", "statusTs": ts, "statusReason": reason[:120]}
+            if event in ("error", "stream_error"):
+                reason = str(payload.get("message") or payload.get("error") or event)
+                return {"status": "failed", "statusTs": ts, "statusReason": reason[:120]}
+            if event == "task_started":
+                return {"status": "working", "statusTs": ts}
+    elif source == "claude":
+        for obj in reversed(rows):
+            typ = obj.get("type")
+            ts = _agent_event_ts(obj, mtime)
+            if typ == "system" and obj.get("subtype") == "api_error":
+                return {"status": "failed", "statusTs": ts, "statusReason": "api_error"}
+            if typ == "system" and obj.get("subtype") == "stop_hook_summary":
+                errors = obj.get("hookErrors") if isinstance(obj.get("hookErrors"), list) else []
+                if errors:
+                    return {"status": "failed", "statusTs": ts, "statusReason": "stop hook failed"}
+                return {"status": ended, "statusTs": ts}
+            if typ == "assistant":
+                message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+                if message.get("stop_reason") == "end_turn":
+                    return {"status": ended, "statusTs": ts}
+                return {"status": "working", "statusTs": ts}
+            if typ == "user":
+                return {"status": "working", "statusTs": ts}
+    if mtime and time.time() - mtime < 120:
+        return {"status": "working", "statusTs": int(mtime), "statusReason": "recent activity"}
+    return {"status": "idle", "statusTs": int(mtime or 0)}
 
 def claude_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
     # worktreePath → [{"source":"claude","title","ts"(파일 mtime),"cliSessionId"}] — claude_session_titles 와 같은 소스·캐시 리듬(20s)
@@ -545,13 +632,27 @@ def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
             item["sid"] = cli_sid   # 행 클릭=대화 열기 (agent-transcript) 식별자
             jpath = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{cli_sid}.jsonl"
             if jpath.is_file():
+                item.update(agent_status(jpath, "claude"))
                 preview = _jsonl_last_assistant_preview(jpath)
                 if preview:
                     from marina_logtext import redact_text   # 카드 payload 도 로그와 같은 마스킹(codex P2)
                     item["preview"] = redact_text(preview)
         elif e["source"] == "codex" and e.get("sid"):
             item["sid"] = e["sid"]
+            item.update(agent_status(Path(e["path"]), "codex"))
+        if "status" not in item:
+            item.update({"status": "idle", "statusTs": int(e["ts"])})
         agents.append(item)
+    return agents
+
+
+def activate_agent_payloads(agents: list[dict[str, Any]],
+                            active_agents: set[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Promote successful ended turns to waiting when their Marina PTY is still alive."""
+    for item in agents:
+        key = (str(item.get("source") or ""), str(item.get("sid") or ""))
+        if key in active_agents and item.get("status") == "completed":
+            item["status"] = "waiting"
     return agents
 
 
@@ -580,52 +681,311 @@ def _tail_lines(path: Path) -> list[str]:
         raw = fh.read()
     return raw.decode("utf-8", errors="ignore").splitlines()
 
-def agent_transcript(root: Path, source: str, sid: str) -> dict[str, Any]:
-    # AGENTS 행 클릭 뷰어 — 끝 256KB 에서 user/assistant 텍스트 턴만 추출(도구 호출·결과는 생략), 로그처럼 마스킹.
+
+def _json_objects(path: Path) -> list[dict[str, Any]]:
+    objects: list[dict[str, Any]] = []
+    for line in _tail_lines(path):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            obj = json.loads(line)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            objects.append(obj)
+    return objects
+
+
+def _transcript_object_turns(obj: dict[str, Any], source: str,
+                             line_offset: int | None = None) -> list[dict[str, str]]:
+    if source == "claude":
+        role = obj.get("type")
+        content = (obj.get("message") or {}).get("content")
+    else:
+        payload = obj.get("payload") or {}
+        if payload.get("type") != "message":
+            return []
+        role = payload.get("role")
+        content = payload.get("content")
+    if role not in ("user", "assistant"):
+        return []
+    turns: list[dict[str, str]] = []
+    for index, text in enumerate(_texts_of(content)):
+        turn = {"role": str(role), "text": text[:AGENT_TURN_MAX_CHARS]}
+        if line_offset is not None:
+            turn["id"] = f"{line_offset}:{index}"
+        turns.append(turn)
+    return turns
+
+
+def _redact_turns(turns: list[dict[str, str]]) -> list[dict[str, str]]:
+    turns = turns[-AGENT_TRANSCRIPT_MAX_TURNS:]
+    for turn in turns:
+        turn["text"] = _redact_transcript(redact_text(turn["text"]))
+    return turns
+
+
+def _transcript_turns(path: Path, source: str) -> list[dict[str, str]]:
+    turns: list[dict[str, str]] = []
+    for obj in _json_objects(path):
+        turns.extend(_transcript_object_turns(obj, source))
+    return _redact_turns(turns)
+
+
+def _transcript_page(path: Path, source: str, before: int | None,
+                     limit: int) -> dict[str, Any]:
+    size = path.stat().st_size
+    end = size if before is None else max(0, min(size, int(before)))
+    limit = max(1, min(100, int(limit or 40)))
+    if not size or not end:
+        return {"turns": [], "cursor": None, "hasMore": False, "fileSize": size}
+    groups: list[list[dict[str, str]]] = []
+    count = 0
+    cursor = end
+    with path.open("rb") as handle:
+        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            while cursor > 0 and count < limit:
+                line_end = cursor - 1 if data[cursor - 1] == 10 else cursor
+                if line_end <= 0:
+                    cursor = 0
+                    break
+                newline = data.rfind(b"\n", 0, line_end)
+                line_start = newline + 1
+                raw = data[line_start:line_end].strip()
+                cursor = line_start
+                if not raw.startswith(b"{"):
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+                if not isinstance(obj, dict):
+                    continue
+                line_turns = _transcript_object_turns(obj, source, line_start)
+                if not line_turns:
+                    continue
+                for turn in line_turns:
+                    turn["text"] = _redact_transcript(redact_text(turn["text"]))
+                groups.append(line_turns)
+                count += len(line_turns)
+    turns = [turn for group in reversed(groups) for turn in group]
+    return {"turns": turns, "cursor": cursor if cursor > 0 else None,
+            "hasMore": cursor > 0, "fileSize": size}
+
+
+def _json_value(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _content_text(content: Any) -> str:
+    return "\n".join(_texts_of(content)) if isinstance(content, list) else str(content or "")
+
+
+def _safe_activity_text(value: Any, limit: int = AGENT_TURN_MAX_CHARS) -> str:
+    return _redact_transcript(redact_text(str(value or "")[:limit]))
+
+
+def _codex_rollout_path(sid: str, root: Path | None = None) -> Path | None:
+    matches: list[Path] = []
+    for base in CODEX_ROLLOUT_DIRS:
+        if not base.is_dir():
+            continue
+        for raw_path in glob.iglob(str(base / "**" / f"rollout-*{sid}.jsonl"), recursive=True):
+            path = Path(raw_path)
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    meta = json.loads(handle.readline())
+                payload = meta.get("payload") or {}
+                if meta.get("type") != "session_meta" or payload.get("id") != sid:
+                    continue
+                if root is not None and Path(str(payload.get("cwd") or "")).resolve() != root.resolve():
+                    continue
+            except Exception:
+                continue
+            matches.append(path)
+    return max(matches, key=lambda path: path.stat().st_mtime) if matches else None
+
+
+def _claude_agent_activity(root: Path, sid: str) -> list[dict[str, Any]]:
+    session_dir = CLAUDE_PROJECTS_DIR / _claude_project_slug(root)
+    parent = session_dir / f"{sid}.jsonl"
+    if not parent.is_file():
+        return []
+    calls: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    for obj in _json_objects(parent):
+        message_content = (obj.get("message") or {}).get("content")
+        notification = obj.get("content") if isinstance(obj.get("content"), str) else message_content if isinstance(message_content, str) else ""
+        if "<task-notification>" in notification:
+            tool_match = re.search(r"<tool-use-id>([^<]+)</tool-use-id>", notification)
+            task_match = re.search(r"<task-id>([^<]+)</task-id>", notification)
+            status_match = re.search(r"<status>([^<]+)</status>", notification)
+            item = calls.get(tool_match.group(1)) if tool_match else None
+            if item is None and task_match:
+                task_id = task_match.group(1).strip()
+                item = next(
+                    (candidate for call_id, candidate in calls.items() if call_id == task_id or candidate.get("id") == task_id),
+                    None,
+                )
+            if item and status_match:
+                status = status_match.group(1).strip().lower()
+                if status == "completed":
+                    item["status"] = "completed"
+                elif status in ("failed", "error"):
+                    item["status"] = "failed"
+                elif status in ("stopped", "cancelled", "canceled"):
+                    item["status"] = "stopped"
+        blocks = message_content if isinstance(message_content, list) else []
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use" and block.get("name") in ("Agent", "Task"):
+                call_id = str(block.get("id") or "")
+                if not call_id:
+                    continue
+                args = block.get("input") if isinstance(block.get("input"), dict) else {}
+                calls[call_id] = {
+                    "id": call_id,
+                    "title": _safe_activity_text(args.get("description") or args.get("subagent_type") or "Subagent", 160),
+                    "status": "running",
+                    "preview": _safe_activity_text(args.get("prompt") or args.get("description") or ""),
+                    "turns": [],
+                }
+                order.append(call_id)
+            elif block.get("type") == "tool_result":
+                call_id = str(block.get("tool_use_id") or "")
+                item = calls.get(call_id)
+                if not item:
+                    continue
+                result_text = _content_text(block.get("content"))
+                match = re.search(r"agentId\s*[:=]\s*['\"]?([A-Za-z0-9_-]+)", result_text)
+                if match:
+                    item["id"] = match.group(1)
+                if block.get("is_error"):
+                    item["status"] = "failed"
+                elif "working in the background" not in result_text.lower():
+                    item["status"] = "completed"
+                if result_text and item["status"] != "running":
+                    item["preview"] = _safe_activity_text(result_text)
+
+    child_dir = session_dir / sid / "subagents"
+    child_paths = {path.stem.removeprefix("agent-"): path for path in child_dir.glob("agent-*.jsonl")} if child_dir.is_dir() else {}
+    for item in calls.values():
+        child = child_paths.get(str(item["id"]))
+        if not child:
+            continue
+        turns = _transcript_turns(child, "claude")
+        item["turns"] = turns[-12:]
+        if turns:
+            item["preview"] = turns[-1]["text"]
+    return [calls[call_id] for call_id in order][-20:]
+
+
+def _codex_agent_activity(root: Path, sid: str) -> list[dict[str, Any]]:
+    entries = codex_agent_sessions().get(str(root), [])
+    parent_entry = next((entry for entry in entries if entry.get("sid") == sid), None)
+    parent_path = Path(parent_entry.get("path") or "") if parent_entry else _codex_rollout_path(sid, root)
+    if not parent_path or not parent_path.is_file():
+        return []
+    calls: dict[str, dict[str, Any]] = {}
+    spawn_calls: dict[str, str] = {}
+    wait_calls: dict[str, list[str]] = {}
+    order: list[str] = []
+    for obj in _json_objects(parent_path):
+        payload = obj.get("payload") or {}
+        payload_type = payload.get("type")
+        call_id = str(payload.get("call_id") or "")
+        if payload_type == "function_call" and payload.get("name") == "spawn_agent":
+            args = _json_value(payload.get("arguments"))
+            spawn_calls[call_id] = call_id
+            calls[call_id] = {
+                "id": call_id,
+                "title": _safe_activity_text(args.get("agent_type") or "Subagent", 160),
+                "status": "running",
+                "preview": _safe_activity_text(args.get("message") or ""),
+                "turns": [],
+                "agentType": _safe_activity_text(args.get("agent_type") or "", 80),
+            }
+            order.append(call_id)
+        elif payload_type == "function_call" and payload.get("name") in ("wait_agent", "wait"):
+            args = _json_value(payload.get("arguments"))
+            wait_calls[call_id] = [str(value) for value in args.get("targets", [])]
+        elif payload_type == "function_call_output" and call_id in spawn_calls:
+            output = _json_value(payload.get("output"))
+            item = calls.get(spawn_calls[call_id])
+            if not item:
+                continue
+            agent_id = str(output.get("agent_id") or "")
+            if agent_id:
+                item["id"] = agent_id
+            nickname = str(output.get("nickname") or "")
+            agent_type = str(item.pop("agentType", "") or "")
+            item["title"] = _safe_activity_text(" · ".join(value for value in (nickname, agent_type) if value) or "Subagent", 160)
+            if not agent_id:
+                item["status"] = "failed"
+        elif payload_type == "function_call_output" and call_id in wait_calls:
+            output = _json_value(payload.get("output"))
+            statuses = output.get("status") if isinstance(output.get("status"), dict) else {}
+            for agent_id in wait_calls[call_id]:
+                item = next((value for value in calls.values() if value.get("id") == agent_id), None)
+                status = statuses.get(agent_id) if isinstance(statuses, dict) else None
+                if not item or not isinstance(status, dict):
+                    continue
+                if "completed" in status:
+                    item["status"] = "completed"
+                    item["preview"] = _safe_activity_text(status.get("completed"))
+                elif "failed" in status or "error" in status:
+                    item["status"] = "failed"
+
+    for item in calls.values():
+        child_path = _codex_rollout_path(str(item["id"]), root)
+        if not child_path or not child_path.is_file():
+            item.pop("agentType", None)
+            continue
+        turns = _transcript_turns(child_path, "codex")
+        item["turns"] = turns[-12:]
+        if turns:
+            item["preview"] = turns[-1]["text"]
+    return [calls[call_id] for call_id in order][-20:]
+
+
+def agent_activity(root: Path, source: str, sid: str) -> list[dict[str, Any]]:
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}", sid or ""):
+        return []
+    if source == "claude":
+        return _claude_agent_activity(root, sid)
+    if source == "codex":
+        return _codex_agent_activity(root, sid)
+    return []
+
+
+def agent_transcript(root: Path, source: str, sid: str, before: int | None = None,
+                     limit: int = 40) -> dict[str, Any]:
+    # AGENTS 대화 — byte cursor 기준 역방향 페이지. 도구 호출·결과는 생략하고 로그와 같은 마스킹 적용.
     from marina_logtext import redact_text   # 지역 import — 순환 의존 예방
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}", sid or ""):   # leading dash 금지
         raise ValueError("invalid session id")
-    turns: list[dict[str, str]] = []
     if source == "claude":
         jpath = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{sid}.jsonl"
         if not jpath.is_file():
             raise ValueError("transcript 파일이 없어요 (세션 만료/이동)")
-        for line in _tail_lines(jpath):
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            role = obj.get("type")
-            if role not in ("user", "assistant"):
-                continue
-            for t in _texts_of((obj.get("message") or {}).get("content")):
-                turns.append({"role": role, "text": t[:AGENT_TURN_MAX_CHARS]})
     elif source == "codex":
         entry = next((e for e in codex_agent_sessions().get(str(root), []) if e.get("sid") == sid), None)
         if not entry or not Path(entry["path"]).is_file():
             raise ValueError("codex rollout 을 못 찾았어요 (세션 만료)")
-        for line in _tail_lines(Path(entry["path"])):
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            try:
-                obj = json.loads(line)
-            except Exception:
-                continue
-            p = obj.get("payload") or {}
-            if p.get("type") != "message" or p.get("role") not in ("user", "assistant"):
-                continue
-            for t in _texts_of(p.get("content")):
-                turns.append({"role": p["role"], "text": t[:AGENT_TURN_MAX_CHARS]})
+        jpath = Path(entry["path"])
     else:
         raise ValueError("unknown source")
-    turns = turns[-AGENT_TRANSCRIPT_MAX_TURNS:]
-    for t in turns:
-        t["text"] = _redact_transcript(redact_text(t["text"]))
-    return {"turns": turns, "source": source}
+    return {**_transcript_page(jpath, source, before, limit), "source": source}
 
 
 # 대화 전용 마스킹 — redact_text(키워드 key/value) 로는 안 잡히는 bare 토큰/이메일(codex P2).
@@ -759,7 +1119,7 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
     else:
         verdict = "active"
 
-    disk_mb, cache_by_cat = _du_info(root, is_main, refresh)   # du 는 별도 장수 캐시 — 여기서 안 기다림
+    disk_mb, cache_by_cat, image_mb, docker_disk = _du_info(root, is_main, refresh)   # du 는 별도 장수 캐시 — 여기서 안 기다림
     project = project_for(root)
     info = {
         "id": session_id(root),
@@ -783,7 +1143,9 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
         # du 2종은 _du_info 캐시 산 — 콜드 직후엔 None/0 이었다가 다음 폴(≤15s)에 채워짐
         "diskMb": disk_mb,
         "cacheMb": sum(cache_by_cat.values()),
+        "imageMb": image_mb,
         "cacheCats": cache_by_cat,
+        "dockerDisk": docker_disk,
         "idleDays": idle_days,
         "lastTs": last_ts,   # 최근 활동(커밋·세션 mtime) — 좌측 카드 최근순 정렬용
         "ahead": ahead,

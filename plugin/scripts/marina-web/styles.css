@@ -461,6 +461,21 @@
     aside { border-right: 1px solid var(--sys-style-neutral-light); overflow-y: auto; min-height: 0; }
     section { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
     .toolbar { display: flex; gap: 8px; align-items: center; }
+    .agent-inbox-wrap { position: relative; }
+    #agentInboxBtn { position: relative; }
+    #agentInboxBtn.has-unread { color: var(--sys-cont-primary-default); }
+    #agentInboxCount { position: absolute; top: -5px; right: -7px; min-width: 16px; height: 16px; padding: 0 3px; box-sizing: border-box; border: 2px solid var(--sys-bg-surface); border-radius: 8px; background: var(--st-err); color: white; font: 700 9px/12px ui-sans-serif, system-ui; text-align: center; }
+    .agent-inbox-panel { position: absolute; z-index: 320; top: calc(100% + 7px); right: 0; width: min(360px, calc(100vw - 16px)); max-height: min(70vh, 620px); overflow-y: auto; border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+    .agent-inbox-group { position: sticky; top: 0; z-index: 1; padding: 7px 10px 5px; border-bottom: 1px solid var(--sys-style-neutral-light); background: var(--sys-bg-surface); color: var(--sys-cont-neutral-lightest); font-size: 10px; font-weight: 800; text-transform: uppercase; }
+    .agent-inbox-item { display: grid; grid-template-columns: 16px auto minmax(0, 1fr); gap: 8px; align-items: center; width: 100%; min-height: 54px; padding: 8px 10px; border: 0; border-bottom: 1px solid var(--sys-style-neutral-light); border-radius: 0; background: transparent; color: var(--sys-cont-neutral-default); text-align: left; cursor: pointer; }
+    .agent-inbox-item:hover { background: var(--sys-bg-surface-hover); }
+    .agent-inbox-item.read { opacity: .62; }
+    .agent-inbox-item.unread .agent-inbox-copy b::after { content: ''; display: inline-block; width: 5px; height: 5px; margin: 0 0 2px 6px; border-radius: 50%; background: var(--sys-cont-primary-default); }
+    .agent-inbox-copy { min-width: 0; }
+    .agent-inbox-copy b, .agent-inbox-copy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .agent-inbox-copy b { font-size: 12px; }
+    .agent-inbox-copy small { margin-top: 2px; color: var(--sys-cont-neutral-lightest); font-size: 10.5px; }
+    .agent-inbox-empty { padding: 24px 14px; color: var(--sys-cont-neutral-lightest); font-size: 12px; text-align: center; }
     /* 설정(⚙) 팝오버 — 테마·알림 등 '설정성' 토글을 모음. 액션(↻)은 헤더에 그대로 */
     .settings-wrap { position: relative; }
     #settingsBtn { font-size: 15px; line-height: 1; }
@@ -524,6 +539,11 @@
     .session-title .hov-acts { top: 0; transform: none; }
     .session:hover > .session-head .hov-acts, .session.selected-card > .session-head .hov-acts { display: inline-flex; }
     .svc:hover .hov-acts, .svc.selected .hov-acts { display: inline-flex; }
+    .svc .hov-acts { display: inline-flex; background: transparent; border-color: transparent; }
+    .svc .hov-acts > button { display: none; }
+    .svc .hov-acts > .svc-lifecycle-action { display: inline-block; }
+    .svc:hover .hov-acts, .svc.selected .hov-acts { background: var(--sys-bg-surface-hover); border-color: var(--sys-style-neutral-light); }
+    .svc:hover .hov-acts > button, .svc.selected .hov-acts > button { display: inline-block; }
     .hov-acts button { border: none; background: transparent; height: 22px; min-width: 24px; padding: 0 5px; border-radius: 5px; cursor: pointer; font-size: 12px; color: var(--sys-cont-neutral-default); }
     .hov-acts button:hover { background: var(--sys-cont-neutral-lightest); color: var(--sys-bg-surface); }
     .wt-right { margin-left: auto; color: var(--sys-cont-neutral-lightest); font-size: 11px; white-space: nowrap; align-self: center; }
@@ -618,6 +638,8 @@
     .svc.agent-row:hover { background: transparent; }
     .agent-row .hov-acts button { height: 18px; padding: 0 7px; border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); font-size: 10.5px; cursor: pointer; }
     .agent-row .hov-acts button:hover { color: var(--sys-cont-neutral-default); background: var(--sys-bg-surface-hover); }
+    .agent-state-label { color: var(--sys-cont-neutral-lightest); font-size: 10px; white-space: nowrap; }
+    .agent-older-btn { display: block; width: max-content; min-height: 28px; margin: 0 auto 8px; padding: 0 10px; font-size: 11px; }
     /* 터미널 탭 — 좌 사이드바(세션 목록) + 우 본문(분할 프리셋 바 + 최대 4분할 그리드) */
     #tab-term { display: flex; flex-direction: column; }
     .term-root { display: flex; height: 100%; min-height: 0; }

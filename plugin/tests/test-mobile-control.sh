@@ -1,0 +1,457 @@
+#!/usr/bin/env bash
+# mobile control: token-protected phone page + remote-safe state/send endpoints.
+set -euo pipefail
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SCR="$HERE/../scripts"; CTRL="$SCR/marina-control.py"
+TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME"
+P="$TMP/proj"; mkdir -p "$P"; (cd "$P" && git init -q && git commit -q --allow-empty -m init)
+cat > "$MARINA_HOME/projects.json" <<JSON
+{"schemaVersion":1,"projects":[{"id":"proj","root":"$P","kind":"compose","composeFile":"docker-compose.yml","subrepos":[],"worktreeGlobs":[]}]}
+JSON
+
+PORT="$(python3 - <<'PY' || exit $?
+import socket, sys
+s = socket.socket()
+try:
+    s.bind(("127.0.0.1", 0))
+except PermissionError:
+    sys.exit(42)
+print(s.getsockname()[1])
+s.close()
+PY
+)" || { code=$?; [[ "$code" == "42" ]] && { echo "SKIP test-mobile-control (localhost bind unavailable)"; exit 0; }; exit "$code"; }
+SRV=""
+cleanup(){ [[ -n "$SRV" ]] && kill "$SRV" 2>/dev/null || true; rm -rf "$TMP"; }
+trap cleanup EXIT
+
+MARINA_MOBILE_TOKEN=secret MARINA_CONTROL_PORT=$PORT MARINA_CONTROL_HOST=127.0.0.1 MARINA_HOME="$MARINA_HOME" python3 "$CTRL" >/dev/null 2>&1 & SRV=$!
+b="http://127.0.0.1:$PORT"
+ready=0
+mobile_html=""
+for _ in $(seq 1 100); do
+  mobile_html="$(curl -sf "$b/mobile?token=secret" || true)"
+  if grep -q 'mobileApp' <<<"$mobile_html"; then ready=1; break; fi
+  sleep 0.1
+done
+[[ "$ready" == "1" ]] || { echo "FAIL: mobile test server did not become ready"; exit 1; }
+
+code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: devbox.example.test' "$b/mobile")"
+[[ "$code" == "200" ]] || { echo "FAIL: /mobile without token should show login page, got $code"; exit 1; }
+login_html="$(curl -sf -H 'Host: devbox.example.test' "$b/mobile")"
+grep -q 'mobileLogin' <<<"$login_html" || { echo "FAIL: /mobile without token missing login form"; exit 1; }
+! grep -q 'secret' <<<"$login_html" || { echo "FAIL: /mobile page leaked configured token"; exit 1; }
+
+grep -q 'mobileApp' <<<"$mobile_html" || { echo "FAIL: /mobile token page missing app marker"; exit 1; }
+grep -q 'mobileLogin' <<<"$mobile_html" || { echo "FAIL: /mobile token page missing login shell"; exit 1; }
+! grep -q 'secret' <<<"$mobile_html" || { echo "FAIL: /mobile token page leaked configured token"; exit 1; }
+grep -q 'logoutBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page missing logout button"; exit 1; }
+grep -q 'localStorage.removeItem("marinaMobileToken")' <<<"$mobile_html" || { echo "FAIL: /mobile page missing logout storage clear"; exit 1; }
+grep -q 'autoPollMs' <<<"$mobile_html" || { echo "FAIL: /mobile page missing auto polling"; exit 1; }
+grep -q 'notifyChange' <<<"$mobile_html" || { echo "FAIL: /mobile page missing notification hook"; exit 1; }
+grep -q '"/mobile/api/state"' <<<"$mobile_html" || { echo "FAIL: /mobile page should fetch mobile-scoped state API"; exit 1; }
+grep -q '"/mobile/api/send"' <<<"$mobile_html" || { echo "FAIL: /mobile page should post mobile-scoped send API"; exit 1; }
+grep -q 'marinaMobileRoot' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected root"; exit 1; }
+grep -q 'marinaMobileTarget' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected target"; exit 1; }
+grep -q 'marinaMobileDraft' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember draft prompt"; exit 1; }
+grep -q 'sessionList' <<<"$mobile_html" || { echo "FAIL: /mobile page should render session cards"; exit 1; }
+grep -q 'isEditing' <<<"$mobile_html" || { echo "FAIL: /mobile page should avoid refresh while user is editing"; exit 1; }
+grep -q 'turns' <<<"$mobile_html" || { echo "FAIL: /mobile page should render agent transcript turns"; exit 1; }
+grep -q 'chatView' <<<"$mobile_html" || { echo "FAIL: /mobile page should have chat view"; exit 1; }
+grep -q 'backBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page should have back button"; exit 1; }
+grep -q 'chatComposer' <<<"$mobile_html" || { echo "FAIL: /mobile page should have fixed chat composer"; exit 1; }
+grep -q 'hiddenSelect' <<<"$mobile_html" || { echo "FAIL: /mobile page should hide technical selects"; exit 1; }
+grep -q 'pendingTurns' <<<"$mobile_html" || { echo "FAIL: /mobile page should show sent messages immediately"; exit 1; }
+grep -q 'selectAgentAfterSend' <<<"$mobile_html" || { echo "FAIL: /mobile page should keep agent sends in the agent chat"; exit 1; }
+grep -q 'menuBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page should collapse utility actions into a menu"; exit 1; }
+grep -q 'menuPanel' <<<"$mobile_html" || { echo "FAIL: /mobile page should render a utility menu panel"; exit 1; }
+grep -q 'projectTabs' <<<"$mobile_html" || { echo "FAIL: /mobile page should organize sessions by project"; exit 1; }
+grep -q 'sourceTabs' <<<"$mobile_html" || { echo "FAIL: /mobile page should filter Codex, Claude, and terminal sessions"; exit 1; }
+grep -q 'marinaMobileProject' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected project"; exit 1; }
+grep -q 'marinaMobileSource' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected source"; exit 1; }
+grep -q 'session-group' <<<"$mobile_html" || { echo "FAIL: /mobile page should group all sessions by source"; exit 1; }
+grep -q 'source-badge' <<<"$mobile_html" || { echo "FAIL: /mobile session cards should identify their source"; exit 1; }
+grep -q 'sessionStructureKey' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve session card nodes when structure is unchanged"; exit 1; }
+grep -q 'sessionList.onclick' <<<"$mobile_html" || { echo "FAIL: /mobile session clicks should use stable delegated handling"; exit 1; }
+! grep -q '<label>최근 작업' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not show a separate recent-work panel"; exit 1; }
+! grep -q 'turn-role' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not label user/assistant roles"; exit 1; }
+grep -q 'renderRichText' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render safe clickable links"; exit 1; }
+grep -q 'noopener noreferrer' <<<"$mobile_html" || { echo "FAIL: /mobile chat links should isolate new tabs"; exit 1; }
+grep -q 'draftKey' <<<"$mobile_html" || { echo "FAIL: /mobile chat should keep drafts per session"; exit 1; }
+grep -q 'queuePendingTurn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should preserve repeated pending prompts independently"; exit 1; }
+grep -q 'startsWith("marinaMobileDraft:")' <<<"$mobile_html" || { echo "FAIL: /mobile logout should clear per-session drafts"; exit 1; }
+grep -q 'autoGrowComposer' <<<"$mobile_html" || { echo "FAIL: /mobile composer should grow with its contents"; exit 1; }
+grep -q 'promptInput.onkeydown' <<<"$mobile_html" || { echo "FAIL: /mobile composer should support hardware keyboard send"; exit 1; }
+grep -q 'retryBtn' <<<"$mobile_html" || { echo "FAIL: /mobile composer should expose failed-send retry"; exit 1; }
+grep -q 'failedSend.sessionKey !== selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile retry should stay bound to the failed session"; exit 1; }
+grep -q 'const requestContext = {root: selectedRoot(), sessionKey: selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile send should capture its session before the request"; exit 1; }
+grep -q 'failedSend = requestContext' <<<"$mobile_html" || { echo "FAIL: /mobile failed send should retry in its original session"; exit 1; }
+grep -q 'suggestions' <<<"$mobile_html" || { echo "FAIL: /mobile composer should render native suggestions"; exit 1; }
+grep -q 'renderSuggestions' <<<"$mobile_html" || { echo "FAIL: /mobile composer should adapt suggestions to Claude/Codex"; exit 1; }
+grep -q '"/mobile/api/catalog"' <<<"$mobile_html" || { echo "FAIL: /mobile composer should query file references lazily"; exit 1; }
+grep -q 'fileSuggestionKey === key' <<<"$mobile_html" || { echo "FAIL: /mobile composer should not refetch the same file query in a loop"; exit 1; }
+grep -q 'selectedSessionKey !== sessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile file suggestions should ignore stale session responses"; exit 1; }
+grep -q 'fileSuggestionKey === key.*selectedSessionKey === sessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile stale file errors should not clear the active session results"; exit 1; }
+grep -q 'newMessagesBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should preserve reading position on refresh"; exit 1; }
+grep -q 'subagentMenuBtn' <<<"$mobile_html" || { echo "FAIL: /mobile menu should expose session subagents"; exit 1; }
+grep -q 'subagentSheet' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render a subagent bottom sheet"; exit 1; }
+grep -q 'renderSubagents' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render subagent activity"; exit 1; }
+grep -q 'openSubagentIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened subagent details"; exit 1; }
+! grep -q '<label>워크트리' <<<"$mobile_html" || { echo "FAIL: /mobile page should not expose worktree select"; exit 1; }
+! grep -q '<label>대상' <<<"$mobile_html" || { echo "FAIL: /mobile page should not expose target select"; exit 1; }
+
+PYTHONPATH="$SCR" python3 - <<'PY' | node
+from marina_mobile import render_mobile_html
+script = render_mobile_html().rsplit("<script>", 1)[1].split("</script>", 1)[0]
+print(script[script.index("function esc"):script.index("function draftKey")])
+print(r'''
+const raw = renderRichText('<img src=x onerror=alert(1)>');
+if (raw.includes('<img') || !raw.includes('&lt;img')) throw new Error(`raw HTML was not escaped: ${raw}`);
+const js = renderRichText('[bad](javascript:alert(1))');
+if (js.includes('<a')) throw new Error(`javascript URL became a link: ${js}`);
+const safe = renderRichText('[docs](https://example.test/a?q=1&x=2)');
+if (!safe.includes('href="https://example.test/a?q=1&amp;x=2"')) throw new Error(`safe URL was not escaped: ${safe}`);
+if (!safe.includes('rel="noopener noreferrer"')) throw new Error(`link isolation missing: ${safe}`);
+const quoted = renderRichText('https://example.test/"onclick="alert(1)');
+if (quoted.includes('onclick="')) throw new Error(`quote escaped from href: ${quoted}`);
+console.log('ok mobile rich text safety');
+''')
+PY
+
+code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: devbox.example.test' "$b/api/mobile-state")"
+[[ "$code" == "403" ]] || { echo "FAIL: mobile-state without token should be 403, got $code"; exit 1; }
+
+code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: devbox.example.test' "$b/mobile/api/state")"
+[[ "$code" == "403" ]] || { echo "FAIL: mobile-scoped state without token should be 403, got $code"; exit 1; }
+
+state_json="$(curl -sf -H 'Host: devbox.example.test' -H 'X-Marina-Mobile-Token: secret' "$b/mobile/api/state")"
+python3 - "$P" "$state_json" <<'PY'
+import json, os, sys
+d = json.loads(sys.argv[2])
+assert d["worktrees"] and os.path.realpath(d["worktrees"][0]["root"]) == os.path.realpath(sys.argv[1]), d
+assert isinstance(d["terms"], list), d
+assert "sessions" in d and isinstance(d["sessions"], list), d
+print("ok mobile state")
+PY
+
+PYTHONPATH="$SCR" python3 - <<'PY'
+from marina_mobile import _input_payload
+assert _input_payload("hello") == "hello\r"
+assert _input_payload("hello\n") == "hello\r"
+assert _input_payload("hello\r") == "hello\r"
+assert _input_payload("line 1\nline 2") == "line 1\nline 2\r"
+print("ok mobile enter payload")
+PY
+
+PYTHONPATH="$SCR" python3 - "$TMP" "$P" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+import marina_sessions as ms
+
+tmp = Path(sys.argv[1])
+root = Path(sys.argv[2]).resolve()
+
+claude_home = tmp / "claude-projects"
+ms.CLAUDE_PROJECTS_DIR = claude_home
+session_dir = claude_home / ms._claude_project_slug(root)
+session_dir.mkdir(parents=True)
+claude_sid = "claude-session-0001"
+tool_id = "toolu_agent_1"
+running_tool_id = "toolu_agent_2"
+(session_dir / f"{claude_sid}.jsonl").write_text("\n".join([
+    json.dumps({"type": "assistant", "message": {"content": [{
+        "type": "tool_use", "id": tool_id, "name": "Agent",
+        "input": {"description": "Review auth flow", "prompt": "Check auth"},
+    }]}}),
+    json.dumps({"type": "user", "message": {"content": [{
+        "type": "tool_result", "tool_use_id": tool_id,
+        "content": [{"type": "text", "text": "agentId: childclaude0001 working in the background"}],
+    }]}}),
+    json.dumps({"type": "assistant", "message": {"content": [{
+        "type": "tool_use", "id": running_tool_id, "name": "Agent",
+        "input": {"description": "Still reviewing", "prompt": "Keep checking"},
+    }]}}),
+    json.dumps({"type": "user", "message": {"content": [{
+        "type": "tool_result", "tool_use_id": running_tool_id,
+        "content": [{"type": "text", "text": "agentId: childclaude0002 working in the background"}],
+    }]}}),
+    json.dumps({"type": "queue-operation", "content": (
+        "<task-notification><task-id>childclaude0001</task-id>"
+        f"<tool-use-id>{tool_id}</tool-use-id><status>completed</status></task-notification>"
+    )}),
+    json.dumps({"type": "queue-operation", "content": (
+        "<task-notification><task-id>childclaude0002</task-id>"
+        "<status>stopped</status></task-notification>"
+    )}),
+]) + "\n", encoding="utf-8")
+child_dir = session_dir / claude_sid / "subagents"
+child_dir.mkdir(parents=True)
+(child_dir / "agent-childclaude0001.jsonl").write_text("\n".join([
+    json.dumps({"type": "user", "message": {"content": "Check auth"}}),
+    json.dumps({"type": "assistant", "message": {"content": [{
+        "type": "text", "text": "Found sk-abcdefghijklmnopqrstuvwxyz secret",
+    }]}}),
+]) + "\n", encoding="utf-8")
+(child_dir / "agent-childclaude0002.jsonl").write_text("\n".join([
+    json.dumps({"type": "user", "message": {"content": "Keep checking"}}),
+    json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Interim finding"}]}}),
+]) + "\n", encoding="utf-8")
+
+claude = ms.agent_activity(root, "claude", claude_sid)
+assert len(claude) == 2, claude
+claude_by_id = {item["id"]: item for item in claude}
+assert claude_by_id["childclaude0001"]["title"] == "Review auth flow", claude
+assert claude_by_id["childclaude0001"]["status"] == "completed", claude
+assert claude_by_id["childclaude0001"]["turns"][-1]["text"] == "Found [redacted] secret", claude
+assert claude_by_id["childclaude0002"]["status"] == "stopped", claude
+
+parent = tmp / "parent-codex.jsonl"
+codex_dir = tmp / "codex-rollouts"
+codex_dir.mkdir()
+codex_sid = "codex-session-0001"
+child_sid = "019f-child-agent-0001"
+child = codex_dir / f"rollout-2026-07-20T00-00-00-{child_sid}.jsonl"
+parent.write_text("\n".join([
+    json.dumps({"payload": {"type": "function_call", "name": "spawn_agent", "call_id": "spawn-1",
+        "arguments": json.dumps({"agent_type": "reviewer", "message": "Review auth"})}}),
+    json.dumps({"payload": {"type": "function_call_output", "call_id": "spawn-1",
+        "output": json.dumps({"agent_id": child_sid, "nickname": "Nash"})}}),
+    json.dumps({"payload": {"type": "function_call", "name": "wait_agent", "call_id": "wait-1",
+        "arguments": json.dumps({"targets": [child_sid]})}}),
+    json.dumps({"payload": {"type": "function_call_output", "call_id": "wait-1",
+        "output": json.dumps({"status": {child_sid: {"completed": "Review complete"}}})}}),
+]) + "\n", encoding="utf-8")
+child.write_text("\n".join([
+    json.dumps({"type": "session_meta", "payload": {"id": child_sid, "cwd": str(root)}}),
+    json.dumps({"payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Review auth"}]}}),
+    json.dumps({"payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Looks good"}]}}),
+]) + "\n", encoding="utf-8")
+ms.codex_agent_sessions = lambda refresh=False: {str(root): [
+    {"sid": codex_sid, "path": str(parent)},
+]}
+ms.CODEX_ROLLOUT_DIRS = (codex_dir,)
+
+codex = ms.agent_activity(root, "codex", codex_sid)
+assert len(codex) == 1, codex
+assert codex[0]["id"] == child_sid, codex
+assert codex[0]["title"] == "Nash · reviewer", codex
+assert codex[0]["status"] == "completed", codex
+assert codex[0]["turns"][-1]["text"] == "Looks good", codex
+print("ok mobile subagent activity")
+PY
+
+PYTHONPATH="$SCR" python3 - "$TMP" "$P" <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+import marina_mobile as mm
+
+tmp = Path(sys.argv[1])
+root = Path(sys.argv[2]).resolve()
+
+def write(path, text):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+write(root / ".claude/skills/deploy/SKILL.md", "---\nname: deploy\ndescription: Deploy this project\n---\n")
+write(root / ".claude/agents/reviewer.md", "---\nname: reviewer\ndescription: Review changes\n---\n")
+write(root / ".agents/skills/audit/SKILL.md", "---\nname: audit\ndescription: Audit the project\n---\n")
+write(root / ".codex/agents/reviewer.toml", 'name = "reviewer"\ndescription = "Review changes"\n')
+write(root / "mobile-note.md", "mobile catalog fixture\n")
+subprocess.run(["git", "add", "mobile-note.md"], cwd=root, check=True)
+
+claude_home = tmp / "claude-home"
+claude_plugin = tmp / "claude-plugin"
+project_plugin = tmp / "project-plugin"
+write(claude_plugin / "skills/plugin-skill/SKILL.md", "---\nname: plugin-skill\ndescription: Plugin skill\n---\n")
+write(claude_plugin / "commands/plugin-command.md", "---\nname: plugin-command\ndescription: Plugin command\n---\n")
+write(claude_plugin / "agents/plugin-reviewer.md", "---\nname: plugin-reviewer\ndescription: Plugin reviewer\n---\n")
+write(project_plugin / "skills/project-skill/SKILL.md", "---\nname: project-skill\ndescription: Project plugin skill\n---\n")
+write(claude_home / "settings.json", json.dumps({"enabledPlugins": {"demo@market": True, "off@market": False}}))
+write(root / ".claude/settings.local.json", json.dumps({"enabledPlugins": {"project@market": True}}))
+write(claude_home / "plugins/installed_plugins.json", json.dumps({"plugins": {
+    "demo@market": [{"installPath": str(claude_plugin)}],
+    "project@market": [{"installPath": str(project_plugin)}],
+    "off@market": [{"installPath": str(tmp / "off-plugin")}],
+}}))
+
+codex_home = tmp / "codex-home"
+write(codex_home / "config.toml", '[plugins."demo@market"]\nenabled = true\n[plugins."off@market"]\nenabled = false\n')
+write(codex_home / "plugins/cache/market/demo/1.0/skills/plugin-skill/SKILL.md", "---\nname: plugin-skill\ndescription: Plugin skill\n---\n")
+write(codex_home / "plugins/cache/market/off/1.0/skills/hidden/SKILL.md", "---\nname: hidden\ndescription: Hidden\n---\n")
+
+mm.CLAUDE_HOME = claude_home
+mm.CODEX_USER_HOME = codex_home
+mm.AGENTS_HOME = tmp / "agents-home"
+
+claude = mm._native_catalog(root, "claude")
+assert {item["insert"] for item in claude["skills"]} >= {
+    "/deploy", "/demo:plugin-skill", "/demo:plugin-command", "/project:project-skill"
+}, claude
+assert {item["insert"] for item in claude["agents"]} >= {"@agent-reviewer", "@agent-demo:plugin-reviewer"}, claude
+assert all("off" not in item["insert"] for item in claude["skills"] + claude["agents"]), claude
+
+codex = mm._native_catalog(root, "codex")
+assert {item["insert"] for item in codex["skills"]} >= {"$audit", "$demo:plugin-skill"}, codex
+assert {item["name"] for item in codex["agents"]} >= {"reviewer"}, codex
+assert all("hidden" not in item["insert"] for item in codex["skills"]), codex
+
+files = mm.mobile_catalog(root, "claude", "mobile")
+assert files["files"] == [{"name": "mobile-note.md", "insert": "@mobile-note.md", "description": "file"}], files
+print("ok mobile native catalog")
+PY
+
+catalog_url="$(python3 -c 'import sys,urllib.parse; print(sys.argv[1] + "/mobile/api/catalog?" + urllib.parse.urlencode({"root":sys.argv[2],"source":"claude","q":"mobile"}))' "$b" "$P")"
+catalog_json="$(curl -sf -H 'Host: devbox.example.test' -H 'X-Marina-Mobile-Token: secret' "$catalog_url")"
+python3 - "$catalog_json" <<'PY'
+import json, sys
+d = json.loads(sys.argv[1])
+assert any(item["name"] == "mobile-note.md" for item in d["files"]), d
+print("ok mobile catalog endpoint")
+PY
+
+PYTHONPATH="$SCR" python3 - "$P" <<'PY'
+from pathlib import Path
+import sys
+import marina_mobile as mm
+
+root = Path(sys.argv[1]).resolve()
+opened = []
+inputs = []
+mm.safe_root = lambda value: root
+mm.term_open = lambda root_arg, cols, rows, agent_source="", agent_sid="", agent_prompt="": (
+    opened.append({
+        "root": root_arg,
+        "cols": cols,
+        "rows": rows,
+        "agent_source": agent_source,
+        "agent_sid": agent_sid,
+        "agent_prompt": agent_prompt,
+    }) or {"tid": "agent-term", "reused": False}
+)
+mm.term_input = lambda tid, data: inputs.append((tid, data)) or {"ok": True}
+out = mm.mobile_send({
+    "root": str(root),
+    "target": {"type": "agent", "source": "codex", "sid": "sid0001"},
+    "text": "hello agent",
+})
+assert out == {"ok": True, "tid": "agent-term", "opened": True}, out
+assert opened and opened[0]["agent_source"] == "codex" and opened[0]["agent_sid"] == "sid0001", opened
+assert opened[0]["agent_prompt"] == "hello agent", opened
+assert inputs == [], inputs
+print("ok mobile agent prompt")
+PY
+
+PYTHONPATH="$SCR" python3 - "$P" <<'PY'
+from pathlib import Path
+import sys
+import marina_mobile as mm
+
+root = Path(sys.argv[1]).resolve()
+mm.discover_all_roots = lambda refresh=False: [root]
+mm.worktree_info = lambda root_arg, refresh=False: {"id": "proj", "projectLabel": "proj", "sessionTitle": "title"}
+mm.agents_payload = lambda root_arg, refresh=False: [{
+    "source": "codex",
+    "sid": "sid0001",
+    "title": "Agent",
+    "preview": "agent preview",
+    "ts": 10,
+}]
+mm.agent_transcript = lambda root_arg, source, sid: {"turns": [{"role": "assistant", "text": "agent preview"}]}
+mm.agent_activity = lambda root_arg, source, sid: [{
+    "id": "child1", "title": "Review", "status": "completed", "preview": "done", "turns": []
+}]
+mm._native_catalog = lambda root_arg, source: {"skills": [{"name": "audit", "insert": "$audit", "description": "Audit"}], "agents": []}
+mm.term_list = lambda: {"sessions": [
+    {"tid": "agent-term", "root": str(root), "agent": {"source": "codex", "sid": "sid0001"}, "preview": "sent text", "created": 20},
+    {"tid": "shell-term", "root": str(root), "agent": None, "preview": "shell preview", "created": 5},
+]}
+state = mm.mobile_state()
+keys = [s["key"] for s in state["sessions"]]
+assert "agent:codex:sid0001:%s" % root in keys, keys
+agent = next(s for s in state["sessions"] if s["key"].startswith("agent:codex:"))
+assert agent["subagents"][0]["title"] == "Review", agent
+assert agent["catalog"]["skills"][0]["insert"] == "$audit", agent
+assert "term:shell-term" in keys, keys
+assert "term:agent-term" not in keys, keys
+print("ok mobile hides agent runner terms")
+PY
+
+send_body="$(python3 -c 'import json,sys; print(json.dumps({"root":sys.argv[1],"target":{"type":"shell"},"text":"echo MOBILE_OK"}))' "$P")"
+tid="$(curl -sf -H 'Host: devbox.example.test' -H 'X-Marina-Mobile-Token: secret' -H 'content-type: application/json' \
+  -d "$send_body" "$b/mobile/api/send" | python3 -c 'import json,sys; d=json.load(sys.stdin); assert d["ok"] and d["tid"], d; print(d["tid"])')"
+
+python3 - "$b" "$tid" <<'PY'
+import json, subprocess, sys, time
+base, tid = sys.argv[1:3]
+for _ in range(50):
+    raw = subprocess.check_output([
+        "curl", "-sf", "-H", "Host: devbox.example.test",
+        "-H", "X-Marina-Mobile-Token: secret", f"{base}/mobile/api/state"
+    ], text=True)
+    state = json.loads(raw)
+    terms = {t["tid"]: t for t in state["terms"]}
+    if tid in terms and "MOBILE_OK" in (terms[tid].get("preview") or ""):
+        print("ok mobile send")
+        break
+    time.sleep(0.2)
+else:
+    raise SystemExit("FAIL: MOBILE_OK did not appear in terminal preview")
+PY
+
+grep -q 'mobile)' "$SCR/marina-entrypoint.sh" || {
+  echo "FAIL: marina mobile CLI missing"; exit 1;
+}
+
+CLI_HOME="$TMP/cli-home"
+out="$(MARINA_HOME="$CLI_HOME" "$SCR/marina-entrypoint.sh" mobile enable devbox.example.test)"
+[[ -s "$CLI_HOME/mobile-token" ]] || { echo "FAIL: mobile enable did not create token"; exit 1; }
+grep -q 'http://devbox.example.test:' <<<"$out" || { echo "FAIL: mobile enable URL missing host: $out"; exit 1; }
+grep -q '/mobile?token=' <<<"$out" || { echo "FAIL: mobile enable URL missing token: $out"; exit 1; }
+grep -q 'phone access: local-only' <<<"$out" || { echo "FAIL: mobile enable should explain local-only dashboard bind: $out"; exit 1; }
+
+old_token="$(cat "$CLI_HOME/mobile-token")"
+token_out="$(MARINA_HOME="$CLI_HOME" "$SCR/marina-entrypoint.sh" mobile token)"
+[[ "$token_out" == "$old_token" ]] || { echo "FAIL: mobile token should print raw token"; exit 1; }
+
+rotate_out="$(MARINA_HOME="$CLI_HOME" "$SCR/marina-entrypoint.sh" mobile rotate devbox.example.test)"
+new_token="$(cat "$CLI_HOME/mobile-token")"
+[[ -n "$new_token" && "$new_token" != "$old_token" ]] || { echo "FAIL: mobile rotate should replace token"; exit 1; }
+grep -q 'mobile token rotated' <<<"$rotate_out" || { echo "FAIL: mobile rotate missing status: $rotate_out"; exit 1; }
+grep -q "token=$new_token" <<<"$rotate_out" || { echo "FAIL: mobile rotate should print new raw token: $rotate_out"; exit 1; }
+grep -q "/mobile?token=$new_token" <<<"$rotate_out" || { echo "FAIL: mobile rotate should print new login URL: $rotate_out"; exit 1; }
+
+address_out="$(MARINA_HOME="$CLI_HOME" "$SCR/marina-entrypoint.sh" mobile address devbox.example.test)"
+[[ "$address_out" == "http://devbox.example.test:3900/mobile" ]] || { echo "FAIL: mobile address should print stable tokenless URL: $address_out"; exit 1; }
+
+address_with_path="$(MARINA_HOME="$CLI_HOME" "$SCR/marina-entrypoint.sh" mobile address https://devbox.example.test/mobile)"
+[[ "$address_with_path" == "https://devbox.example.test/mobile" ]] || { echo "FAIL: mobile address should not duplicate /mobile path: $address_with_path"; exit 1; }
+
+env_host_url="$(MARINA_HOME="$CLI_HOME" MARINA_MOBILE_HOST=phonebox.test "$SCR/marina-entrypoint.sh" mobile address)"
+[[ "$env_host_url" == "http://phonebox.test:3900/mobile" ]] || { echo "FAIL: mobile address should prefer MARINA_MOBILE_HOST: $env_host_url"; exit 1; }
+
+FAKEBIN="$TMP/fakebin"; mkdir -p "$FAKEBIN"
+cat > "$FAKEBIN/open" <<'SH'
+#!/usr/bin/env bash
+echo "$1" > "$MARINA_OPEN_CAPTURE"
+SH
+chmod +x "$FAKEBIN/open"
+MARINA_OPEN_CAPTURE="$TMP/open-url" MARINA_HOME="$CLI_HOME" PATH="$FAKEBIN:$PATH" "$SCR/marina-entrypoint.sh" mobile open devbox.example.test >/dev/null
+[[ "$(cat "$TMP/open-url")" == "http://devbox.example.test:3900/mobile" ]] || { echo "FAIL: mobile open should open stable address"; exit 1; }
+
+status_out="$(MARINA_HOME="$CLI_HOME" MARINA_CONTROL_HOST=0.0.0.0 "$SCR/marina-entrypoint.sh" mobile status devbox.example.test)"
+grep -q 'mobile enabled token=' <<<"$status_out" || { echo "FAIL: mobile status should show enabled token: $status_out"; exit 1; }
+grep -q 'address=http://devbox.example.test:3900/mobile' <<<"$status_out" || { echo "FAIL: mobile status should show stable address: $status_out"; exit 1; }
+grep -q "login-url=http://devbox.example.test:3900/mobile?token=$new_token" <<<"$status_out" || { echo "FAIL: mobile status should show login URL: $status_out"; exit 1; }
+grep -q 'phone access: network-bind' <<<"$status_out" || { echo "FAIL: mobile status should explain network bind: $status_out"; exit 1; }
+
+doctor_out="$(MARINA_HOME="$CLI_HOME" MARINA_CONTROL_HOST=127.0.0.1 MARINA_CONTROL_PORT=$PORT "$SCR/marina-entrypoint.sh" mobile doctor devbox.example.test)"
+grep -q 'mobile doctor' <<<"$doctor_out" || { echo "FAIL: mobile doctor missing heading: $doctor_out"; exit 1; }
+grep -q 'dashboard-http=ok' <<<"$doctor_out" || { echo "FAIL: mobile doctor should confirm dashboard HTTP: $doctor_out"; exit 1; }
+grep -q 'address=http://devbox.example.test:' <<<"$doctor_out" || { echo "FAIL: mobile doctor should show stable address: $doctor_out"; exit 1; }
+grep -q 'login-url=http://devbox.example.test:' <<<"$doctor_out" || { echo "FAIL: mobile doctor should show login URL: $doctor_out"; exit 1; }
+grep -q 'phone access: local-only' <<<"$doctor_out" || { echo "FAIL: mobile doctor should show bind hint: $doctor_out"; exit 1; }
+
+echo "PASS test-mobile-control"
