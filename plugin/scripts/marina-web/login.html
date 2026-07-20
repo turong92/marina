@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Marina login</title>
+  <link rel="icon" type="image/png" href="/web/favicon.png" />
+  <link rel="stylesheet" href="/web/auth.css" />
+</head>
+<body class="auth-page">
+  <main class="auth-shell">
+    <header class="auth-brand">
+      <img src="/web/marina-mark-light.png" alt="" />
+      <div><b>Marina</b><span>remote workspace</span></div>
+    </header>
+
+    <section class="auth-panel" aria-live="polite">
+      <form id="authLoginForm" hidden>
+        <div class="auth-heading"><h1>로그인</h1><p>계속할 계정을 입력하세요.</p></div>
+        <label>사용자명<input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label>
+        <label>비밀번호<input name="password" type="password" autocomplete="current-password" required /></label>
+        <button class="auth-primary" type="submit">로그인</button>
+      </form>
+
+      <form id="authBootstrapForm" hidden>
+        <div class="auth-heading"><h1>관리자 설정</h1><p>이 Marina를 관리할 첫 계정을 만드세요.</p></div>
+        <label>표시 이름<input name="displayName" autocomplete="name" required maxlength="80" /></label>
+        <label>사용자명<input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required /></label>
+        <label>비밀번호<input name="password" type="password" autocomplete="new-password" minlength="12" required /></label>
+        <label>비밀번호 확인<input name="confirmPassword" type="password" autocomplete="new-password" minlength="12" required /></label>
+        <button class="auth-primary" type="submit">관리자 만들기</button>
+      </form>
+
+      <form id="authClaimForm" hidden>
+        <div class="auth-heading"><h1>비밀번호 설정</h1><p>등록된 계정의 비밀번호를 정하세요.</p></div>
+        <label>사용자명<input name="username" autocomplete="username" readonly /></label>
+        <label>새 비밀번호<input name="password" type="password" autocomplete="new-password" minlength="12" required /></label>
+        <label>비밀번호 확인<input name="confirmPassword" type="password" autocomplete="new-password" minlength="12" required /></label>
+        <button class="auth-primary" type="submit">승인 요청</button>
+        <button class="auth-secondary" type="button" data-auth-back>다른 계정</button>
+      </form>
+
+      <div id="authPending" class="auth-state" hidden>
+        <span class="auth-status-mark" aria-hidden="true"></span>
+        <h1>승인 대기 중</h1>
+        <p>관리자가 승인하면 로그인할 수 있습니다.</p>
+        <button class="auth-secondary" type="button" data-auth-back>로그인으로</button>
+      </div>
+
+      <div id="authUnavailable" class="auth-state" hidden>
+        <h1 id="authUnavailableTitle">로컬 설정 필요</h1>
+        <p id="authUnavailableMessage">Marina가 설치된 컴퓨터에서 관리자 설정을 먼저 완료하세요.</p>
+        <code id="authUnavailableCommand" hidden>marina auth status</code>
+      </div>
+
+      <p id="authError" class="auth-error" role="alert" hidden></p>
+    </section>
+  </main>
+  <script src="/web/auth-login.js"></script>
+</body>
+</html>

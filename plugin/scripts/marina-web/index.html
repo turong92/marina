@@ -37,6 +37,8 @@
             <span>알림</span>
             <button id="notifyToggle" class="notify-toggle" title="알림 꺼짐(기본, 옵트인) — 클릭하면 서비스 기동 완료/실패를 브라우저 알림으로 받아요">🔕</button>
           </div>
+          <button id="userManagementBtn" class="settings-action" type="button" hidden><span aria-hidden="true">◎</span>사용자 관리</button>
+          <button id="accountLogoutBtn" class="settings-action" type="button" hidden><span aria-hidden="true">↪</span>로그아웃</button>
         </div>
       </div>
     </div>
@@ -233,7 +235,32 @@
       </div>
     </div>
   </div>
+  <div id="userManagementDialog" class="modal-backdrop auth-users-backdrop" role="dialog" aria-modal="true" aria-labelledby="userManagementTitle" hidden>
+    <section class="user-management-panel">
+      <header class="user-management-head">
+        <div><h2 id="userManagementTitle">사용자 관리</h2><p>계정을 등록하고 접속 요청을 승인합니다.</p></div>
+        <button id="userManagementClose" class="icon-close" type="button" title="닫기" aria-label="사용자 관리 닫기">×</button>
+      </header>
+      <form id="authUserAddForm" class="auth-user-add">
+        <label>사용자명<input name="username" required autocomplete="off" autocapitalize="none" spellcheck="false" /></label>
+        <label>표시 이름<input name="displayName" required autocomplete="off" /></label>
+        <label>역할<select name="role"><option value="member">팀원</option><option value="admin">관리자</option></select></label>
+        <button class="primary" type="submit">계정 등록</button>
+      </form>
+      <div id="authUsersStatus" class="auth-users-status" hidden></div>
+      <div class="auth-users-table-wrap">
+        <table class="auth-users-table">
+          <thead><tr><th>계정</th><th>역할</th><th>상태</th><th><span class="sr-only">작업</span></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <footer class="user-management-foot">
+        <button id="revokeAllSessionsBtn" class="danger" type="button">모든 세션 로그아웃</button>
+      </footer>
+    </section>
+  </div>
   <datalist id="profileSuggest"><option value="local"></option><option value="dev"></option><option value="prod"></option><option value="staging"></option></datalist>
+  <script src="/web/app-0-auth.js"></script>
   <script src="/web/app-1-core.js"></script>
   <script src="/web/app-2-register.js"></script>
   <script src="/web/app-2b-workbench.js"></script>
@@ -249,6 +276,7 @@
   <script src="/web/app-5d-worktree-create.js"></script>
   <script src="/web/app-6-modals.js"></script>
   <script src="/web/app-6b-notify.js"></script>
+  <script src="/web/app-6c-users.js"></script>
   <script src="/web/app-8-git.js"></script>
   <script src="/web/app-8b-git-commit.js"></script>
   <script src="/web/app-9-connections.js"></script>

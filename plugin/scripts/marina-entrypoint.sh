@@ -16,6 +16,7 @@ DASHBOARD="$SCRIPT_DIR/marina-dashboard.sh"
 ATTACH="$SCRIPT_DIR/attach-detached-subrepos.sh"
 RESOLVE="$SCRIPT_DIR/marina-resolve.sh"
 CLI="$SCRIPT_DIR/marina_cli.py"
+AUTH_CLI="$SCRIPT_DIR/marina_auth_cli.py"
 # shellcheck source=/dev/null
 source "$RESOLVE"
 
@@ -60,6 +61,9 @@ usage (marina = 전역 CLI):
     marina dashboard [start|stop|status|open]    # 무인자 marina = dashboard start
   mobile:
     marina mobile enable|url|address|open|token|rotate|status|doctor|disable [host-or-base-url]
+  accounts:
+    marina auth status|reset-admin|disable
+    marina user list|add|approve|reject|disable|reset-password
   setup: marina attach | install-cli | uninstall-cli
 EOF
 }
@@ -195,6 +199,9 @@ command="${1:-dashboard}"
 shift || true
 
 case "$command" in
+  auth|user)
+    exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$AUTH_CLI" "$command" "$@"
+    ;;
   project|worktree|gateway|link)
     # 그룹 → marina.sh dispatch 로 위임 (project {add|rm|ls|...} · worktree create · gateway {start|...} · link)
     # worktree/gateway 누락이 "설치 shim 은 이 명령 없음" 증상의 원인이었음(도그푸드에서 발견)

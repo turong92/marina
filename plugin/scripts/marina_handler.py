@@ -43,6 +43,7 @@ from marina_sessions import activate_agent_payloads, agent_transcript, agents_pa
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
+from marina_auth_http import AUTH_DENIED, auth_controller
 
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
 
@@ -52,16 +53,20 @@ def render_index_html() -> str:
     return html.replace("{{MARINA_BUILD}}", _serving_sha() or "dev")
 
 class Handler(BaseHTTPRequestHandler):
-    def send_json(self, payload: Any, status: int = 200) -> None:
+    def send_json(self, payload: Any, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         data = json_bytes(payload)
         self.send_response(status)
         self.send_header("content-type", "application/json; charset=utf-8")
+        self.send_header("cache-control", "no-store")
         origin = self.headers.get("origin")
         if origin and origin_allowed(origin, True):
             # localhost 웹앱(/api/console)만 CORS 응답 허용 — 구버전의 무차별 `*` 제거
             self.send_header("access-control-allow-origin", origin)
             self.send_header("vary", "origin")
+        for name, value in headers or []:
+            self.send_header(name, value)
         self.send_header("content-length", str(len(data)))
+        auth_controller().add_security_headers(self)
         self.end_headers()
         self.wfile.write(data)
 
@@ -72,24 +77,46 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
+        host_guarded = parsed.path.startswith("/api/") and parsed.path not in ("/api/mobile-state",)
+        if host_guarded and not host_allowed(self.headers.get("host")):
+            self.send_json({"error": "forbidden host"}, 403)
+            return
+        controller = auth_controller()
+        if controller.dispatch(self, "GET", parsed):
+            return
+        principal = controller.authorize(self, "GET", parsed)
+        if principal is AUTH_DENIED:
+            return
+        self.auth_principal = principal
+        if parsed.path == "/login":
+            data = (_WEB_DIR / "login.html").read_bytes()
+            self.send_response(200)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("cache-control", "no-store")
+            self.send_header("content-length", str(len(data)))
+            controller.add_security_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if parsed.path == "/mobile":
-            data = render_mobile_html().encode("utf-8")
+            data = render_mobile_html(auth_enabled=principal is not None).encode("utf-8")
             self.send_response(200)
             self.send_header("content-type", "text/html; charset=utf-8")
             self.send_header("cache-control", "no-store, no-cache, must-revalidate")
             self.send_header("content-length", str(len(data)))
+            controller.add_security_headers(self)
             self.end_headers()
             self.wfile.write(data)
             return
         if parsed.path in ("/mobile/api/state", "/api/mobile-state"):
-            if not mobile_request_ok(self, parsed):
+            if principal is None and not mobile_request_ok(self, parsed):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
             self.send_json(mobile_state(refresh=query.get("refresh", ["0"])[0] == "1"))
             return
         if parsed.path == "/mobile/api/catalog":
-            if not mobile_request_ok(self, parsed):
+            if principal is None and not mobile_request_ok(self, parsed):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -100,7 +127,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, 400)
             return
         if parsed.path == "/mobile/api/transcript":
-            if not mobile_request_ok(self, parsed):
+            if principal is None and not mobile_request_ok(self, parsed):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -131,6 +158,7 @@ class Handler(BaseHTTPRequestHandler):
             # 서빙해서, 재시작 후 location.reload()·수동 새로고침이 옛 UI/JS 를 받는다 (새 코드 안 보임).
             self.send_header("cache-control", "no-store, no-cache, must-revalidate")
             self.send_header("content-length", str(len(data)))
+            controller.add_security_headers(self)
             self.end_headers()
             self.wfile.write(data)
             return
@@ -155,6 +183,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("content-type", ctype)
             self.send_header("cache-control", "no-store, no-cache, must-revalidate")
             self.send_header("content-length", str(len(data)))
+            controller.add_security_headers(self)
             self.end_headers()
             self.wfile.write(data)
             return
@@ -627,8 +656,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         try:
             parsed = urllib.parse.urlparse(self.path)
+            host_guarded = parsed.path.startswith("/api/") and parsed.path not in ("/api/mobile-send",)
+            if host_guarded and not host_allowed(self.headers.get("host")):
+                self.send_json({"error": "forbidden host"}, 403)
+                return
+            controller = auth_controller()
+            if controller.dispatch(self, "POST", parsed):
+                return
+            principal = controller.authorize(self, "POST", parsed)
+            if principal is AUTH_DENIED:
+                return
+            self.auth_principal = principal
             if parsed.path in ("/mobile/api/send", "/api/mobile-send"):
-                if not mobile_request_ok(self, parsed):
+                if principal is None and not mobile_request_ok(self, parsed):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 self.send_json(mobile_send(self.read_json()))
@@ -1225,6 +1265,7 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("origin")
         if not origin_allowed(origin, True):
             self.send_response(403)
+            auth_controller().add_security_headers(self)
             self.end_headers()
             return
         self.send_response(204)
@@ -1232,7 +1273,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("access-control-allow-origin", origin)
             self.send_header("vary", "origin")
         self.send_header("access-control-allow-methods", "GET, POST, OPTIONS")
-        self.send_header("access-control-allow-headers", "content-type")
+        self.send_header("access-control-allow-headers", "content-type, x-marina-csrf")
+        auth_controller().add_security_headers(self)
         self.end_headers()
 
     def stream_log(self, root: Path, service: str, run: str | None, from_offset: int | None = None) -> None:
@@ -1247,6 +1289,7 @@ class Handler(BaseHTTPRequestHandler):
         if origin and origin_allowed(origin, True):
             self.send_header("access-control-allow-origin", origin)
             self.send_header("vary", "origin")
+        auth_controller().add_security_headers(self)
         self.end_headers()
 
         idle = 0.0
@@ -1323,6 +1366,7 @@ class Handler(BaseHTTPRequestHandler):
         if origin and origin_allowed(origin, True):
             self.send_header("access-control-allow-origin", origin)
             self.send_header("vary", "origin")
+        auth_controller().add_security_headers(self)
         self.end_headers()
         try:
             with path.open("rb") as handle:

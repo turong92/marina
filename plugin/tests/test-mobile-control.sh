@@ -20,8 +20,8 @@ print(s.getsockname()[1])
 s.close()
 PY
 )" || { code=$?; [[ "$code" == "42" ]] && { echo "SKIP test-mobile-control (localhost bind unavailable)"; exit 0; }; exit "$code"; }
-SRV=""
-cleanup(){ [[ -n "$SRV" ]] && kill "$SRV" 2>/dev/null || true; rm -rf "$TMP"; }
+SRV=""; AUTH_SRV=""
+cleanup(){ [[ -n "$SRV" ]] && kill "$SRV" 2>/dev/null || true; [[ -n "$AUTH_SRV" ]] && kill "$AUTH_SRV" 2>/dev/null || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 
 MARINA_MOBILE_TOKEN=secret MARINA_CONTROL_PORT=$PORT MARINA_CONTROL_HOST=127.0.0.1 MARINA_HOME="$MARINA_HOME" python3 "$CTRL" >/dev/null 2>&1 & SRV=$!
@@ -400,6 +400,34 @@ for _ in range(50):
 else:
     raise SystemExit("FAIL: MOBILE_OK did not appear in terminal preview")
 PY
+
+AUTH_HOME="$TMP/auth-home"; mkdir -p "$AUTH_HOME"
+cp "$MARINA_HOME/projects.json" "$AUTH_HOME/projects.json"
+AUTH_PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()
+PY
+)"
+MARINA_HOME="$AUTH_HOME" MARINA_AUTH_DB="$AUTH_HOME/auth.db" MARINA_AUTH_PBKDF2_ITERATIONS=1000 PYTHONPATH="$SCR" python3 - <<'PY'
+import os
+from pathlib import Path
+from marina_auth import AuthStore
+store = AuthStore(Path(os.environ["MARINA_AUTH_DB"]), pbkdf2_iterations=1000)
+store.initialize()
+store.bootstrap_admin("owner", "Owner", "owner-password")
+PY
+MARINA_MOBILE_TOKEN=secret MARINA_CONTROL_PORT=$AUTH_PORT MARINA_CONTROL_HOST=127.0.0.1 \
+  MARINA_HOME="$AUTH_HOME" MARINA_AUTH_DB="$AUTH_HOME/auth.db" MARINA_AUTH_PBKDF2_ITERATIONS=1000 \
+  python3 "$CTRL" >/dev/null 2>&1 & AUTH_SRV=$!
+auth_base="http://127.0.0.1:$AUTH_PORT"
+for _ in $(seq 1 100); do curl -sf "$auth_base/api/health" >/dev/null && break; sleep 0.1; done
+old_token_code="$(curl -s -o /dev/null -w '%{http_code}' -H 'X-Marina-Mobile-Token: secret' "$auth_base/mobile/api/state")"
+[[ "$old_token_code" == "401" ]] || { echo "FAIL: auth-enabled mobile token should be rejected, got $old_token_code"; exit 1; }
+cookie_jar="$TMP/auth-cookies"
+curl -sf -c "$cookie_jar" -H 'content-type: application/json' \
+  -d '{"username":"owner","password":"owner-password"}' "$auth_base/api/auth/login" >/dev/null
+cookie_state_code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie_jar" "$auth_base/mobile/api/state")"
+[[ "$cookie_state_code" == "200" ]] || { echo "FAIL: auth-enabled mobile cookie should work, got $cookie_state_code"; exit 1; }
 
 grep -q 'mobile)' "$SCR/marina-entrypoint.sh" || {
   echo "FAIL: marina mobile CLI missing"; exit 1;

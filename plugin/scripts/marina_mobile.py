@@ -416,8 +416,8 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "tid": tid, "opened": opened}
 
 
-def render_mobile_html() -> str:
-    return _MOBILE_HTML
+def render_mobile_html(auth_enabled: bool = False) -> str:
+    return _MOBILE_HTML.replace("__MARINA_AUTH_ENABLED__", "true" if auth_enabled else "false")
 
 
 _MOBILE_HTML = r"""<!doctype html>
@@ -622,13 +622,23 @@ _MOBILE_HTML = r"""<!doctype html>
     </div>
   </div>
   <script>
+    const cookieAuth = __MARINA_AUTH_ENABLED__;
     const urlToken = new URL(location.href).searchParams.get("token");
-    if (urlToken) {
+    if (urlToken && !cookieAuth) {
       localStorage.setItem("marinaMobileToken", urlToken);
       history.replaceState(null, "", location.pathname);
     }
     const token = () => localStorage.getItem("marinaMobileToken") || "";
-    const headers = (json=false) => ({ ...(json ? {"content-type":"application/json"} : {}), "x-marina-mobile-token": token() });
+    const cookie = (name) => {
+      const prefix = `${encodeURIComponent(name)}=`;
+      const item = String(document.cookie || "").split(";").map(value => value.trim()).find(value => value.startsWith(prefix));
+      return item ? decodeURIComponent(item.slice(prefix.length)) : "";
+    };
+    const headers = (json=false) => ({
+      ...(json ? {"content-type":"application/json"} : {}),
+      ...(!cookieAuth ? {"x-marina-mobile-token": token()} : {}),
+      ...(cookieAuth && json ? {"x-marina-csrf": cookie("marina_csrf")} : {}),
+    });
     const catalogEndpoint = "/mobile/api/catalog";
     const login = document.getElementById("mobileLogin");
     const app = document.getElementById("mobileApp");
@@ -730,7 +740,7 @@ _MOBILE_HTML = r"""<!doctype html>
       inboxSheet.classList.remove("open");
       inboxSheet.setAttribute("aria-hidden", "true");
     }
-    function logout() {
+    async function logout() {
       localStorage.removeItem("marinaMobileToken");
       localStorage.removeItem("marinaMobileDraft");
       Object.keys(localStorage).filter(key => key.startsWith("marinaMobileDraft:")).forEach(key => localStorage.removeItem(key));
@@ -744,6 +754,11 @@ _MOBILE_HTML = r"""<!doctype html>
       turnsEl.innerHTML = "";
       Object.keys(historyCache).forEach(key => delete historyCache[key]);
       showList();
+      if (cookieAuth) {
+        try { await fetch("/api/auth/logout", {method: "POST", headers: headers(true), body: "{}"}); }
+        finally { location.replace("/login?next=%2Fmobile"); }
+        return;
+      }
       showLogin("로그아웃했습니다.");
     }
     function esc(value) {
@@ -1354,7 +1369,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (document.activeElement === promptInput) renderSuggestions();
     }
     async function load(options={}) {
-      if (!token()) {
+      if (!cookieAuth && !token()) {
         showLogin("mobile token을 입력하세요.");
         return;
       }
@@ -1364,6 +1379,10 @@ _MOBILE_HTML = r"""<!doctype html>
       try {
         if (!options.quiet) statusEl.textContent = "불러오는 중...";
         const r = await fetch("/mobile/api/state", {headers: headers()});
+        if (r.status === 401) {
+          location.replace("/login?next=%2Fmobile");
+          return;
+        }
         if (r.status === 403) {
           localStorage.removeItem("marinaMobileToken");
           showLogin("token이 맞지 않거나 mobile이 꺼져 있습니다.");

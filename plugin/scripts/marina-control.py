@@ -15,10 +15,12 @@ import marina_update
 import marina_compose_svc
 import marina_sessions
 import marina_lifecycle
+import marina_auth
+import marina_auth_http
 import marina_handler
 
 # 전 모듈 심볼을 이 모듈 네임스페이스로 재export — 테스트(spec_from_file_location)가 mc.<symbol> 로 접근.
-for _m in (marina_state, marina_dockerfile, marina_logtext, marina_cache, marina_registry, marina_paths, marina_cli, marina_update, marina_compose_svc, marina_sessions, marina_lifecycle, marina_handler):
+for _m in (marina_state, marina_dockerfile, marina_logtext, marina_cache, marina_registry, marina_paths, marina_cli, marina_update, marina_compose_svc, marina_sessions, marina_lifecycle, marina_auth, marina_auth_http, marina_handler):
     globals().update({k: v for k, v in vars(_m).items() if not k.startswith("__")})
 
 from marina_handler import Handler, main  # noqa: E402  (조립 진입점)

@@ -485,6 +485,44 @@
     .settings-row > span { color: var(--sys-cont-neutral-light); font-weight: 600; }
     .settings-row select { height: 26px; }
     .settings-row .notify-toggle { height: 26px; }
+    .settings-action { width: 100%; height: 30px; display: flex; align-items: center; gap: 8px; padding: 0 8px; border: 0; background: transparent; text-align: left; color: var(--sys-cont-neutral-default); }
+    .settings-action:hover { background: var(--sys-bg-surface-hover); }
+    .settings-action > span { width: 16px; color: var(--sys-cont-neutral-light); text-align: center; }
+    .auth-users-backdrop { z-index: 420; }
+    .user-management-panel { width: min(920px, calc(100vw - 32px)); max-height: calc(100vh - 48px); display: flex; flex-direction: column; overflow: hidden; border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); box-shadow: 0 12px 36px rgba(0,0,0,.2); }
+    .user-management-head { height: auto; padding: 18px 20px; border-bottom: 1px solid var(--sys-style-neutral-light); }
+    .user-management-head h2 { margin: 0; font-size: 16px; letter-spacing: 0; }
+    .user-management-head p { margin: 5px 0 0; color: var(--sys-cont-neutral-light); font-size: 12px; }
+    .user-management-head .icon-close { width: 30px; padding: 0; font-size: 20px; color: var(--sys-cont-neutral-light); }
+    .auth-user-add { display: grid; grid-template-columns: minmax(150px, 1fr) minmax(180px, 1.3fr) 120px auto; align-items: end; gap: 10px; padding: 14px 20px; border-bottom: 1px solid var(--sys-style-neutral-light); }
+    .auth-user-add label { display: flex; flex-direction: column; gap: 5px; color: var(--sys-cont-neutral-light); font-size: 11px; font-weight: 600; }
+    .auth-user-add input, .auth-user-add select, .auth-user-add button { width: 100%; height: 34px; }
+    .auth-users-status { padding: 10px 20px; color: var(--sys-cont-neutral-light); font-size: 12px; }
+    .auth-users-table-wrap { min-height: 180px; overflow: auto; }
+    .auth-users-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .auth-users-table th { position: sticky; top: 0; z-index: 1; padding: 9px 12px; color: var(--sys-cont-neutral-light); background: var(--sys-bg-base); text-align: left; font-size: 11px; }
+    .auth-users-table td { padding: 10px 12px; border-top: 1px solid var(--sys-style-neutral-light); vertical-align: middle; }
+    .auth-users-table td:first-child b, .auth-users-table td:first-child small { display: block; }
+    .auth-users-table td:first-child small { margin-top: 3px; color: var(--sys-cont-neutral-light); }
+    .auth-user-state { display: inline-block; padding: 3px 7px; border: 1px solid var(--sys-style-neutral-default); border-radius: 999px; color: var(--sys-cont-neutral-light); }
+    .auth-user-state.active { color: var(--st-run); border-color: color-mix(in srgb, var(--st-run) 45%, transparent); }
+    .auth-user-state.pending_approval { color: var(--st-boot); border-color: color-mix(in srgb, var(--st-boot) 45%, transparent); }
+    .auth-user-state.disabled { color: var(--sys-cont-negative-default); }
+    .auth-user-actions { display: flex; justify-content: flex-end; gap: 5px; white-space: nowrap; }
+    .auth-user-actions button { height: 26px; padding: 0 7px; font-size: 11px; }
+    .auth-users-empty { height: 160px; color: var(--sys-cont-neutral-light); text-align: center; }
+    .user-management-foot { height: auto; padding: 12px 20px; border-top: 1px solid var(--sys-style-neutral-light); justify-content: flex-end; }
+    .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    @media (max-width: 680px) {
+      .user-management-panel { width: 100vw; max-height: 100vh; height: 100vh; border: 0; border-radius: 0; }
+      .auth-user-add { grid-template-columns: 1fr 1fr; }
+      .auth-user-add button { align-self: end; }
+      .auth-users-table thead { display: none; }
+      .auth-users-table tr { display: grid; grid-template-columns: 1fr auto; padding: 10px 14px; border-top: 1px solid var(--sys-style-neutral-light); }
+      .auth-users-table td { padding: 3px 0; border: 0; }
+      .auth-users-table td:nth-child(2), .auth-users-table td:nth-child(3) { display: inline-flex; align-items: center; margin-right: 8px; }
+      .auth-user-actions { grid-column: 1 / -1; flex-wrap: wrap; justify-content: flex-start; margin-top: 6px; }
+    }
     .sessions { padding: 14px; display: grid; gap: 12px; }
     /* ── Orca 문법 카드 (콘솔 스펙 D3) — 무테두리, 간격·배경 명도로 구분, 선택/hover 승격 ── */
     .session { border: none; border-radius: 10px; background: var(--sys-bg-surface); overflow: hidden; position: relative; padding-bottom: 8px; }
