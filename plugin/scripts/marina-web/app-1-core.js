@@ -41,6 +41,7 @@
     const AGENT_INBOX_READ_KEY = 'marinaAgentInboxRead';
     const AGENT_STATUS_META = {
       working:   { dot: 'boot', label: '작업 중', title: '에이전트가 현재 작업 중' },
+      blocked:   { dot: 'bad',  label: '응답 필요', title: '권한 승인 또는 사용자 입력이 필요함' },
       waiting:   { dot: 'part', label: '응답 대기', title: '응답을 마치고 다음 입력을 기다리는 중' },
       completed: { dot: 'run',  label: '완료', title: '작업을 마치고 세션이 종료됨' },
       failed:    { dot: 'bad',  label: '실패', title: '작업이 오류 또는 중단으로 끝남' },
@@ -58,7 +59,7 @@
       return `${agent.source || ''}:${agent.sid || ''}:${agent.status || 'idle'}:${agent.statusTs || agent.ts || 0}`;
     }
     function agentInboxEntries() {
-      const actionable = new Set(['waiting', 'completed', 'failed']);
+      const actionable = new Set(['blocked', 'waiting', 'completed', 'failed']);
       const entries = [];
       for (const wt of worktreeData) {
         for (const agent of (wt.agents || [])) {

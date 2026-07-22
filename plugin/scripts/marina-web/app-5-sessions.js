@@ -16,7 +16,7 @@
     function agentsSummary(agents) {
       const states = (agents || []).map(agentState);
       const working = states.filter(state => state === 'working').length;
-      const attention = states.filter(state => ['waiting', 'completed', 'failed'].includes(state)).length;
+      const attention = states.filter(state => ['blocked', 'waiting', 'completed', 'failed'].includes(state)).length;
       return [working ? `<span class="c-boot">⟳ ${working}</span>` : '', attention ? `<span class="c-err">▤ ${attention}</span>` : ''].filter(Boolean).join(' · ');
     }
     function renderAgentRow(agent) {

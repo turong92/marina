@@ -1263,7 +1263,7 @@ _MOBILE_HTML = r"""<!doctype html>
       return `${session.source || ""}:${session.sid || ""}:${session.status || "idle"}:${session.statusTs || session.ts || 0}`;
     }
     function inboxSessions() {
-      const actionable = new Set(["waiting", "completed", "failed"]);
+      const actionable = new Set(["blocked", "waiting", "completed", "failed"]);
       return (state.sessions || []).filter(session => session.kind === "agent" && session.sid && actionable.has(session.status))
         .map(session => ({...session, eventId: inboxEventId(session)}))
         .sort((a, b) => Number(b.statusTs || b.ts || 0) - Number(a.statusTs || a.ts || 0))
@@ -1285,7 +1285,7 @@ _MOBILE_HTML = r"""<!doctype html>
       inboxCount.textContent = unread > 99 ? "99+" : String(unread);
       inboxMenuBtn.title = unread ? `새 작업 ${unread}개` : "확인할 새 작업 없음";
       if (!inboxSheet.classList.contains("open")) return;
-      const statusLabel = {waiting: "응답 대기", completed: "완료", failed: "실패"};
+      const statusLabel = {blocked: "응답 필요", waiting: "응답 대기", completed: "완료", failed: "실패"};
       let previousProject = "";
       const html = items.map(item => {
         const wt = worktreeForRoot(item.root);

@@ -175,4 +175,42 @@ grep -q 'id="inboxSheet"' "$MOBILE" || { echo "FAIL mobile inbox sheet missing";
 grep -q 'function openInbox' "$MOBILE" || { echo "FAIL mobile inbox open flow missing"; exit 1; }
 grep -q 'chooseSession' "$MOBILE" || { echo "FAIL mobile inbox does not reuse chat selection"; exit 1; }
 
+node - "$CORE" "$SESSIONS" <<'JS'
+const fs = require('fs');
+const vm = require('vm');
+const [corePath, sessionsPath] = process.argv.slice(2);
+const coreSource = fs.readFileSync(corePath, 'utf8');
+const sessionsSource = fs.readFileSync(sessionsPath, 'utf8');
+const start = coreSource.indexOf('const AGENT_STATUS_META = {');
+const end = coreSource.indexOf("document.getElementById('agentInboxBtn').onclick");
+if (start < 0 || end < 0) throw new Error('desktop inbox source boundaries missing');
+const context = {
+  localStorage: {getItem: () => null, setItem: () => {}},
+  worktreeData: [{
+    root: '/tmp/marina-project', projectId: 'project', projectLabel: 'Project',
+    agents: [
+      {source: 'claude', sid: 'claude-blocked', status: 'blocked', statusTs: 200, title: 'Needs approval'},
+      {source: 'codex', sid: 'codex-working', status: 'working', statusTs: 100, title: 'Still working'},
+    ],
+  }],
+  escapeHtml: value => String(value),
+  relTime: value => `${value}s`,
+  openAgentTerminal: () => {},
+};
+vm.createContext(context);
+vm.runInContext(`${coreSource.slice(start, end)}\nthis.__meta = AGENT_STATUS_META;`, context, {filename: corePath});
+vm.runInContext(sessionsSource, context, {filename: sessionsPath});
+const meta = context.__meta.blocked;
+if (!meta || meta.label !== '응답 필요' || meta.title !== '권한 승인 또는 사용자 입력이 필요함') {
+  throw new Error(`blocked metadata mismatch: ${JSON.stringify(meta)}`);
+}
+const entries = context.agentInboxEntries();
+if (entries.length !== 1 || entries[0].sid !== 'claude-blocked') {
+  throw new Error(`blocked Inbox membership mismatch: ${JSON.stringify(entries)}`);
+}
+const summary = context.agentsSummary(context.worktreeData[0].agents);
+if (!summary.includes('▤ 1')) throw new Error(`blocked attention count missing: ${summary}`);
+console.log('ok desktop blocked inbox membership and attention count');
+JS
+
 echo "PASS test-agent-inbox"
