@@ -86,6 +86,7 @@ assert ms.agent_status(codex_future_native, "codex", now=1000) == {"status": "id
 # Native transcript parsing remains the fallback, but an explicit lifecycle event at
 # the same or newer timestamp is authoritative for this root/session only.
 events = tmp / "events-home"
+events.mkdir()
 claude_done_ts = 1784538062
 record_hook_event({
     "hook_event_name": "Notification", "notification_type": "permission_prompt",

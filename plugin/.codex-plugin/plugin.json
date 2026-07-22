@@ -8,6 +8,7 @@
   "homepage": "https://github.com/turong92/marina",
   "repository": "https://github.com/turong92/marina",
   "license": "MIT",
+  "hooks": "./hooks/codex-hooks.json",
   "keywords": [
     "worktree",
     "dev-server",

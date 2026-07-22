@@ -10,10 +10,11 @@ import os
 import re
 import stat
 import sys
-import tempfile
 import time
+import uuid
+from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 MAX_ROWS = 100
 MAX_FUTURE_SECONDS = 300
@@ -85,67 +86,121 @@ def _source(payload: Mapping[str, Any], environ: Mapping[str, str]) -> str | Non
     return None
 
 
-def _journal_paths(home: Path, source: str, sid: str) -> tuple[Path, Path, Path]:
-    source_dir = home / ".marina" / "agent-events" / source
-    return source_dir, source_dir / f"{sid}.jsonl", source_dir / f"{sid}.lock"
+def _directory_flags() -> int:
+    if not hasattr(os, "O_DIRECTORY") or not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("safe journal handling requires O_DIRECTORY and O_NOFOLLOW")
+    return os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
 
 
-def _ensure_private_directory(path: Path, *, parents: bool = False) -> None:
-    try:
-        path.mkdir(mode=0o700, parents=parents)
-    except FileNotFoundError:
-        raise
-    except FileExistsError:
-        pass
-
+def _file_flags(flags: int) -> int:
     if not hasattr(os, "O_NOFOLLOW"):
-        raise OSError("safe directory handling requires O_NOFOLLOW")
-    flags = os.O_RDONLY | os.O_NOFOLLOW
-    if hasattr(os, "O_DIRECTORY"):
-        flags |= os.O_DIRECTORY
-    fd = os.open(path, flags)
+        raise OSError("safe journal handling requires O_NOFOLLOW")
+    return flags | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+
+
+def _open_home_directory(home: Path) -> int | None:
     try:
-        details = os.fstat(fd)
-        if not stat.S_ISDIR(details.st_mode):
-            raise OSError(f"unsafe journal directory: {path}")
-        # chmod the opened directory, never a path that could have been
-        # replaced with a symlink after validation.
+        fd = os.open(os.fspath(home), _directory_flags())
+    except FileNotFoundError:
+        return None
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError("unsafe journal home directory")
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _open_private_child(parent_fd: int, name: str, *, create: bool) -> int | None:
+    try:
+        fd = os.open(name, _directory_flags(), dir_fd=parent_fd)
+    except FileNotFoundError:
+        if not create:
+            return None
+        try:
+            os.mkdir(name, 0o700, dir_fd=parent_fd)
+        except FileExistsError:
+            pass
+        fd = os.open(name, _directory_flags(), dir_fd=parent_fd)
+    try:
+        if not stat.S_ISDIR(os.fstat(fd).st_mode):
+            raise OSError(f"unsafe journal directory: {name}")
         os.fchmod(fd, 0o700)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+@contextmanager
+def _source_directory(home: Path, source: str, *, create: bool) -> Iterator[int]:
+    """Open the journal directory without following any journal-tree component."""
+    fds: list[int] = []
+    try:
+        home_fd = _open_home_directory(home)
+        if home_fd is None:
+            raise FileNotFoundError(os.fspath(home))
+        fds.append(home_fd)
+        for name in (".marina", "agent-events", source):
+            child_fd = _open_private_child(fds[-1], name, create=create)
+            if child_fd is None:
+                raise FileNotFoundError(name)
+            fds.append(child_fd)
+        yield fds[-1]
+    finally:
+        for fd in reversed(fds):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _open_regular_at(source_fd: int, name: str, *, create: bool = False, writable: bool = False) -> int | None:
+    flags = os.O_RDWR if writable else os.O_RDONLY
+    try:
+        fd = os.open(name, _file_flags(flags), 0o600, dir_fd=source_fd)
+    except FileNotFoundError:
+        if not create:
+            return None
+        try:
+            fd = os.open(
+                name,
+                _file_flags(flags | os.O_CREAT | os.O_EXCL),
+                0o600,
+                dir_fd=source_fd,
+            )
+        except FileExistsError:
+            fd = os.open(name, _file_flags(flags), 0o600, dir_fd=source_fd)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError(f"unsafe journal file: {name}")
+        os.fchmod(fd, 0o600)
+        return fd
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _journal_exists(source_fd: int, name: str) -> bool:
+    fd = _open_regular_at(source_fd, name)
+    if fd is None:
+        return False
+    try:
+        return True
     finally:
         os.close(fd)
 
 
-def _prepare_directory(path: Path) -> None:
-    marina_dir = path.parents[1]
-    events_dir = path.parent
-    _ensure_private_directory(marina_dir, parents=True)
-    _ensure_private_directory(events_dir)
-    _ensure_private_directory(path)
-
-
-def _is_regular_file(path: Path) -> bool:
+@contextmanager
+def _open_lock(source_fd: int, name: str) -> Iterator[int]:
+    fd = _open_regular_at(source_fd, name, create=True, writable=True)
+    if fd is None:
+        raise OSError("failed to create journal lock")
     try:
-        details = path.lstat()
-    except FileNotFoundError:
-        return False
-    return not stat.S_ISLNK(details.st_mode) and stat.S_ISREG(details.st_mode)
-
-
-def _open_lock(path: Path):
-    if not hasattr(os, "O_NOFOLLOW"):
-        raise OSError("safe lock handling requires O_NOFOLLOW")
-    flags = os.O_RDWR | os.O_CREAT
-    flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
-    try:
-        details = os.fstat(fd)
-        if not stat.S_ISREG(details.st_mode):
-            raise OSError(f"unsafe journal lock: {path}")
-        os.fchmod(fd, 0o600)
-        return os.fdopen(fd, "a+", encoding="utf-8")
-    except Exception:
+        yield fd
+    finally:
         os.close(fd)
-        raise
 
 
 def _valid_row(row: object) -> dict[str, Any] | None:
@@ -170,56 +225,90 @@ def _valid_row(row: object) -> dict[str, Any] | None:
     return {"source": source, "sid": sid, "root": root, "event": event, "reason": reason, "ts": ts}
 
 
-def _read_rows(path: Path, *, source: str | None = None, sid: str | None = None) -> list[dict[str, Any]]:
+def _read_rows(source_fd: int, name: str, *, source: str, sid: str) -> list[dict[str, Any]]:
     """Read only a bounded tail and retain rows for the expected journal."""
+    fd = _open_regular_at(source_fd, name)
+    if fd is None:
+        return []
     try:
-        if not _is_regular_file(path):
-            return []
-        size = path.stat().st_size
-        with path.open("rb") as handle:
-            if size > MAX_JOURNAL_READ_BYTES:
-                handle.seek(size - MAX_JOURNAL_READ_BYTES)
-                raw = handle.read().split(b"\n", 1)
-                raw = raw[1] if len(raw) == 2 else b""
-            else:
-                raw = handle.read()
+        size = os.fstat(fd).st_size
+        offset = max(0, size - MAX_JOURNAL_READ_BYTES)
+        os.lseek(fd, offset, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = min(size, MAX_JOURNAL_READ_BYTES)
+        while remaining:
+            chunk = os.read(fd, min(65536, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        if offset:
+            split = raw.split(b"\n", 1)
+            raw = split[1] if len(split) == 2 else b""
         raw_rows = raw.decode("utf-8", errors="replace").splitlines()
     except OSError:
         return []
+    finally:
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
     rows: list[dict[str, Any]] = []
     for line in raw_rows:
         try:
             row = _valid_row(json.loads(line))
         except (TypeError, ValueError, json.JSONDecodeError):
             row = None
-        if row and (source is None or row["source"] == source) and (sid is None or row["sid"] == sid):
+        if row and row["source"] == source and row["sid"] == sid:
             rows.append(row)
     return rows
 
 
-def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
-    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent, text=True)
-    temp_path = Path(temp_name)
+def _write_all(fd: int, value: bytes) -> None:
+    view = memoryview(value)
+    while view:
+        written = os.write(fd, view)
+        if written <= 0:
+            raise OSError("failed to write journal")
+        view = view[written:]
+
+
+def _write_rows(source_fd: int, name: str, rows: list[dict[str, Any]]) -> None:
+    temp_name = f".{name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    fd: int | None = None
+    replaced = False
     try:
+        fd = os.open(
+            temp_name,
+            _file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL),
+            0o600,
+            dir_fd=source_fd,
+        )
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise OSError("unsafe journal temporary file")
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            for row in rows:
-                handle.write(json.dumps(row, separators=(",", ":"), sort_keys=True))
-                handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temp_path, path)
-    except Exception:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        raise
+        for row in rows:
+            _write_all(fd, json.dumps(row, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n")
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.replace(temp_name, name, src_dir_fd=source_fd, dst_dir_fd=source_fd)
+        replaced = True
     finally:
-        try:
-            temp_path.unlink()
-        except FileNotFoundError:
-            pass
+        if fd is not None:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        if not replaced:
+            try:
+                os.unlink(temp_name, dir_fd=source_fd)
+            except FileNotFoundError:
+                pass
+            except OSError:
+                pass
 
 
 def _event_from_payload(payload: Mapping[str, Any]) -> tuple[str, str | None] | None:
@@ -231,12 +320,12 @@ def _event_from_payload(payload: Mapping[str, Any]) -> tuple[str, str | None] | 
     return None
 
 
-def _acquire_lock(lock_handle, mode: int) -> bool:
+def _acquire_lock(lock_fd: int, mode: int) -> bool:
     """Acquire a sidecar lock without letting a synchronous hook stall a turn."""
     deadline = time.monotonic() + LOCK_ACQUIRE_TIMEOUT_SECONDS
     while True:
         try:
-            fcntl.flock(lock_handle.fileno(), mode | fcntl.LOCK_NB)
+            fcntl.flock(lock_fd, mode | fcntl.LOCK_NB)
             return True
         except (BlockingIOError, OSError):
             remaining = deadline - time.monotonic()
@@ -276,33 +365,32 @@ def record_hook_event(
             return None
 
         resolved_home = Path.home() if home is None else Path(home)
-        source_dir, journal_path, lock_path = _journal_paths(resolved_home, source, sid)
-        _prepare_directory(source_dir)
-        if os.path.lexists(journal_path) and not _is_regular_file(journal_path):
-            return None
+        journal_name = f"{sid}.jsonl"
+        lock_name = f"{sid}.lock"
         current = float(row["ts"])
-        with _open_lock(lock_path) as lock_handle:
-            if not _acquire_lock(lock_handle, fcntl.LOCK_EX):
-                return None
-            try:
-                rows = [
-                    existing for existing in _read_rows(journal_path, source=source, sid=sid)
-                    if existing["ts"] <= current + MAX_FUTURE_SECONDS
-                ]
-                rows.sort(key=lambda existing: existing["ts"])
-                if (
-                    rows
-                    and rows[-1]["root"] == root
-                    and rows[-1]["event"] == event
-                    and rows[-1].get("reason") == reason
-                ):
-                    return rows[-1]
-                rows.append(row)
-                rows = sorted(rows, key=lambda existing: existing["ts"])[-MAX_ROWS:]
-                _write_rows(journal_path, rows)
-                return row
-            finally:
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+        with _source_directory(resolved_home, source, create=True) as source_fd:
+            with _open_lock(source_fd, lock_name) as lock_fd:
+                if not _acquire_lock(lock_fd, fcntl.LOCK_EX):
+                    return None
+                try:
+                    rows = [
+                        existing for existing in _read_rows(source_fd, journal_name, source=source, sid=sid)
+                        if existing["ts"] <= current + MAX_FUTURE_SECONDS
+                    ]
+                    rows.sort(key=lambda existing: existing["ts"])
+                    if (
+                        rows
+                        and rows[-1]["root"] == root
+                        and rows[-1]["event"] == event
+                        and rows[-1].get("reason") == reason
+                    ):
+                        return rows[-1]
+                    rows.append(row)
+                    rows = sorted(rows, key=lambda existing: existing["ts"])[-MAX_ROWS:]
+                    _write_rows(source_fd, journal_name, rows)
+                    return row
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
     except Exception:
         return None
 
@@ -323,18 +411,19 @@ def latest_agent_event(
         if canonical_root is None:
             return None
         resolved_home = Path.home() if home is None else Path(home)
-        source_dir, journal_path, lock_path = _journal_paths(resolved_home, source, sid)
-        if not _is_regular_file(journal_path):
-            return None
+        journal_name = f"{sid}.jsonl"
+        lock_name = f"{sid}.lock"
         current = time.time() if now is None else now
-        _prepare_directory(source_dir)
-        with _open_lock(lock_path) as lock_handle:
-            if not _acquire_lock(lock_handle, fcntl.LOCK_SH):
+        with _source_directory(resolved_home, source, create=False) as source_fd:
+            if not _journal_exists(source_fd, journal_name):
                 return None
-            try:
-                rows = _read_rows(journal_path, source=source, sid=sid)
-            finally:
-                fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            with _open_lock(source_fd, lock_name) as lock_fd:
+                if not _acquire_lock(lock_fd, fcntl.LOCK_SH):
+                    return None
+                try:
+                    rows = _read_rows(source_fd, journal_name, source=source, sid=sid)
+                finally:
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
         matching = [
             row for row in rows
             if row["source"] == source
@@ -342,7 +431,7 @@ def latest_agent_event(
             and row["root"] == canonical_root
             and row["ts"] <= current + MAX_FUTURE_SECONDS
         ]
-        return max(matching, key=lambda row: row["ts"]) if matching else None
+        return max(enumerate(matching), key=lambda pair: (pair[1]["ts"], pair[0]))[1] if matching else None
     except Exception:
         return None
 

@@ -45,6 +45,7 @@ def _hold_lock(path, ready, duration):
 root = tmp / "root"
 root.mkdir()
 home = tmp / "home"
+home.mkdir()
 claude_base = {
     "session_id": "claude-1",
     "cwd": str(root),
@@ -179,8 +180,15 @@ utf_dir.mkdir(parents=True, mode=0o700)
 utf_journal = utf_dir / "utf-1.jsonl"
 utf_row = {"source": "claude", "sid": "utf-1", "root": str(root.resolve()),
            "event": "working", "reason": None, "ts": 1300.5}
-utf_journal.write_bytes(b'{"bad":"\\xff"}\n' + json.dumps(utf_row).encode() + b"\n")
+utf_journal.write_bytes(b'{"bad":\xff}\n' + json.dumps(utf_row).encode() + b"\n")
 assert latest_agent_event("claude", "utf-1", root, home=utf_home, now=1301) == utf_row
+
+# A reader must not create a missing journal hierarchy merely to discover that
+# no event exists.
+missing_reader_home = tmp / "missing-reader-home"
+missing_reader_home.mkdir()
+assert latest_agent_event("claude", "missing-1", root, home=missing_reader_home, now=1301) is None
+assert not (missing_reader_home / ".marina").exists()
 
 # Refuse symlinked source directories and lock files without following or
 # chmodding outside targets.
@@ -213,42 +221,38 @@ outside_journal.write_text("do not touch", encoding="utf-8")
 assert record_hook_event({**claude_base, "hook_event_name": "UserPromptSubmit"}, home=file_home, now=1402) is None
 assert outside_journal.read_text(encoding="utf-8") == "do not touch"
 
-# A directory replacement after validation must leave the external target's
-# mode untouched: directory permission changes operate on the opened fd only.
-race_dir = tmp / "race-directory"
+# Replace an already-opened journal ancestor during the real recorder path.
+# Retained descriptor traversal must keep every following operation in the
+# renamed directory, never in the symlink target now visible by pathname.
+race_home = tmp / "race-home"
+race_home.mkdir()
+race_dir = race_home / ".marina"
 race_dir.mkdir(mode=0o755)
 race_outside = tmp / "race-outside"
 race_outside.mkdir(mode=0o755)
 race_parked = tmp / "race-parked"
-real_chmod = events.os.chmod
-real_fchmod = events.os.fchmod
+real_open = events.os.open
 swapped = False
 
-def swap_directory():
+def race_open(path, flags, mode=0o777, *, dir_fd=None):
     global swapped
-    if not swapped:
+    if path == "agent-events" and not swapped:
         race_dir.rename(race_parked)
         race_dir.symlink_to(race_outside, target_is_directory=True)
         swapped = True
+    return real_open(path, flags, mode, dir_fd=dir_fd)
 
-def race_chmod(path, mode, *args, **kwargs):
-    if Path(path) == race_dir:
-        swap_directory()
-    return real_chmod(path, mode, *args, **kwargs)
-
-def race_fchmod(fd, mode):
-    swap_directory()
-    return real_fchmod(fd, mode)
-
-events.os.chmod = race_chmod
-events.os.fchmod = race_fchmod
+events.os.open = race_open
 try:
-    events._ensure_private_directory(race_dir)
+    race_result = record_hook_event(
+        {**claude_base, "hook_event_name": "UserPromptSubmit"}, home=race_home, now=1450,
+    )
 finally:
-    events.os.chmod = real_chmod
-    events.os.fchmod = real_fchmod
+    events.os.open = real_open
 assert swapped
 assert stat.S_IMODE(race_outside.stat().st_mode) == 0o755
+assert not list(race_outside.iterdir())
+assert race_result and race_result["ts"] == 1450
 
 # Sidecar locking retains all valid writes from a synchronized process burst.
 for index in range(MAX_ROWS):
@@ -305,19 +309,41 @@ assert elapsed < LOCK_ACQUIRE_TIMEOUT_SECONDS + 0.2, elapsed
 print("ok hook journal")
 PY
 
-python3 - "$HERE/../hooks/hooks.json" <<'PY'
+python3 - "$HERE/../hooks/hooks.json" "$HERE/../hooks/codex-hooks.json" "$HERE/../.claude-plugin/plugin.json" "$HERE/../.codex-plugin/plugin.json" <<'PY'
 import json
 import sys
 
-hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+claude_hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+codex_hooks = json.load(open(sys.argv[2], encoding="utf-8"))["hooks"]
+claude_manifest = json.load(open(sys.argv[3], encoding="utf-8"))
+codex_manifest = json.load(open(sys.argv[4], encoding="utf-8"))
+
+assert "Notification" in claude_hooks
+assert "Notification" not in codex_hooks
+assert set(codex_hooks) == {"SessionStart", "PreToolUse", "UserPromptSubmit", "Stop"}
+assert codex_manifest["hooks"] == "./hooks/codex-hooks.json"
+assert "hooks" not in claude_manifest
+
 for name in ("UserPromptSubmit", "Notification", "Stop"):
-    commands = hooks[name][0]["hooks"]
+    commands = claude_hooks[name][0]["hooks"]
     assert len(commands) == 1 and commands[0].get("async") is False, (name, commands)
     assert commands[0].get("timeout") == 2, (name, commands)
-print("ok synchronous lifecycle hook contract")
+    assert "${CLAUDE_PLUGIN_ROOT}" in commands[0]["command"], (name, commands)
+
+for name in ("UserPromptSubmit", "Stop"):
+    commands = codex_hooks[name][0]["hooks"]
+    assert len(commands) == 1 and commands[0].get("async") is False, (name, commands)
+    assert commands[0].get("timeout") == 2, (name, commands)
+    assert "${PLUGIN_ROOT}" in commands[0]["command"], (name, commands)
+
+for name in ("SessionStart", "PreToolUse"):
+    command = codex_hooks[name][0]["hooks"][0]["command"]
+    assert "${PLUGIN_ROOT}" in command, (name, command)
+print("ok host-specific synchronous lifecycle hook contract")
 PY
 
 WRAPPER="$SCRIPTS/marina-agent-event-hook.sh"
+mkdir -p "$TMP/wrapper-home"
 printf '{not json}\n' | HOME="$TMP/wrapper-home" "$WRAPPER"
 printf '%s\n' '{"session_id":"wrapper-1","cwd":"/tmp","transcript_path":"/tmp/.claude/x.jsonl","hook_event_name":"UserPromptSubmit"}' | HOME="$TMP/wrapper-home" "$WRAPPER"
 test -f "$TMP/wrapper-home/.marina/agent-events/claude/wrapper-1.jsonl" || { echo "FAIL wrapper did not record valid input"; exit 1; }

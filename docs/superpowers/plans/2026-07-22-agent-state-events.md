@@ -6,7 +6,7 @@
 
 **Architecture:** A dependency-free hook recorder writes metadata-only, per-session JSONL under `~/.marina/agent-events`. `marina_sessions.py` merges the newest valid hook event with the existing bounded native transcript result, then the existing terminal-activity pass distinguishes `waiting` from `completed`. Desktop and mobile reuse their current Inbox flows and add `blocked` as one actionable state.
 
-**Tech Stack:** Python 3 standard library, Claude/Codex `hooks.json`, Bash fixture tests, vanilla JavaScript, embedded mobile HTML.
+**Tech Stack:** Python 3 standard library, host-specific Claude/Codex hook JSON, Bash fixture tests, vanilla JavaScript, embedded mobile HTML.
 
 ## Global Constraints
 
@@ -25,6 +25,8 @@
 - Create: `plugin/scripts/marina_agent_events.py`
 - Create: `plugin/scripts/marina-agent-event-hook.sh`
 - Modify: `plugin/hooks/hooks.json`
+- Create: `plugin/hooks/codex-hooks.json`
+- Modify: `plugin/.codex-plugin/plugin.json`
 - Create: `plugin/tests/test-agent-events.sh`
 
 **Interfaces:**
@@ -86,7 +88,7 @@ exit 0
 
 - [x] **Step 4: Register lifecycle hooks**
 
-Add command hooks for `UserPromptSubmit`, `Notification`, and `Stop` to `plugin/hooks/hooks.json`, each invoking `marina-agent-event-hook.sh` with `"async": false` and a two-second host timeout. Synchronous registration is required because Codex skips asynchronous command hooks, and it preserves Claude lifecycle order instead of allowing delayed child processes to record a stale state after `Stop`. Use a much shorter bounded nonblocking retry for the local sidecar lock so a contended journal fails open before the host timeout. Keep `SessionStart` and `PreToolUse` unchanged.
+Keep `plugin/hooks/hooks.json` as the Claude configuration: it contains `UserPromptSubmit`, `Notification`, and `Stop`, each invoking `marina-agent-event-hook.sh` with `"async": false` and a two-second host timeout through `CLAUDE_PLUGIN_ROOT`. Create `plugin/hooks/codex-hooks.json` for only Codex-supported `SessionStart`, `PreToolUse`, `UserPromptSubmit`, and `Stop`; lifecycle commands use `PLUGIN_ROOT`, remain synchronous, and have the same two-second timeout. Point the Codex manifest `hooks` field at `./hooks/codex-hooks.json`; do not register `Notification` for Codex. Synchronous registration is required because Codex skips asynchronous command hooks, and it preserves Claude lifecycle order instead of allowing delayed child processes to record a stale state after `Stop`. Use a much shorter bounded nonblocking retry for the local sidecar lock so a contended journal fails open before the host timeout. Keep `SessionStart` and `PreToolUse` behavior equivalent.
 
 - [x] **Step 5: Run the journal test and syntax checks**
 
@@ -97,6 +99,9 @@ bash plugin/tests/test-agent-events.sh
 python3 -m py_compile plugin/scripts/marina_agent_events.py
 bash -n plugin/scripts/marina-agent-event-hook.sh
 python3 -m json.tool plugin/hooks/hooks.json >/dev/null
+python3 -m json.tool plugin/hooks/codex-hooks.json >/dev/null
+python3 -m json.tool plugin/.claude-plugin/plugin.json >/dev/null
+python3 -m json.tool plugin/.codex-plugin/plugin.json >/dev/null
 ```
 
 Expected: all commands exit zero and the test prints `PASS test-agent-events`.
@@ -312,3 +317,10 @@ Expected: every repository shell test exits zero, `git diff --check` is clean, a
 - Aside mobile verification at phone layout showed the same actionable states without overlap; selecting the blocked item opened the existing native chat with its prior turns and composer. Missing event files also used the native fallback.
 - Codex `blocked` remains capability-based: when its host does not emit a stable approval or user-input lifecycle event, Marina preserves the other native state and does not infer a blocker from text.
 - `git status --short --branch` showed a clean working tree with only the planned commits ahead of `origin/main`. No push or installed-plugin update occurred.
+
+## Correction Set 3 (2026-07-22)
+
+- [x] Split Claude and Codex hook registrations: Claude keeps `Notification` in `plugin/hooks/hooks.json`; the Codex manifest selects `plugin/hooks/codex-hooks.json`, which contains only Codex-supported events and uses `PLUGIN_ROOT`.
+- [x] Keep lifecycle recorders synchronous with `async: false` and a two-second host timeout while preserving SessionStart and PreToolUse behavior.
+- [x] Replace journal path traversal with retained descriptor-relative opens for every journal-tree component, journal/lock files, and temporary replacement files; use `O_DIRECTORY`, `O_NOFOLLOW`, `fstat`, `fchmod`, and directory-fd replacement/cleanup.
+- [x] Add regressions for an actual invalid UTF-8 byte, missing-reader no-create behavior, host manifest separation, and a deterministic ancestor-replacement race that leaves the external target untouched.

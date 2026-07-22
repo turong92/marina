@@ -56,7 +56,9 @@ Each row contains only:
 
 Prompt text, tool input, tool output, transcript content, tokens, and credentials are never copied. The directory is mode `0700`, files are mode `0600`, malformed input produces no row, and every recorder failure exits zero so an agent session is never blocked by Marina. Consecutive duplicate `(root, event, reason)` rows are suppressed and each file retains only the newest 100 rows. Rows are accepted only when their source and session ID match the journal path; foreign, malformed, and more-than-five-minutes-future rows are discarded before retention. Journal reads use a bounded tail so corrupt files cannot grow dashboard polling memory.
 
-Lifecycle hooks stay synchronous for Codex compatibility and event ordering, with a two-second host timeout. The recorder uses a much shorter bounded, nonblocking sidecar-lock retry window and fails open when it cannot acquire the lock, leaving margin for Python startup without stalling an agent turn.
+Journal traversal is descriptor-relative after the HOME directory is opened: `.marina`, `agent-events`, and the source directory are opened or created one component at a time with `O_DIRECTORY | O_NOFOLLOW`. Permissions are applied with `fchmod` to those retained directory descriptors. Journal, lock, and temporary names are opened relative to the retained source descriptor with `O_NOFOLLOW`; replacement and cleanup use the same directory descriptor. This prevents a concurrent path replacement from redirecting reads, writes, or permission changes to an external target. A reader never creates a missing journal hierarchy; it creates a lock only after finding an existing journal to synchronize with a writer.
+
+Lifecycle hooks stay synchronous for Codex compatibility and event ordering, with a two-second host timeout. The recorder uses a much shorter bounded, nonblocking sidecar-lock retry window and fails open when it cannot acquire the lock, leaving margin for Python startup without stalling an agent turn. `plugin/hooks/hooks.json` remains the Claude configuration and includes its supported `Notification` hook using `CLAUDE_PLUGIN_ROOT`. The Codex manifest explicitly selects `./hooks/codex-hooks.json`, which contains only `SessionStart`, `PreToolUse`, `UserPromptSubmit`, and `Stop` using `PLUGIN_ROOT`; it deliberately omits unsupported `Notification`.
 
 Hook configuration records only events supported by the host. Unknown or absent lifecycle events are harmless because native transcript parsing remains authoritative when no newer journal event exists. Codex project hooks continue to load only in trusted projects, matching Codex's existing hook trust boundary.
 
@@ -82,7 +84,7 @@ The Inbox continues to derive read state in browser local storage. Status truth 
 - No runtime dependency is added; Python standard library and the existing hook mechanism are sufficient.
 - Existing installations without the new hooks retain native JSONL and mtime behavior.
 - Hook trust and host support are capability boundaries, not reasons to disable the dashboard.
-- Journal paths are derived from validated source/session identifiers and never from raw path fragments. Symlinked journal directories, journal files, and lock files fail open rather than being followed.
+- Journal paths are derived from validated source/session identifiers and never from raw path fragments. Descriptor-relative traversal rejects symlinked journal directories, journal files, and lock files without following them.
 - Events older than the native state do not override it.
 - Events more than five minutes in the future are ignored.
 
