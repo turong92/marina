@@ -28,6 +28,7 @@ VALID_SOURCES = {"claude", "codex"}
 BLOCKED_REASONS = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
 HOOK_EVENTS = {
     "UserPromptSubmit": "working",
+    "PostToolUse": "working",
     "Stop": "ended",
 }
 
@@ -324,11 +325,13 @@ def _write_rows(source_fd: int, name: str, rows: list[dict[str, Any]]) -> None:
                 pass
 
 
-def _event_from_payload(payload: Mapping[str, Any]) -> tuple[str, str | None] | None:
+def _event_from_payload(payload: Mapping[str, Any], source: str) -> tuple[str, str | None] | None:
     hook_event = payload.get("hook_event_name")
+    if hook_event == "PermissionRequest":
+        return "blocked", "permission_prompt"
     if hook_event in HOOK_EVENTS:
         return HOOK_EVENTS[str(hook_event)], None
-    if hook_event == "Notification" and payload.get("notification_type") in BLOCKED_REASONS:
+    if source == "claude" and hook_event == "Notification" and payload.get("notification_type") in BLOCKED_REASONS:
         return "blocked", str(payload["notification_type"])
     return None
 
@@ -362,7 +365,7 @@ def record_hook_event(
         source = _source(payload, environment)
         sid = _session_id(payload)
         root = _canonical_path(payload.get("cwd"))
-        mapped_event = _event_from_payload(payload)
+        mapped_event = _event_from_payload(payload, source)
         if source not in VALID_SOURCES or not sid or not root or not mapped_event:
             return None
         event, reason = mapped_event
@@ -397,8 +400,9 @@ def record_hook_event(
                         and rows[-1]["event"] == event
                         and rows[-1].get("reason") == reason
                     ):
-                        return rows[-1]
-                    rows.append(row)
+                        rows[-1] = row
+                    else:
+                        rows.append(row)
                     rows = sorted(rows, key=lambda existing: existing["ts"])[-MAX_ROWS:]
                     _write_rows(source_fd, journal_name, rows)
                     return row

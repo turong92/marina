@@ -485,13 +485,17 @@ def _agent_event_ts(obj: dict[str, Any], fallback: float) -> float:
 
 def _agent_state_rows(path: Path) -> tuple[list[dict[str, Any]], float]:
     try:
-        stat = path.stat()
         with path.open("rb") as fh:
-            if stat.st_size > AGENT_STATE_TAIL_BYTES:
-                fh.seek(stat.st_size - AGENT_STATE_TAIL_BYTES)
-            raw = fh.read()
+            descriptor_stat = os.fstat(fh.fileno())
+            offset = max(0, descriptor_stat.st_size - AGENT_STATE_TAIL_BYTES)
+            if offset:
+                fh.seek(offset)
+            raw = fh.read(min(descriptor_stat.st_size, AGENT_STATE_TAIL_BYTES))
     except OSError:
         return [], 0
+    if offset:
+        split = raw.split(b"\n", 1)
+        raw = split[1] if len(split) == 2 else b""
     rows: list[dict[str, Any]] = []
     for line in raw.decode("utf-8", errors="ignore").splitlines():
         try:
@@ -500,7 +504,7 @@ def _agent_state_rows(path: Path) -> tuple[list[dict[str, Any]], float]:
             continue
         if isinstance(obj, dict):
             rows.append(obj)
-    return rows, stat.st_mtime
+    return rows, descriptor_stat.st_mtime
 
 
 EVENT_TO_STATUS = {

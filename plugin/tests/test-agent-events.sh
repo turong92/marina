@@ -78,14 +78,22 @@ assert codex and codex["source"] == "codex" and codex["sid"] == "codex-1", codex
 
 # A nullable Codex transcript still resolves from its host-specific plugin
 # root, before the shared Claude compatibility variable/session fallback.
-codex_null = record_hook_event({
+codex_null_base = {
     "session_id": "codex-null-1",
     "cwd": str(root),
     "transcript_path": None,
-    "hook_event_name": "UserPromptSubmit",
+}
+codex_null = record_hook_event({
+    **codex_null_base,
+    "hook_event_name": "PermissionRequest",
 }, environ={"PLUGIN_ROOT": "/codex-plugin", "CLAUDE_PLUGIN_ROOT": "/compat-plugin"}, home=home, now=1004.5)
-assert codex_null and codex_null["source"] == "codex", codex_null
+assert codex_null and codex_null["source"] == "codex" and codex_null["event"] == "blocked", codex_null
 assert (home / ".marina" / "agent-events" / "codex" / "codex-null-1.jsonl").is_file()
+codex_post_tool = record_hook_event({
+    **codex_null_base,
+    "hook_event_name": "PostToolUse",
+}, environ={"PLUGIN_ROOT": "/codex-plugin", "CLAUDE_PLUGIN_ROOT": "/compat-plugin"}, home=home, now=1004.75)
+assert codex_post_tool and codex_post_tool["source"] == "codex" and codex_post_tool["event"] == "working", codex_post_tool
 
 # A transcript signal always beats ambiguous environment fallback signals.
 mixed = record_hook_event({
@@ -98,9 +106,29 @@ assert mixed and mixed["source"] == "claude", mixed
 assert record_hook_event({"hook_event_name": "UserPromptSubmit"}, home=home, now=1006) is None
 assert record_hook_event({**claude_base, "session_id": "../escape", "hook_event_name": "UserPromptSubmit"}, home=home, now=1006) is None
 
-# Consecutive duplicates do not grow the journal.
+# Consecutive duplicates are coalesced into the current canonical row rather
+# than preserving a timestamp that stale native activity could later beat.
 duplicate = record_hook_event({**claude_base, "hook_event_name": "Stop"}, home=home, now=1007)
-assert duplicate and duplicate["ts"] == 1002, duplicate
+assert duplicate and duplicate["ts"] == 1007, duplicate
+
+coalesced_base = {
+    "session_id": "coalesced-1", "cwd": str(root),
+    "transcript_path": str(tmp / ".claude/projects/root/coalesced-1.jsonl"),
+}
+first_blocked = record_hook_event({
+    **coalesced_base, "hook_event_name": "Notification", "notification_type": "permission_prompt",
+}, home=home, now=1010)
+second_blocked = record_hook_event({
+    **coalesced_base, "hook_event_name": "Notification", "notification_type": "permission_prompt",
+}, home=home, now=1011)
+first_ended = record_hook_event({**coalesced_base, "hook_event_name": "Stop"}, home=home, now=1012)
+second_ended = record_hook_event({**coalesced_base, "hook_event_name": "Stop"}, home=home, now=1013)
+assert first_blocked and second_blocked and second_blocked["ts"] == 1011, second_blocked
+assert first_ended and second_ended and second_ended["ts"] == 1013, second_ended
+coalesced_journal = home / ".marina" / "agent-events" / "claude" / "coalesced-1.jsonl"
+coalesced_rows = [json.loads(line) for line in coalesced_journal.read_text(encoding="utf-8").splitlines()]
+assert len(coalesced_rows) == 2 <= MAX_ROWS, coalesced_rows
+assert [row["ts"] for row in coalesced_rows] == [1011, 1013], coalesced_rows
 
 resumed_root = tmp / "resumed-root"
 resumed_root.mkdir()
@@ -478,7 +506,9 @@ readme = Path(sys.argv[5]).read_text(encoding="utf-8")
 
 assert "Notification" in claude_hooks
 assert "Notification" not in codex_hooks
-assert set(codex_hooks) == {"SessionStart", "PreToolUse", "UserPromptSubmit", "Stop"}
+assert set(codex_hooks) == {
+    "SessionStart", "PreToolUse", "UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop",
+}
 assert codex_manifest["hooks"] == "./hooks/codex-hooks.json"
 assert "hooks" not in claude_manifest
 
@@ -488,11 +518,14 @@ for name in ("UserPromptSubmit", "Notification", "Stop"):
     assert commands[0].get("timeout") == 2, (name, commands)
     assert "${CLAUDE_PLUGIN_ROOT}" in commands[0]["command"], (name, commands)
 
-for name in ("UserPromptSubmit", "Stop"):
+for name in ("UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"):
     commands = codex_hooks[name][0]["hooks"]
     assert len(commands) == 1 and commands[0].get("async") is False, (name, commands)
     assert commands[0].get("timeout") == 2, (name, commands)
     assert "${PLUGIN_ROOT}" in commands[0]["command"], (name, commands)
+
+for name in ("PermissionRequest", "PostToolUse"):
+    assert codex_hooks[name][0].get("matcher") == "*", (name, codex_hooks[name])
 
 for name in ("SessionStart", "PreToolUse"):
     command = codex_hooks[name][0]["hooks"][0]["command"]

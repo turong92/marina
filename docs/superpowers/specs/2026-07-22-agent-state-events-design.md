@@ -17,7 +17,7 @@ This phase improves state accuracy for the existing desktop and mobile Activity 
 | `failed` | The native source reports an aborted turn, API error, stream error, or failed stop hook. |
 | `idle` | No reliable current event exists. |
 
-`blocked` is intentionally narrow. A normal final response remains `waiting` or `completed`, even when its prose contains a question mark. If Codex does not expose a stable approval or user-input event for a session, Marina leaves the session at its other native state rather than guessing.
+`blocked` is intentionally narrow. A normal final response remains `waiting` or `completed`, even when its prose contains a question mark. Codex uses its explicit `PermissionRequest` hook for this state; Marina never infers a blocker from text.
 
 ## Source Mapping
 
@@ -30,12 +30,12 @@ Claude sessions are identified by canonical worktree root plus `cliSessionId`. T
 
 Codex sessions are identified by canonical `session_meta.cwd` plus `session_meta.id`. Their native rollout remains `~/.codex/sessions/**/rollout-*.jsonl`.
 
-- `task_started` maps to `working`.
-- A stable native approval or request-user-input event maps to `blocked` when present.
+- `UserPromptSubmit`, `PostToolUse`, and `task_started` map to `working`.
+- `PermissionRequest` maps to `blocked` with the bounded `permission_prompt` reason.
 - `task_complete` maps to successful turn end.
 - `turn_aborted`, `error`, or `stream_error` maps to `failed`.
 
-The current local Codex rollouts expose reliable `task_started`, `task_complete`, and `turn_aborted` events but no consistent blocked event. The implementation therefore keeps blocked detection capability-based and does not parse assistant text.
+`PermissionRequest` and `PostToolUse` are turn-scoped Codex hooks with tool-name matchers. Marina records only their normalized lifecycle metadata, not tool, prompt, or transcript content.
 
 ## Event Journal
 
@@ -54,11 +54,11 @@ Each row contains only:
 }
 ```
 
-Prompt text, tool input, tool output, transcript content, tokens, and credentials are never copied. The directory is mode `0700`, files are mode `0600`, malformed input produces no row, and every recorder failure exits zero so an agent session is never blocked by Marina. Consecutive duplicate `(root, event, reason)` rows are suppressed and each file retains only the newest 100 rows. Rows are accepted only when their source and session ID match the journal path; foreign, malformed, and more-than-five-minutes-future rows are discarded before retention. Journal reads use a bounded tail so corrupt files cannot grow dashboard polling memory.
+Prompt text, tool input, tool output, transcript content, tokens, and credentials are never copied. The directory is mode `0700`, files are mode `0600`, malformed input produces no row, and every recorder failure exits zero so an agent session is never blocked by Marina. Consecutive duplicate `(root, event, reason)` rows coalesce to one current canonical row: its timestamp is refreshed and the bounded journal is rewritten. Each file retains only the newest 100 rows. Rows are accepted only when their source and session ID match the journal path; foreign, malformed, and more-than-five-minutes-future rows are discarded before retention. Journal reads use a bounded tail so corrupt files cannot grow dashboard polling memory.
 
 Journal traversal is descriptor-relative after the HOME directory is opened: `.marina`, `agent-events`, and the source directory are opened or created one component at a time with `O_DIRECTORY | O_NOFOLLOW`. Permissions are applied with `fchmod` to those retained directory descriptors. Journal, lock, and temporary names are opened relative to the retained source descriptor with `O_NOFOLLOW | O_NONBLOCK`, then must be regular files with exactly one link before any `fchmod`, read, or write. Replacement and cleanup use the same directory descriptor; the writer retains the temp descriptor across `os.replace` and verifies the final non-following `(st_dev, st_ino)` identity before reporting success. This prevents a concurrent path replacement from redirecting reads, writes, or permission changes to an external target. Readers fail open for unsafe entries; writers may replace an unsafe journal pathname with a new verified inode. A reader never creates a missing journal hierarchy; it creates a lock only after finding an existing journal to synchronize with a writer.
 
-Lifecycle hooks stay synchronous for Codex compatibility and event ordering, with a two-second host timeout. The recorder uses a much shorter bounded, nonblocking sidecar-lock retry window and fails open when it cannot acquire the lock, leaving margin for Python startup without stalling an agent turn. `plugin/hooks/hooks.json` remains the Claude configuration and includes its supported `Notification` hook using `CLAUDE_PLUGIN_ROOT`. The Codex manifest explicitly selects `./hooks/codex-hooks.json`, which contains only `SessionStart`, `PreToolUse`, `UserPromptSubmit`, and `Stop` using `PLUGIN_ROOT`; it deliberately omits unsupported `Notification`.
+Lifecycle hooks stay synchronous for Codex compatibility and event ordering, with a two-second host timeout. The recorder uses a much shorter bounded, nonblocking sidecar-lock retry window and fails open when it cannot acquire the lock, leaving margin for Python startup without stalling an agent turn. `plugin/hooks/hooks.json` remains the Claude configuration and includes its supported `Notification` hook using `CLAUDE_PLUGIN_ROOT`. The Codex manifest explicitly selects `./hooks/codex-hooks.json`, which contains `SessionStart`, `PreToolUse`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, and `Stop` using `PLUGIN_ROOT`; `PermissionRequest` and `PostToolUse` use the all-tools matcher and both recorder commands remain synchronous with a two-second timeout. It deliberately omits unsupported `Notification`.
 
 Hook configuration records only events supported by the host. Unknown or absent lifecycle events are harmless because native transcript parsing remains authoritative when no newer journal event exists. Codex project hooks continue to load only in trusted projects, matching Codex's existing hook trust boundary.
 
@@ -71,7 +71,7 @@ Hook configuration records only events supported by the host. Unknown or absent 
 3. recent file mtime fallback;
 4. `idle`.
 
-A successful turn-end event first normalizes to an internal ended state. The existing live terminal identity set then renders it as `waiting` when resumable or `completed` otherwise. A newer user-submit or task-start event clears an older `blocked` state. Out-of-order, malformed, missing, or future-dated rows are ignored without breaking the worktree payload.
+A successful turn-end event first normalizes to an internal ended state. The existing live terminal identity set then renders it as `waiting` when resumable or `completed` otherwise. A newer user-submit, tool completion, or task-start event clears an older `blocked` state. Out-of-order, malformed, missing, or future-dated rows are ignored without breaking the worktree payload.
 
 ## UI Behavior
 
@@ -90,7 +90,7 @@ The Inbox continues to derive read state in browser local storage. Status truth 
 
 ## Verification
 
-- Fixture tests cover Claude and Codex native mappings, hook precedence, blocked clearing, duplicate suppression, malformed rows, future timestamps, and bounded retention.
+- Fixture tests cover Claude and Codex native mappings, real nullable-transcript Codex approval/tool lifecycle payloads, hook precedence, blocked clearing, duplicate timestamp refresh, malformed rows, future timestamps, bounded retention, and descriptor-bounded native reads.
 - Desktop and mobile contract tests require the `blocked` label and actionable Inbox inclusion.
 - Existing agent history, Inbox, mobile control, authentication, and terminal tests remain green.
 - Aside browser verification checks desktop and mobile blocked items, unread counts, navigation to the existing session, and no layout overlap.

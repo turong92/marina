@@ -83,6 +83,46 @@ codex_future_native = write("codex-future-native.jsonl", [
 os.utime(codex_future_native, (1401, 1401))
 assert ms.agent_status(codex_future_native, "codex", now=1000) == {"status": "idle", "statusTs": 0}
 
+# A stale path stat may be followed by a replacement descriptor. Native state
+# reads must bound the descriptor read itself and retain a complete tail row.
+stale_native_path = write("stale-native.jsonl", [])
+replacement_native_path = tmp / "replacement-native.jsonl"
+replacement_native_path.write_bytes(
+    (b"x" * (ms.AGENT_STATE_TAIL_BYTES * 2)) + b"\n" + json.dumps({
+        "timestamp": 1700, "type": "event_msg", "payload": {"type": "task_started"},
+    }).encode("utf-8") + b"\n"
+)
+read_requests = []
+real_path_open = ms.Path.open
+
+class TrackingHandle:
+    def __init__(self, handle):
+        self.handle = handle
+    def __enter__(self):
+        return self
+    def __exit__(self, *args):
+        return self.handle.__exit__(*args)
+    def fileno(self):
+        return self.handle.fileno()
+    def seek(self, *args):
+        return self.handle.seek(*args)
+    def read(self, size=-1):
+        read_requests.append(size)
+        return self.handle.read(size)
+
+def replacement_open(path, *args, **kwargs):
+    if path == stale_native_path:
+        return TrackingHandle(real_path_open(replacement_native_path, *args, **kwargs))
+    return real_path_open(path, *args, **kwargs)
+
+ms.Path.open = replacement_open
+try:
+    replacement_status = ms.agent_status(stale_native_path, "codex", now=1701)
+finally:
+    ms.Path.open = real_path_open
+assert read_requests and all(0 <= size <= ms.AGENT_STATE_TAIL_BYTES for size in read_requests), read_requests
+assert replacement_status == {"status": "working", "statusTs": 1700}, replacement_status
+
 # Native transcript parsing remains the fallback, but an explicit lifecycle event at
 # the same or newer timestamp is authoritative for this root/session only.
 events = tmp / "events-home"
@@ -111,9 +151,8 @@ working = ms.agent_status(
 assert working == {"status": "working", "statusTs": claude_done_ts + 20}, working
 
 record_hook_event({
-    "hook_event_name": "Stop", "thread_id": "codex-1", "cwd": str(tmp),
-    "transcript_path": str(tmp / ".codex" / "sessions" / "rollout.jsonl"),
-}, home=events, now=1784538000)
+    "hook_event_name": "Stop", "session_id": "codex-1", "cwd": str(tmp), "transcript_path": None,
+}, environ={"PLUGIN_ROOT": "/codex-plugin"}, home=events, now=1784538000)
 older = ms.agent_status(
     codex_done, "codex", sid="codex-1", root=tmp,
     event_home=events, now=1784538200,
@@ -121,26 +160,53 @@ older = ms.agent_status(
 assert older == {"status": "completed", "statusTs": 1784538245}, older
 
 record_hook_event({
-    "hook_event_name": "Notification", "notification_type": "idle_prompt",
-    "thread_id": "codex-equal", "cwd": str(tmp),
-    "transcript_path": str(tmp / ".codex" / "sessions" / "rollout.jsonl"),
-}, home=events, now=1784538245)
+    "hook_event_name": "PermissionRequest", "session_id": "codex-equal", "cwd": str(tmp), "transcript_path": None,
+}, environ={"PLUGIN_ROOT": "/codex-plugin"}, home=events, now=1784538245)
 equal = ms.agent_status(
     codex_done, "codex", sid="codex-equal", root=tmp,
     event_home=events, now=1784538250,
 )
 assert equal == {"status": "blocked", "statusTs": 1784538245,
-                 "statusReason": "idle_prompt"}, equal
+                 "statusReason": "permission_prompt"}, equal
 
 record_hook_event({
-    "hook_event_name": "UserPromptSubmit", "thread_id": "codex-future", "cwd": str(tmp),
-    "transcript_path": str(tmp / ".codex" / "sessions" / "rollout.jsonl"),
-}, home=events, now=1784538600)
+    "hook_event_name": "PostToolUse", "session_id": "codex-future", "cwd": str(tmp), "transcript_path": None,
+}, environ={"PLUGIN_ROOT": "/codex-plugin"}, home=events, now=1784538600)
 future = ms.agent_status(
     codex_done, "codex", sid="codex-future", root=tmp,
     event_home=events, now=1784538250,
 )
 assert future == {"status": "completed", "statusTs": 1784538245}, future
+
+# Coalesced hook events refresh their timestamp. A newer native working event
+# must beat the first hook row but yield to the repeated real lifecycle hook.
+codex_resolver_native = write("codex-resolver-native.jsonl", [
+    {"timestamp": 150, "type": "event_msg", "payload": {"type": "task_started"}},
+])
+blocked_resolver_payload = {
+    "hook_event_name": "PermissionRequest", "session_id": "codex-blocked-repeat",
+    "cwd": str(tmp), "transcript_path": None,
+}
+record_hook_event(blocked_resolver_payload, environ={"PLUGIN_ROOT": "/codex-plugin"}, home=events, now=100)
+assert ms.agent_status(
+    codex_resolver_native, "codex", sid="codex-blocked-repeat", root=tmp, event_home=events, now=151,
+) == {"status": "working", "statusTs": 150}
+record_hook_event(blocked_resolver_payload, environ={"PLUGIN_ROOT": "/codex-plugin"}, home=events, now=200)
+assert ms.agent_status(
+    codex_resolver_native, "codex", sid="codex-blocked-repeat", root=tmp, event_home=events, now=201,
+) == {"status": "blocked", "statusTs": 200, "statusReason": "permission_prompt"}
+
+ended_resolver_payload = {
+    "hook_event_name": "Stop", "session_id": "codex-ended-repeat", "cwd": str(tmp), "transcript_path": None,
+}
+record_hook_event(ended_resolver_payload, environ={"PLUGIN_ROOT": "/codex-plugin"}, home=events, now=100)
+assert ms.agent_status(
+    codex_resolver_native, "codex", sid="codex-ended-repeat", root=tmp, event_home=events, now=151,
+) == {"status": "working", "statusTs": 150}
+record_hook_event(ended_resolver_payload, environ={"PLUGIN_ROOT": "/codex-plugin"}, home=events, now=200)
+assert ms.agent_status(
+    codex_resolver_native, "codex", sid="codex-ended-repeat", root=tmp, event_home=events, now=201,
+) == {"status": "completed", "statusTs": 200}
 
 # `latest_agent_event` owns supplied-now future validation. Once it returns an
 # event, changing the process wall clock must not alter this result.

@@ -118,14 +118,15 @@ for source, sid, root in [
     ("claude", "cli-recent", Path(wt)),
     ("codex", "codex-1", Path(wt2)),
 ]:
+    is_codex = source == "codex"
     recorded = record_hook_event({
-        "source": source,
-        "hook_event_name": "Notification", "notification_type": "permission_prompt",
-        "session_id": sid if source == "claude" else None,
-        "thread_id": sid if source == "codex" else None,
+        **({} if is_codex else {"source": source}),
+        "hook_event_name": "PermissionRequest" if is_codex else "Notification",
+        **({} if is_codex else {"notification_type": "permission_prompt"}),
+        "session_id": sid,
         "cwd": str(root / ".." / root.name),
-        "transcript_path": str(root / f"{sid}.jsonl"),
-    }, home=Path(fake_home), now=event_ts)
+        "transcript_path": None if is_codex else str(root / f"{sid}.jsonl"),
+    }, environ={"PLUGIN_ROOT": "/codex-plugin"} if is_codex else None, home=Path(fake_home), now=event_ts)
     assert recorded and recorded["sid"] == sid, recorded
 
 codex_agents = ms.agents_payload(Path(wt2), refresh=True)

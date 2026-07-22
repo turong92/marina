@@ -100,6 +100,8 @@ codex plugin add marina@marina-dev
 미등록 레포에서는 세션 시작 시 등록 힌트 1줄만 준다(레지스트리 판독 불가 시엔 침묵). 사람이/
 에이전트가 의도적으로 직접 실행해야 하면 명령 앞에 `MARINA_DIRECT=1 ` 을 붙인다(차단 우회).
 참고: 플러그인 업데이트로 `hooks/codex-hooks.json` 이 바뀌면 Codex 는 훅을 다시 신뢰해야 할 수 있다.
+Codex 의 동기 lifecycle recorder 는 `UserPromptSubmit`·`PermissionRequest`·`PostToolUse`·`Stop` 메타데이터만
+기록한다. `PermissionRequest` 만 `응답 필요` 상태로 만들며, prompt/tool 내용이나 텍스트 추론은 사용하지 않는다.
 
 대시보드 데몬은 OS supervisor 로 등록되어 로그인·부팅 후 자동 기동된다:
 
