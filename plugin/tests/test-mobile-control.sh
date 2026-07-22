@@ -91,6 +91,10 @@ grep -q 'failedSend.sessionKey !== selectedSessionKey' <<<"$mobile_html" || { ec
 grep -q 'const requestContext = {root: selectedRoot(), sessionKey: selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile send should capture its session before the request"; exit 1; }
 grep -q 'failedSend = requestContext' <<<"$mobile_html" || { echo "FAIL: /mobile failed send should retry in its original session"; exit 1; }
 grep -q 'async function responseError' <<<"$mobile_html" || { echo "FAIL: /mobile should show the server send failure reason"; exit 1; }
+grep -q 'class="usageRail"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose agent context usage"; exit 1; }
+grep -q 'loadAgentUsage' <<<"$mobile_html" || { echo "FAIL: /mobile should load usage lazily for the selected agent"; exit 1; }
+grep -q '"/mobile/api/usage"' <<<"$mobile_html" || { echo "FAIL: /mobile should use the scoped usage endpoint"; exit 1; }
+grep -q 'formatTokens' <<<"$mobile_html" || { echo "FAIL: /mobile should compact large token values"; exit 1; }
 grep -q 'suggestions' <<<"$mobile_html" || { echo "FAIL: /mobile composer should render native suggestions"; exit 1; }
 grep -q 'renderSuggestions' <<<"$mobile_html" || { echo "FAIL: /mobile composer should adapt suggestions to Claude/Codex"; exit 1; }
 grep -q '"/mobile/api/catalog"' <<<"$mobile_html" || { echo "FAIL: /mobile composer should query file references lazily"; exit 1; }
@@ -111,6 +115,7 @@ grep -q 'servicesSheet' <<<"$mobile_html" || { echo "FAIL: /mobile should render
 grep -q 'settingsBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose model and effort settings"; exit 1; }
 grep -q 'stopBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose current-turn interruption"; exit 1; }
 grep -q '"/mobile/api/interrupt"' <<<"$mobile_html" || { echo "FAIL: /mobile stop should call the scoped interrupt API"; exit 1; }
+grep -q '앱에서 실행 중' <<<"$mobile_html" || { echo "FAIL: app-owned working sessions should be labeled"; exit 1; }
 grep -q 'history.pushState({view: "chat"}' <<<"$mobile_html" || { echo "FAIL: /mobile chat should own a browser history entry"; exit 1; }
 grep -q '한 번 더 누르면 Marina를 나갑니다' <<<"$mobile_html" || { echo "FAIL: /mobile main back should show a two-step exit guard"; exit 1; }
 grep -q 'turnsEl.scrollHeight' <<<"$mobile_html" || { echo "FAIL: /mobile chat should scroll its transcript rather than the page"; exit 1; }

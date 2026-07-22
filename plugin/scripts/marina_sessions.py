@@ -419,6 +419,7 @@ def codex_session_titles(refresh: bool = False) -> dict[str, str]:
 # A1 — 카드 AGENTS 섹션: 워크트리에서 도는 Claude/Codex 세션 가시화(Orca 의 "이 안에서 뭐가 도는지" 를 서비스뿐 아니라 에이전트에도).
 # CLI 트랜스크립트(~/.claude/projects/<슬러그>/<cliSessionId>.jsonl) — Claude Code 가 절대경로의 '/'·'.'을 '-'로 치환해 만드는 디렉토리명.
 CLAUDE_PROJECTS_DIR = Path(os.environ.get("CLAUDE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
+CLAUDE_CONFIG_FILE = Path(os.environ.get("CLAUDE_CONFIG_FILE", str(Path.home() / ".claude.json")))
 
 AGENTS_MAX_PER_ROOT = 3
 
@@ -1122,6 +1123,120 @@ def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
         if model or effort:
             return {"model": model, "effort": effort}
     return {"model": "", "effort": ""}
+
+
+def _usage_token_count(usage: dict[str, Any], key: str) -> int:
+    value = usage.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return 0
+    return max(0, int(value))
+
+
+def _model_context_window(value: str) -> int | None:
+    match = re.search(r"\[(\d+(?:\.\d+)?)([km])\]$", value.strip().lower())
+    if not match:
+        return None
+    multiplier = 1_000 if match.group(2) == "k" else 1_000_000
+    return int(float(match.group(1)) * multiplier)
+
+
+def _claude_context_window(model: str) -> int | None:
+    direct = _model_context_window(model)
+    if direct is not None or not model:
+        return direct
+    try:
+        config = json.loads(CLAUDE_CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    options = config.get("additionalModelOptionsCache") if isinstance(config, dict) else None
+    if not isinstance(options, list):
+        return None
+    for option in options:
+        value = str(option.get("value") or "") if isinstance(option, dict) else ""
+        if value.split("[", 1)[0] == model:
+            window = _model_context_window(value)
+            if window is not None:
+                return window
+    return None
+
+
+def _empty_agent_usage(source: str, model: str = "") -> dict[str, Any]:
+    return {
+        "source": source,
+        "model": model,
+        "usedTokens": None,
+        "contextWindow": None,
+        "remainingTokens": None,
+        "contextPercent": None,
+    }
+
+
+def _normalized_agent_usage(source: str, model: str, used: int,
+                            window: int | None) -> dict[str, Any]:
+    if window is None or window <= 0:
+        remaining = None
+        percent = None
+    else:
+        remaining = max(0, window - used)
+        percent = min(100.0, round(used * 100 / window, 1))
+    return {
+        "source": source,
+        "model": model,
+        "usedTokens": used,
+        "contextWindow": window,
+        "remainingTokens": remaining,
+        "contextPercent": percent,
+    }
+
+
+def agent_usage_from_path(path: Path, source: str) -> dict[str, Any]:
+    """Read the newest native context counter without scanning session history."""
+    if source not in ("claude", "codex"):
+        raise ValueError("unknown source")
+    if not path.is_file():
+        return _empty_agent_usage(source)
+    for obj in _reverse_json_objects(path):
+        if source == "codex":
+            payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+            if obj.get("type") != "event_msg" or payload.get("type") != "token_count":
+                continue
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            latest = info.get("last_token_usage") if isinstance(info.get("last_token_usage"), dict) else {}
+            used = latest.get("total_tokens")
+            window = info.get("model_context_window")
+            if isinstance(used, bool) or not isinstance(used, (int, float)):
+                continue
+            normalized_window = int(window) if isinstance(window, (int, float)) and not isinstance(window, bool) else None
+            return _normalized_agent_usage(source, "", max(0, int(used)), normalized_window)
+        if obj.get("type") != "assistant":
+            continue
+        message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+        usage = message.get("usage") if isinstance(message.get("usage"), dict) else {}
+        if not usage:
+            continue
+        model = str(message.get("model") or "")
+        used = sum(_usage_token_count(usage, key) for key in (
+            "input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens",
+        ))
+        return _normalized_agent_usage(source, model, used, _claude_context_window(model))
+    return _empty_agent_usage(source)
+
+
+def agent_usage(root: Path, source: str, sid: str) -> dict[str, Any]:
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}", sid or ""):
+        raise ValueError("invalid session id")
+    if source == "claude":
+        path = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{sid}.jsonl"
+    elif source == "codex":
+        entry = next((item for item in codex_agent_sessions().get(str(root), []) if item.get("sid") == sid), None)
+        path = Path(str((entry or {}).get("path") or ""))
+        if not entry:
+            raise ValueError("codex rollout 을 못 찾았어요 (세션 만료)")
+    else:
+        raise ValueError("unknown source")
+    if not path.is_file():
+        raise ValueError("transcript 파일이 없어요 (세션 만료/이동)")
+    return agent_usage_from_path(path, source)
 
 
 def agent_transcript(root: Path, source: str, sid: str, before: int | None = None,

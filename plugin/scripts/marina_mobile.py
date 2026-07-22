@@ -692,6 +692,14 @@ _MOBILE_HTML = r"""<!doctype html>
     .empty-state { padding: 28px 12px; color: #747d8b; text-align: center; font-size: 13px; line-height: 1.45; }
     .chat-title { font-size: 18px; font-weight: 900; line-height: 1.25; overflow-wrap: anywhere; }
     .chat-subtitle { color: #596070; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
+    .usageRail { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 10px; margin-top: 7px; padding-top: 7px; border-top: 1px solid #dde2ea; font-variant-numeric: tabular-nums; }
+    .usageMetric { min-width: 0; }
+    .usageLabel { display: block; color: #747d8b; font-size: 9px; font-weight: 800; }
+    .usageValue { display: block; margin-top: 1px; overflow: hidden; color: #303846; font-size: 12px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
+    .usageTrack { grid-column: 1 / -1; height: 3px; overflow: hidden; border-radius: 2px; background: #dfe5ec; }
+    .usageFill { display: block; width: 0; height: 100%; background: #26845b; transition: width .18s ease; }
+    .usageRail[data-level="warn"] .usageFill { background: #bd7418; }
+    .usageRail[data-level="critical"] .usageFill { background: #c43d3d; }
     .turns { display: flex; min-height: 0; flex-direction: column; justify-content: flex-start; gap: 9px; overflow-y: auto; overscroll-behavior: contain; padding: 2px 1px 8px; }
     .olderMessagesBtn { display: none; align-self: center; width: auto; min-height: 32px; padding: 0 11px; border-color: #b9c6d8; color: #596070; font-size: 11px; }
     .turn { align-self: flex-start; max-width: 88%; padding: 9px 11px; border-radius: 8px; background: #eef2f7; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
@@ -764,7 +772,10 @@ _MOBILE_HTML = r"""<!doctype html>
       label, p, .status { color: #a5adba; }
       .chatComposer { background: #171d27; border-color: #303846; }
       .session-card { border-color: #303846; }
-      .session-subtitle, .chat-subtitle { color: #a5adba; }
+      .session-subtitle, .chat-subtitle, .usageLabel { color: #a5adba; }
+      .usageRail { border-color: #303846; }
+      .usageValue { color: #e3e7ed; }
+      .usageTrack { background: #303846; }
       .session-preview { color: #d6dbe4; }
       .iconBtn, .servicesBtn { color: #d6dbe4; }
       .project-chip { color: #a5adba; }
@@ -813,9 +824,15 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="session-list" id="sessionList"></div>
       </section>
       <section id="chatView">
-        <div>
+        <div class="chatHeader">
           <div class="chat-title" id="chatTitle">세션을 선택하세요</div>
           <div class="chat-subtitle" id="chatSubtitle"></div>
+          <div class="usageRail" id="usageRail" aria-label="컨텍스트 사용량" style="display:none">
+            <div class="usageMetric"><span class="usageLabel">컨텍스트</span><span class="usageValue" id="usagePercent">-</span></div>
+            <div class="usageMetric"><span class="usageLabel">사용</span><span class="usageValue" id="usageUsed">-</span></div>
+            <div class="usageMetric"><span class="usageLabel">남음</span><span class="usageValue" id="usageRemaining">-</span></div>
+            <div class="usageTrack"><span class="usageFill" id="usageFill"></span></div>
+          </div>
         </div>
         <label class="hiddenSelect">워크트리<select id="rootSelect"></select></label>
         <label class="hiddenSelect">대상<select id="targetSelect"></select></label>
@@ -897,6 +914,7 @@ _MOBILE_HTML = r"""<!doctype html>
       }
     }
     const catalogEndpoint = "/mobile/api/catalog";
+    const usageEndpoint = "/mobile/api/usage";
     const login = document.getElementById("mobileLogin");
     const app = document.getElementById("mobileApp");
     const loginStatus = document.getElementById("loginStatus");
@@ -906,6 +924,11 @@ _MOBILE_HTML = r"""<!doctype html>
     const backBtn = document.getElementById("backBtn");
     const chatTitle = document.getElementById("chatTitle");
     const chatSubtitle = document.getElementById("chatSubtitle");
+    const usageRail = document.getElementById("usageRail");
+    const usagePercent = document.getElementById("usagePercent");
+    const usageUsed = document.getElementById("usageUsed");
+    const usageRemaining = document.getElementById("usageRemaining");
+    const usageFill = document.getElementById("usageFill");
     const rootSelect = document.getElementById("rootSelect");
     const targetSelect = document.getElementById("targetSelect");
     const promptInput = document.getElementById("prompt");
@@ -973,6 +996,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const historyCache = {};
     const activityCache = {};
     const catalogCache = {};
+    const usageCache = {};
     const expandedTurnIds = new Set();
     const collapsedTurnIds = new Set();
     let historyLoading = false;
@@ -1053,6 +1077,7 @@ _MOBILE_HTML = r"""<!doctype html>
       Object.keys(historyCache).forEach(key => delete historyCache[key]);
       Object.keys(activityCache).forEach(key => delete activityCache[key]);
       Object.keys(catalogCache).forEach(key => delete catalogCache[key]);
+      Object.keys(usageCache).forEach(key => delete usageCache[key]);
       showList();
       if (cookieAuth) {
         try { await fetch("/api/auth/logout", {method: "POST", headers: headers(true), body: "{}"}); }
@@ -1417,6 +1442,52 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       return history;
     }
+    function formatTokens(value) {
+      if (value == null || value === "" || !Number.isFinite(Number(value))) return "-";
+      const amount = Number(value);
+      if (amount >= 1_000_000) return `${(amount / 1_000_000).toFixed(amount >= 10_000_000 ? 0 : 1)}M`;
+      if (amount >= 1_000) return `${(amount / 1_000).toFixed(amount >= 100_000 ? 0 : 1)}K`;
+      return String(Math.round(amount));
+    }
+    function renderAgentUsage(session) {
+      const isAgent = Boolean(session && session.kind === "agent");
+      usageRail.style.display = isAgent ? "grid" : "none";
+      if (!isAgent) return;
+      const entry = usageCache[session.key];
+      const usage = entry && entry.data;
+      const percent = usage && Number.isFinite(Number(usage.contextPercent)) ? Number(usage.contextPercent) : null;
+      usagePercent.textContent = percent == null ? "-" : `${percent.toFixed(1)}%`;
+      usageUsed.textContent = formatTokens(usage && usage.usedTokens);
+      usageRemaining.textContent = formatTokens(usage && usage.remainingTokens);
+      usageFill.style.width = `${percent == null ? 0 : Math.max(0, Math.min(100, percent))}%`;
+      usageRail.dataset.level = percent != null && percent >= 90 ? "critical" : percent != null && percent >= 70 ? "warn" : "normal";
+      usageRail.title = usage && usage.contextWindow ? `컨텍스트 ${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindow)}` : "컨텍스트 한도 정보 없음";
+    }
+    async function loadAgentUsage(session) {
+      if (!session || session.kind !== "agent") {
+        renderAgentUsage(null);
+        return;
+      }
+      const entry = usageCache[session.key] || (usageCache[session.key] = {data: null, loading: false, loadedAt: 0});
+      if (entry.loading || Date.now() - entry.loadedAt < 6000) {
+        renderAgentUsage(session);
+        return;
+      }
+      entry.loading = true;
+      try {
+        const params = new URLSearchParams({root: session.root, source: session.source, sid: session.sid});
+        const response = await fetch(`${usageEndpoint}?${params}`, {headers: headers()});
+        if (!response.ok) throw new Error(await responseError(response));
+        entry.data = await response.json();
+        entry.loadedAt = Date.now();
+        if (selectedSessionKey === session.key) renderAgentUsage(session);
+      } catch (_) {
+        entry.loadedAt = Date.now();
+        if (selectedSessionKey === session.key) renderAgentUsage(session);
+      } finally {
+        entry.loading = false;
+      }
+    }
     async function loadSessionMessages(session, options={}) {
       const history = sessionHistory(session);
       if (!session || !history || history.loading || (history.loaded && !options.refresh)) return;
@@ -1641,6 +1712,7 @@ _MOBILE_HTML = r"""<!doctype html>
         const elapsed = Math.max(0, Math.round(Date.now() / 1000 - Number(session.statusTs)));
         text += elapsed < 60 ? ` · ${elapsed}초` : ` · ${Math.floor(elapsed / 60)}분`;
       }
+      if (session.status === "working" && !session.controllable) text += " · 앱에서 실행 중";
       return text;
     }
     function renderSessionControls(session) {
@@ -1899,6 +1971,7 @@ _MOBILE_HTML = r"""<!doctype html>
       else showList();
       chatTitle.textContent = session ? (session.title || "세션") : "세션을 선택하세요";
       chatSubtitle.textContent = session ? (session.subtitle || session.root || "") : "";
+      renderAgentUsage(session);
       restoreDraft();
       renderTurns(session);
       renderSubagents(session);
@@ -1907,6 +1980,7 @@ _MOBILE_HTML = r"""<!doctype html>
       promptInput.placeholder = source === "claude" ? "Claude에 메시지" : source === "codex" ? "Codex에 메시지" : "터미널에 입력";
       if (document.activeElement === promptInput) renderSuggestions();
       loadServices(false);
+      loadAgentUsage(session);
     }
     async function load(options={}) {
       if (!cookieAuth && !token()) {

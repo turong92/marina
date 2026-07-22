@@ -92,6 +92,10 @@ try:
     }
     marina_handler.safe_service = lambda service, value: service if service in {"web", "api"} else (_ for _ in ()).throw(ValueError("unknown service"))
     marina_handler.agent_belongs_to_root = lambda value, source, sid: True
+    marina_handler.agent_usage = lambda value, source, sid: {
+        "source": source, "model": "gpt-test", "usedTokens": 64000,
+        "contextWindow": 128000, "remainingTokens": 64000, "contextPercent": 50.0,
+    }
     marina_handler.start_service = lambda value, service, force=False: calls.append(("start", service)) or {"started": True}
     marina_handler.stop_service = lambda value, service: calls.append(("stop", service)) or {"stopped": True}
     marina_handler.restart_service = lambda value, service, force=False: calls.append(("restart", service)) or {"restarted": True}
@@ -108,6 +112,21 @@ try:
     assert status == 400 and result["error"] == "unknown service", (status, result)
     status, result = request("GET", f"/mobile/api/services?root={root}")
     assert status == 403, (status, result)
+
+    status, usage = request(
+        "GET", f"/mobile/api/usage?root={root}&source=codex&sid=sid0001",
+        mobile_token=mobile_token,
+    )
+    assert status == 200 and usage["usedTokens"] == 64000 and usage["contextPercent"] == 50.0, (status, usage)
+    status, usage = request("GET", f"/mobile/api/usage?root={root}&source=codex&sid=sid0001")
+    assert status == 403, (status, usage)
+    marina_handler.agent_belongs_to_root = lambda value, source, sid: False
+    status, usage = request(
+        "GET", f"/mobile/api/usage?root={root}&source=codex&sid=other-session",
+        mobile_token=mobile_token,
+    )
+    assert status == 403, (status, usage)
+    marina_handler.agent_belongs_to_root = lambda value, source, sid: True
 
     status, result = request("POST", "/mobile/api/interrupt", body={"root": str(root), "target": {"type": "agent", "source": "codex", "sid": "sid0001"}}, mobile_token=mobile_token)
     assert status == 400 and "실행 중" in result["error"], (status, result)

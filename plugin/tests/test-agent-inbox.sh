@@ -336,7 +336,7 @@ class FakeClassList {
 class FakeElement {
   constructor() {
     this.classList = new FakeClassList();
-    this.style = {};
+    this.style = {setProperty(name, value) { this[name] = value; }};
     this.attributes = {};
     this.innerHTML = "";
     this.textContent = "";
@@ -349,6 +349,8 @@ class FakeElement {
   querySelectorAll() { return []; }
   querySelector() { return null; }
   contains() { return true; }
+  addEventListener() {}
+  scrollTo() {}
 }
 
 const ids = [
@@ -385,7 +387,7 @@ const context = {
   document,
   window,
   location,
-  history: {replaceState() {}},
+  history: {state: null, replaceState(value) { this.state = value; }, pushState(value) { this.state = value; }, back() {}},
   localStorage: {
     getItem: key => storage.has(key) ? storage.get(key) : null,
     setItem: (key, value) => storage.set(key, String(value)),
