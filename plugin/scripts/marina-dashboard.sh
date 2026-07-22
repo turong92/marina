@@ -48,6 +48,7 @@ MARINA_GATEWAY="${MARINA_GATEWAY:-}"            # 게이트웨이 옵트인(빈=
 MARINA_GATEWAY_PORT="${MARINA_GATEWAY_PORT:-3902}"   # 비특권 기본(권한·:80 충돌 회피, marina_state 와 일치) — 빈 문자열 export 로 데몬 int('') 크래시 방지(코덱스 P1)
 MARINA_GATEWAY_ADMIN="${MARINA_GATEWAY_ADMIN:-localhost:2021}"
 MARINA_GATEWAY_POLL="${MARINA_GATEWAY_POLL:-5}"
+DAEMON_PATH="${PATH:-/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin}"
 
 usage() {
   cat <<'EOF'
@@ -124,6 +125,8 @@ write_plist() {
   </array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>PATH</key>
+    <string>$DAEMON_PATH</string>
     <key>MARINA_CONTROL_HOST</key>
     <string>$HOST</string>
     <key>MARINA_CONTROL_PORT</key>
@@ -185,6 +188,7 @@ After=default.target
 [Service]
 ExecStart=$LAUNCHER
 Restart=on-failure
+Environment=PATH=$DAEMON_PATH
 Environment=MARINA_CONTROL_HOST=$HOST
 Environment=MARINA_CONTROL_PORT=$PORT
 Environment=MARINA_HOME=$MARINA_HOME

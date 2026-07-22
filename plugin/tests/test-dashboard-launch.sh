@@ -31,6 +31,7 @@ JSON
     [[ -f "$U" ]] || { echo "FAIL: unit missing"; exit 1; }
     grep -q "ExecStart=$MARINA_HOME/dashboard-launch.sh" "$U" || { echo "FAIL: ExecStart not launcher"; exit 1; }
     grep -q "Environment=MARINA_GATEWAY_ADMIN=$MARINA_GATEWAY_ADMIN" "$U" || { echo "FAIL: gateway admin env missing"; exit 1; }
+    grep -Fq "Environment=PATH=$FAKE:" "$U" || { echo "FAIL: systemd PATH missing"; exit 1; }
   fi
   if [[ "$exp" == launchd ]]; then
     local P="$MARINA_HOME/marina.dashboard.plist"
@@ -38,6 +39,7 @@ JSON
     grep -q "$MARINA_HOME/dashboard-launch.sh" "$P" || { echo "FAIL: plist not pointing at launcher"; exit 1; }
     grep -q 'marina-control.py' "$P" && { echo "FAIL: plist still references control.py"; exit 1; }
     grep -A1 -q '<key>MARINA_GATEWAY_ADMIN</key>' "$P" || { echo "FAIL: gateway admin env missing"; exit 1; }
+    grep -A1 '<key>PATH</key>' "$P" | grep -Fq "<string>$FAKE:" || { echo "FAIL: launchd PATH missing"; exit 1; }
     grep -A1 -q '<key>KeepAlive</key>' "$P" || { echo "FAIL: launchd plist should restart dashboard after exit"; exit 1; }
   fi
   rm -rf "$TMP"
