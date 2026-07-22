@@ -568,7 +568,7 @@ def _native_agent_status(path: Path, source: str, *, now: float | None = None) -
         return best
     if mtime and mtime <= current and current - mtime < 120:
         return {"status": "working", "statusTs": mtime, "statusReason": "recent activity"}
-    return {"status": "idle", "statusTs": mtime or 0}
+    return {"status": "idle", "statusTs": mtime if mtime <= current else 0}
 
 
 def merge_agent_status(

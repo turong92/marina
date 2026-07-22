@@ -81,7 +81,7 @@ codex_future_native = write("codex-future-native.jsonl", [
     {"timestamp": 1401, "type": "event_msg", "payload": {"type": "task_started"}},
 ])
 os.utime(codex_future_native, (1401, 1401))
-assert ms.agent_status(codex_future_native, "codex", now=1000) == {"status": "idle", "statusTs": 1401}
+assert ms.agent_status(codex_future_native, "codex", now=1000) == {"status": "idle", "statusTs": 0}
 
 # Native transcript parsing remains the fallback, but an explicit lifecycle event at
 # the same or newer timestamp is authoritative for this root/session only.
