@@ -65,6 +65,8 @@ grep -q 'visualViewport' <<<"$mobile_html" || { echo "FAIL: /mobile should track
 grep -q -- '--app-height' <<<"$mobile_html" || { echo "FAIL: /mobile should size its shell from the visual viewport"; exit 1; }
 grep -q 'hiddenSelect' <<<"$mobile_html" || { echo "FAIL: /mobile page should hide technical selects"; exit 1; }
 grep -q 'pendingTurns' <<<"$mobile_html" || { echo "FAIL: /mobile page should show sent messages immediately"; exit 1; }
+grep -q 'pendingDeliveryLabel' <<<"$mobile_html" || { echo "FAIL: /mobile pending messages should identify steer/queue state"; exit 1; }
+grep -q 'd.delivery' <<<"$mobile_html" || { echo "FAIL: /mobile should render the server-confirmed delivery mode"; exit 1; }
 grep -q 'selectAgentAfterSend' <<<"$mobile_html" || { echo "FAIL: /mobile page should keep agent sends in the agent chat"; exit 1; }
 ! grep -q 'menuPanel' <<<"$mobile_html" || { echo "FAIL: /mobile primary navigation should not hide behind a utility menu"; exit 1; }
 grep -q 'projectTabs' <<<"$mobile_html" || { echo "FAIL: /mobile page should organize sessions by project"; exit 1; }
@@ -88,6 +90,7 @@ grep -q 'retryBtn' <<<"$mobile_html" || { echo "FAIL: /mobile composer should ex
 grep -q 'failedSend.sessionKey !== selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile retry should stay bound to the failed session"; exit 1; }
 grep -q 'const requestContext = {root: selectedRoot(), sessionKey: selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile send should capture its session before the request"; exit 1; }
 grep -q 'failedSend = requestContext' <<<"$mobile_html" || { echo "FAIL: /mobile failed send should retry in its original session"; exit 1; }
+grep -q 'async function responseError' <<<"$mobile_html" || { echo "FAIL: /mobile should show the server send failure reason"; exit 1; }
 grep -q 'suggestions' <<<"$mobile_html" || { echo "FAIL: /mobile composer should render native suggestions"; exit 1; }
 grep -q 'renderSuggestions' <<<"$mobile_html" || { echo "FAIL: /mobile composer should adapt suggestions to Claude/Codex"; exit 1; }
 grep -q '"/mobile/api/catalog"' <<<"$mobile_html" || { echo "FAIL: /mobile composer should query file references lazily"; exit 1; }
@@ -171,8 +174,14 @@ opens = []
 mm.term_list = lambda: {"sessions": [{
     "tid": "live-agent-1", "root": str(root), "alive": True,
     "agent": {"source": "codex", "sid": "codex-session-0001"},
+}, {
+    "tid": "live-agent-2", "root": str(root), "alive": True,
+    "agent": {"source": "claude", "sid": "claude-session-0001"},
 }]}
 mm.term_input = lambda tid, data: inputs.append((tid, data)) or {"ok": True}
+pauses = []
+mm._agent_input_pause = lambda: pauses.append(True)
+assert mm.AGENT_INPUT_SETTLE_S > 0.12, mm.AGENT_INPUT_SETTLE_S
 mm.term_open = lambda *args, **kwargs: opens.append((args, kwargs)) or {"tid": "new", "reused": False}
 
 body = {
@@ -181,8 +190,32 @@ body = {
     "text": "Please check the failing test",
 }
 sent = mm.mobile_send(body)
-assert sent == {"ok": True, "tid": "live-agent-1", "opened": False, "steered": True}, sent
-assert inputs == [("live-agent-1", "Please check the failing test\r")], inputs
+assert sent == {"ok": True, "tid": "live-agent-1", "opened": False, "delivery": "steer"}, sent
+assert inputs == [
+    ("live-agent-1", "Please check the failing test"),
+    ("live-agent-1", "\r"),
+], inputs
+assert pauses == [True], pauses
+
+queued = mm.mobile_send({
+    "root": str(root),
+    "target": {"type": "agent", "source": "claude", "sid": "claude-session-0001"},
+    "text": "Run this after the current turn",
+})
+assert queued == {"ok": True, "tid": "live-agent-2", "opened": False, "delivery": "queue"}, queued
+assert inputs[-2:] == [
+    ("live-agent-2", "Run this after the current turn"),
+    ("live-agent-2", "\r"),
+], inputs
+assert pauses == [True, True], pauses
+
+codex_queued = mm.mobile_send({**body, "delivery": "queue", "text": "Follow up next turn"})
+assert codex_queued == {"ok": True, "tid": "live-agent-1", "opened": False, "delivery": "queue"}, codex_queued
+assert inputs[-2:] == [
+    ("live-agent-1", "Follow up next turn"),
+    ("live-agent-1", "\t"),
+], inputs
+assert pauses == [True, True, True], pauses
 assert not opens, opens
 
 stopped = mm.mobile_interrupt({"root": str(root), "target": body["target"]})

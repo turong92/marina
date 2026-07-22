@@ -9,6 +9,7 @@ import secrets
 import shlex
 import subprocess
 import threading
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any
@@ -27,6 +28,7 @@ PENDING_SETTINGS_FILE = MARINA_HOME / "mobile-pending-agent-settings.json"
 CODEX_MODELS_FILE = CODEX_USER_HOME / "models_cache.json"
 _SESSION_SETTINGS_LOCK = threading.Lock()
 _AGENT_SEND_LOCK = threading.Lock()
+AGENT_INPUT_SETTLE_S = 0.16
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -539,6 +541,34 @@ def _native_agent_active(root: Path, source: str, sid: str) -> bool:
     )
 
 
+def _agent_input_pause() -> None:
+    # Codex treats Enter inside its 120ms paste window as a newline.
+    time.sleep(AGENT_INPUT_SETTLE_S)
+
+
+def _agent_delivery(source: str, requested: str = "") -> str:
+    requested = requested.strip().lower()
+    if source == "codex":
+        if requested not in ("", "steer", "queue"):
+            raise ValueError("Codex delivery는 steer 또는 queue여야 합니다")
+        return requested or "steer"
+    if source == "claude":
+        if requested not in ("", "queue"):
+            raise ValueError("Claude 실행 중 메시지는 queue로 전달됩니다")
+        return "queue"
+    raise ValueError("unknown agent source")
+
+
+def _deliver_agent_input(tid: str, source: str, text: str, requested: str = "") -> str:
+    if not text:
+        raise ValueError("text 필요")
+    delivery = _agent_delivery(source, requested)
+    term_input(tid, text)
+    _agent_input_pause()
+    term_input(tid, "\t" if source == "codex" and delivery == "queue" else "\r")
+    return delivery
+
+
 def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
     root = safe_root(str(body.get("root", "")))
     target = body.get("target") if isinstance(body.get("target"), dict) else {}
@@ -561,8 +591,8 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
         with _AGENT_SEND_LOCK:
             tid = _live_agent_tid(root, source, sid)
             if tid:
-                term_input(tid, _input_payload(text))
-                return {"ok": True, "tid": tid, "opened": False, "steered": True}
+                delivery = _deliver_agent_input(tid, source, text, str(body.get("delivery") or ""))
+                return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
             if _agent_process_active(source, sid) or _native_agent_active(root, source, sid):
                 raise ValueError("이 세션은 다른 앱이나 터미널에서 실행 중입니다. 완료된 뒤 다시 보내주세요")
             saved = mobile_pending_session_settings(root, source, sid)
@@ -667,6 +697,8 @@ _MOBILE_HTML = r"""<!doctype html>
     .turn { align-self: flex-start; max-width: 88%; padding: 9px 11px; border-radius: 8px; background: #eef2f7; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
     .turn.user { align-self: flex-end; background: #dcecff; }
     .turn.output { width: 100%; max-width: none; background: #111827; color: #e5e7eb; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
+    .turn.pending { opacity: .82; }
+    .turnState { margin-top: 5px; color: #687083; font-size: 10px; font-weight: 750; }
     .turn a, .subagent-turn a { color: #0969da; text-decoration: underline; text-underline-offset: 2px; }
     .turn code, .subagent-turn code { padding: 1px 4px; border-radius: 4px; background: rgba(127, 127, 127, .14); font: .92em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
     .turnToggle { display: block; margin: 6px 0 0; padding: 2px 0; border: 0; background: transparent; color: #526176; font-size: 11px; }
@@ -855,6 +887,15 @@ _MOBILE_HTML = r"""<!doctype html>
       ...(!cookieAuth ? {"x-marina-mobile-token": token()} : {}),
       ...(cookieAuth && json ? {"x-marina-csrf": cookie("marina_csrf")} : {}),
     });
+    async function responseError(response) {
+      const raw = await response.text();
+      try {
+        const payload = JSON.parse(raw);
+        return String(payload.message || payload.error || raw || `HTTP ${response.status}`);
+      } catch (_) {
+        return raw || `HTTP ${response.status}`;
+      }
+    }
     const catalogEndpoint = "/mobile/api/catalog";
     const login = document.getElementById("mobileLogin");
     const app = document.getElementById("mobileApp");
@@ -1181,21 +1222,27 @@ _MOBILE_HTML = r"""<!doctype html>
       if (a.type === "agent") return a.source === b.source && a.sid === b.sid;
       return a.type === b.type;
     }
-    function queuePendingTurn(key, text) {
+    function pendingDeliveryLabel(delivery) {
+      if (delivery === "steer") return "현재 작업에 전달 중";
+      if (delivery === "queue") return "다음 작업 대기열";
+      if (delivery === "started") return "새 작업 시작 중";
+      return "전송 확인 중";
+    }
+    function queuePendingTurn(key, text, delivery="pending") {
       const session = (state.sessions || []).find(item => item.key === key);
       const cached = sessionHistory(session);
       const confirmedCount = ((cached && cached.turns) || (session && session.turns) || []).filter(turn => turn.role === "user" && String(turn.text || "") === text).length;
       const existing = pendingTurns[key] || [];
       const pendingCount = existing.filter(turn => String(turn.text || "") === text).length;
-      pendingTurns[key] = existing.concat([{role: "user", text, baseline: confirmedCount + pendingCount}]).slice(-12);
+      pendingTurns[key] = existing.concat([{role: "user", text, baseline: confirmedCount + pendingCount, pending: true, delivery}]).slice(-12);
     }
-    function selectAgentAfterSend(text, target) {
+    function selectAgentAfterSend(text, target, delivery="pending") {
       const root = selectedRoot();
       const current = selectedSession();
       const key = current && sameTarget(current.target, target) ? selectedSessionKey : agentSessionKey(target, root);
       selectedSessionKey = key;
       localStorage.setItem("marinaMobileSession", key);
-      queuePendingTurn(key, text);
+      queuePendingTurn(key, text, delivery);
       const value = targetValue(target);
       localStorage.setItem("marinaMobileTarget", value);
       localStorage.setItem(targetKey(root), value);
@@ -1228,9 +1275,9 @@ _MOBILE_HTML = r"""<!doctype html>
       if (root) localStorage.setItem("marinaMobileRoot", root);
       return key;
     }
-    function selectReturnedTerm(tid, text, target=null) {
+    function selectReturnedTerm(tid, text, target=null, delivery="pending") {
       if (target && target.type === "agent") {
-        selectAgentAfterSend(text, target);
+        selectAgentAfterSend(text, target, delivery);
         return;
       }
       const root = selectedRoot();
@@ -1457,7 +1504,8 @@ _MOBILE_HTML = r"""<!doctype html>
         const body = expanded ? renderRichText(text) : `${renderRichText(text.slice(0, 280).trimEnd())}&hellip;`;
         const toggle = long ? `<button class="turnToggle" type="button" data-turn-toggle="${esc(id)}" data-expanded="${expanded ? "1" : "0"}">${expanded ? "접기" : "펼치기"}</button>` : "";
         const role = t.role === "user" ? "user" : t.role === "output" ? "output" : "assistant";
-        return `<div class="turn ${role}"><div class="turnBody">${body}</div>${toggle}</div>`;
+        const pendingState = t.pending ? `<div class="turnState">${esc(pendingDeliveryLabel(t.delivery))}</div>` : "";
+        return `<div class="turn ${role}${t.pending ? " pending" : ""}"><div class="turnBody">${body}</div>${toggle}${pendingState}</div>`;
       }).join("");
       turnsStructureKey = nextKey;
       requestAnimationFrame(() => {
@@ -1912,7 +1960,7 @@ _MOBILE_HTML = r"""<!doctype html>
       retryBtn.style.display = "none";
       try {
         const r = await fetch("/mobile/api/send", {method: "POST", headers: headers(true), body: JSON.stringify({root: requestContext.root, target, text})});
-        if (!r.ok) throw new Error(await r.text());
+        if (!r.ok) throw new Error(await responseError(r));
         const d = await r.json();
         localStorage.removeItem(requestContext.draftKey);
         if (requestIsActive()) {
@@ -1920,14 +1968,15 @@ _MOBILE_HTML = r"""<!doctype html>
           autoGrowComposer();
           closeSuggestions();
           failedSend = null;
-          selectReturnedTerm(d.tid, text, target);
-          statusEl.textContent = `보냄 · ${d.tid}`;
+          selectReturnedTerm(d.tid, text, target, d.delivery || (target.type === "agent" ? "started" : "sent"));
+          statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(d.delivery || "started") : `보냄 · ${d.tid}`;
         }
         setTimeout(() => load({quiet: true}).catch(e => statusEl.textContent = String(e)), 500);
       } catch (error) {
         failedSend = requestContext;
         if (requestIsActive()) {
           statusEl.textContent = `전송 실패 · ${String(error)}`;
+          showToast(`전송 실패 · ${String(error)}`);
           retryBtn.style.display = "inline-block";
         }
       } finally {
