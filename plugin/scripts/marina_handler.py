@@ -39,7 +39,7 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
-from marina_mobile import mobile_catalog, mobile_request_ok, mobile_send, mobile_state, render_mobile_html
+from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_catalog, mobile_request_ok, mobile_send, mobile_state, render_mobile_html, rotate_mobile_token
 from marina_sessions import activate_agent_payloads, agent_belongs_to_root, agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
@@ -175,6 +175,21 @@ class Handler(BaseHTTPRequestHandler):
             return True
         return self._forbidden("Administrator access is required.")
 
+    def _require_mobile_admin(self) -> bool:
+        principal = getattr(self, "auth_principal", None)
+        if principal is not None:
+            return principal.user.role == "admin" or self._forbidden("Administrator access is required.")
+        if not auth_controller().store.auth_enabled() and is_loopback_client(self):
+            return True
+        return self._forbidden("Mobile access can only be managed locally or by an administrator.")
+
+    def _mobile_access_payload(self) -> dict[str, Any]:
+        service = self._remote_service()
+        return mobile_access_status(
+            service.controller.status(), service.control_host, service.control_port,
+            auth_enabled=auth_controller().store.auth_enabled(),
+        )
+
     def _require_root_access(self, root: Path) -> bool:
         if self._policy().can_root(getattr(self, "auth_principal", None), root):
             return True
@@ -257,6 +272,11 @@ class Handler(BaseHTTPRequestHandler):
         if principal is AUTH_DENIED:
             return
         self.auth_principal = principal
+        if parsed.path == "/api/mobile/access":
+            if not self._require_mobile_admin():
+                return
+            self.send_json(self._mobile_access_payload())
+            return
         if parsed.path == "/api/remote/status":
             try:
                 remote = self._remote_service().status()
@@ -973,6 +993,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             body = self.read_json()
+            if self.path in ("/api/mobile/enable", "/api/mobile/rotate", "/api/mobile/disable"):
+                if not self._require_mobile_admin():
+                    return
+                if self.path == "/api/mobile/enable":
+                    ensure_mobile_token()
+                elif self.path == "/api/mobile/rotate":
+                    rotate_mobile_token()
+                else:
+                    disable_mobile_token()
+                if principal is not None:
+                    controller.store.audit_action(
+                        "mobile.access.change", "ok", principal.user.id, "mobile",
+                        self.path.rsplit("/", 1)[-1],
+                    )
+                self.send_json(self._mobile_access_payload())
+                return
             if self.path in _ADMIN_POST_PATHS and not self._require_admin_access():
                 return
             if self.path in _ROOT_POST_PATHS:

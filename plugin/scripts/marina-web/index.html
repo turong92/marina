@@ -38,6 +38,7 @@
             <span>알림</span>
             <button id="notifyToggle" class="notify-toggle" title="알림 꺼짐(기본, 옵트인) — 클릭하면 서비스 기동 완료/실패를 브라우저 알림으로 받아요">🔕</button>
           </div>
+          <button id="mobileAccessBtn" class="settings-action" type="button" hidden><span aria-hidden="true">▯</span>모바일 연결</button>
           <button id="userManagementBtn" class="settings-action" type="button" hidden><span aria-hidden="true">◎</span>사용자 관리</button>
           <button id="remoteAccessBtn" class="settings-action" type="button" hidden><span aria-hidden="true">⌁</span>원격 접근</button>
           <button id="accountLogoutBtn" class="settings-action" type="button" hidden><span aria-hidden="true">↪</span>로그아웃</button>
@@ -266,6 +267,25 @@
       </footer>
     </section>
   </div>
+  <div id="mobileAccessDialog" class="modal-backdrop remote-access-backdrop" role="dialog" aria-modal="true" aria-labelledby="mobileAccessTitle" hidden>
+    <section class="remote-access-panel">
+      <header class="user-management-head">
+        <div><h2 id="mobileAccessTitle">모바일 연결</h2><p>휴대폰에서 Marina 세션을 확인하고 메시지를 보냅니다.</p></div>
+        <button id="mobileAccessClose" class="icon-close" type="button" title="닫기" aria-label="모바일 연결 닫기">×</button>
+      </header>
+      <div class="remote-access-body">
+        <div class="remote-mode-line"><span id="mobileAccessMode">확인 중</span><a id="mobileAccessAddress" target="_blank" rel="noopener" hidden></a></div>
+        <div id="mobileAccessMessage" class="remote-error" hidden></div>
+        <div id="mobileAccessChecks" class="remote-checks"></div>
+      </div>
+      <footer class="remote-actions">
+        <button id="mobileAccessDisable" type="button" hidden>모바일 끄기</button>
+        <button id="mobileAccessRotate" type="button" hidden>링크 재발급</button>
+        <button id="mobileAccessEnable" class="primary" type="button">모바일 켜기</button>
+        <button id="mobileAccessCopy" class="primary" type="button" hidden>로그인 링크 복사</button>
+      </footer>
+    </section>
+  </div>
   <div id="remoteAccessDialog" class="modal-backdrop remote-access-backdrop" role="dialog" aria-modal="true" aria-labelledby="remoteAccessTitle" hidden>
     <section class="remote-access-panel">
       <header class="user-management-head">
@@ -305,6 +325,7 @@
   <script src="/web/app-6b-notify.js"></script>
   <script src="/web/app-6c-users.js"></script>
   <script src="/web/app-6d-remote.js"></script>
+  <script src="/web/app-6e-mobile.js"></script>
   <script src="/web/app-8-git.js"></script>
   <script src="/web/app-8b-git-commit.js"></script>
   <script src="/web/app-9-connections.js"></script>

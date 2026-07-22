@@ -201,6 +201,17 @@ def ensure_mobile_token() -> str:
     return token
 
 
+def rotate_mobile_token() -> str:
+    MARINA_HOME.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_urlsafe(32)
+    TOKEN_FILE.write_text(token + "\n", encoding="utf-8")
+    try:
+        TOKEN_FILE.chmod(0o600)
+    except OSError:
+        pass
+    return token
+
+
 def disable_mobile_token() -> bool:
     try:
         TOKEN_FILE.unlink()
@@ -218,6 +229,52 @@ def mobile_url(host: str = "") -> str:
         port = os.environ.get("MARINA_CONTROL_PORT") or str(PORT)
         base = f"http://{host}:{port}"
     return f"{base}/mobile?token={urllib.parse.quote(token)}"
+
+
+def mobile_access_status(
+    remote_status: dict[str, Any],
+    control_host: str,
+    control_port: int,
+    auth_enabled: bool = False,
+) -> dict[str, Any]:
+    token = mobile_token()
+    remote_url = str(remote_status.get("url") or "").rstrip("/")
+    host = str(control_host or "localhost").strip()
+    port = int(control_port)
+    network_bind = host in ("0.0.0.0", "::", "") or host not in ("localhost", "127.0.0.1", "::1")
+    transport = "local"
+    if remote_url:
+        base = remote_url
+        transport = str(remote_status.get("mode") or "tailscale")
+    else:
+        ips = remote_status.get("ips") if isinstance(remote_status.get("ips"), list) else []
+        ip = next((str(value) for value in ips if value and ":" not in str(value)), "")
+        if network_bind and bool(remote_status.get("online")) and ip:
+            base = f"http://{ip}:{port}"
+            transport = "tailscale-ip"
+        else:
+            display_host = "localhost" if host in ("0.0.0.0", "::", "") else host
+            if ":" in display_host and not display_host.startswith("["):
+                display_host = f"[{display_host}]"
+            base = f"http://{display_host}:{port}"
+            if network_bind:
+                transport = "network"
+    address = base + "/mobile"
+    login_url = address
+    if token and not auth_enabled:
+        login_url += "?token=" + urllib.parse.quote(token)
+    reachable = bool(remote_url or (network_bind and transport != "local"))
+    return {
+        "enabled": bool(auth_enabled or token),
+        "tokenEnabled": bool(token),
+        "authEnabled": bool(auth_enabled),
+        "address": address,
+        "loginUrl": login_url if auth_enabled or token else "",
+        "reachable": reachable,
+        "transport": transport,
+        "tailscaleInstalled": bool(remote_status.get("installed")),
+        "tailscaleOnline": bool(remote_status.get("online")),
+    }
 
 
 def request_mobile_token(handler: Any, parsed: urllib.parse.ParseResult) -> str:
