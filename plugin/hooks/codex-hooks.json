@@ -36,7 +36,7 @@
     ],
     "PermissionRequest": [
       {
-        "matcher": "*",
+        "matcher": "^(Bash|apply_patch|Edit|Write|mcp__.*)$",
         "hooks": [
           {
             "type": "command",
@@ -49,7 +49,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": "*",
+        "matcher": "^(Bash|apply_patch|Edit|Write|mcp__.*)$",
         "hooks": [
           {
             "type": "command",

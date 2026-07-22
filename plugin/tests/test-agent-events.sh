@@ -11,6 +11,7 @@ import json
 import fcntl
 import os
 import stat
+import subprocess
 import sys
 import time
 from multiprocessing import get_context
@@ -89,11 +90,54 @@ codex_null = record_hook_event({
 }, environ={"PLUGIN_ROOT": "/codex-plugin", "CLAUDE_PLUGIN_ROOT": "/compat-plugin"}, home=home, now=1004.5)
 assert codex_null and codex_null["source"] == "codex" and codex_null["event"] == "blocked", codex_null
 assert (home / ".marina" / "agent-events" / "codex" / "codex-null-1.jsonl").is_file()
+
+# Codex-only lifecycle names must fail closed when a Claude payload uses them.
+assert record_hook_event({**claude_base, "hook_event_name": "PermissionRequest"}, home=home, now=1004.6) is None
+assert record_hook_event({**claude_base, "hook_event_name": "PostToolUse"}, home=home, now=1004.7) is None
+
+# A Codex tool completion clears only the approval blocker that immediately
+# precedes it. The new working row must carry the later completion timestamp.
 codex_post_tool = record_hook_event({
     **codex_null_base,
     "hook_event_name": "PostToolUse",
 }, environ={"PLUGIN_ROOT": "/codex-plugin", "CLAUDE_PLUGIN_ROOT": "/compat-plugin"}, home=home, now=1004.75)
 assert codex_post_tool and codex_post_tool["source"] == "codex" and codex_post_tool["event"] == "working", codex_post_tool
+assert codex_post_tool["ts"] == 1004.75 > codex_null["ts"], codex_post_tool
+codex_null_journal = home / ".marina" / "agent-events" / "codex" / "codex-null-1.jsonl"
+assert [json.loads(line) for line in codex_null_journal.read_text(encoding="utf-8").splitlines()][-1] == codex_post_tool
+
+# PostToolUse is deliberately a no-op without a journal or after normal work:
+# it must not create, append, or replace a journal just to repeat working.
+codex_post_without_journal = {
+    "session_id": "codex-no-journal-1", "cwd": str(root), "transcript_path": None,
+    "hook_event_name": "PostToolUse",
+}
+assert record_hook_event(
+    codex_post_without_journal,
+    environ={"PLUGIN_ROOT": "/codex-plugin"}, home=home, now=1004.8,
+) is None
+assert not (home / ".marina" / "agent-events" / "codex" / "codex-no-journal-1.jsonl").exists()
+
+codex_working_base = {
+    "session_id": "codex-working-1", "cwd": str(root), "transcript_path": None,
+}
+ordinary_working = record_hook_event(
+    {**codex_working_base, "hook_event_name": "UserPromptSubmit"},
+    environ={"PLUGIN_ROOT": "/codex-plugin"}, home=home, now=1004.85,
+)
+assert ordinary_working and ordinary_working["event"] == "working", ordinary_working
+ordinary_working_journal = home / ".marina" / "agent-events" / "codex" / "codex-working-1.jsonl"
+ordinary_working_bytes = ordinary_working_journal.read_bytes()
+ordinary_working_stat = ordinary_working_journal.stat()
+assert record_hook_event(
+    {**codex_working_base, "hook_event_name": "PostToolUse"},
+    environ={"PLUGIN_ROOT": "/codex-plugin"}, home=home, now=1004.9,
+) is None
+ordinary_working_after = ordinary_working_journal.stat()
+assert ordinary_working_journal.read_bytes() == ordinary_working_bytes
+assert (ordinary_working_after.st_dev, ordinary_working_after.st_ino, ordinary_working_after.st_mtime_ns) == (
+    ordinary_working_stat.st_dev, ordinary_working_stat.st_ino, ordinary_working_stat.st_mtime_ns,
+)
 
 # A transcript signal always beats ambiguous environment fallback signals.
 mixed = record_hook_event({
@@ -490,6 +534,24 @@ holder.join(15)
 assert holder.exitcode == 0, holder.exitcode
 assert timed_out is None
 assert elapsed < LOCK_ACQUIRE_TIMEOUT_SECONDS + 0.2, elapsed
+
+# The wrapper caps stdin before JSON parsing. A larger payload fails open
+# quickly, leaves no journal hierarchy, and avoids unbounded allocation.
+oversized_wrapper_home = tmp / "oversized-wrapper-home"
+oversized_wrapper_home.mkdir()
+started = time.monotonic()
+oversized = subprocess.run(
+    [str(scripts / "marina-agent-event-hook.sh")],
+    input=b"x" * (events.MAX_HOOK_INPUT_BYTES + 1),
+    env={**os.environ, "HOME": str(oversized_wrapper_home)},
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+    timeout=5,
+)
+elapsed = time.monotonic() - started
+assert oversized.returncode == 0, oversized.returncode
+assert elapsed < 3, elapsed
+assert not (oversized_wrapper_home / ".marina").exists()
 print("ok hook journal")
 PY
 
@@ -525,7 +587,7 @@ for name in ("UserPromptSubmit", "PermissionRequest", "PostToolUse", "Stop"):
     assert "${PLUGIN_ROOT}" in commands[0]["command"], (name, commands)
 
 for name in ("PermissionRequest", "PostToolUse"):
-    assert codex_hooks[name][0].get("matcher") == "*", (name, codex_hooks[name])
+    assert codex_hooks[name][0].get("matcher") == "^(Bash|apply_patch|Edit|Write|mcp__.*)$", (name, codex_hooks[name])
 
 for name in ("SessionStart", "PreToolUse"):
     command = codex_hooks[name][0]["hooks"][0]["command"]

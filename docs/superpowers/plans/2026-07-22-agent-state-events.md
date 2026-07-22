@@ -65,6 +65,7 @@ Implement these constants and mappings in `marina_agent_events.py`:
 ```python
 MAX_ROWS = 100
 MAX_FUTURE_SECONDS = 300
+MAX_HOOK_INPUT_BYTES = 1024 * 1024
 VALID_SOURCES = {"claude", "codex"}
 BLOCKED_REASONS = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
 HOOK_EVENTS = {
@@ -73,7 +74,7 @@ HOOK_EVENTS = {
 }
 ```
 
-Infer source from `.claude` or `.codex` components in `transcript_path` before checking `CODEX_THREAD_ID`/`CODEX_HOME` and `CLAUDE_PLUGIN_ROOT` environment fallbacks. Validate session IDs with `^[A-Za-z0-9._-]{1,160}$`, canonicalize `cwd`, and use `fcntl.flock` around read-trim-rewrite so concurrent macOS/Linux hooks cannot lose rows. Rewrite through a temporary file plus `os.replace` and keep only the newest 100 valid rows. The CLI path reads one JSON object from stdin and returns zero for every error.
+Infer source from `.claude` or `.codex` components in `transcript_path` before checking `CODEX_THREAD_ID`/`CODEX_HOME` and `CLAUDE_PLUGIN_ROOT` environment fallbacks. Validate session IDs with `^[A-Za-z0-9._-]{1,160}$`, canonicalize `cwd`, and use `fcntl.flock` around read-trim-rewrite so concurrent macOS/Linux hooks cannot lose rows. Rewrite through a temporary file plus `os.replace` and keep only the newest 100 valid rows. The CLI path reads at most `MAX_HOOK_INPUT_BYTES + 1` bytes from `sys.stdin.buffer` before JSON decoding; malformed or oversized input exits zero without a row so synchronous hook memory is bounded.
 
 Create `marina-agent-event-hook.sh`:
 
@@ -88,7 +89,7 @@ exit 0
 
 - [x] **Step 4: Register lifecycle hooks**
 
-Keep `plugin/hooks/hooks.json` as the Claude configuration: it contains `UserPromptSubmit`, `Notification`, and `Stop`, each invoking `marina-agent-event-hook.sh` with `"async": false` and a two-second host timeout through `CLAUDE_PLUGIN_ROOT`. The Codex configuration contains its supported `SessionStart`, `PreToolUse`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, and `Stop` events. `PermissionRequest` records `blocked` with `permission_prompt`; `PostToolUse` records `working`; both use matcher `"*"`, `PLUGIN_ROOT`, `"async": false`, and a two-second timeout. Point the Codex manifest `hooks` field at `./hooks/codex-hooks.json`; do not register `Notification` for Codex. Synchronous registration is required because Codex skips asynchronous command hooks, and it preserves lifecycle order instead of allowing delayed child processes to record a stale state after `Stop`. Use a much shorter bounded nonblocking retry for the local sidecar lock so a contended journal fails open before the host timeout. Keep `SessionStart` and `PreToolUse` behavior equivalent.
+Keep `plugin/hooks/hooks.json` as the Claude configuration: it contains `UserPromptSubmit`, `Notification`, and `Stop`, each invoking `marina-agent-event-hook.sh` with `"async": false` and a two-second host timeout through `CLAUDE_PLUGIN_ROOT`. The Codex configuration contains its supported `SessionStart`, `PreToolUse`, `UserPromptSubmit`, `PermissionRequest`, `PostToolUse`, and `Stop` events. `PermissionRequest` records `blocked` with `permission_prompt`; `PostToolUse` records `working` only when the newest valid canonical journal row for the same session/root is `blocked`; both use matcher `"^(Bash|apply_patch|Edit|Write|mcp__.*)$"`, `PLUGIN_ROOT`, `"async": false`, and a two-second timeout. A missing journal or a newest non-blocked row returns `None` without a rewrite or `fsync`; oversized `PostToolUse` input relies on native transcript or `Stop` fallback. Point the Codex manifest `hooks` field at `./hooks/codex-hooks.json`; do not register `Notification` for Codex. Synchronous registration is required because Codex skips asynchronous command hooks, and it preserves lifecycle order instead of allowing delayed child processes to record a stale state after `Stop`. Use a much shorter bounded nonblocking retry for the local sidecar lock so a contended journal fails open before the host timeout. Keep `SessionStart` and `PreToolUse` behavior equivalent.
 
 - [x] **Step 5: Run the journal test and syntax checks**
 
@@ -315,7 +316,7 @@ Expected: every repository shell test exits zero, `git diff --check` is clean, a
 - The same isolated synthetic dashboard used for desktop and mobile Aside verification contained a malformed journal row. Both browser pages remained usable while the malformed row was ignored, and the dashboard returned `working`, `blocked`, `waiting`, `completed`, and `failed` through both worktree and mobile state APIs with expected timestamps.
 - Aside desktop verification showed actionable Inbox entries with source badges and the exact `응답 필요` label; selecting the blocked Claude item marked it read and opened the existing agent terminal.
 - Aside mobile verification at phone layout showed the same actionable states without overlap; selecting the blocked item opened the existing native chat with its prior turns and composer. Missing event files also used the native fallback.
-- Codex `blocked` now comes only from the explicit `PermissionRequest` lifecycle hook; when that event is absent, Marina preserves the other native state and does not infer a blocker from text. `PostToolUse` records the newer working signal after an approval.
+- Codex `blocked` now comes only from the explicit `PermissionRequest` lifecycle hook; when that event is absent, Marina preserves the other native state and does not infer a blocker from text. `PostToolUse` records the newer working signal only when it follows the newest same-session/root `blocked` approval row; otherwise it leaves the journal untouched.
 - `git status --short --branch` showed a clean working tree with only the planned commits ahead of `origin/main`. No push or installed-plugin update occurred.
 
 ## Correction Set 3 (2026-07-22)
@@ -330,3 +331,9 @@ Expected: every repository shell test exits zero, `git diff --check` is clean, a
 - [x] Open journal and lock candidates with `O_NONBLOCK | O_NOFOLLOW`; reject FIFO and every non-regular descriptor before permission changes, reads, or writes.
 - [x] Require `st_nlink == 1` for journal, lock, and temporary descriptors so a hard-linked outside inode is never chmodded or written.
 - [x] Retain and verify the temporary inode through replacement; fail closed when a substituted source path cannot produce the expected final inode, while allowing a later writer to replace that unsafe journal entry.
+
+## Correction Set 5 (2026-07-22)
+
+- [x] Scope Codex `PermissionRequest` and `PostToolUse` to approval-capable Bash, patch, and MCP tool paths with `^(Bash|apply_patch|Edit|Write|mcp__.*)$`.
+- [x] Keep the two-second synchronous hooks while bounding decoded input to `MAX_HOOK_INPUT_BYTES = 1 MiB`; oversized payloads fail open and use native transcript or `Stop` fallback.
+- [x] Restrict Codex-only lifecycle names to Codex payloads and make `PostToolUse` rewrite only a newest blocked journal row for the same session/root.

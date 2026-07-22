@@ -101,7 +101,11 @@ codex plugin add marina@marina-dev
 에이전트가 의도적으로 직접 실행해야 하면 명령 앞에 `MARINA_DIRECT=1 ` 을 붙인다(차단 우회).
 참고: 플러그인 업데이트로 `hooks/codex-hooks.json` 이 바뀌면 Codex 는 훅을 다시 신뢰해야 할 수 있다.
 Codex 의 동기 lifecycle recorder 는 `UserPromptSubmit`·`PermissionRequest`·`PostToolUse`·`Stop` 메타데이터만
-기록한다. `PermissionRequest` 만 `응답 필요` 상태로 만들며, prompt/tool 내용이나 텍스트 추론은 사용하지 않는다.
+기록한다. `PermissionRequest`·`PostToolUse` 는 승인 가능한 도구 경로(`^(Bash|apply_patch|Edit|Write|mcp__.*)$`)에만
+적용되며 2초 timeout 을 유지한다. `PermissionRequest` 만 `응답 필요` 상태로 만들고, `PostToolUse` 는 같은 세션/루트의
+최신 journal 이 그 승인 대기 상태일 때만 `working` 으로 지운다. 입력은 `MAX_HOOK_INPUT_BYTES`(1 MiB)로 제한하며,
+초과한 `PostToolUse` 는 journal 을 쓰지 않고 native transcript 또는 `Stop` lifecycle fallback 에 맡긴다. prompt/tool 내용이나
+텍스트 추론은 사용하지 않는다.
 
 대시보드 데몬은 OS supervisor 로 등록되어 로그인·부팅 후 자동 기동된다:
 

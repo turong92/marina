@@ -20,6 +20,10 @@ MAX_ROWS = 100
 MAX_FUTURE_SECONDS = 300
 LOCK_ACQUIRE_TIMEOUT_SECONDS = 0.35
 LOCK_RETRY_SECONDS = 0.01
+# Hooks receive metadata plus ordinary payloads only. Cap stdin before JSON
+# parsing so a malformed or oversized host payload cannot consume unbounded
+# memory on a synchronous lifecycle path.
+MAX_HOOK_INPUT_BYTES = 1024 * 1024
 # 100 canonical metadata rows fit comfortably in this bounded tail. Keep
 # reads bounded even when a corrupt or manually edited journal grows without
 # limit, because this runs on dashboard/mobile polling paths.
@@ -28,7 +32,6 @@ VALID_SOURCES = {"claude", "codex"}
 BLOCKED_REASONS = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
 HOOK_EVENTS = {
     "UserPromptSubmit": "working",
-    "PostToolUse": "working",
     "Stop": "ended",
 }
 
@@ -327,8 +330,11 @@ def _write_rows(source_fd: int, name: str, rows: list[dict[str, Any]]) -> None:
 
 def _event_from_payload(payload: Mapping[str, Any], source: str) -> tuple[str, str | None] | None:
     hook_event = payload.get("hook_event_name")
-    if hook_event == "PermissionRequest":
-        return "blocked", "permission_prompt"
+    if source == "codex":
+        if hook_event == "PermissionRequest":
+            return "blocked", "permission_prompt"
+        if hook_event == "PostToolUse":
+            return "working", None
     if hook_event in HOOK_EVENTS:
         return HOOK_EVENTS[str(hook_event)], None
     if source == "claude" and hook_event == "Notification" and payload.get("notification_type") in BLOCKED_REASONS:
@@ -384,7 +390,10 @@ def record_hook_event(
         journal_name = f"{sid}.jsonl"
         lock_name = f"{sid}.lock"
         current = float(row["ts"])
-        with _source_directory(resolved_home, source, create=True) as source_fd:
+        is_codex_post_tool_use = source == "codex" and payload.get("hook_event_name") == "PostToolUse"
+        with _source_directory(resolved_home, source, create=not is_codex_post_tool_use) as source_fd:
+            if is_codex_post_tool_use and not _journal_exists(source_fd, journal_name):
+                return None
             with _open_lock(source_fd, lock_name) as lock_fd:
                 if not _acquire_lock(lock_fd, fcntl.LOCK_EX):
                     return None
@@ -393,6 +402,13 @@ def record_hook_event(
                         existing for existing in _read_rows(source_fd, journal_name, source=source, sid=sid)
                         if existing["ts"] <= current + MAX_FUTURE_SECONDS
                     ]
+                    if is_codex_post_tool_use:
+                        root_rows = [existing for existing in rows if existing["root"] == root]
+                        if not root_rows:
+                            return None
+                        newest = max(enumerate(root_rows), key=lambda pair: (pair[1]["ts"], pair[0]))[1]
+                        if newest["event"] != "blocked":
+                            return None
                     rows.sort(key=lambda existing: existing["ts"])
                     if (
                         rows
@@ -455,7 +471,10 @@ def latest_agent_event(
 
 def main() -> int:
     try:
-        payload = json.load(sys.stdin)
+        raw = sys.stdin.buffer.read(MAX_HOOK_INPUT_BYTES + 1)
+        if len(raw) > MAX_HOOK_INPUT_BYTES:
+            return 0
+        payload = json.loads(raw)
         record_hook_event(payload)
     except Exception:
         pass
