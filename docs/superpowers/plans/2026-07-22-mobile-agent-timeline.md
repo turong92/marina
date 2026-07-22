@@ -44,10 +44,10 @@
 - Consumes: normalized timeline items from Task 1.
 - Produces: pages bounded by message count and activity count with the existing byte cursor.
 
-- [ ] Add assertions that tool-heavy pages include their surrounding latest prompt/answer, timeline IDs remain unique across pages, and `/mobile/api/state` remains transcript-lazy.
-- [ ] Run `bash plugin/tests/test-agent-history-pagination.sh`; expect the new timeline assertions to fail.
-- [ ] Collect native rows while scanning to the existing message limit, cap returned activities, and preserve cursor progress even for malformed or tool-only rows.
-- [ ] Re-run timeline and pagination tests; expect both to pass.
+- [x] Add assertions that tool-heavy pages include their surrounding latest prompt/answer, timeline IDs remain unique across pages, and `/mobile/api/state` remains transcript-lazy.
+- [x] Run `bash plugin/tests/test-agent-history-pagination.sh`; the shared Task 1 page implementation already satisfied the new assertions.
+- [x] Collect native rows while scanning to the existing message limit, cap returned activities, and preserve cursor progress even for malformed or tool-only rows.
+- [x] Re-run timeline and pagination tests; expect both to pass.
 
 ### Task 3: Collapsible Mobile Timeline
 

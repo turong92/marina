@@ -27,10 +27,12 @@ root.mkdir()
 def collect(source, sid):
     before = None
     pages = []
+    timeline_pages = []
     while True:
         page = ms.agent_transcript(root, source, sid, before=before, limit=20)
         assert len(page["turns"]) <= 20, page
         pages.insert(0, page["turns"])
+        timeline_pages.insert(0, page["timeline"])
         if not page["hasMore"]:
             break
         assert page["cursor"] is not None and page["cursor"] != before, page
@@ -38,7 +40,10 @@ def collect(source, sid):
     turns = [turn for page in pages for turn in page]
     ids = [turn["id"] for turn in turns]
     assert len(ids) == len(set(ids)), "turn IDs must be stable and unique"
-    return turns
+    timeline = [item for page in timeline_pages for item in page]
+    timeline_ids = [item["id"] for item in timeline]
+    assert len(timeline_ids) == len(set(timeline_ids)), "timeline IDs must be stable and unique"
+    return turns, timeline
 
 claude_sid = "claude-history-0001"
 claude_dir = claude_projects / re.sub(r"[/.]", "-", str(root))
@@ -53,8 +58,9 @@ claude_rows = [
 (claude_dir / f"{claude_sid}.jsonl").write_text(
     "{broken\n" + "\n".join(json.dumps(row) for row in claude_rows) + "\n", encoding="utf-8",
 )
-claude_turns = collect("claude", claude_sid)
+claude_turns, claude_timeline = collect("claude", claude_sid)
 assert [turn["text"] for turn in claude_turns] == [f"claude-{i:03d}" for i in range(95)]
+assert [item["text"] for item in claude_timeline if item["kind"] == "message"] == [f"claude-{i:03d}" for i in range(95)]
 assert ms.agent_runtime_settings(root, "claude", claude_sid) == {"model": "claude-test", "effort": "high"}
 
 codex_sid = "codex-history-0001"
@@ -63,18 +69,26 @@ codex_sid = "codex-history-0001"
     json.dumps({"id": codex_sid, "thread_name": "History"}) + "\n", encoding="utf-8",
 )
 codex_path = codex_home / "sessions" / f"rollout-{codex_sid}.jsonl"
+codex_tools = [item for i in range(140) for item in (
+    {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": f"tool-{i}", "input": json.dumps({"cmd": f"echo {i}"})}},
+    {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": f"tool-{i}", "output": str(i)}},
+)]
 codex_rows = [{"type": "session_meta", "payload": {"cwd": str(root), "id": codex_sid}}] + [
     {"type": "response_item", "payload": {
         "type": "message", "role": "user" if i % 2 == 0 else "assistant",
         "content": [{"type": "input_text" if i % 2 == 0 else "output_text", "text": f"codex-{i:03d}"}],
     }} for i in range(55)
-] + [
+] + codex_tools + [
     {"type": "turn_context", "payload": {"model": "gpt-test", "effort": "xhigh"}},
     {"type": "event_msg", "payload": {"type": "tool_output", "blob": "x" * 400_000}},
 ]
 codex_path.write_text("\n".join(json.dumps(row) for row in codex_rows) + "\n", encoding="utf-8")
-codex_turns = collect("codex", codex_sid)
+codex_turns, codex_timeline = collect("codex", codex_sid)
 assert [turn["text"] for turn in codex_turns] == [f"codex-{i:03d}" for i in range(55)]
+assert [item["text"] for item in codex_timeline if item["kind"] == "message"] == [f"codex-{i:03d}" for i in range(55)]
+activities = [item for item in codex_timeline if item["kind"] == "activity"]
+assert len(activities) == ms.AGENT_TIMELINE_MAX_ACTIVITIES, len(activities)
+assert activities[-1]["label"] == "echo 139", activities[-1]
 assert ms.agent_runtime_settings(root, "codex", codex_sid) == {"model": "gpt-test", "effort": "xhigh"}
 print("ok paginated Claude/Codex history")
 PY
