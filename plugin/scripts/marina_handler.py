@@ -157,8 +157,25 @@ class Handler(BaseHTTPRequestHandler):
             with (MARINA_HOME / "restart-dry-run.log").open("a", encoding="utf-8") as fh:
                 fh.write(f"would run: bash {dash} restart\n")
             return
+        restart_script = f"sleep 1; bash {shlex.quote(str(dash))} restart"
+        launchctl = shutil.which("launchctl") if sys.platform == "darwin" else None
+        if launchctl:
+            label = f"marina.dashboard.restart.{os.getpid()}.{time.time_ns()}"
+            helper_script = (
+                f"{restart_script}; {shlex.quote(launchctl)} remove {shlex.quote(label)} "
+                ">/dev/null 2>&1 || true"
+            )
+            try:
+                submitted = subprocess.run(
+                    [launchctl, "submit", "-l", label, "--", "/bin/bash", "-c", helper_script],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3,
+                )
+                if submitted.returncode == 0:
+                    return
+            except (OSError, subprocess.SubprocessError):
+                pass
         subprocess.Popen(
-            ["bash", "-c", f"sleep 1; exec bash {shlex.quote(str(dash))} restart"],
+            ["bash", "-c", f"{restart_script};"],
             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
