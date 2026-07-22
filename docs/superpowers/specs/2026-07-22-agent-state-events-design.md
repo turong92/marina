@@ -54,7 +54,7 @@ Each row contains only:
 }
 ```
 
-Prompt text, tool input, tool output, transcript content, tokens, and credentials are never copied. The directory is mode `0700`, files are mode `0600`, malformed input produces no row, and every recorder failure exits zero so an agent session is never blocked by Marina. Consecutive duplicate `(event, reason)` rows are suppressed and each file retains only the newest 100 rows.
+Prompt text, tool input, tool output, transcript content, tokens, and credentials are never copied. The directory is mode `0700`, files are mode `0600`, malformed input produces no row, and every recorder failure exits zero so an agent session is never blocked by Marina. Consecutive duplicate `(root, event, reason)` rows are suppressed and each file retains only the newest 100 rows. Rows are accepted only when their source and session ID match the journal path; foreign, malformed, and more-than-five-minutes-future rows are discarded before retention. Journal reads use a bounded tail so corrupt files cannot grow dashboard polling memory.
 
 Hook configuration records only events supported by the host. Unknown or absent lifecycle events are harmless because native transcript parsing remains authoritative when no newer journal event exists. Codex project hooks continue to load only in trusted projects, matching Codex's existing hook trust boundary.
 
@@ -80,7 +80,7 @@ The Inbox continues to derive read state in browser local storage. Status truth 
 - No runtime dependency is added; Python standard library and the existing hook mechanism are sufficient.
 - Existing installations without the new hooks retain native JSONL and mtime behavior.
 - Hook trust and host support are capability boundaries, not reasons to disable the dashboard.
-- Journal paths are derived from validated source/session identifiers and never from raw path fragments.
+- Journal paths are derived from validated source/session identifiers and never from raw path fragments. Symlinked journal directories, journal files, and lock files fail open rather than being followed.
 - Events older than the native state do not override it.
 - Events more than five minutes in the future are ignored.
 

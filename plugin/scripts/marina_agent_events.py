@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import tempfile
 import time
@@ -16,6 +17,10 @@ from typing import Any, Mapping
 
 MAX_ROWS = 100
 MAX_FUTURE_SECONDS = 300
+# 100 canonical metadata rows fit comfortably in this bounded tail. Keep
+# reads bounded even when a corrupt or manually edited journal grows without
+# limit, because this runs on dashboard/mobile polling paths.
+MAX_JOURNAL_READ_BYTES = 256 * 1024
 VALID_SOURCES = {"claude", "codex"}
 BLOCKED_REASONS = {"permission_prompt", "idle_prompt", "elicitation_dialog"}
 HOOK_EVENTS = {
@@ -79,12 +84,50 @@ def _journal_paths(home: Path, source: str, sid: str) -> tuple[Path, Path, Path]
     return source_dir, source_dir / f"{sid}.jsonl", source_dir / f"{sid}.lock"
 
 
+def _ensure_private_directory(path: Path, *, parents: bool = False) -> None:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        try:
+            path.mkdir(mode=0o700, parents=parents)
+        except FileExistsError:
+            pass
+        details = path.lstat()
+    if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
+        raise OSError(f"unsafe journal directory: {path}")
+    os.chmod(path, 0o700)
+
+
 def _prepare_directory(path: Path) -> None:
     marina_dir = path.parents[1]
     events_dir = path.parent
-    for index, directory in enumerate((marina_dir, events_dir, path)):
-        directory.mkdir(mode=0o700, parents=index == 0, exist_ok=True)
-        os.chmod(directory, 0o700)
+    _ensure_private_directory(marina_dir, parents=True)
+    _ensure_private_directory(events_dir)
+    _ensure_private_directory(path)
+
+
+def _is_regular_file(path: Path) -> bool:
+    try:
+        details = path.lstat()
+    except FileNotFoundError:
+        return False
+    return not stat.S_ISLNK(details.st_mode) and stat.S_ISREG(details.st_mode)
+
+
+def _open_lock(path: Path):
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o600)
+    try:
+        details = os.fstat(fd)
+        if not stat.S_ISREG(details.st_mode):
+            raise OSError(f"unsafe journal lock: {path}")
+        os.fchmod(fd, 0o600)
+        return os.fdopen(fd, "a+", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
 
 
 def _valid_row(row: object) -> dict[str, Any] | None:
@@ -109,9 +152,20 @@ def _valid_row(row: object) -> dict[str, Any] | None:
     return {"source": source, "sid": sid, "root": root, "event": event, "reason": reason, "ts": ts}
 
 
-def _read_rows(path: Path) -> list[dict[str, Any]]:
+def _read_rows(path: Path, *, source: str | None = None, sid: str | None = None) -> list[dict[str, Any]]:
+    """Read only a bounded tail and retain rows for the expected journal."""
     try:
-        raw_rows = path.read_text(encoding="utf-8").splitlines()
+        if not _is_regular_file(path):
+            return []
+        size = path.stat().st_size
+        with path.open("rb") as handle:
+            if size > MAX_JOURNAL_READ_BYTES:
+                handle.seek(size - MAX_JOURNAL_READ_BYTES)
+                raw = handle.read().split(b"\n", 1)
+                raw = raw[1] if len(raw) == 2 else b""
+            else:
+                raw = handle.read()
+        raw_rows = raw.decode("utf-8").splitlines()
     except (OSError, UnicodeDecodeError):
         return []
     rows: list[dict[str, Any]] = []
@@ -120,7 +174,7 @@ def _read_rows(path: Path) -> list[dict[str, Any]]:
             row = _valid_row(json.loads(line))
         except (TypeError, ValueError, json.JSONDecodeError):
             row = None
-        if row:
+        if row and (source is None or row["source"] == source) and (sid is None or row["sid"] == sid):
             rows.append(row)
     return rows
 
@@ -193,11 +247,17 @@ def record_hook_event(
         resolved_home = Path.home() if home is None else Path(home)
         source_dir, journal_path, lock_path = _journal_paths(resolved_home, source, sid)
         _prepare_directory(source_dir)
-        with lock_path.open("a", encoding="utf-8") as lock_handle:
-            os.chmod(lock_path, 0o600)
+        if os.path.lexists(journal_path) and not _is_regular_file(journal_path):
+            return None
+        current = float(row["ts"])
+        with _open_lock(lock_path) as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             try:
-                rows = _read_rows(journal_path)
+                rows = [
+                    existing for existing in _read_rows(journal_path, source=source, sid=sid)
+                    if existing["ts"] <= current + MAX_FUTURE_SECONDS
+                ]
+                rows.sort(key=lambda existing: existing["ts"])
                 if (
                     rows
                     and rows[-1]["root"] == root
@@ -231,15 +291,15 @@ def latest_agent_event(
         if canonical_root is None:
             return None
         resolved_home = Path.home() if home is None else Path(home)
-        _, journal_path, lock_path = _journal_paths(resolved_home, source, sid)
-        if not journal_path.is_file():
+        source_dir, journal_path, lock_path = _journal_paths(resolved_home, source, sid)
+        if not _is_regular_file(journal_path):
             return None
         current = time.time() if now is None else now
-        with lock_path.open("a", encoding="utf-8") as lock_handle:
-            os.chmod(lock_path, 0o600)
+        _prepare_directory(source_dir)
+        with _open_lock(lock_path) as lock_handle:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
             try:
-                rows = _read_rows(journal_path)
+                rows = _read_rows(journal_path, source=source, sid=sid)
             finally:
                 fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         matching = [

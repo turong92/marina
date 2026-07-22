@@ -15,7 +15,7 @@ from pathlib import Path
 
 scripts, tmp = map(Path, sys.argv[1:3])
 sys.path.insert(0, str(scripts))
-from marina_agent_events import MAX_ROWS, latest_agent_event, record_hook_event
+from marina_agent_events import MAX_JOURNAL_READ_BYTES, MAX_ROWS, latest_agent_event, record_hook_event
 
 
 def _concurrent_write(index, ready, release):
@@ -114,6 +114,74 @@ journal.write_text(journal.read_text(encoding="utf-8") + json.dumps({
 }) + "\n", encoding="utf-8")
 assert latest_agent_event("claude", "claude-1", root, home=home, now=1210)["ts"] == 1209
 
+# Rows must belong to this exact journal before they participate in duplicate
+# suppression or bounded retention. A foreign final row must not swallow a
+# real local event, and future-row poisoning must not evict that event.
+journal.write_text(journal.read_text(encoding="utf-8") + json.dumps({
+    "source": "codex", "sid": "other-session", "root": str(root.resolve()),
+    "event": "working", "reason": None, "ts": 1211,
+}) + "\n", encoding="utf-8")
+real_after_foreign = record_hook_event(
+    {**claude_base, "hook_event_name": "UserPromptSubmit"}, home=home, now=1212,
+)
+assert real_after_foreign and real_after_foreign["source"] == "claude" and real_after_foreign["ts"] == 1212
+with journal.open("a", encoding="utf-8") as handle:
+    for index in range(MAX_ROWS):
+        handle.write(json.dumps({
+            "source": "claude", "sid": "claude-1", "root": str(root.resolve()),
+            "event": "ended", "reason": None, "ts": 10000 + index,
+        }) + "\n")
+real_after_poison = record_hook_event(
+    {**claude_base, "hook_event_name": "Stop"}, home=home, now=1213,
+)
+assert real_after_poison and real_after_poison["ts"] == 1213, real_after_poison
+assert latest_agent_event("claude", "claude-1", root, home=home, now=1214)["ts"] == 1213
+rewritten = [json.loads(line) for line in journal.read_text(encoding="utf-8").splitlines()]
+assert len(rewritten) <= MAX_ROWS
+assert all(row["source"] == "claude" and row["sid"] == "claude-1" and row["ts"] <= 1513 for row in rewritten)
+
+# Journal parsing is deliberately bounded: a corrupt prefix larger than the
+# tail limit cannot make every dashboard poll read an arbitrary file.
+tail_home = tmp / "tail-home"
+tail_dir = tail_home / ".marina" / "agent-events" / "claude"
+tail_dir.mkdir(parents=True, mode=0o700)
+tail_journal = tail_dir / "tail-1.jsonl"
+tail_row = {"source": "claude", "sid": "tail-1", "root": str(root.resolve()),
+            "event": "working", "reason": None, "ts": 1300.25}
+tail_journal.write_bytes((b"x" * (MAX_JOURNAL_READ_BYTES * 2)) + b"\n" + json.dumps(tail_row).encode() + b"\n")
+assert latest_agent_event("claude", "tail-1", root, home=tail_home, now=1301) == tail_row
+
+# Refuse symlinked source directories and lock files without following or
+# chmodding outside targets.
+symlink_home = tmp / "symlink-home"
+outside_dir = tmp / "outside-directory"
+outside_dir.mkdir(mode=0o755)
+source_parent = symlink_home / ".marina" / "agent-events"
+source_parent.mkdir(parents=True, mode=0o700)
+(source_parent / "claude").symlink_to(outside_dir, target_is_directory=True)
+assert record_hook_event({**claude_base, "hook_event_name": "UserPromptSubmit"}, home=symlink_home, now=1400) is None
+assert stat.S_IMODE(outside_dir.stat().st_mode) == 0o755 and not list(outside_dir.iterdir())
+
+lock_home = tmp / "lock-home"
+lock_dir = lock_home / ".marina" / "agent-events" / "claude"
+lock_dir.mkdir(parents=True, mode=0o700)
+outside_lock = tmp / "outside.lock"
+outside_lock.write_text("do not touch", encoding="utf-8")
+outside_lock.chmod(0o644)
+(lock_dir / "claude-1.lock").symlink_to(outside_lock)
+assert record_hook_event({**claude_base, "hook_event_name": "UserPromptSubmit"}, home=lock_home, now=1401) is None
+assert outside_lock.read_text(encoding="utf-8") == "do not touch"
+assert stat.S_IMODE(outside_lock.stat().st_mode) == 0o644
+
+file_home = tmp / "file-home"
+file_dir = file_home / ".marina" / "agent-events" / "claude"
+file_dir.mkdir(parents=True, mode=0o700)
+outside_journal = tmp / "outside.jsonl"
+outside_journal.write_text("do not touch", encoding="utf-8")
+(file_dir / "claude-1.jsonl").symlink_to(outside_journal)
+assert record_hook_event({**claude_base, "hook_event_name": "UserPromptSubmit"}, home=file_home, now=1402) is None
+assert outside_journal.read_text(encoding="utf-8") == "do not touch"
+
 # Sidecar locking retains all valid writes from a synchronized process burst.
 for index in range(MAX_ROWS):
     prefill = record_hook_event({
@@ -142,6 +210,17 @@ concurrent_rows = [json.loads(line) for line in concurrent_journal.read_text(enc
 assert len(concurrent_rows) == MAX_ROWS, len(concurrent_rows)
 assert {row["ts"] for row in concurrent_rows} == set(range(2012, 2100)) | set(range(3000, 3000 + workers))
 print("ok hook journal")
+PY
+
+python3 - "$HERE/../hooks/hooks.json" <<'PY'
+import json
+import sys
+
+hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
+for name in ("UserPromptSubmit", "Notification", "Stop"):
+    commands = hooks[name][0]["hooks"]
+    assert len(commands) == 1 and commands[0].get("async") is False, (name, commands)
+print("ok synchronous lifecycle hook contract")
 PY
 
 WRAPPER="$SCRIPTS/marina-agent-event-hook.sh"

@@ -28,7 +28,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-agent-event-hook.sh\"",
-            "async": true
+            "async": false
           }
         ]
       }
@@ -39,7 +39,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-agent-event-hook.sh\"",
-            "async": true
+            "async": false
           }
         ]
       }
@@ -50,7 +50,7 @@
           {
             "type": "command",
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-agent-event-hook.sh\"",
-            "async": true
+            "async": false
           }
         ]
       }

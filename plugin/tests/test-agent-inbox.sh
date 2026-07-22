@@ -62,6 +62,27 @@ failed = ms.agent_status(codex_failed, "codex")
 assert failed["status"] == "failed" and failed.get("statusReason") == "interrupted", failed
 assert ms.agent_status(tmp / "missing.jsonl", "claude")["status"] == "idle"
 
+# Native lifecycle rows are selected by their greatest valid timestamp, rather
+# than append order. Equal timestamps retain the later append as the tiebreak.
+codex_out_of_order = write("codex-out-of-order.jsonl", [
+    {"timestamp": 1000, "type": "event_msg", "payload": {"type": "task_complete"}},
+    {"timestamp": 999, "type": "event_msg", "payload": {"type": "task_started"}},
+    {"timestamp": 1000, "type": "event_msg", "payload": {"type": "task_started"}},
+])
+assert ms.agent_status(codex_out_of_order, "codex", now=1000) == {"status": "working", "statusTs": 1000}
+claude_out_of_order = write("claude-out-of-order.jsonl", [
+    {"type": "assistant", "timestamp": 1000, "message": {"stop_reason": "end_turn"}},
+    {"type": "user", "timestamp": 999, "message": {}},
+])
+assert ms.agent_status(claude_out_of_order, "claude", now=1000) == {"status": "completed", "statusTs": 1000}
+
+# Future native rows and a future file mtime cannot manufacture recent work.
+codex_future_native = write("codex-future-native.jsonl", [
+    {"timestamp": 1401, "type": "event_msg", "payload": {"type": "task_started"}},
+])
+os.utime(codex_future_native, (1401, 1401))
+assert ms.agent_status(codex_future_native, "codex", now=1000) == {"status": "idle", "statusTs": 1401}
+
 # Native transcript parsing remains the fallback, but an explicit lifecycle event at
 # the same or newer timestamp is authoritative for this root/session only.
 events = tmp / "events-home"
@@ -139,6 +160,12 @@ finally:
     ms.time.time = real_time
 assert deterministic == {"status": "blocked", "statusTs": deterministic_event_ts,
                          "statusReason": "permission_prompt"}, deterministic
+
+fractional = ms.merge_agent_status(
+    {"status": "completed", "statusTs": claude_done_ts},
+    {"event": "working", "ts": claude_done_ts + 0.25},
+)
+assert fractional == {"status": "working", "statusTs": claude_done_ts + 0.25}, fractional
 
 waiting = ms.merge_agent_status(
     {"status": "completed", "statusTs": claude_done_ts},

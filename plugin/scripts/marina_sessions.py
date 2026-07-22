@@ -466,21 +466,21 @@ def _jsonl_last_assistant_preview(path: Path) -> str:
     return ""
 
 
-def _agent_event_ts(obj: dict[str, Any], fallback: float) -> int:
+def _agent_event_ts(obj: dict[str, Any], fallback: float) -> float:
     raw = obj.get("timestamp")
-    if isinstance(raw, (int, float)):
-        return int(raw)
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool) and math.isfinite(raw):
+        return float(raw)
     if isinstance(raw, str) and raw:
         try:
-            return int(datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp())
+            return datetime.fromisoformat(raw.replace("Z", "+00:00")).timestamp()
         except ValueError:
             pass
     payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
     for key in ("completed_at", "started_at"):
         value = payload.get(key)
-        if isinstance(value, (int, float)):
-            return int(value)
-    return int(fallback)
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value):
+            return float(value)
+    return float(fallback)
 
 
 def _agent_state_rows(path: Path) -> tuple[list[dict[str, Any]], float]:
@@ -514,43 +514,61 @@ EVENT_TO_STATUS = {
 def _native_agent_status(path: Path, source: str, *, now: float | None = None) -> dict[str, Any]:
     """Normalize native Claude/Codex turn boundaries without reading an entire rollout."""
     rows, mtime = _agent_state_rows(path)
+    current = time.time() if now is None else now
+    best: dict[str, Any] | None = None
+
+    def offer(status: str, ts: float, reason: str | None = None) -> None:
+        nonlocal best
+        if not math.isfinite(ts) or ts > current + 300:
+            return
+        candidate: dict[str, Any] = {"status": status, "statusTs": ts}
+        if reason:
+            candidate["statusReason"] = reason[:120]
+        # Iterating in append order makes an equal timestamp deterministically
+        # prefer the later native record, while newer timestamps always win.
+        if best is None or ts >= best["statusTs"]:
+            best = candidate
+
     if source == "codex":
-        for obj in reversed(rows):
+        for obj in rows:
             payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
             event = payload.get("type") if obj.get("type") == "event_msg" else None
             ts = _agent_event_ts(obj, mtime)
             if event == "task_complete":
-                return {"status": "completed", "statusTs": ts}
-            if event == "turn_aborted":
+                offer("completed", ts)
+            elif event == "turn_aborted":
                 reason = str(payload.get("reason") or "aborted")
-                return {"status": "failed", "statusTs": ts, "statusReason": reason[:120]}
-            if event in ("error", "stream_error"):
+                offer("failed", ts, reason)
+            elif event in ("error", "stream_error"):
                 reason = str(payload.get("message") or payload.get("error") or event)
-                return {"status": "failed", "statusTs": ts, "statusReason": reason[:120]}
-            if event == "task_started":
-                return {"status": "working", "statusTs": ts}
+                offer("failed", ts, reason)
+            elif event == "task_started":
+                offer("working", ts)
     elif source == "claude":
-        for obj in reversed(rows):
+        for obj in rows:
             typ = obj.get("type")
             ts = _agent_event_ts(obj, mtime)
             if typ == "system" and obj.get("subtype") == "api_error":
-                return {"status": "failed", "statusTs": ts, "statusReason": "api_error"}
-            if typ == "system" and obj.get("subtype") == "stop_hook_summary":
+                offer("failed", ts, "api_error")
+            elif typ == "system" and obj.get("subtype") == "stop_hook_summary":
                 errors = obj.get("hookErrors") if isinstance(obj.get("hookErrors"), list) else []
                 if errors:
-                    return {"status": "failed", "statusTs": ts, "statusReason": "stop hook failed"}
-                return {"status": "completed", "statusTs": ts}
-            if typ == "assistant":
+                    offer("failed", ts, "stop hook failed")
+                else:
+                    offer("completed", ts)
+            elif typ == "assistant":
                 message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                 if message.get("stop_reason") == "end_turn":
-                    return {"status": "completed", "statusTs": ts}
-                return {"status": "working", "statusTs": ts}
-            if typ == "user":
-                return {"status": "working", "statusTs": ts}
-    current = time.time() if now is None else now
-    if mtime and current - mtime < 120:
-        return {"status": "working", "statusTs": int(mtime), "statusReason": "recent activity"}
-    return {"status": "idle", "statusTs": int(mtime or 0)}
+                    offer("completed", ts)
+                else:
+                    offer("working", ts)
+            elif typ == "user":
+                offer("working", ts)
+    if best is not None:
+        return best
+    if mtime and mtime <= current and current - mtime < 120:
+        return {"status": "working", "statusTs": mtime, "statusReason": "recent activity"}
+    return {"status": "idle", "statusTs": mtime or 0}
 
 
 def merge_agent_status(
@@ -576,7 +594,7 @@ def merge_agent_status(
             and event_ts >= native_ts
         ):
             status = EVENT_TO_STATUS[str(event_name)]
-            result = {"status": status, "statusTs": int(event_ts)}
+            result = {"status": status, "statusTs": event_ts}
             reason = event.get("reason")
             if status == "blocked" and reason in BLOCKED_REASONS:
                 result["statusReason"] = str(reason)[:120]
