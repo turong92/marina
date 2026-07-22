@@ -98,6 +98,7 @@ grep -q 'newMessagesBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should 
 ! grep -q 'subagentMenuBtn' <<<"$mobile_html" || { echo "FAIL: /mobile should not expose subagents as a global menu action"; exit 1; }
 grep -q 'subagentSessionBtn' <<<"$mobile_html" || { echo "FAIL: /mobile should expose subagents inside their session"; exit 1; }
 grep -q 'subagentSheet' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render a subagent bottom sheet"; exit 1; }
+grep -q '/mobile/api/activity' <<<"$mobile_html" || { echo "FAIL: /mobile should load subagent activity on demand"; exit 1; }
 grep -q 'renderSubagents' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render subagent activity"; exit 1; }
 grep -q 'openSubagentIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened subagent details"; exit 1; }
 ! grep -q '<label>워크트리' <<<"$mobile_html" || { echo "FAIL: /mobile page should not expose worktree select"; exit 1; }
@@ -525,11 +526,20 @@ keys = [s["key"] for s in state["sessions"]]
 assert "agent:codex:sid0001:%s" % root in keys, keys
 agent = next(s for s in state["sessions"] if s["key"].startswith("agent:codex:"))
 assert agent["tid"] == "agent-term" and agent["controllable"] is True, agent
-assert agent["subagents"][0]["title"] == "Review", agent
-assert agent["catalog"]["skills"][0]["insert"] == "$audit", agent
+assert "subagents" not in agent, agent
+assert "catalog" not in agent, agent
 assert "term:shell-term" in keys, keys
 assert "term:agent-term" not in keys, keys
 print("ok mobile hides agent runner terms")
+PY
+
+activity_url="$(python3 -c 'import sys,urllib.parse; print(sys.argv[1] + "/mobile/api/activity?" + urllib.parse.urlencode({"root":sys.argv[2],"source":"codex","sid":"sid0001"}))' "$b" "$P")"
+activity_json="$(curl -sf -H 'Host: devbox.example.test' -H 'X-Marina-Mobile-Token: secret' "$activity_url")"
+python3 - "$activity_json" <<'PY'
+import json, sys
+payload = json.loads(sys.argv[1])
+assert payload == {"subagents": []}, payload
+print("ok mobile activity endpoint")
 PY
 
 send_body="$(python3 -c 'import json,sys; print(json.dumps({"root":sys.argv[1],"target":{"type":"shell"},"text":"echo MOBILE_OK"}))' "$P")"

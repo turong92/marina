@@ -40,7 +40,7 @@ from marina_update import _serving_sha, update_claude, update_codex, update_stat
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
 from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_catalog, mobile_interrupt, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, render_mobile_html, rotate_mobile_token
-from marina_sessions import activate_agent_payloads, agent_belongs_to_root, agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_sessions import activate_agent_payloads, agent_activity, agent_belongs_to_root, agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
@@ -384,6 +384,28 @@ class Handler(BaseHTTPRequestHandler):
                 before = int(raw_before) if raw_before else None
                 payload = agent_transcript(root, query.get("source", [""])[0],
                                            query.get("sid", [""])[0], before=before, limit=40)
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
+            return
+        if parsed.path == "/mobile/api/activity":
+            if principal is None and not mobile_request_ok(self, parsed):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
+                source = query.get("source", [""])[0]
+                sid = query.get("sid", [""])[0]
+                agent_key = canonical_agent(source, sid)
+                self._policy().inherit_from_root("agent", agent_key, root)
+                if not self._policy().can_resource(principal, "agent", agent_key):
+                    self._forbidden()
+                    return
+                payload = {"subagents": agent_activity(root, source, sid)}
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return

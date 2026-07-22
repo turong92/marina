@@ -79,13 +79,61 @@ assert ms.agent_runtime_settings(root, "codex", codex_sid) == {"model": "gpt-tes
 print("ok paginated Claude/Codex history")
 PY
 
+PYTHONPATH="$SCR" python3 - "$TMP" <<'PY'
+import sys
+from pathlib import Path
+
+import marina_mobile as mm
+
+root = (Path(sys.argv[1]) / "mobile-state-root").resolve()
+root.mkdir()
+mm.discover_all_roots = lambda refresh=False: [root]
+mm.worktree_info = lambda value, refresh=False: {
+    "id": "mobile-state", "alias": "mobile-state", "projectId": "project",
+    "projectLabel": "Project", "source": "registry",
+}
+mm.term_list = lambda: {"sessions": []}
+mm.agents_payload = lambda value, refresh=False: [{
+    "source": "codex", "sid": "codex-history-0001", "title": "History",
+    "preview": "latest preview", "ts": 1,
+}]
+mm.activate_agent_payloads = lambda agents, active: agents
+mm.agent_transcript = lambda *args, **kwargs: (_ for _ in ()).throw(
+    AssertionError("mobile state eagerly loaded every transcript")
+)
+mm.agent_activity = lambda *args, **kwargs: (_ for _ in ()).throw(
+    AssertionError("mobile state eagerly loaded subagent activity")
+)
+mm._native_catalog = lambda *args, **kwargs: (_ for _ in ()).throw(
+    AssertionError("mobile state eagerly loaded native catalogs")
+)
+mm.agent_runtime_settings = lambda *args, **kwargs: {}
+mm.mobile_pending_session_settings = lambda *args, **kwargs: {}
+mm.mobile_agent_options = lambda: {}
+
+state = mm.mobile_state()
+session = state["sessions"][0]
+assert session["preview"] == "latest preview", session
+assert "turns" not in session, session
+assert "historyCursor" not in session, session
+assert "hasMoreHistory" not in session, session
+assert "subagents" not in session, session
+assert "catalog" not in session, session
+print("ok mobile state defers transcript loading")
+PY
+
 MOBILE="$SCR/marina_mobile.py"
 HANDLER="$SCR/marina_handler.py"
 MODALS="$SCR/marina-web/app-6-modals.js"
 grep -q 'id="olderMessagesBtn"' "$MOBILE" || { echo "FAIL mobile older-message control missing"; exit 1; }
 grep -q 'function loadOlderMessages' "$MOBILE" || { echo "FAIL mobile older-message loader missing"; exit 1; }
 grep -q 'historyCursor' "$MOBILE" || { echo "FAIL mobile history cursor missing"; exit 1; }
+grep -q 'async function loadSessionMessages' "$MOBILE" || { echo "FAIL mobile latest-history loader missing"; exit 1; }
+grep -q 'await loadSessionMessages(selectedSession()' "$MOBILE" || { echo "FAIL mobile selected history is not loaded after state"; exit 1; }
+grep -q 'async function loadSessionActivity' "$MOBILE" || { echo "FAIL mobile subagent activity is not lazy"; exit 1; }
+grep -q 'async function loadNativeCatalog' "$MOBILE" || { echo "FAIL mobile native catalog is not lazy"; exit 1; }
 grep -q '"/mobile/api/transcript"' "$HANDLER" || { echo "FAIL token-protected mobile transcript route missing"; exit 1; }
+grep -q '"/mobile/api/activity"' "$HANDLER" || { echo "FAIL token-protected mobile activity route missing"; exit 1; }
 grep -q 'data-agent-older' "$MODALS" || { echo "FAIL desktop transcript older-message control missing"; exit 1; }
 grep -q 'loadOlderAgentTurns' "$MODALS" || { echo "FAIL desktop transcript pagination missing"; exit 1; }
 

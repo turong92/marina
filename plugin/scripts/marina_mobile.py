@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
-from marina_sessions import activate_agent_payloads, agent_activity, agent_runtime_settings, agent_transcript, agents_payload, safe_root, worktree_info
+from marina_sessions import activate_agent_payloads, agent_runtime_settings, agents_payload, safe_root, worktree_info
 from marina_state import MARINA_HOME, PORT
 from marina_term import _agent_cli, term_input, term_list, term_open
 
@@ -373,38 +373,9 @@ def mobile_request_ok(handler: Any, parsed: urllib.parse.ParseResult) -> bool:
     return bool(expected and supplied and hmac.compare_digest(expected, supplied))
 
 
-def _agent_history(root: Path, source: str, sid: str) -> dict[str, Any]:
-    if not sid:
-        return {"turns": [], "cursor": None, "hasMore": False}
-    try:
-        payload = agent_transcript(root, source, sid)
-        turns = payload.get("turns", [])
-        return {
-            "turns": turns if isinstance(turns, list) else [],
-            "cursor": payload.get("cursor"),
-            "hasMore": bool(payload.get("hasMore")),
-        }
-    except Exception:
-        return {"turns": [], "cursor": None, "hasMore": False}
-
-
-def _agent_turns(root: Path, source: str, sid: str) -> list[dict[str, str]]:
-    return _agent_history(root, source, sid)["turns"]
-
-
-def _agent_subagents(root: Path, source: str, sid: str) -> list[dict[str, Any]]:
-    if not sid:
-        return []
-    try:
-        return agent_activity(root, source, sid)
-    except Exception:
-        return []
-
-
 def mobile_state(refresh: bool = False) -> dict[str, Any]:
     worktrees: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []
-    catalogs: dict[tuple[str, str], dict[str, list[dict[str, str]]]] = {}
     terms = term_list().get("sessions", [])
     for root in discover_all_roots(refresh):
         try:
@@ -434,17 +405,7 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
             for agent in agents:
                 source = str(agent.get("source") or "")
                 sid = str(agent.get("sid") or "")
-                history = _agent_history(root, source, sid)
-                turns = history["turns"]
-                catalog_key = (str(root), source)
-                if catalog_key not in catalogs:
-                    try:
-                        catalogs[catalog_key] = _native_catalog(root, source)
-                    except Exception:
-                        catalogs[catalog_key] = {"skills": [], "agents": []}
                 preview = str(agent.get("preview") or "")
-                if not preview and turns:
-                    preview = str(turns[-1].get("text") or "")
                 sessions.append({
                     "key": f"agent:{source}:{sid}:{root}",
                     "kind": "agent",
@@ -455,11 +416,6 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                     "source": source,
                     "sid": sid,
                     "target": {"type": "agent", "source": source, "sid": sid},
-                    "turns": turns,
-                    "historyCursor": history["cursor"],
-                    "hasMoreHistory": history["hasMore"],
-                    "subagents": _agent_subagents(root, source, sid),
-                    "catalog": catalogs[catalog_key],
                     "ts": agent.get("ts") or 0,
                     "status": agent.get("status") or "idle",
                     "statusTs": agent.get("statusTs") or agent.get("ts") or 0,
@@ -974,6 +930,8 @@ _MOBILE_HTML = r"""<!doctype html>
     } catch (_) { inboxRead = new Set(); }
     const pendingTurns = {};
     const historyCache = {};
+    const activityCache = {};
+    const catalogCache = {};
     const expandedTurnIds = new Set();
     const collapsedTurnIds = new Set();
     let historyLoading = false;
@@ -1052,6 +1010,8 @@ _MOBILE_HTML = r"""<!doctype html>
       turnsStructureKey = "";
       turnsEl.innerHTML = "";
       Object.keys(historyCache).forEach(key => delete historyCache[key]);
+      Object.keys(activityCache).forEach(key => delete activityCache[key]);
+      Object.keys(catalogCache).forEach(key => delete catalogCache[key]);
       showList();
       if (cookieAuth) {
         try { await fetch("/api/auth/logout", {method: "POST", headers: headers(true), body: "{}"}); }
@@ -1203,6 +1163,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (history.state && history.state.view === "chat") history.replaceState({view: "chat"}, "", location.href);
       else history.pushState({view: "chat"}, "", location.href);
       render();
+      loadSessionMessages(s).catch(error => { statusEl.textContent = `대화 실패 · ${String(error)}`; });
       requestAnimationFrame(() => scrollToLatest("auto"));
     }
     function targetValue(target) {
@@ -1222,7 +1183,8 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function queuePendingTurn(key, text) {
       const session = (state.sessions || []).find(item => item.key === key);
-      const confirmedCount = ((session && session.turns) || []).filter(turn => turn.role === "user" && String(turn.text || "") === text).length;
+      const cached = sessionHistory(session);
+      const confirmedCount = ((cached && cached.turns) || (session && session.turns) || []).filter(turn => turn.role === "user" && String(turn.text || "") === text).length;
       const existing = pendingTurns[key] || [];
       const pendingCount = existing.filter(turn => String(turn.text || "") === text).length;
       pendingTurns[key] = existing.concat([{role: "user", text, baseline: confirmedCount + pendingCount}]).slice(-12);
@@ -1400,12 +1362,36 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!history) {
         history = historyCache[session.key] = {
           turns: (session.turns || []).slice(), cursor: session.historyCursor ?? null,
-          hasMore: Boolean(session.hasMoreHistory),
+          hasMore: Boolean(session.hasMoreHistory), loaded: Boolean(session.historyLoaded),
+          loading: false, paged: false,
         };
       } else {
         history.turns = mergeHistoryTurns(history.turns, session.turns || []);
       }
       return history;
+    }
+    async function loadSessionMessages(session, options={}) {
+      const history = sessionHistory(session);
+      if (!session || !history || history.loading || (history.loaded && !options.refresh)) return;
+      history.loading = true;
+      try {
+        const params = new URLSearchParams({root: session.root, source: session.source, sid: session.sid});
+        const response = await fetch(`/mobile/api/transcript?${params}`, {headers: headers()});
+        if (!response.ok) throw new Error(await response.text());
+        const page = await response.json();
+        history.turns = mergeHistoryTurns(history.turns, page.turns || []);
+        if (!history.paged) {
+          history.cursor = page.cursor ?? null;
+          history.hasMore = Boolean(page.hasMore);
+        }
+        history.loaded = true;
+        if (selectedSessionKey === session.key) {
+          turnsStructureKey = "";
+          renderTurns(session);
+        }
+      } finally {
+        history.loading = false;
+      }
     }
     async function loadOlderMessages() {
       const session = selectedSession();
@@ -1424,6 +1410,7 @@ _MOBILE_HTML = r"""<!doctype html>
         history.turns = mergeHistoryTurns(history.turns, page.turns || []);
         history.cursor = page.cursor ?? null;
         history.hasMore = Boolean(page.hasMore);
+        history.paged = true;
         turnsStructureKey = "";
         renderTurns(session);
         requestAnimationFrame(() => { turnsEl.scrollTop = oldY + turnsEl.scrollHeight - oldHeight; });
@@ -1478,12 +1465,34 @@ _MOBILE_HTML = r"""<!doctype html>
         else newMessagesBtn.style.display = "block";
       });
     }
+    function sessionActivity(session) {
+      if (!session || session.kind !== "agent") return null;
+      return activityCache[session.key] || (activityCache[session.key] = {items: [], loaded: false, loading: false});
+    }
+    async function loadSessionActivity(session) {
+      const activity = sessionActivity(session);
+      if (!activity || activity.loaded || activity.loading) return;
+      activity.loading = true;
+      try {
+        const params = new URLSearchParams({root: session.root, source: session.source, sid: session.sid});
+        const response = await fetch(`/mobile/api/activity?${params}`, {headers: headers()});
+        if (!response.ok) throw new Error(await response.text());
+        const payload = await response.json();
+        activity.items = payload.subagents || [];
+        activity.loaded = true;
+        if (selectedSessionKey === session.key) renderSubagents(session);
+      } finally {
+        activity.loading = false;
+      }
+    }
     function renderSubagents(session) {
-      const subagents = (session && session.subagents) || [];
-      subagentCount.textContent = String(subagents.length);
-      subagentSessionBtn.style.display = subagents.length ? "inline-block" : "none";
+      const activity = sessionActivity(session);
+      const subagents = activity ? activity.items : [];
+      subagentCount.textContent = activity && activity.loaded ? String(subagents.length) : "";
+      subagentSessionBtn.style.display = activity ? "inline-block" : "none";
       if (!subagents.length) {
-        updateHtmlIfChanged(subagentList, '<div class="empty-state">이 세션의 작업 에이전트 기록이 없습니다.</div>');
+        const message = activity && !activity.loaded ? "불러오는 중..." : "이 세션의 작업 에이전트 기록이 없습니다.";
+        updateHtmlIfChanged(subagentList, `<div class="empty-state">${message}</div>`);
         return;
       }
       const statusLabel = {running: "실행 중", completed: "완료", failed: "실패", stopped: "중지"};
@@ -1498,10 +1507,17 @@ _MOBILE_HTML = r"""<!doctype html>
         subagentList.scrollTop = previousScrollTop;
       }
     }
-    function openSubagents() {
-      renderSubagents(selectedSession());
+    async function openSubagents() {
+      const session = selectedSession();
+      if (!session || session.kind !== "agent") return;
+      renderSubagents(session);
       subagentSheet.classList.add("open");
       subagentSheet.setAttribute("aria-hidden", "false");
+      try {
+        await loadSessionActivity(session);
+      } catch (error) {
+        updateHtmlIfChanged(subagentList, `<div class="empty-state">서브에이전트를 불러오지 못했습니다.<br>${esc(String(error))}</div>`);
+      }
     }
     function renderServiceState() {
       servicesCount.textContent = `${servicesState.running || 0}/${servicesState.defined || 0}`;
@@ -1723,10 +1739,32 @@ _MOBILE_HTML = r"""<!doctype html>
       const token = match[2];
       return {trigger: token[0], query: token.slice(1).toLowerCase(), start: cursor - token.length, end: cursor};
     }
+    function sessionCatalog(session) {
+      if (!session || session.kind !== "agent") return {skills: [], agents: [], loaded: true, loading: false};
+      const key = `${session.root}|${session.source}`;
+      return catalogCache[key] || (catalogCache[key] = {skills: [], agents: [], loaded: false, loading: false});
+    }
+    async function loadNativeCatalog(session) {
+      const catalog = sessionCatalog(session);
+      if (!session || session.kind !== "agent" || catalog.loaded || catalog.loading) return;
+      catalog.loading = true;
+      try {
+        const params = new URLSearchParams({root: session.root, source: session.source});
+        const response = await fetch(`${catalogEndpoint}?${params}`, {headers: headers()});
+        if (!response.ok) throw new Error(await response.text());
+        const payload = await response.json();
+        catalog.skills = payload.skills || [];
+        catalog.agents = payload.agents || [];
+        catalog.loaded = true;
+        if (selectedSessionKey === session.key && document.activeElement === promptInput) renderSuggestions();
+      } finally {
+        catalog.loading = false;
+      }
+    }
     function suggestionItems(trigger) {
       const session = selectedSession();
       const source = sessionSource(session);
-      const catalog = (session && session.catalog) || {skills: [], agents: []};
+      const catalog = sessionCatalog(session);
       let items = [];
       if (source === "claude" && trigger.trigger === "/") items = (catalog.skills || []).map(item => ({...item, kind: "skill"}));
       else if (source === "claude" && trigger.trigger === "@") items = (catalog.agents || []).map(item => ({...item, kind: "agent"})).concat(fileSuggestions.map(item => ({...item, kind: "file"})));
@@ -1746,6 +1784,8 @@ _MOBILE_HTML = r"""<!doctype html>
         closeSuggestions();
         return;
       }
+      const catalog = sessionCatalog(selectedSession());
+      if (!catalog.loaded) loadNativeCatalog(selectedSession()).catch(() => {});
       suggestionRange = trigger;
       const items = suggestionItems(trigger);
       suggestionsEl.innerHTML = items.map((item, index) => `<button class="suggestion" type="button" role="option" data-suggestion="${index}" data-insert="${esc(item.insert)}"><span><span class="suggestion-name">${esc(item.insert || item.name)}</span><span class="suggestion-description">${esc(item.description === item.kind ? "" : item.description || "")}</span></span><span class="suggestion-kind">${esc(item.kind)}</span></button>`).join("");
@@ -1844,6 +1884,7 @@ _MOBILE_HTML = r"""<!doctype html>
         state = await r.json();
         showApp();
         render();
+        await loadSessionMessages(selectedSession(), {refresh: Boolean(options.quiet)});
         if (!options.quiet && !selectedSession()) statusEl.textContent = "준비됨";
       } finally {
         loading = false;

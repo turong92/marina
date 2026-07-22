@@ -280,6 +280,10 @@ start() {
 
 stop() {
   local pid
+  if [[ "${MARINA_DRY_RUN:-}" == "1" ]]; then
+    echo "dry-run: not stopping dashboard"
+    return 0
+  fi
   if use_launchctl; then
     [[ -f "$PLIST_FILE" ]] && launchctl bootout "$(launchctl_domain)" "$PLIST_FILE" >/dev/null 2>&1 || true
   fi
