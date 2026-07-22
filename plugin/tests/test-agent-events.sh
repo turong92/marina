@@ -535,14 +535,96 @@ assert holder.exitcode == 0, holder.exitcode
 assert timed_out is None
 assert elapsed < LOCK_ACQUIRE_TIMEOUT_SECONDS + 0.2, elapsed
 
-# The wrapper caps stdin before JSON parsing. A larger payload fails open
-# quickly, leaves no journal hierarchy, and avoids unbounded allocation.
+# The wrapper caps stdin before JSON parsing. Keep the payload valid and
+# otherwise recordable so the old json.load-style path would create a row.
+oversized_payload = {
+    "session_id": "oversized-wrapper-1",
+    "cwd": str(root),
+    "transcript_path": str(tmp / ".claude/projects/root/oversized-wrapper-1.jsonl"),
+    "hook_event_name": "UserPromptSubmit",
+    "irrelevant": "",
+}
+
+def encode_payload(payload):
+    return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+
+oversized_payload["irrelevant"] = "x" * (
+    events.MAX_HOOK_INPUT_BYTES + 1 - len(encode_payload(oversized_payload))
+)
+oversized_input = encode_payload(oversized_payload)
+assert len(oversized_input) == events.MAX_HOOK_INPUT_BYTES + 1
+assert json.loads(oversized_input)["hook_event_name"] == "UserPromptSubmit"
+
+# An isolated pre-fix json.load-style harness records this same valid payload.
+# Its journal is evidence that the real wrapper assertion below would catch
+# the former unbounded parser without changing the production script.
+legacy_home = tmp / "legacy-unbounded-home"
+legacy_home.mkdir()
+legacy_harness = """
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from marina_agent_events import record_hook_event
+
+record_hook_event(json.load(sys.stdin), home=Path(os.environ["HOME"]), now=5000)
+"""
+legacy = subprocess.run(
+    [sys.executable, "-c", legacy_harness, str(scripts)],
+    input=oversized_input,
+    env={**os.environ, "HOME": str(legacy_home)},
+    stdout=subprocess.PIPE,
+    stderr=subprocess.PIPE,
+    timeout=5,
+)
+assert legacy.returncode == 0, legacy.stderr.decode()
+legacy_journal = legacy_home / ".marina" / "agent-events" / "claude" / "oversized-wrapper-1.jsonl"
+assert legacy_journal.is_file(), "isolated unbounded parser did not record payload"
+
+# Pin the pre-decode read contract without relying on wall-clock behavior.
+read_requests = []
+decode_calls = []
+real_loads = events.json.loads
+
+class ReadProbe:
+    def __init__(self, value):
+        self.value = value
+
+    def read(self, size=-1):
+        read_requests.append(size)
+        return self.value[:size]
+
+
+class StdinProbe:
+    def __init__(self, value):
+        self.buffer = ReadProbe(value)
+
+
+def probe_loads(value):
+    decode_calls.append(value)
+    return real_loads(value)
+
+
+real_stdin = events.sys.stdin
+events.sys.stdin = StdinProbe(oversized_input)
+events.json.loads = probe_loads
+try:
+    assert events.main() == 0
+finally:
+    events.sys.stdin = real_stdin
+    events.json.loads = real_loads
+assert read_requests == [events.MAX_HOOK_INPUT_BYTES + 1], read_requests
+assert not decode_calls, "oversized input was decoded"
+
 oversized_wrapper_home = tmp / "oversized-wrapper-home"
 oversized_wrapper_home.mkdir()
 started = time.monotonic()
 oversized = subprocess.run(
     [str(scripts / "marina-agent-event-hook.sh")],
-    input=b"x" * (events.MAX_HOOK_INPUT_BYTES + 1),
+    input=oversized_input,
     env={**os.environ, "HOME": str(oversized_wrapper_home)},
     stdout=subprocess.DEVNULL,
     stderr=subprocess.DEVNULL,

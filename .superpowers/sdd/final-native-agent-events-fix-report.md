@@ -46,3 +46,15 @@
 - `plugin/tests/test-agent-inbox.sh`
 - `plugin/tests/test-agents-section.sh`
 - `.superpowers/sdd/final-native-agent-events-fix-report.md`
+
+## Final Review Follow-Up: Valid Oversized Hook Payload Proof (2026-07-22)
+
+### RED Evidence
+
+- An isolated pre-fix `json.load(sys.stdin)` harness received syntactically valid `UserPromptSubmit` JSON of exactly `MAX_HOOK_INPUT_BYTES + 1` bytes, including one large irrelevant string field, and created the expected Claude journal. Applying the regression's no-journal assertion to that harness exited `1` with `AssertionError: pre-fix json.load-style path created journal`.
+
+### GREEN Evidence
+
+- `bash plugin/tests/test-agent-events.sh` exited `0`. The oversized fixture is valid JSON, is exactly `MAX_HOOK_INPUT_BYTES + 1` bytes, records through the isolated unbounded harness, then makes the real wrapper exit `0` within three seconds without creating `.marina`; the ordinary valid wrapper recording check remains unchanged.
+- The in-process stdin probe exited as part of the same test with exactly one `read(MAX_HOOK_INPUT_BYTES + 1)` request and no JSON decode call for the oversized payload.
+- `bash -n plugin/tests/test-agent-events.sh` exited `0`.
