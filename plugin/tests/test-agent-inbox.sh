@@ -120,6 +120,26 @@ future = ms.agent_status(
 )
 assert future == {"status": "completed", "statusTs": 1784538245}, future
 
+# `latest_agent_event` owns supplied-now future validation. Once it returns an
+# event, changing the process wall clock must not alter this result.
+deterministic_event_ts = 2000000100
+record_hook_event({
+    "hook_event_name": "Notification", "notification_type": "permission_prompt",
+    "session_id": "claude-deterministic", "cwd": str(tmp),
+    "transcript_path": str(tmp / ".claude" / "projects" / "root" / "claude-deterministic.jsonl"),
+}, home=events, now=deterministic_event_ts)
+real_time = ms.time.time
+ms.time.time = lambda: 0
+try:
+    deterministic = ms.agent_status(
+        claude_done, "claude", sid="claude-deterministic", root=tmp,
+        event_home=events, now=deterministic_event_ts + 1,
+    )
+finally:
+    ms.time.time = real_time
+assert deterministic == {"status": "blocked", "statusTs": deterministic_event_ts,
+                         "statusReason": "permission_prompt"}, deterministic
+
 waiting = ms.merge_agent_status(
     {"status": "completed", "statusTs": claude_done_ts},
     {"event": "ended", "ts": claude_done_ts + 1},

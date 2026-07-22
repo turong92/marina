@@ -19,15 +19,17 @@ mkdir -p "$SESS_DIR" "$PROJ_DIR" "$CODEX_HOME_DIR/sessions"
 WT="$TMP/worktree-a"; mkdir -p "$WT"
 WT2="$TMP/worktree-b"; mkdir -p "$WT2"
 
-python3 - "$SCR" "$SESS_DIR" "$PROJ_DIR" "$CODEX_HOME_DIR" "$WT" "$WT2" <<'PY'
+python3 - "$SCR" "$FAKE_HOME" "$SESS_DIR" "$PROJ_DIR" "$CODEX_HOME_DIR" "$WT" "$WT2" <<'PY'
 import sys, os, json, time, re
 
-scr, sess_dir, proj_dir, codex_home, wt, wt2 = sys.argv[1:7]
+scr, fake_home, sess_dir, proj_dir, codex_home, wt, wt2 = sys.argv[1:8]
+os.environ["HOME"] = fake_home
 os.environ["CLAUDE_DESKTOP_SESSIONS_DIR"] = sess_dir
 os.environ["CLAUDE_PROJECTS_DIR"] = proj_dir
 os.environ["CODEX_HOME"] = codex_home
 sys.path.insert(0, scr)
 import marina_sessions as ms
+from marina_agent_events import record_hook_event
 from pathlib import Path
 
 now = time.time()
@@ -49,7 +51,7 @@ write_session("recent", "cli-recent", wt, "최근 세션", now)
 long_text = "가" * 120
 write_transcript(wt, "cli-recent", [
     json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "질문"}]}}),
-    json.dumps({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": long_text}]}}),
+    json.dumps({"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": long_text}]}}),
 ])
 
 # 최대 3개 캡 — extra1(가장 오래됨, 탈락) < extra2 < extra3 < recent(now)
@@ -101,9 +103,30 @@ rollout.write_text(json.dumps({
     "type": "session_meta",
     "payload": {"cwd": wt2, "id": "codex-1", "timestamp": "2026-07-01T00:00:00Z"},
 }) + "\n" + json.dumps({
+    "type": "event_msg", "timestamp": "2026-07-01T00:00:01Z",
+    "payload": {"type": "task_complete", "turn_id": "turn-1"},
+}) + "\n" + json.dumps({
     "type": "response_item",
     "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "코덱스 응답"}]},
 }) + "\n", encoding="utf-8")
+
+# agents_payload obtains these identities from session discovery, then supplies
+# the canonical root and HOME-backed journal location to latest_agent_event.
+# A blocked lifecycle event newer than the native completion must win for both.
+event_ts = int(time.time()) + 1
+for source, sid, root in [
+    ("claude", "cli-recent", Path(wt)),
+    ("codex", "codex-1", Path(wt2)),
+]:
+    recorded = record_hook_event({
+        "source": source,
+        "hook_event_name": "Notification", "notification_type": "permission_prompt",
+        "session_id": sid if source == "claude" else None,
+        "thread_id": sid if source == "codex" else None,
+        "cwd": str(root / ".." / root.name),
+        "transcript_path": str(root / f"{sid}.jsonl"),
+    }, home=Path(fake_home), now=event_ts)
+    assert recorded and recorded["sid"] == sid, recorded
 
 codex_agents = ms.agents_payload(Path(wt2), refresh=True)
 assert len(codex_agents) == 1, codex_agents
@@ -115,6 +138,16 @@ assert cx.get("sid") == "codex-1", f"codex sid 노출 실패: {cx}"
 trx = ms.agent_transcript(Path(wt2), "codex", "codex-1")
 assert [t["text"] for t in trx["turns"]] == ["코덱스 응답"], trx
 print("ok codex_agent_sessions (title+ts·sid, rollout 턴 추출)")
+
+resolved_claude_agents = ms.agents_payload(Path(wt), refresh=True)
+resolved_codex_agents = ms.agents_payload(Path(wt2), refresh=True)
+claude_event = next(agent for agent in resolved_claude_agents if agent["sid"] == "cli-recent")
+codex_event = next(agent for agent in resolved_codex_agents if agent["sid"] == "codex-1")
+expected_status = {"status": "blocked", "statusTs": event_ts,
+                   "statusReason": "permission_prompt"}
+assert {key: claude_event[key] for key in expected_status} == expected_status, claude_event
+assert {key: codex_event[key] for key in expected_status} == expected_status, codex_event
+print("ok agents_payload journal resolution (Claude/Codex sid·canonical root·HOME)")
 PY
 
 # ── 2) 실서버: /api/worktrees payload 에 agents 노출 ──

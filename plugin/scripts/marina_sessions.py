@@ -27,7 +27,7 @@ from marina_registry import default_attach_of, discover_all_roots, discover_root
 from marina_paths import ensure_current_log, log_run_payload, read_config, read_meta, service_log, session_dir, session_id
 from marina_compose_svc import _compose_services, _log_tail_line, compose_service_names, compose_service_subrepos, missing_env_vars
 from marina_memory import enrich_session_memory, memory_snapshot
-from marina_agent_events import BLOCKED_REASONS, MAX_FUTURE_SECONDS, latest_agent_event
+from marina_agent_events import BLOCKED_REASONS, latest_agent_event
 
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(["git", *args], cwd=str(cwd), text=True, stderr=subprocess.STDOUT)
@@ -573,7 +573,6 @@ def merge_agent_status(
         if (
             event_name in EVENT_TO_STATUS
             and math.isfinite(event_ts)
-            and event_ts <= time.time() + MAX_FUTURE_SECONDS
             and event_ts >= native_ts
         ):
             status = EVENT_TO_STATUS[str(event_name)]
