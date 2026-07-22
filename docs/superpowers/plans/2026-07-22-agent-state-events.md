@@ -306,8 +306,9 @@ Expected: every repository shell test exits zero, `git diff --check` is clean, a
 ## Verification Evidence (2026-07-22)
 
 - Focused regression passed: lifecycle journal, state merge and Inbox contracts, agent session discovery/history, mobile control, access/auth HTTP boundaries, and dashboard state UI.
-- The complete `plugin/tests/test-*.sh` shell suite passed, followed by a clean `git diff --check`.
-- An isolated synthetic dashboard returned `working`, `blocked`, `waiting`, `completed`, and `failed` through both worktree and mobile state APIs with expected timestamps. Corrupt journal data was ignored and never exposed in either payload.
+- The complete `plugin/tests/test-*.sh` shell suite passed: 144/144 tests, followed by a clean `git diff --check`.
+- The same isolated synthetic dashboard used for desktop and mobile Aside verification contained a malformed journal row. Both browser pages remained usable while the malformed row was ignored, and the dashboard returned `working`, `blocked`, `waiting`, `completed`, and `failed` through both worktree and mobile state APIs with expected timestamps.
 - Aside desktop verification showed actionable Inbox entries with source badges and the exact `응답 필요` label; selecting the blocked Claude item marked it read and opened the existing agent terminal.
-- Aside mobile verification at phone layout showed the same actionable states without overlap; selecting the blocked item opened the existing native chat with its prior turns and composer. Missing event files continued through native fallback.
+- Aside mobile verification at phone layout showed the same actionable states without overlap; selecting the blocked item opened the existing native chat with its prior turns and composer. Missing event files also used the native fallback.
 - Codex `blocked` remains capability-based: when its host does not emit a stable approval or user-input lifecycle event, Marina preserves the other native state and does not infer a blocker from text.
+- `git status --short --branch` showed a clean working tree with only the planned commits ahead of `origin/main`. No push or installed-plugin update occurred.
