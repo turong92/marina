@@ -250,7 +250,11 @@ P0.8은 같은 Doctor에 Playwright·Chromium·ffmpeg·torch·TensorFlow·OpenCV
   메뉴에서 프로젝트별 Claude/Codex 상태를 모아 보고 기존 세션으로 이동한다.
 - [ ] **P1.2 Quick Commands**: 프로젝트별 shell command와 agent prompt를 저장·실행한다.
 - [ ] **P1.3 Copy Context**: 로그·터미널 최근 범위를 bounded text로 복사한다.
-- [ ] **P1.4 Agent 상태 정확도**: working/idle/blocked를 hook 이벤트로 판정한다.
+- [x] **P1.4 Agent 상태 정확도**: Claude/Codex lifecycle hook journal과 native transcript를 최신 이벤트 기준으로
+  병합해 `working`/`idle`/`blocked`를 판정하고, 데스크톱·모바일 Inbox에서 `응답 필요`로 연다. Codex는 안정적인
+  승인·사용자 입력 이벤트를 내보내는 경우에만 `blocked`를 판정하며, 해당 native event가 없으면 다른 상태를 유지하고
+  추측하지 않는다. 합성 Claude/Codex fixture API와 데스크톱·모바일 브라우저 검증에서 상태, 기존 세션 이동, 누락·손상
+  journal fallback을 확인했다.
 - [ ] **P1.5 터미널 탭·분할**: 한 worktree에서 여러 agent를 나란히 본다.
 - [ ] **P1.6 Start-from picker**: base branch·local branch·remote·SHA를 선택한다.
 

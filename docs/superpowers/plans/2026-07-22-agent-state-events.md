@@ -32,7 +32,7 @@
 - Produces: `latest_agent_event(source: str, sid: str, root: Path, *, home: Path | None = None, now: float | None = None) -> dict[str, Any] | None`
 - Consumes: hook JSON fields `hook_event_name`, `session_id` or `thread_id`, `cwd`, `transcript_path`, and optional `notification_type`.
 
-- [ ] **Step 1: Write the failing hook journal test**
+- [x] **Step 1: Write the failing hook journal test**
 
 Create `plugin/tests/test-agent-events.sh` with Python fixtures that call `record_hook_event` for:
 
@@ -50,13 +50,13 @@ assert record_hook_event({**claude_base, "hook_event_name": "Notification", "not
 
 Also assert Codex detection from a `.codex/sessions/.../rollout.jsonl` transcript, malformed input rejection, path-traversal session IDs, consecutive duplicate suppression, `0700`/`0600` modes, 100-row retention, root matching, and future-row rejection. Exercise the shell wrapper with invalid and valid stdin and assert both exit zero.
 
-- [ ] **Step 2: Run the journal test and verify RED**
+- [x] **Step 2: Run the journal test and verify RED**
 
 Run: `bash plugin/tests/test-agent-events.sh`
 
 Expected: FAIL because `marina_agent_events` and the hook wrapper do not exist.
 
-- [ ] **Step 3: Implement the journal module and fail-open wrapper**
+- [x] **Step 3: Implement the journal module and fail-open wrapper**
 
 Implement these constants and mappings in `marina_agent_events.py`:
 
@@ -84,11 +84,11 @@ python3 "$SCRIPT_DIR/marina_agent_events.py" 2>/dev/null || true
 exit 0
 ```
 
-- [ ] **Step 4: Register lifecycle hooks**
+- [x] **Step 4: Register lifecycle hooks**
 
 Add command hooks for `UserPromptSubmit`, `Notification`, and `Stop` to `plugin/hooks/hooks.json`, each invoking `marina-agent-event-hook.sh` with `"async": true`. Keep `SessionStart` and `PreToolUse` unchanged.
 
-- [ ] **Step 5: Run the journal test and syntax checks**
+- [x] **Step 5: Run the journal test and syntax checks**
 
 Run:
 
@@ -101,7 +101,7 @@ python3 -m json.tool plugin/hooks/hooks.json >/dev/null
 
 Expected: all commands exit zero and the test prints `PASS test-agent-events`.
 
-- [ ] **Step 6: Commit the hook journal**
+- [x] **Step 6: Commit the hook journal**
 
 ```bash
 git add plugin/scripts/marina_agent_events.py plugin/scripts/marina-agent-event-hook.sh plugin/hooks/hooks.json plugin/tests/test-agent-events.sh
@@ -120,7 +120,7 @@ git commit -m "feat(agent): record native lifecycle events"
 - Produces: `merge_agent_status(native: dict[str, Any], event: dict[str, Any] | None, terminal_active: bool = False) -> dict[str, Any]`.
 - Extends: `agent_status(path, source, terminal_active=False, *, sid="", root=None, event_home=None, now=None)`.
 
-- [ ] **Step 1: Add failing merge assertions**
+- [x] **Step 1: Add failing merge assertions**
 
 Extend `test-agent-inbox.sh` so a newer blocked journal event overrides an older native Claude end turn, a newer working event clears blocked, an older journal event cannot override `task_complete`, an equal-timestamp journal event wins, a future event is ignored, and `ended` renders as `waiting` only when `terminal_active=True`.
 
@@ -133,13 +133,13 @@ waiting = ms.merge_agent_status({"status": "completed", "statusTs": event_ts}, {
 assert waiting["status"] == "waiting"
 ```
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `bash plugin/tests/test-agent-inbox.sh`
 
 Expected: FAIL because the journal merge interface is missing.
 
-- [ ] **Step 3: Implement deterministic event merging**
+- [x] **Step 3: Implement deterministic event merging**
 
 Move the existing native parsing body to `_native_agent_status`. Implement `merge_agent_status` with this mapping:
 
@@ -156,7 +156,7 @@ Choose the journal event only when its canonical root matches, its timestamp is 
 
 Update `agents_payload` to pass each session's `sid`, canonical root, and event home to `agent_status`. Preserve `activate_agent_payloads` for callers that obtain live terminal identities after payload construction.
 
-- [ ] **Step 4: Run focused state tests**
+- [x] **Step 4: Run focused state tests**
 
 Run:
 
@@ -169,7 +169,7 @@ bash plugin/tests/test-mobile-control.sh
 
 Expected: all four tests pass.
 
-- [ ] **Step 5: Commit state resolution**
+- [x] **Step 5: Commit state resolution**
 
 ```bash
 git add plugin/scripts/marina_sessions.py plugin/tests/test-agent-inbox.sh
@@ -190,17 +190,17 @@ git commit -m "feat(agent): resolve states from native events"
 - Consumes: agent payload `{status: "blocked", statusTs, statusReason}`.
 - Produces: desktop `AGENT_STATUS_META.blocked`, desktop/mobile actionable Inbox membership, and mobile label `응답 필요`.
 
-- [ ] **Step 1: Add failing UI contract assertions**
+- [x] **Step 1: Add failing UI contract assertions**
 
 Require all three UI sources to contain `blocked`, `응답 필요`, and actionable sets that include blocked. Add a Node VM assertion that a blocked session contributes to the attention count and desktop Inbox entries.
 
-- [ ] **Step 2: Run and verify RED**
+- [x] **Step 2: Run and verify RED**
 
 Run: `bash plugin/tests/test-agent-inbox.sh`
 
 Expected: FAIL on the first missing blocked UI contract.
 
-- [ ] **Step 3: Add the desktop blocked presentation**
+- [x] **Step 3: Add the desktop blocked presentation**
 
 Add:
 
@@ -210,11 +210,11 @@ blocked: { dot: 'bad', label: '응답 필요', title: '권한 승인 또는 사�
 
 Include `blocked` in `agentInboxEntries()` and `agentsSummary()` actionable sets. Keep the existing event ID, local read state, sorting, and `openAgentTerminal` navigation unchanged.
 
-- [ ] **Step 4: Add the mobile blocked presentation**
+- [x] **Step 4: Add the mobile blocked presentation**
 
 Include `blocked` in `inboxSessions()` and add `blocked: "응답 필요"` to the mobile Inbox status label. Reuse `chooseSession`; do not add another navigation or chat path.
 
-- [ ] **Step 5: Run UI and syntax verification**
+- [x] **Step 5: Run UI and syntax verification**
 
 Run:
 
@@ -229,7 +229,7 @@ python3 -m py_compile plugin/scripts/marina_mobile.py
 
 Expected: all commands pass.
 
-- [ ] **Step 6: Commit blocked UI support**
+- [x] **Step 6: Commit blocked UI support**
 
 ```bash
 git add plugin/scripts/marina-web/app-1-core.js plugin/scripts/marina-web/app-5-sessions.js plugin/scripts/marina_mobile.py plugin/tests/test-agent-inbox.sh
@@ -246,7 +246,7 @@ git commit -m "feat(agent): surface blocked sessions in inbox"
 - Consumes: completed hook journal, resolver, and blocked UI.
 - Produces: checked P1.4 roadmap status and fresh desktop/mobile verification evidence.
 
-- [ ] **Step 1: Run the focused regression set**
+- [x] **Step 1: Run the focused regression set**
 
 Run:
 
@@ -264,11 +264,11 @@ git diff --check
 
 Expected: every command exits zero.
 
-- [ ] **Step 2: Verify real hook fixtures without user data**
+- [x] **Step 2: Verify real hook fixtures without user data**
 
 Start a temporary dashboard and create synthetic Claude and Codex session metadata, native JSONL, and hook rows under a temporary `MARINA_HOME`. Verify `/api/worktrees` returns `working`, `blocked`, `waiting`, `completed`, and `failed` with the expected timestamps and no journal payload text.
 
-- [ ] **Step 3: Verify desktop and mobile with Aside**
+- [x] **Step 3: Verify desktop and mobile with Aside**
 
 Use `snapshot(page, {interactive: true})` as the primary browser evidence. Confirm:
 
@@ -277,18 +277,18 @@ Use `snapshot(page, {interactive: true})` as the primary browser evidence. Confi
 - no overlap occurs at desktop and phone layouts;
 - malformed or missing event files leave both pages usable.
 
-- [ ] **Step 4: Update roadmap and plan checkboxes**
+- [x] **Step 4: Update roadmap and plan checkboxes**
 
 Mark P1.4 complete in `2026-07-14-orca-comparison-and-roadmap-design.md`, explicitly noting that Codex blocked remains capability-based when no stable native event is emitted. Mark every completed step in this plan.
 
-- [ ] **Step 5: Commit verification documentation**
+- [x] **Step 5: Commit verification documentation**
 
 ```bash
 git add docs/superpowers/specs/2026-07-14-orca-comparison-and-roadmap-design.md docs/superpowers/plans/2026-07-22-agent-state-events.md
 git commit -m "docs(agent): complete native state events"
 ```
 
-- [ ] **Step 6: Final verification before integration**
+- [x] **Step 6: Final verification before integration**
 
 Run:
 
@@ -302,3 +302,12 @@ git status --short --branch
 ```
 
 Expected: every repository shell test exits zero, `git diff --check` is clean, and the branch contains only the planned commits. Do not push or update the installed plugin until explicitly requested.
+
+## Verification Evidence (2026-07-22)
+
+- Focused regression passed: lifecycle journal, state merge and Inbox contracts, agent session discovery/history, mobile control, access/auth HTTP boundaries, and dashboard state UI.
+- The complete `plugin/tests/test-*.sh` shell suite passed, followed by a clean `git diff --check`.
+- An isolated synthetic dashboard returned `working`, `blocked`, `waiting`, `completed`, and `failed` through both worktree and mobile state APIs with expected timestamps. Corrupt journal data was ignored and never exposed in either payload.
+- Aside desktop verification showed actionable Inbox entries with source badges and the exact `응답 필요` label; selecting the blocked Claude item marked it read and opened the existing agent terminal.
+- Aside mobile verification at phone layout showed the same actionable states without overlap; selecting the blocked item opened the existing native chat with its prior turns and composer. Missing event files continued through native fallback.
+- Codex `blocked` remains capability-based: when its host does not emit a stable approval or user-input lifecycle event, Marina preserves the other native state and does not infer a blocker from text.
