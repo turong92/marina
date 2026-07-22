@@ -4,7 +4,7 @@
 #   marina start|stop|restart|rebuild|clean-rebuild <svc..> # 현재 worktree(cwd) 의 서비스 (전체는 --all)
 #   marina status | ports | logs [svc]       # 현재 worktree 상태/포트/로그
 #   marina project {add|rm|ls|default|infer} # 프로젝트 레지스트리 (~/.marina/projects.json)
-#   marina dashboard [start|stop|status|open]# 전역 대시보드(:3900). 무인자 marina = dashboard start
+#   marina dashboard [start|stop|restart|status|open]# 전역 대시보드(:3900). 무인자 marina = dashboard start
 #
 # 스크립트는 모두 이 파일의 형제(scripts/) — 어디서 실행하든 위치독립.
 
@@ -59,7 +59,7 @@ usage (marina = 전역 CLI):
   링크 (main checkout 의 deps·빌드산출물·설정을 워크트리로):
     marina link
   dashboard (:3900):
-    marina dashboard [start|stop|status|open]    # 무인자 marina = dashboard start
+    marina dashboard [start|stop|restart|status|open]    # 무인자 marina = dashboard start
   mobile:
     marina mobile enable|url|address|open|token|rotate|status|doctor|disable [host-or-base-url]
   accounts:
@@ -232,9 +232,10 @@ case "$command" in
     case "${1:-start}" in
       start|"") "$DASHBOARD" start; print_dashboard_url ;;
       stop)     "$DASHBOARD" stop ;;
+      restart)  "$DASHBOARD" restart; print_dashboard_url ;;
       status)   "$DASHBOARD" status ;;
       open)     shift; exec "$0" open ;;
-      *) echo "usage: marina dashboard {start|stop|status|open}" >&2; exit 2 ;;
+      *) echo "usage: marina dashboard {start|stop|restart|status|open}" >&2; exit 2 ;;
     esac
     ;;
   mobile)

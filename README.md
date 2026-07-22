@@ -663,7 +663,7 @@ x-marina:
 
 | 그룹 | 명령 |
 |---|---|
-| 대시보드 | `marina`(무인자=대시보드 start) · `marina dashboard start\|stop\|status\|open` · `marina open` |
+| 대시보드 | `marina`(무인자=대시보드 start) · `marina dashboard start\|stop\|restart\|status\|open` · `marina open` |
 | 모바일 | `marina mobile enable\|url\|address\|open\|token\|rotate\|status\|doctor\|disable [host-or-base-url]` |
 | 계정 | `marina auth status\|reset-admin\|disable` · `marina user list\|add\|approve\|reject\|disable\|reset-password` |
 | 셋업 | `marina install-cli` · `marina uninstall-cli` · `marina attach` |
