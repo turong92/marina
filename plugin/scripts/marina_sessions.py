@@ -763,6 +763,7 @@ def activate_agent_payloads(agents: list[dict[str, Any]],
 AGENT_TRANSCRIPT_TAIL_BYTES = 256 * 1024
 AGENT_TRANSCRIPT_MAX_TURNS = 60
 AGENT_TURN_MAX_CHARS = 4000
+AGENT_TIMELINE_MAX_ACTIVITIES = 120
 
 def _texts_of(content: Any) -> list[str]:
     # message.content — 문자열이거나 [{type:text|input_text|output_text, text}] 리스트. 텍스트 블록만 수집.
@@ -870,6 +871,7 @@ def _transcript_page(path: Path, source: str, before: int | None,
     if not size or not end:
         return {"turns": [], "cursor": None, "hasMore": False, "fileSize": size}
     groups: list[list[dict[str, str]]] = []
+    native_rows: list[tuple[int, dict[str, Any]]] = []
     count = 0
     cursor = end
     with path.open("rb") as handle:
@@ -891,6 +893,7 @@ def _transcript_page(path: Path, source: str, before: int | None,
                     continue
                 if not isinstance(obj, dict):
                     continue
+                native_rows.append((line_start, obj))
                 line_turns = _transcript_object_turns(obj, source, line_start)
                 if not line_turns:
                     continue
@@ -899,7 +902,9 @@ def _transcript_page(path: Path, source: str, before: int | None,
                 groups.append(line_turns)
                 count += len(line_turns)
     turns = [turn for group in reversed(groups) for turn in group]
-    return {"turns": turns, "cursor": cursor if cursor > 0 else None,
+    timeline = _transcript_timeline(list(reversed(native_rows)), source)
+    return {"turns": turns, "timeline": timeline,
+            "cursor": cursor if cursor > 0 else None,
             "hasMore": cursor > 0, "fileSize": size}
 
 
@@ -921,6 +926,150 @@ def _content_text(content: Any) -> str:
 
 def _safe_activity_text(value: Any, limit: int = AGENT_TURN_MAX_CHARS) -> str:
     return _redact_transcript(redact_text(str(value or "")[:limit]))
+
+
+def _activity_value_text(value: Any) -> str:
+    if isinstance(value, str):
+        raw = value
+    elif value is None:
+        raw = ""
+    else:
+        try:
+            raw = json.dumps(value, ensure_ascii=False, indent=2)
+        except (TypeError, ValueError):
+            raw = str(value)
+    return _safe_activity_text(raw)
+
+
+def _activity_type(name: str, detail: str) -> str:
+    lowered = name.strip().lower()
+    detail_lower = detail.lower()
+    if lowered == "skill" or re.search(r"(?:^|/)skills/[^/]+/skill\.md(?:\s|$|['\"])", detail_lower):
+        return "skill"
+    if lowered in ("apply_patch", "edit", "multiedit", "patch"):
+        return "diff"
+    if lowered in ("write", "read", "notebookedit"):
+        return "file"
+    if lowered in ("bash", "exec", "exec_command", "shell", "terminal"):
+        return "command"
+    if lowered in ("agent", "task", "spawn_agent", "create_agent"):
+        return "agent"
+    return "tool"
+
+
+def _activity_label(name: str, activity_type: str, raw_input: Any, detail: str) -> str:
+    payload = _json_value(raw_input)
+    if activity_type == "skill":
+        skill = str(payload.get("skill") or payload.get("name") or "").strip()
+        if not skill:
+            match = re.search(r"(?:^|/)skills/([^/]+)/skill\.md", detail, re.I)
+            skill = match.group(1) if match else ""
+        return skill or "Skill"
+    if activity_type == "command":
+        command = str(payload.get("cmd") or payload.get("command") or "").strip()
+        return (command.splitlines()[0][:140] if command else name) or "Command"
+    if activity_type in ("diff", "file"):
+        target = str(payload.get("file_path") or payload.get("path") or payload.get("file") or "").strip()
+        return target or name or ("Diff" if activity_type == "diff" else "File")
+    if activity_type == "agent":
+        prompt = str(payload.get("message") or payload.get("prompt") or payload.get("task") or "").strip()
+        return (prompt.splitlines()[0][:140] if prompt else name) or "Agent"
+    return name or "Tool"
+
+
+def _activity_failed(value: Any, container: dict[str, Any]) -> bool:
+    if bool(container.get("is_error") or container.get("isError")):
+        return True
+    parsed = _json_value(value)
+    return bool(parsed.get("is_error") or parsed.get("isError") or parsed.get("error"))
+
+
+def _new_timeline_activity(source: str, offset: int, index: int, name: str,
+                           call_id: str, raw_input: Any) -> dict[str, Any]:
+    detail = _activity_value_text(raw_input)
+    activity_type = _activity_type(name, detail)
+    return {
+        "id": f"{source}:activity:{call_id or f'{offset}:{index}'}",
+        "kind": "activity",
+        "activityType": activity_type,
+        "name": name,
+        "label": _activity_label(name, activity_type, raw_input, detail),
+        "detail": detail,
+        "result": "",
+        "status": "running",
+    }
+
+
+def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) -> list[dict[str, Any]]:
+    timeline: list[dict[str, Any]] = []
+    calls: dict[str, dict[str, Any]] = {}
+    for offset, obj in rows:
+        if source == "claude":
+            role = str(obj.get("type") or "")
+            content = (obj.get("message") or {}).get("content")
+            if role not in ("user", "assistant") or not isinstance(content, list):
+                continue
+            for index, block in enumerate(content):
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "text":
+                    text = _safe_activity_text(block.get("text"))
+                    if text.strip():
+                        timeline.append({"id": f"{source}:message:{offset}:{index}", "kind": "message",
+                                         "role": role, "text": text})
+                elif block_type == "tool_use":
+                    call_id = str(block.get("id") or "")
+                    item = _new_timeline_activity(source, offset, index, str(block.get("name") or ""),
+                                                  call_id, block.get("input"))
+                    timeline.append(item)
+                    if call_id:
+                        calls[call_id] = item
+                elif block_type == "tool_result":
+                    call_id = str(block.get("tool_use_id") or "")
+                    item = calls.get(call_id)
+                    if item is not None:
+                        item["result"] = _activity_value_text(block.get("content"))
+                        item["status"] = "failed" if _activity_failed(block.get("content"), block) else "completed"
+        else:
+            payload = obj.get("payload") or {}
+            payload_type = payload.get("type")
+            if obj.get("type") != "response_item":
+                continue
+            if payload_type == "message":
+                role = str(payload.get("role") or "")
+                if role not in ("user", "assistant"):
+                    continue
+                for index, text in enumerate(_texts_of(payload.get("content"))):
+                    safe_text = _safe_activity_text(text)
+                    timeline.append({"id": f"{source}:message:{offset}:{index}", "kind": "message",
+                                     "role": role, "text": safe_text})
+            elif payload_type in ("function_call", "custom_tool_call"):
+                call_id = str(payload.get("call_id") or payload.get("id") or "")
+                raw_input = payload.get("arguments") if payload_type == "function_call" else payload.get("input")
+                item = _new_timeline_activity(source, offset, 0, str(payload.get("name") or ""),
+                                              call_id, raw_input)
+                timeline.append(item)
+                if call_id:
+                    calls[call_id] = item
+            elif payload_type in ("function_call_output", "custom_tool_call_output"):
+                call_id = str(payload.get("call_id") or "")
+                item = calls.get(call_id)
+                if item is not None:
+                    output = payload.get("output")
+                    item["result"] = _activity_value_text(output)
+                    item["status"] = "failed" if _activity_failed(output, payload) else "completed"
+    activity_count = sum(1 for item in timeline if item.get("kind") == "activity")
+    if activity_count <= AGENT_TIMELINE_MAX_ACTIVITIES:
+        return timeline
+    keep = activity_count - AGENT_TIMELINE_MAX_ACTIVITIES
+    bounded: list[dict[str, Any]] = []
+    for item in timeline:
+        if item.get("kind") == "activity" and keep > 0:
+            keep -= 1
+            continue
+        bounded.append(item)
+    return bounded
 
 
 def _codex_rollout_path(sid: str, root: Path | None = None) -> Path | None:

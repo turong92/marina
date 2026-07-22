@@ -28,11 +28,11 @@
 - Produces: `_transcript_page(...)["timeline"] -> list[dict[str, Any]]`
 - Preserves: `_transcript_page(...)["turns"] -> list[dict[str, str]]`
 
-- [ ] Add fixtures containing Codex `function_call`/`custom_tool_call` and Claude `tool_use`/`tool_result` pairs, including Skill, command, patch, failure, missing result, and a redacted secret.
-- [ ] Run `bash plugin/tests/test-agent-timeline.sh`; expect failure because `timeline` is absent.
-- [ ] Add source-aware call/result extraction, stable IDs, activity classification, bounded detail/result fields, and forward correlation after backward page collection.
-- [ ] Assert chronological ordering, running/completed/failed states, categories, redaction, unique IDs, and unchanged legacy turns.
-- [ ] Re-run the focused test; expect `PASS test-agent-timeline`.
+- [x] Add fixtures containing Codex `function_call`/`custom_tool_call` and Claude `tool_use`/`tool_result` pairs, including Skill, command, patch, failure, missing result, and a redacted secret.
+- [x] Run `bash plugin/tests/test-agent-timeline.sh`; expect failure because `timeline` is absent.
+- [x] Add source-aware call/result extraction, stable IDs, activity classification, bounded detail/result fields, and forward correlation after backward page collection.
+- [x] Assert chronological ordering, running/completed/failed states, categories, redaction, unique IDs, and unchanged legacy turns.
+- [x] Re-run the focused test; expect `PASS test-agent-timeline`.
 
 ### Task 2: Pagination Contract
 
