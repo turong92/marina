@@ -102,7 +102,7 @@ def _valid_row(row: object) -> dict[str, Any] | None:
         return None
     if not isinstance(ts, (int, float)) or isinstance(ts, bool) or not math.isfinite(ts):
         return None
-    if reason is not None and reason not in BLOCKED_REASONS:
+    if event == "blocked" and reason not in BLOCKED_REASONS:
         return None
     if event != "blocked" and reason is not None:
         return None
@@ -198,7 +198,12 @@ def record_hook_event(
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
             try:
                 rows = _read_rows(journal_path)
-                if rows and rows[-1]["event"] == event and rows[-1].get("reason") == reason:
+                if (
+                    rows
+                    and rows[-1]["root"] == root
+                    and rows[-1]["event"] == event
+                    and rows[-1].get("reason") == reason
+                ):
                     return rows[-1]
                 rows.append(row)
                 rows = sorted(rows, key=lambda existing: existing["ts"])[-MAX_ROWS:]
