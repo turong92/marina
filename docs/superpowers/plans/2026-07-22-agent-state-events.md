@@ -86,7 +86,7 @@ exit 0
 
 - [x] **Step 4: Register lifecycle hooks**
 
-Add command hooks for `UserPromptSubmit`, `Notification`, and `Stop` to `plugin/hooks/hooks.json`, each invoking `marina-agent-event-hook.sh` with `"async": false`. Synchronous registration is required because Codex skips asynchronous command hooks, and it preserves Claude lifecycle order instead of allowing delayed child processes to record a stale state after `Stop`. Keep `SessionStart` and `PreToolUse` unchanged.
+Add command hooks for `UserPromptSubmit`, `Notification`, and `Stop` to `plugin/hooks/hooks.json`, each invoking `marina-agent-event-hook.sh` with `"async": false` and a two-second host timeout. Synchronous registration is required because Codex skips asynchronous command hooks, and it preserves Claude lifecycle order instead of allowing delayed child processes to record a stale state after `Stop`. Use a much shorter bounded nonblocking retry for the local sidecar lock so a contended journal fails open before the host timeout. Keep `SessionStart` and `PreToolUse` unchanged.
 
 - [x] **Step 5: Run the journal test and syntax checks**
 

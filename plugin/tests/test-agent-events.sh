@@ -8,14 +8,17 @@ trap 'rm -rf "$TMP"' EXIT
 
 python3 - "$SCRIPTS" "$TMP" <<'PY'
 import json
+import fcntl
 import stat
 import sys
+import time
 from multiprocessing import get_context
 from pathlib import Path
 
 scripts, tmp = map(Path, sys.argv[1:3])
 sys.path.insert(0, str(scripts))
-from marina_agent_events import MAX_JOURNAL_READ_BYTES, MAX_ROWS, latest_agent_event, record_hook_event
+import marina_agent_events as events
+from marina_agent_events import LOCK_ACQUIRE_TIMEOUT_SECONDS, MAX_JOURNAL_READ_BYTES, MAX_ROWS, latest_agent_event, record_hook_event
 
 
 def _concurrent_write(index, ready, release):
@@ -31,6 +34,13 @@ def _concurrent_write(index, ready, release):
     }, home=home, now=3000 + index)
     if not result or result["ts"] != 3000 + index:
         raise RuntimeError(f"concurrent write {index} was not recorded: {result}")
+
+
+def _hold_lock(path, ready, duration):
+    with open(path, "a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        ready.put(True)
+        time.sleep(duration)
 
 root = tmp / "root"
 root.mkdir()
@@ -53,6 +63,17 @@ codex = record_hook_event({
     "hook_event_name": "UserPromptSubmit",
 }, home=home, now=1004)
 assert codex and codex["source"] == "codex" and codex["sid"] == "codex-1", codex
+
+# A nullable Codex transcript still resolves from its host-specific plugin
+# root, before the shared Claude compatibility variable/session fallback.
+codex_null = record_hook_event({
+    "session_id": "codex-null-1",
+    "cwd": str(root),
+    "transcript_path": None,
+    "hook_event_name": "UserPromptSubmit",
+}, environ={"PLUGIN_ROOT": "/codex-plugin", "CLAUDE_PLUGIN_ROOT": "/compat-plugin"}, home=home, now=1004.5)
+assert codex_null and codex_null["source"] == "codex", codex_null
+assert (home / ".marina" / "agent-events" / "codex" / "codex-null-1.jsonl").is_file()
 
 # A transcript signal always beats ambiguous environment fallback signals.
 mixed = record_hook_event({
@@ -151,6 +172,16 @@ tail_row = {"source": "claude", "sid": "tail-1", "root": str(root.resolve()),
 tail_journal.write_bytes((b"x" * (MAX_JOURNAL_READ_BYTES * 2)) + b"\n" + json.dumps(tail_row).encode() + b"\n")
 assert latest_agent_event("claude", "tail-1", root, home=tail_home, now=1301) == tail_row
 
+# One malformed UTF-8 line cannot poison a valid later JSONL row in the tail.
+utf_home = tmp / "utf-home"
+utf_dir = utf_home / ".marina" / "agent-events" / "claude"
+utf_dir.mkdir(parents=True, mode=0o700)
+utf_journal = utf_dir / "utf-1.jsonl"
+utf_row = {"source": "claude", "sid": "utf-1", "root": str(root.resolve()),
+           "event": "working", "reason": None, "ts": 1300.5}
+utf_journal.write_bytes(b'{"bad":"\\xff"}\n' + json.dumps(utf_row).encode() + b"\n")
+assert latest_agent_event("claude", "utf-1", root, home=utf_home, now=1301) == utf_row
+
 # Refuse symlinked source directories and lock files without following or
 # chmodding outside targets.
 symlink_home = tmp / "symlink-home"
@@ -182,6 +213,43 @@ outside_journal.write_text("do not touch", encoding="utf-8")
 assert record_hook_event({**claude_base, "hook_event_name": "UserPromptSubmit"}, home=file_home, now=1402) is None
 assert outside_journal.read_text(encoding="utf-8") == "do not touch"
 
+# A directory replacement after validation must leave the external target's
+# mode untouched: directory permission changes operate on the opened fd only.
+race_dir = tmp / "race-directory"
+race_dir.mkdir(mode=0o755)
+race_outside = tmp / "race-outside"
+race_outside.mkdir(mode=0o755)
+race_parked = tmp / "race-parked"
+real_chmod = events.os.chmod
+real_fchmod = events.os.fchmod
+swapped = False
+
+def swap_directory():
+    global swapped
+    if not swapped:
+        race_dir.rename(race_parked)
+        race_dir.symlink_to(race_outside, target_is_directory=True)
+        swapped = True
+
+def race_chmod(path, mode, *args, **kwargs):
+    if Path(path) == race_dir:
+        swap_directory()
+    return real_chmod(path, mode, *args, **kwargs)
+
+def race_fchmod(fd, mode):
+    swap_directory()
+    return real_fchmod(fd, mode)
+
+events.os.chmod = race_chmod
+events.os.fchmod = race_fchmod
+try:
+    events._ensure_private_directory(race_dir)
+finally:
+    events.os.chmod = real_chmod
+    events.os.fchmod = real_fchmod
+assert swapped
+assert stat.S_IMODE(race_outside.stat().st_mode) == 0o755
+
 # Sidecar locking retains all valid writes from a synchronized process burst.
 for index in range(MAX_ROWS):
     prefill = record_hook_event({
@@ -209,6 +277,31 @@ concurrent_journal = events_root / "claude" / "concurrent-1.jsonl"
 concurrent_rows = [json.loads(line) for line in concurrent_journal.read_text(encoding="utf-8").splitlines()]
 assert len(concurrent_rows) == MAX_ROWS, len(concurrent_rows)
 assert {row["ts"] for row in concurrent_rows} == set(range(2012, 2100)) | set(range(3000, 3000 + workers))
+
+# Synchronous hooks must fail open within their local lock deadline instead of
+# stalling a turn until another recorder eventually releases the sidecar lock.
+lock_bound = record_hook_event({
+    "session_id": "lock-bound-1", "cwd": str(root),
+    "transcript_path": str(tmp / ".claude/projects/root/lock-bound-1.jsonl"),
+    "hook_event_name": "UserPromptSubmit",
+}, home=home, now=4000)
+assert lock_bound
+bound_lock_path = events_root / "claude" / "lock-bound-1.lock"
+lock_ready = context.Queue()
+holder = context.Process(target=_hold_lock, args=(bound_lock_path, lock_ready, 0.8))
+holder.start()
+assert lock_ready.get(timeout=15) is True
+started = time.monotonic()
+timed_out = record_hook_event({
+    "session_id": "lock-bound-1", "cwd": str(root),
+    "transcript_path": str(tmp / ".claude/projects/root/lock-bound-1.jsonl"),
+    "hook_event_name": "Stop",
+}, home=home, now=4001)
+elapsed = time.monotonic() - started
+holder.join(15)
+assert holder.exitcode == 0, holder.exitcode
+assert timed_out is None
+assert elapsed < LOCK_ACQUIRE_TIMEOUT_SECONDS + 0.2, elapsed
 print("ok hook journal")
 PY
 
@@ -220,6 +313,7 @@ hooks = json.load(open(sys.argv[1], encoding="utf-8"))["hooks"]
 for name in ("UserPromptSubmit", "Notification", "Stop"):
     commands = hooks[name][0]["hooks"]
     assert len(commands) == 1 and commands[0].get("async") is False, (name, commands)
+    assert commands[0].get("timeout") == 2, (name, commands)
 print("ok synchronous lifecycle hook contract")
 PY
 

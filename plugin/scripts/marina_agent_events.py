@@ -17,6 +17,8 @@ from typing import Any, Mapping
 
 MAX_ROWS = 100
 MAX_FUTURE_SECONDS = 300
+LOCK_ACQUIRE_TIMEOUT_SECONDS = 0.35
+LOCK_RETRY_SECONDS = 0.01
 # 100 canonical metadata rows fit comfortably in this bounded tail. Keep
 # reads bounded even when a corrupt or manually edited journal grows without
 # limit, because this runs on dashboard/mobile polling paths.
@@ -70,6 +72,10 @@ def _source(payload: Mapping[str, Any], environ: Mapping[str, str]) -> str | Non
     explicit = payload.get("source")
     if explicit in VALID_SOURCES:
         return str(explicit)
+    # Codex supplies this even when transcript_path is intentionally null. It
+    # must win over the compatibility variable shared with Claude plugins.
+    if environ.get("PLUGIN_ROOT"):
+        return "codex"
     if isinstance(payload.get("thread_id"), str) and not payload.get("session_id"):
         return "codex"
     if environ.get("CODEX_THREAD_ID") or environ.get("CODEX_HOME"):
@@ -86,16 +92,27 @@ def _journal_paths(home: Path, source: str, sid: str) -> tuple[Path, Path, Path]
 
 def _ensure_private_directory(path: Path, *, parents: bool = False) -> None:
     try:
-        details = path.lstat()
+        path.mkdir(mode=0o700, parents=parents)
     except FileNotFoundError:
-        try:
-            path.mkdir(mode=0o700, parents=parents)
-        except FileExistsError:
-            pass
-        details = path.lstat()
-    if stat.S_ISLNK(details.st_mode) or not stat.S_ISDIR(details.st_mode):
-        raise OSError(f"unsafe journal directory: {path}")
-    os.chmod(path, 0o700)
+        raise
+    except FileExistsError:
+        pass
+
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("safe directory handling requires O_NOFOLLOW")
+    flags = os.O_RDONLY | os.O_NOFOLLOW
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd = os.open(path, flags)
+    try:
+        details = os.fstat(fd)
+        if not stat.S_ISDIR(details.st_mode):
+            raise OSError(f"unsafe journal directory: {path}")
+        # chmod the opened directory, never a path that could have been
+        # replaced with a symlink after validation.
+        os.fchmod(fd, 0o700)
+    finally:
+        os.close(fd)
 
 
 def _prepare_directory(path: Path) -> None:
@@ -115,9 +132,10 @@ def _is_regular_file(path: Path) -> bool:
 
 
 def _open_lock(path: Path):
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise OSError("safe lock handling requires O_NOFOLLOW")
     flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
+    flags |= os.O_NOFOLLOW
     fd = os.open(path, flags, 0o600)
     try:
         details = os.fstat(fd)
@@ -165,8 +183,8 @@ def _read_rows(path: Path, *, source: str | None = None, sid: str | None = None)
                 raw = raw[1] if len(raw) == 2 else b""
             else:
                 raw = handle.read()
-        raw_rows = raw.decode("utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
+        raw_rows = raw.decode("utf-8", errors="replace").splitlines()
+    except OSError:
         return []
     rows: list[dict[str, Any]] = []
     for line in raw_rows:
@@ -191,7 +209,6 @@ def _write_rows(path: Path, rows: list[dict[str, Any]]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, path)
-        os.chmod(path, 0o600)
     except Exception:
         try:
             os.close(fd)
@@ -212,6 +229,20 @@ def _event_from_payload(payload: Mapping[str, Any]) -> tuple[str, str | None] | 
     if hook_event == "Notification" and payload.get("notification_type") in BLOCKED_REASONS:
         return "blocked", str(payload["notification_type"])
     return None
+
+
+def _acquire_lock(lock_handle, mode: int) -> bool:
+    """Acquire a sidecar lock without letting a synchronous hook stall a turn."""
+    deadline = time.monotonic() + LOCK_ACQUIRE_TIMEOUT_SECONDS
+    while True:
+        try:
+            fcntl.flock(lock_handle.fileno(), mode | fcntl.LOCK_NB)
+            return True
+        except (BlockingIOError, OSError):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(LOCK_RETRY_SECONDS, remaining))
 
 
 def record_hook_event(
@@ -251,7 +282,8 @@ def record_hook_event(
             return None
         current = float(row["ts"])
         with _open_lock(lock_path) as lock_handle:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            if not _acquire_lock(lock_handle, fcntl.LOCK_EX):
+                return None
             try:
                 rows = [
                     existing for existing in _read_rows(journal_path, source=source, sid=sid)
@@ -297,7 +329,8 @@ def latest_agent_event(
         current = time.time() if now is None else now
         _prepare_directory(source_dir)
         with _open_lock(lock_path) as lock_handle:
-            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
+            if not _acquire_lock(lock_handle, fcntl.LOCK_SH):
+                return None
             try:
                 rows = _read_rows(journal_path, source=source, sid=sid)
             finally:

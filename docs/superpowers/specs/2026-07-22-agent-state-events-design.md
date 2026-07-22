@@ -56,6 +56,8 @@ Each row contains only:
 
 Prompt text, tool input, tool output, transcript content, tokens, and credentials are never copied. The directory is mode `0700`, files are mode `0600`, malformed input produces no row, and every recorder failure exits zero so an agent session is never blocked by Marina. Consecutive duplicate `(root, event, reason)` rows are suppressed and each file retains only the newest 100 rows. Rows are accepted only when their source and session ID match the journal path; foreign, malformed, and more-than-five-minutes-future rows are discarded before retention. Journal reads use a bounded tail so corrupt files cannot grow dashboard polling memory.
 
+Lifecycle hooks stay synchronous for Codex compatibility and event ordering, with a two-second host timeout. The recorder uses a much shorter bounded, nonblocking sidecar-lock retry window and fails open when it cannot acquire the lock, leaving margin for Python startup without stalling an agent turn.
+
 Hook configuration records only events supported by the host. Unknown or absent lifecycle events are harmless because native transcript parsing remains authoritative when no newer journal event exists. Codex project hooks continue to load only in trusted projects, matching Codex's existing hook trust boundary.
 
 ## Resolution Order
