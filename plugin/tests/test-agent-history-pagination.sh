@@ -47,6 +47,7 @@ claude_rows = [
     {"type": "user" if i % 2 == 0 else "assistant", "message": {
         "role": "user" if i % 2 == 0 else "assistant",
         "content": [{"type": "text", "text": f"claude-{i:03d}"}],
+        **({"model": "claude-test", "effort": "high"} if i % 2 else {}),
     }} for i in range(95)
 ]
 (claude_dir / f"{claude_sid}.jsonl").write_text(
@@ -54,6 +55,7 @@ claude_rows = [
 )
 claude_turns = collect("claude", claude_sid)
 assert [turn["text"] for turn in claude_turns] == [f"claude-{i:03d}" for i in range(95)]
+assert ms.agent_runtime_settings(root, "claude", claude_sid) == {"model": "claude-test", "effort": "high"}
 
 codex_sid = "codex-history-0001"
 (codex_home / "sessions").mkdir(parents=True)
@@ -66,10 +68,14 @@ codex_rows = [{"type": "session_meta", "payload": {"cwd": str(root), "id": codex
         "type": "message", "role": "user" if i % 2 == 0 else "assistant",
         "content": [{"type": "input_text" if i % 2 == 0 else "output_text", "text": f"codex-{i:03d}"}],
     }} for i in range(55)
+] + [
+    {"type": "turn_context", "payload": {"model": "gpt-test", "effort": "xhigh"}},
+    {"type": "event_msg", "payload": {"type": "tool_output", "blob": "x" * 400_000}},
 ]
 codex_path.write_text("\n".join(json.dumps(row) for row in codex_rows) + "\n", encoding="utf-8")
 codex_turns = collect("codex", codex_sid)
 assert [turn["text"] for turn in codex_turns] == [f"codex-{i:03d}" for i in range(55)]
+assert ms.agent_runtime_settings(root, "codex", codex_sid) == {"model": "gpt-test", "effort": "xhigh"}
 print("ok paginated Claude/Codex history")
 PY
 

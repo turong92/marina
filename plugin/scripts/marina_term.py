@@ -139,16 +139,54 @@ def _reap_idle() -> None:
 # 셸 -ilc 경유(rc 로드 → PATH/노드 버전 등 사용자 환경 그대로). sid 는 정규식 검증 후에만 문자열 조립.
 # resume 명령을 셸 문자열이 아니라 argv 로 조립 → 셸 인용/인젝션 걱정 원천 제거. `--` 로 옵션 종료해
 # sid 가 CLI 플래그로 해석되는 것도 차단(codex P2). sid 정규식은 leading `-` 도 금지(이중 안전).
-_AGENT_CLIS = {
-    "claude": lambda sid, prompt="": ["claude", "--resume", sid, prompt] if prompt else ["claude", "--resume", "--", sid],
-    "codex": lambda sid, prompt="": ["codex", "resume", sid, prompt] if prompt else ["codex", "resume", "--", sid],
-}
 _SID_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}")
+_MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
+_EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
+
+
+def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "") -> list[str]:
+    cmd = ["claude"]
+    if model:
+        cmd += ["--model", model]
+    if effort:
+        cmd += ["--effort", effort]
+    cmd += ["--resume", sid]
+    if prompt:
+        cmd.append(prompt)
+    return cmd
+
+
+def _codex_cli(sid: str, prompt: str = "", model: str = "", effort: str = "") -> list[str]:
+    cmd = ["codex", "resume"]
+    if model:
+        cmd += ["--model", model]
+    if effort:
+        cmd += ["-c", f'model_reasoning_effort="{effort}"']
+    cmd.append(sid)
+    if prompt:
+        cmd.append(prompt)
+    return cmd
+
+
+_AGENT_CLIS = {"claude": _claude_cli, "codex": _codex_cli}
+
+
+def _agent_cli(source: str, sid: str, prompt: str = "", model: str = "", effort: str = "") -> list[str]:
+    if source not in _AGENT_CLIS:
+        raise ValueError("unknown agent source")
+    if not _SID_RE.fullmatch(sid or ""):
+        raise ValueError("invalid session id")
+    if model and not _MODEL_RE.fullmatch(model):
+        raise ValueError("invalid agent model")
+    if effort and effort not in _EFFORTS:
+        raise ValueError("invalid agent effort")
+    return _AGENT_CLIS[source](sid, prompt, model, effort)
 
 
 def term_open(root: Path, cols: int = 80, rows: int = 24,
               agent_source: str = "", agent_sid: str = "",
-              agent_prompt: str = "") -> dict[str, Any]:
+              agent_prompt: str = "", agent_model: str = "",
+              agent_effort: str = "") -> dict[str, Any]:
     """root 워크트리에 새 PTY 세션을 연다(셸은 매번 새로 — 같은 워크트리에 여러 개 가능).
     기본은 $SHELL -il, agent_source/sid 를 주면 그 CLI 세션에 resume 으로 붙는다(살아있으면 재사용 — 이중 실행 방지)."""
     _reap_idle()
@@ -159,13 +197,13 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
     key = ""
     agent = None
     if agent_source:
-        if agent_source not in _AGENT_CLIS:
-            raise ValueError("unknown agent source")
-        if not _SID_RE.fullmatch(agent_sid or ""):
-            raise ValueError("invalid session id")
-        cmd = _AGENT_CLIS[agent_source](agent_sid, agent_prompt)
+        cmd = _agent_cli(agent_source, agent_sid, agent_prompt, agent_model, agent_effort)
         key = "" if agent_prompt else f"{cwd}::agent:{agent_source}:{agent_sid}"
         agent = {"source": agent_source, "sid": agent_sid}
+        if agent_model:
+            agent["model"] = agent_model
+        if agent_effort:
+            agent["effort"] = agent_effort
     with _lock:
         if key:                                  # 에이전트만 재사용 — resume 이중 실행 방지
             existing = _by_key.get(key)

@@ -48,7 +48,7 @@ grep -q 'mobileLogin' <<<"$mobile_html" || { echo "FAIL: /mobile token page miss
 grep -q 'logoutBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page missing logout button"; exit 1; }
 grep -q 'localStorage.removeItem("marinaMobileToken")' <<<"$mobile_html" || { echo "FAIL: /mobile page missing logout storage clear"; exit 1; }
 grep -q 'autoPollMs' <<<"$mobile_html" || { echo "FAIL: /mobile page missing auto polling"; exit 1; }
-grep -q 'notifyChange' <<<"$mobile_html" || { echo "FAIL: /mobile page missing notification hook"; exit 1; }
+! grep -q 'notifyBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page should not promise unsupported background notifications"; exit 1; }
 grep -q '"/mobile/api/state"' <<<"$mobile_html" || { echo "FAIL: /mobile page should fetch mobile-scoped state API"; exit 1; }
 grep -q '"/mobile/api/send"' <<<"$mobile_html" || { echo "FAIL: /mobile page should post mobile-scoped send API"; exit 1; }
 grep -q 'marinaMobileRoot' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected root"; exit 1; }
@@ -59,12 +59,14 @@ grep -q 'isEditing' <<<"$mobile_html" || { echo "FAIL: /mobile page should avoid
 grep -q 'turns' <<<"$mobile_html" || { echo "FAIL: /mobile page should render agent transcript turns"; exit 1; }
 grep -q 'chatView' <<<"$mobile_html" || { echo "FAIL: /mobile page should have chat view"; exit 1; }
 grep -q 'backBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page should have back button"; exit 1; }
-grep -q 'chatComposer' <<<"$mobile_html" || { echo "FAIL: /mobile page should have fixed chat composer"; exit 1; }
+grep -q 'chatComposer' <<<"$mobile_html" || { echo "FAIL: /mobile page should have a chat composer"; exit 1; }
+! grep -q '\.chatComposer { position: fixed' <<<"$mobile_html" || { echo "FAIL: /mobile composer should participate in the viewport grid"; exit 1; }
+grep -q 'visualViewport' <<<"$mobile_html" || { echo "FAIL: /mobile should track the virtual keyboard viewport"; exit 1; }
+grep -q -- '--app-height' <<<"$mobile_html" || { echo "FAIL: /mobile should size its shell from the visual viewport"; exit 1; }
 grep -q 'hiddenSelect' <<<"$mobile_html" || { echo "FAIL: /mobile page should hide technical selects"; exit 1; }
 grep -q 'pendingTurns' <<<"$mobile_html" || { echo "FAIL: /mobile page should show sent messages immediately"; exit 1; }
 grep -q 'selectAgentAfterSend' <<<"$mobile_html" || { echo "FAIL: /mobile page should keep agent sends in the agent chat"; exit 1; }
-grep -q 'menuBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page should collapse utility actions into a menu"; exit 1; }
-grep -q 'menuPanel' <<<"$mobile_html" || { echo "FAIL: /mobile page should render a utility menu panel"; exit 1; }
+! grep -q 'menuPanel' <<<"$mobile_html" || { echo "FAIL: /mobile primary navigation should not hide behind a utility menu"; exit 1; }
 grep -q 'projectTabs' <<<"$mobile_html" || { echo "FAIL: /mobile page should organize sessions by project"; exit 1; }
 grep -q 'sourceTabs' <<<"$mobile_html" || { echo "FAIL: /mobile page should filter Codex, Claude, and terminal sessions"; exit 1; }
 grep -q 'marinaMobileProject' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected project"; exit 1; }
@@ -93,12 +95,23 @@ grep -q 'fileSuggestionKey === key' <<<"$mobile_html" || { echo "FAIL: /mobile c
 grep -q 'selectedSessionKey !== sessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile file suggestions should ignore stale session responses"; exit 1; }
 grep -q 'fileSuggestionKey === key.*selectedSessionKey === sessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile stale file errors should not clear the active session results"; exit 1; }
 grep -q 'newMessagesBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should preserve reading position on refresh"; exit 1; }
-grep -q 'subagentMenuBtn' <<<"$mobile_html" || { echo "FAIL: /mobile menu should expose session subagents"; exit 1; }
+! grep -q 'subagentMenuBtn' <<<"$mobile_html" || { echo "FAIL: /mobile should not expose subagents as a global menu action"; exit 1; }
+grep -q 'subagentSessionBtn' <<<"$mobile_html" || { echo "FAIL: /mobile should expose subagents inside their session"; exit 1; }
 grep -q 'subagentSheet' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render a subagent bottom sheet"; exit 1; }
 grep -q 'renderSubagents' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render subagent activity"; exit 1; }
 grep -q 'openSubagentIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened subagent details"; exit 1; }
 ! grep -q '<label>워크트리' <<<"$mobile_html" || { echo "FAIL: /mobile page should not expose worktree select"; exit 1; }
 ! grep -q '<label>대상' <<<"$mobile_html" || { echo "FAIL: /mobile page should not expose target select"; exit 1; }
+grep -q 'servicesBtn' <<<"$mobile_html" || { echo "FAIL: /mobile shell should expose service state"; exit 1; }
+grep -q 'servicesSheet' <<<"$mobile_html" || { echo "FAIL: /mobile should render service controls in a sheet"; exit 1; }
+grep -q 'settingsBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose model and effort settings"; exit 1; }
+grep -q 'stopBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose current-turn interruption"; exit 1; }
+grep -q '"/mobile/api/interrupt"' <<<"$mobile_html" || { echo "FAIL: /mobile stop should call the scoped interrupt API"; exit 1; }
+grep -q 'history.pushState({view: "chat"}' <<<"$mobile_html" || { echo "FAIL: /mobile chat should own a browser history entry"; exit 1; }
+grep -q '한 번 더 누르면 Marina를 나갑니다' <<<"$mobile_html" || { echo "FAIL: /mobile main back should show a two-step exit guard"; exit 1; }
+grep -q 'turnsEl.scrollHeight' <<<"$mobile_html" || { echo "FAIL: /mobile chat should scroll its transcript rather than the page"; exit 1; }
+grep -q 'data-turn-toggle' <<<"$mobile_html" || { echo "FAIL: /mobile chat should collapse long historical messages"; exit 1; }
+grep -q 'collapsedTurnIds' <<<"$mobile_html" || { echo "FAIL: /mobile chat should remember manual message collapse state"; exit 1; }
 
 PYTHONPATH="$SCR" python3 - <<'PY' | node
 from marina_mobile import render_mobile_html
@@ -114,6 +127,8 @@ if (!safe.includes('href="https://example.test/a?q=1&amp;x=2"')) throw new Error
 if (!safe.includes('rel="noopener noreferrer"')) throw new Error(`link isolation missing: ${safe}`);
 const quoted = renderRichText('https://example.test/"onclick="alert(1)');
 if (quoted.includes('onclick="')) throw new Error(`quote escaped from href: ${quoted}`);
+const markdown = renderRichText('**모델**은 `gpt-test`');
+if (!markdown.includes('<strong>모델</strong>') || !markdown.includes('<code>gpt-test</code>')) throw new Error(`basic markdown missing: ${markdown}`);
 console.log('ok mobile rich text safety');
 ''')
 PY
@@ -141,6 +156,142 @@ assert _input_payload("hello\n") == "hello\r"
 assert _input_payload("hello\r") == "hello\r"
 assert _input_payload("line 1\nline 2") == "line 1\nline 2\r"
 print("ok mobile enter payload")
+PY
+
+PYTHONPATH="$SCR" python3 - "$P" <<'PY'
+from pathlib import Path
+import sys
+import marina_mobile as mm
+
+root = Path(sys.argv[1]).resolve()
+mm.safe_root = lambda value: root
+inputs = []
+opens = []
+mm.term_list = lambda: {"sessions": [{
+    "tid": "live-agent-1", "root": str(root), "alive": True,
+    "agent": {"source": "codex", "sid": "codex-session-0001"},
+}]}
+mm.term_input = lambda tid, data: inputs.append((tid, data)) or {"ok": True}
+mm.term_open = lambda *args, **kwargs: opens.append((args, kwargs)) or {"tid": "new", "reused": False}
+
+body = {
+    "root": str(root),
+    "target": {"type": "agent", "source": "codex", "sid": "codex-session-0001"},
+    "text": "Please check the failing test",
+}
+sent = mm.mobile_send(body)
+assert sent == {"ok": True, "tid": "live-agent-1", "opened": False, "steered": True}, sent
+assert inputs == [("live-agent-1", "Please check the failing test\r")], inputs
+assert not opens, opens
+
+stopped = mm.mobile_interrupt({"root": str(root), "target": body["target"]})
+assert stopped == {"ok": True, "tid": "live-agent-1", "interrupted": True}, stopped
+assert inputs[-1] == ("live-agent-1", "\x03"), inputs
+
+try:
+    mm.mobile_interrupt({"root": str(root), "target": {"type": "agent", "source": "claude", "sid": "other-session"}})
+    raise AssertionError("interrupt accepted an agent without a live Marina PTY")
+except ValueError as exc:
+    assert "실행 중" in str(exc), exc
+print("ok mobile steering and interrupt")
+PY
+
+PYTHONPATH="$SCR" python3 - "$P" <<'PY'
+from pathlib import Path
+import sys
+import marina_mobile as mm
+
+root = Path(sys.argv[1]).resolve()
+mm.safe_root = lambda value: root
+mm.term_list = lambda: {"sessions": []}
+mm._agent_process_active = lambda source, sid: True
+mm.term_open = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("duplicate resume opened"))
+
+try:
+    mm.mobile_send({
+        "root": str(root),
+        "target": {"type": "agent", "source": "codex", "sid": "codex-session-0001"},
+        "text": "do not overlap",
+    })
+    raise AssertionError("mobile accepted a session already running outside Marina")
+except ValueError as exc:
+    assert "다른 앱" in str(exc), exc
+print("ok mobile blocks external duplicate resume")
+PY
+
+PYTHONPATH="$SCR" python3 - "$P" <<'PY'
+from pathlib import Path
+import sys
+import marina_mobile as mm
+
+root = Path(sys.argv[1]).resolve()
+mm.safe_root = lambda value: root
+mm.term_list = lambda: {"sessions": []}
+mm._agent_process_active = lambda source, sid: False
+mm.agents_payload = lambda value, refresh=False: [{
+    "source": "codex", "sid": "codex-session-0001", "status": "working",
+}, {
+    "source": "claude", "sid": "claude-session-0001", "status": "working",
+}]
+mm.term_open = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("native-active resume opened"))
+
+try:
+    mm.mobile_send({
+        "root": str(root),
+        "target": {"type": "agent", "source": "codex", "sid": "codex-session-0001"},
+        "text": "do not overlap the desktop app",
+    })
+    raise AssertionError("mobile accepted a session active in a native app")
+except ValueError as exc:
+    assert "다른 앱" in str(exc), exc
+try:
+    mm.mobile_send({
+        "root": str(root),
+        "target": {"type": "agent", "source": "claude", "sid": "claude-session-0001"},
+        "text": "do not overlap the Claude app",
+    })
+    raise AssertionError("mobile accepted a Claude session active in a native app")
+except ValueError as exc:
+    assert "다른 앱" in str(exc), exc
+print("ok mobile blocks native-app duplicate resume")
+PY
+
+PYTHONPATH="$SCR" python3 - "$TMP" "$P" <<'PY'
+import json
+from pathlib import Path
+import sys
+import marina_mobile as mm
+
+tmp, root = Path(sys.argv[1]), Path(sys.argv[2]).resolve()
+mm.PENDING_SETTINGS_FILE = tmp / "mobile-pending-agent-settings.json"
+mm.safe_root = lambda value: root
+
+saved = mm.mobile_update_session_settings({
+    "root": str(root), "source": "codex", "sid": "codex-session-0001",
+    "model": "gpt-5.6-sol", "effort": "high",
+})
+assert saved["model"] == "gpt-5.6-sol" and saved["effort"] == "high", saved
+assert mm.mobile_pending_session_settings(root, "codex", "codex-session-0001") == saved
+mode = mm.PENDING_SETTINGS_FILE.stat().st_mode & 0o777
+assert mode == 0o600, oct(mode)
+try:
+    mm.mobile_update_session_settings({
+        "root": str(root), "source": "codex", "sid": "codex-session-0001",
+        "model": "--dangerous", "effort": "high",
+    })
+    raise AssertionError("invalid model persisted")
+except ValueError:
+    pass
+
+mm.CODEX_MODELS_FILE = tmp / "models_cache.json"
+mm.CODEX_MODELS_FILE.write_text(json.dumps({"models": [{
+    "slug": "gpt-test", "display_name": "GPT Test",
+    "supported_reasoning_levels": [{"effort": "low"}, {"effort": "high"}],
+}]}), encoding="utf-8")
+catalog = mm.mobile_agent_options()
+assert catalog["codex"]["models"] == [{"value": "gpt-test", "label": "GPT Test", "efforts": ["low", "high"]}], catalog
+assert catalog["claude"]["efforts"] == ["low", "medium", "high", "xhigh", "max"], catalog
+print("ok mobile session settings")
 PY
 
 PYTHONPATH="$SCR" python3 - "$TMP" "$P" <<'PY'
@@ -373,6 +524,7 @@ state = mm.mobile_state()
 keys = [s["key"] for s in state["sessions"]]
 assert "agent:codex:sid0001:%s" % root in keys, keys
 agent = next(s for s in state["sessions"] if s["key"].startswith("agent:codex:"))
+assert agent["tid"] == "agent-term" and agent["controllable"] is True, agent
 assert agent["subagents"][0]["title"] == "Review", agent
 assert agent["catalog"]["skills"][0]["insert"] == "$audit", agent
 assert "term:shell-term" in keys, keys

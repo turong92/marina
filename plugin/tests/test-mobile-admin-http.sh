@@ -45,7 +45,7 @@ server = ThreadingHTTPServer(("127.0.0.1", 0), marina_handler.Handler)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 
 
-def request(method, path, session=None):
+def request(method, path, session=None, body=None, mobile_token=None):
     conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=10)
     headers = {"Host": f"127.0.0.1:{server.server_address[1]}"}
     if session is not None:
@@ -53,9 +53,12 @@ def request(method, path, session=None):
             f"marina_session={session.token}; marina_csrf={session.csrf_token}"
         )
         headers["X-Marina-CSRF"] = session.csrf_token
+    if mobile_token is not None:
+        headers["X-Marina-Mobile-Token"] = mobile_token
     if method == "POST":
         headers["Content-Type"] = "application/json"
-    conn.request(method, path, "{}" if method == "POST" else None, headers)
+    encoded = json.dumps(body or {}) if method == "POST" else None
+    conn.request(method, path, encoded, headers)
     response = conn.getresponse()
     payload = json.loads(response.read())
     conn.close()
@@ -71,6 +74,49 @@ try:
     assert status == 200 and enabled["enabled"] is True, (status, enabled)
     assert enabled["loginUrl"].startswith(enabled["address"] + "?token="), enabled
     first_url = enabled["loginUrl"]
+    mobile_token = first_url.split("?token=", 1)[1]
+
+    root = Path(sys.argv[1]) / "project"
+    root.mkdir()
+    calls = []
+    marina_handler.safe_root = lambda value: root.resolve() if value == str(root) else (_ for _ in ()).throw(ValueError("unknown worktree root"))
+    import marina_mobile
+    marina_mobile.safe_root = marina_handler.safe_root
+    marina_mobile.term_list = lambda: {"sessions": []}
+    marina_handler.session_payload = lambda value: {
+        "id": "main", "projectId": "proj", "root": str(root.resolve()),
+        "services": [
+            {"service": "web", "running": True, "state": "running", "port": "4173", "health": "ok"},
+            {"service": "api", "running": False, "state": "stopped", "port": None, "health": None},
+        ],
+    }
+    marina_handler.safe_service = lambda service, value: service if service in {"web", "api"} else (_ for _ in ()).throw(ValueError("unknown service"))
+    marina_handler.agent_belongs_to_root = lambda value, source, sid: True
+    marina_handler.start_service = lambda value, service, force=False: calls.append(("start", service)) or {"started": True}
+    marina_handler.stop_service = lambda value, service: calls.append(("stop", service)) or {"stopped": True}
+    marina_handler.restart_service = lambda value, service, force=False: calls.append(("restart", service)) or {"restarted": True}
+
+    status, services = request("GET", f"/mobile/api/services?root={root}", mobile_token=mobile_token)
+    assert status == 200 and services["running"] == 1 and services["defined"] == 2, (status, services)
+    assert services["services"][0]["service"] == "web" and services["services"][0]["state"] == "running", services
+
+    status, result = request("POST", "/mobile/api/services/action", body={"root": str(root), "service": "api", "action": "start"}, mobile_token=mobile_token)
+    assert status == 200 and result["ok"] is True and calls == [("start", "api")], (status, result, calls)
+    status, result = request("POST", "/mobile/api/services/action", body={"root": str(root), "service": "api", "action": "remove"}, mobile_token=mobile_token)
+    assert status == 400 and "action" in result["error"], (status, result)
+    status, result = request("POST", "/mobile/api/services/action", body={"root": str(root), "service": "unknown", "action": "start"}, mobile_token=mobile_token)
+    assert status == 400 and result["error"] == "unknown service", (status, result)
+    status, result = request("GET", f"/mobile/api/services?root={root}")
+    assert status == 403, (status, result)
+
+    status, result = request("POST", "/mobile/api/interrupt", body={"root": str(root), "target": {"type": "agent", "source": "codex", "sid": "sid0001"}}, mobile_token=mobile_token)
+    assert status == 400 and "실행 중" in result["error"], (status, result)
+
+    marina_handler.mobile_update_session_settings = lambda body: {"model": body.get("model", ""), "effort": body.get("effort", "")}
+    status, result = request("POST", "/mobile/api/settings", body={
+        "root": str(root), "source": "codex", "sid": "sid0001", "model": "gpt-test", "effort": "high",
+    }, mobile_token=mobile_token)
+    assert status == 200 and result == {"ok": True, "model": "gpt-test", "effort": "high"}, (status, result)
 
     status, rotated = request("POST", "/api/mobile/rotate")
     assert status == 200 and rotated["loginUrl"] != first_url, (status, rotated)

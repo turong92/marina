@@ -39,7 +39,7 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
-from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_catalog, mobile_request_ok, mobile_send, mobile_state, render_mobile_html, rotate_mobile_token
+from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_catalog, mobile_interrupt, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, render_mobile_html, rotate_mobile_token
 from marina_sessions import activate_agent_payloads, agent_belongs_to_root, agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
@@ -326,6 +326,43 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_root_access(root):
                     return
                 self.send_json(mobile_catalog(root, query.get("source", [""])[0], query.get("q", [""])[0]))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+            return
+        if parsed.path == "/mobile/api/services":
+            if principal is None and not mobile_request_ok(self, parsed):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
+                session = session_payload(root)
+                open_urls: dict[str, str] = {}
+                if _GATEWAY_ON:
+                    snapshot = next(
+                        (item for item in _gateway_snapshot()
+                         if item.get("id") == session.get("id") and item.get("projectId") == session.get("projectId")),
+                        None,
+                    )
+                    if snapshot:
+                        for route in _gw().summarize_gateway([snapshot], _GATEWAY_PORT):
+                            open_urls[str(route.get("service") or "")] = f"http://{route['domain']}/"
+                services = [{
+                    "service": str(item.get("service") or ""),
+                    "running": bool(item.get("running")),
+                    "state": str(item.get("state") or ("running" if item.get("running") else "stopped")),
+                    "stateReason": str(item.get("stateReason") or item.get("busyError") or ""),
+                    "health": item.get("health"),
+                    "port": item.get("port"),
+                    "degraded": bool(item.get("degraded")),
+                    "openUrl": open_urls.get(str(item.get("service") or ""), ""),
+                } for item in session.get("services", []) if item.get("service")]
+                self.send_json({
+                    "root": str(root), "running": sum(1 for item in services if item["running"]),
+                    "defined": len(services), "services": services,
+                })
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
             return
@@ -984,6 +1021,79 @@ class Handler(BaseHTTPRequestHandler):
                         "ok", principal.user.id, target_type, agent_key if target_type == "agent" else str(result.get("tid") or ""),
                     )
                 self.send_json(result)
+                return
+            if parsed.path == "/mobile/api/interrupt":
+                if principal is None and not mobile_request_ok(self, parsed):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    mobile_body = self.read_json()
+                    root = safe_root(str(mobile_body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    target = mobile_body.get("target") if isinstance(mobile_body.get("target"), dict) else {}
+                    source, sid = str(target.get("source") or ""), str(target.get("sid") or "")
+                    if not agent_belongs_to_root(root, source, sid):
+                        self._forbidden()
+                        return
+                    result = mobile_interrupt(mobile_body)
+                    if principal is not None:
+                        controller.store.audit_action(
+                            "agent.interrupt", "ok", principal.user.id, "agent", canonical_agent(source, sid),
+                        )
+                    self.send_json(result)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
+            if parsed.path == "/mobile/api/services/action":
+                if principal is None and not mobile_request_ok(self, parsed):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    mobile_body = self.read_json()
+                    root = safe_root(str(mobile_body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    service = safe_service(str(mobile_body.get("service", "")), root)
+                    action = str(mobile_body.get("action") or "")
+                    if action == "start":
+                        result = start_service(root, service)
+                    elif action == "stop":
+                        result = stop_service(root, service)
+                    elif action == "restart":
+                        result = restart_service(root, service)
+                    else:
+                        raise ValueError("unknown service action")
+                    if principal is not None:
+                        controller.store.audit_action(
+                            f"service.{action}", "ok", principal.user.id, "worktree",
+                            canonical_root(root), request_meta="service=" + service,
+                        )
+                    self.send_json({"ok": True, "action": action, "service": service, "result": result})
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
+            if parsed.path == "/mobile/api/settings":
+                if principal is None and not mobile_request_ok(self, parsed):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    mobile_body = self.read_json()
+                    root = safe_root(str(mobile_body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    source, sid = str(mobile_body.get("source") or ""), str(mobile_body.get("sid") or "")
+                    if not agent_belongs_to_root(root, source, sid):
+                        self._forbidden()
+                        return
+                    result = mobile_update_session_settings(mobile_body)
+                    if principal is not None:
+                        controller.store.audit_action(
+                            "agent.settings", "ok", principal.user.id, "agent", canonical_agent(source, sid),
+                        )
+                    self.send_json({"ok": True, **result})
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
                 return
             if not self._host_allowed():
                 self.send_json({"error": "forbidden host"}, 403)

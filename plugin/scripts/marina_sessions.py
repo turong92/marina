@@ -800,6 +800,31 @@ def _json_objects(path: Path) -> list[dict[str, Any]]:
     return objects
 
 
+def _reverse_json_objects(path: Path):
+    """Yield complete JSONL objects newest-first without a fixed tail window."""
+    if not path.is_file() or path.stat().st_size == 0:
+        return
+    with path.open("rb") as handle:
+        with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as data:
+            cursor = len(data)
+            while cursor > 0:
+                line_end = cursor - 1 if data[cursor - 1] == 10 else cursor
+                if line_end <= 0:
+                    break
+                newline = data.rfind(b"\n", 0, line_end)
+                line_start = newline + 1
+                raw = data[line_start:line_end].strip()
+                cursor = line_start
+                if not raw.startswith(b"{"):
+                    continue
+                try:
+                    obj = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(obj, dict):
+                    yield obj
+
+
 def _transcript_object_turns(obj: dict[str, Any], source: str,
                              line_offset: int | None = None) -> list[dict[str, str]]:
     if source == "claude":
@@ -1069,6 +1094,34 @@ def agent_activity(root: Path, source: str, sid: str) -> list[dict[str, Any]]:
     if source == "codex":
         return _codex_agent_activity(root, sid)
     return []
+
+
+def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
+    """Read the model/effort last recorded by the native CLI session."""
+    if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}", sid or ""):
+        return {"model": "", "effort": ""}
+    if source == "claude":
+        path = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{sid}.jsonl"
+    elif source == "codex":
+        entry = next((e for e in codex_agent_sessions().get(str(root), []) if e.get("sid") == sid), None)
+        path = Path(str((entry or {}).get("path") or ""))
+    else:
+        return {"model": "", "effort": ""}
+    if not path.is_file():
+        return {"model": "", "effort": ""}
+    for obj in _reverse_json_objects(path):
+        if source == "claude" and obj.get("type") == "assistant":
+            message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            model, effort = str(message.get("model") or ""), str(message.get("effort") or "")
+        elif source == "codex" and obj.get("type") == "turn_context":
+            payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+            model = str(payload.get("model") or "")
+            effort = str(payload.get("effort") or payload.get("reasoning_effort") or "")
+        else:
+            continue
+        if model or effort:
+            return {"model": model, "effort": effort}
+    return {"model": "", "effort": ""}
 
 
 def agent_transcript(root: Path, source: str, sid: str, before: int | None = None,

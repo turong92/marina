@@ -14,6 +14,25 @@ scr, tmp = sys.argv[1:3]
 sys.path.insert(0, scr)
 import marina_term as mt
 
+# Agent options are argv-only and source-aware. Values are validated before
+# fork/exec so mobile settings cannot become CLI flags or shell syntax.
+assert mt._agent_cli("claude", "sid0001", "hello", "opus", "high") == [
+    "claude", "--model", "opus", "--effort", "high", "--resume", "sid0001", "hello",
+]
+assert mt._agent_cli("codex", "sid0001", "hello", "gpt-5.6-codex", "xhigh") == [
+    "codex", "resume", "--model", "gpt-5.6-codex", "-c", 'model_reasoning_effort="xhigh"', "sid0001", "hello",
+]
+for bad_options in [
+    ("claude", "sid0001", "", "--dangerously-skip-permissions", ""),
+    ("codex", "sid0001", "", "gpt\nmalicious", "high"),
+    ("codex", "sid0001", "", "gpt-5", "high; touch /tmp/nope"),
+]:
+    try:
+        mt._agent_cli(*bad_options)
+        raise AssertionError(f"agent option validation bypassed: {bad_options}")
+    except ValueError:
+        pass
+
 d = mt.term_open(Path(tmp), 80, 24)
 assert not d["reused"] and d["tid"], d
 d2 = mt.term_open(Path(tmp), 100, 30)
@@ -65,7 +84,7 @@ for bad in [("evil", "abcd1234"), ("claude", "../x"), ("claude", "a"), ("codex",
         raise AssertionError(f"검증 뚫림: {bad}")
     except ValueError:
         pass
-mt._AGENT_CLIS["fake"] = lambda sid, prompt="": ["python3", "-c", "import sys,time; print('FAKE_'+sys.argv[1]+'_'+sys.argv[2]); time.sleep(2)", sid, prompt]   # argv 리스트(셸 문자열 조립 폐지)
+mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="": ["python3", "-c", "import sys,time; print('FAKE_'+sys.argv[1]+'_'+sys.argv[2]); time.sleep(2)", sid, prompt]   # argv 리스트(셸 문자열 조립 폐지)
 d6 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0001")
 assert not d6["reused"] and mt._by_tid[d3["tid"]].key == "" and mt._by_tid[d6["tid"]].key, "셸은 키 없음·에이전트만 키 보유"
 assert {s["tid"]: s for s in mt.term_list()["sessions"]}[d6["tid"]]["agent"] == {"source": "fake", "sid": "sid0001"}, "에이전트 세션은 agent 필드가 실려야"

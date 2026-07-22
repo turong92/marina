@@ -6,21 +6,27 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
+import threading
 import urllib.parse
 from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
-from marina_sessions import activate_agent_payloads, agent_activity, agent_transcript, agents_payload, safe_root, worktree_info
+from marina_sessions import activate_agent_payloads, agent_activity, agent_runtime_settings, agent_transcript, agents_payload, safe_root, worktree_info
 from marina_state import MARINA_HOME, PORT
-from marina_term import term_input, term_list, term_open
+from marina_term import _agent_cli, term_input, term_list, term_open
 
 
 TOKEN_FILE = MARINA_HOME / "mobile-token"
 CLAUDE_HOME = Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
 CODEX_USER_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 AGENTS_HOME = Path(os.environ.get("AGENTS_HOME", str(Path.home() / ".agents")))
+PENDING_SETTINGS_FILE = MARINA_HOME / "mobile-pending-agent-settings.json"
+CODEX_MODELS_FILE = CODEX_USER_HOME / "models_cache.json"
+_SESSION_SETTINGS_LOCK = threading.Lock()
+_AGENT_SEND_LOCK = threading.Lock()
 
 
 def _read_json(path: Path) -> dict[str, Any]:
@@ -29,6 +35,79 @@ def _read_json(path: Path) -> dict[str, Any]:
     except Exception:
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _session_settings_key(root: Path, source: str, sid: str) -> str:
+    return f"{root.resolve()}\n{source}\n{sid}"
+
+
+def mobile_pending_session_settings(root: Path, source: str, sid: str) -> dict[str, str]:
+    raw = _read_json(PENDING_SETTINGS_FILE).get(_session_settings_key(root, source, sid))
+    if not isinstance(raw, dict):
+        return {"model": "", "effort": ""}
+    return {"model": str(raw.get("model") or ""), "effort": str(raw.get("effort") or "")}
+
+
+def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
+    root = safe_root(str(body.get("root") or ""))
+    source = str(body.get("source") or "")
+    sid = str(body.get("sid") or "")
+    value = {"model": str(body.get("model") or ""), "effort": str(body.get("effort") or "")}
+    _agent_cli(source, sid, model=value["model"], effort=value["effort"])
+    key = _session_settings_key(root, source, sid)
+    with _SESSION_SETTINGS_LOCK:
+        payload = _read_json(PENDING_SETTINGS_FILE)
+        payload[key] = value
+        PENDING_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        temporary = PENDING_SETTINGS_FILE.with_name(f".{PENDING_SETTINGS_FILE.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        try:
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, PENDING_SETTINGS_FILE)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+    return value
+
+
+def _clear_pending_session_settings(root: Path, source: str, sid: str) -> None:
+    key = _session_settings_key(root, source, sid)
+    with _SESSION_SETTINGS_LOCK:
+        payload = _read_json(PENDING_SETTINGS_FILE)
+        if key not in payload:
+            return
+        payload.pop(key, None)
+        temporary = PENDING_SETTINGS_FILE.with_name(f".{PENDING_SETTINGS_FILE.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        try:
+            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+            os.chmod(temporary, 0o600)
+            os.replace(temporary, PENDING_SETTINGS_FILE)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def mobile_agent_options() -> dict[str, Any]:
+    codex_models: list[dict[str, Any]] = []
+    for item in (_read_json(CODEX_MODELS_FILE).get("models") or []):
+        if not isinstance(item, dict):
+            continue
+        value = str(item.get("slug") or "")
+        if not value:
+            continue
+        efforts = [
+            str(level.get("effort")) for level in (item.get("supported_reasoning_levels") or [])
+            if isinstance(level, dict) and level.get("effort")
+        ]
+        codex_models.append({"value": value, "label": str(item.get("display_name") or value), "efforts": efforts})
+    return {
+        "codex": {"models": codex_models, "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "manualModel": True},
+        "claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"], "manualModel": True},
+    }
 
 
 def _definition(path: Path) -> tuple[str, str]:
@@ -331,6 +410,10 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
         try:
             info = worktree_info(root, refresh)
             root_terms = [t for t in terms if str(t.get("root") or "") == str(root)]
+            agent_terms = {
+                (str(t["agent"].get("source") or ""), str(t["agent"].get("sid") or "")): t
+                for t in root_terms if isinstance(t.get("agent"), dict) and bool(t.get("alive", True))
+            }
             active_agents = {
                 (str(t["agent"].get("source") or ""), str(t["agent"].get("sid") or ""))
                 for t in root_terms if isinstance(t.get("agent"), dict)
@@ -381,6 +464,12 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                     "status": agent.get("status") or "idle",
                     "statusTs": agent.get("statusTs") or agent.get("ts") or 0,
                     "statusReason": agent.get("statusReason") or "",
+                    "tid": str((agent_terms.get((source, sid)) or {}).get("tid") or ""),
+                    "controllable": bool((agent_terms.get((source, sid)) or {}).get("tid")),
+                    "settings": {
+                        "current": agent_runtime_settings(root, source, sid),
+                        "pending": mobile_pending_session_settings(root, source, sid),
+                    },
                 })
             for term in root_terms:
                 tid = str(term.get("tid") or "")
@@ -415,7 +504,7 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
         except Exception as exc:
             worktrees.append({"root": str(root), "error": str(exc), "agents": []})
     sessions.sort(key=lambda s: int(float(s.get("ts") or 0)), reverse=True)
-    return {"worktrees": worktrees, "terms": terms, "sessions": sessions}
+    return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "agentOptions": mobile_agent_options()}
 
 
 def _input_payload(text: str) -> str:
@@ -436,6 +525,64 @@ def _term_root(tid: str) -> Path | None:
     return None
 
 
+def _live_agent_tid(root: Path, source: str, sid: str) -> str:
+    resolved = root.resolve()
+    for item in term_list().get("sessions", []):
+        agent = item.get("agent") if isinstance(item.get("agent"), dict) else {}
+        if (
+            bool(item.get("alive", True))
+            and str(item.get("root") or "") == str(resolved)
+            and str(agent.get("source") or "") == source
+            and str(agent.get("sid") or "") == sid
+        ):
+            return str(item.get("tid") or "")
+    return ""
+
+
+def _agent_process_active(source: str, sid: str) -> bool:
+    """Find a resume process that outlived Marina's in-memory PTY registry."""
+    if source not in ("claude", "codex") or not sid:
+        return False
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "command="], check=False, capture_output=True,
+            text=True, timeout=1,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    for line in result.stdout.splitlines():
+        try:
+            argv = shlex.split(line)
+        except ValueError:
+            continue
+        for index, token in enumerate(argv):
+            if Path(token).name != source:
+                continue
+            tail = argv[index + 1:]
+            if source == "codex" and "resume" in tail:
+                resume_index = tail.index("resume")
+                if sid in tail[resume_index + 1:]:
+                    return True
+            if source == "claude":
+                if any(token == f"--resume={sid}" for token in tail):
+                    return True
+                if "--resume" in tail:
+                    resume_index = tail.index("--resume")
+                    if resume_index + 1 < len(tail) and tail[resume_index + 1] == sid:
+                        return True
+    return False
+
+
+def _native_agent_active(root: Path, source: str, sid: str) -> bool:
+    """Use native transcript lifecycle when desktop apps hide the SID from ps."""
+    return any(
+        str(item.get("source") or "") == source
+        and str(item.get("sid") or "") == sid
+        and str(item.get("status") or "") == "working"
+        for item in agents_payload(root, refresh=True)
+    )
+
+
 def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
     root = safe_root(str(body.get("root", "")))
     target = body.get("target") if isinstance(body.get("target"), dict) else {}
@@ -453,17 +600,32 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
         if term_root != root.resolve():
             raise ValueError("선택한 터미널이 worktree와 맞지 않습니다")
     elif target_type == "agent":
-        result = term_open(
-            root,
-            int(body.get("cols") or 80),
-            int(body.get("rows") or 24),
-            agent_source=str(target.get("source") or ""),
-            agent_sid=str(target.get("sid") or ""),
-            agent_prompt=text,
-        )
-        tid = str(result["tid"])
-        opened = not bool(result.get("reused"))
-        prompt_submitted = True
+        source = str(target.get("source") or "")
+        sid = str(target.get("sid") or "")
+        with _AGENT_SEND_LOCK:
+            tid = _live_agent_tid(root, source, sid)
+            if tid:
+                term_input(tid, _input_payload(text))
+                return {"ok": True, "tid": tid, "opened": False, "steered": True}
+            if _agent_process_active(source, sid) or _native_agent_active(root, source, sid):
+                raise ValueError("이 세션은 다른 앱이나 터미널에서 실행 중입니다. 완료된 뒤 다시 보내주세요")
+            saved = mobile_pending_session_settings(root, source, sid)
+            model = str(body.get("model") if "model" in body else saved["model"])
+            effort = str(body.get("effort") if "effort" in body else saved["effort"])
+            options = {
+                "agent_source": source,
+                "agent_sid": sid,
+                "agent_prompt": text,
+            }
+            if model:
+                options["agent_model"] = model
+            if effort:
+                options["agent_effort"] = effort
+            result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24), **options)
+            tid = str(result["tid"])
+            opened = not bool(result.get("reused"))
+            prompt_submitted = True
+            _clear_pending_session_settings(root, source, sid)
     else:
         result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24))
         tid = str(result["tid"])
@@ -471,6 +633,18 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
     if not prompt_submitted:
         term_input(tid, _input_payload(text))
     return {"ok": True, "tid": tid, "opened": opened}
+
+
+def mobile_interrupt(body: dict[str, Any]) -> dict[str, Any]:
+    root = safe_root(str(body.get("root", "")))
+    target = body.get("target") if isinstance(body.get("target"), dict) else {}
+    if str(target.get("type") or "") != "agent":
+        raise ValueError("에이전트 세션만 중단할 수 있어요")
+    tid = _live_agent_tid(root, str(target.get("source") or ""), str(target.get("sid") or ""))
+    if not tid:
+        raise ValueError("실행 중인 에이전트가 없어요")
+    term_input(tid, "\x03")
+    return {"ok": True, "tid": tid, "interrupted": True}
 
 
 def render_mobile_html(auth_enabled: bool = False) -> str:
@@ -485,15 +659,15 @@ _MOBILE_HTML = r"""<!doctype html>
   <title>Marina Mobile</title>
   <style>
     :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { margin: 0; background: #f4f6f9; color: #17191f; }
-    #mobileApp { min-height: 100vh; display: none; flex-direction: column; }
+    body { margin: 0; overflow: hidden; background: #f4f6f9; color: #17191f; }
+    #mobileApp { --app-height: 100dvh; height: var(--app-height); min-height: 0; display: none; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
     #mobileLogin { min-height: 100vh; display: none; align-items: stretch; justify-content: center; flex-direction: column; padding: 24px; box-sizing: border-box; gap: 14px; }
     #mobileLogin form { display: flex; flex-direction: column; gap: 10px; }
-    header { position: sticky; top: 0; z-index: 4; display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px; align-items: center; min-height: 48px; padding: 3px 8px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
-    h1 { grid-column: 2; margin: 0; font-size: 15px; line-height: 1.2; text-align: center; }
+    header { z-index: 4; display: grid; gap: 4px; padding: 4px 8px 6px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
+    .shellRow { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 5px; align-items: center; min-height: 38px; }
     h2 { margin: 0; font-size: 22px; }
     p { margin: 0; color: #596070; line-height: 1.45; }
-    main { display: flex; flex-direction: column; gap: 10px; padding: 10px 12px 16px; }
+    main { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow: hidden; padding: 10px 12px; }
     label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 700; color: #596070; }
     select, textarea, input, button { width: 100%; box-sizing: border-box; border: 1px solid #ccd3dd; border-radius: 8px; background: #fff; color: #17191f; font: inherit; }
     input { min-height: 42px; padding: 0 11px; }
@@ -502,24 +676,20 @@ _MOBILE_HTML = r"""<!doctype html>
     button { font-weight: 800; color: #0b63ce; }
     button.primary { background: #0b63ce; border-color: #0b63ce; color: white; }
     button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #0b63ce; outline-offset: 2px; }
-    .iconBtn { width: 40px; height: 40px; min-height: 40px; padding: 0; border-color: transparent; background: transparent; color: #303846; font-size: 20px; line-height: 1; }
+    .iconBtn { width: 36px; height: 36px; min-height: 36px; padding: 0; border-color: transparent; background: transparent; color: #303846; font-size: 19px; line-height: 1; }
     .backBtn { grid-column: 1; }
-    .menuWrap { grid-column: 3; position: relative; width: 40px; height: 40px; }
-    .menuPanel { position: absolute; top: 43px; right: 0; display: none; width: 180px; padding: 5px; background: #fff; border: 1px solid #d8dee7; border-radius: 8px; box-shadow: 0 8px 24px rgb(23 25 31 / 14%); }
-    .menuPanel.open { display: flex; flex-direction: column; gap: 2px; }
-    .menuPanel button { min-height: 38px; padding: 0 10px; border: 0; text-align: left; color: #303846; }
-    .menuPanel button span { float: right; min-width: 18px; color: #747d8b; font-variant-numeric: tabular-nums; text-align: right; }
-    #listView, #chatView { display: flex; flex-direction: column; gap: 10px; }
-    #chatView { display: none; min-height: calc(100dvh - 74px); padding-bottom: 104px; box-sizing: border-box; }
+    #listView { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow-y: auto; overscroll-behavior: contain; }
+    #chatView { position: relative; display: none; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; overflow: hidden; }
     .hiddenSelect { display: none !important; }
-    .project-strip { display: flex; gap: 6px; margin: 0 -12px; padding: 0 12px 2px; overflow-x: auto; scrollbar-width: none; }
+    .project-strip { display: flex; min-width: 0; gap: 5px; padding: 1px 0; overflow-x: auto; scrollbar-width: none; }
     .project-strip::-webkit-scrollbar { display: none; }
-    .project-chip { flex: 0 0 auto; width: auto; max-width: 220px; min-height: 34px; padding: 0 11px; border-radius: 17px; color: #596070; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .project-chip { flex: 0 0 auto; width: auto; max-width: 150px; min-height: 32px; padding: 0 10px; border-radius: 8px; color: #596070; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .project-chip.active { background: #17191f; border-color: #17191f; color: #fff; }
     .project-count { margin-left: 5px; opacity: .7; font-variant-numeric: tabular-nums; }
-    .source-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; padding: 3px; background: #e8ecf2; border-radius: 8px; }
-    .source-tab { min-width: 0; min-height: 34px; padding: 0 4px; border: 0; background: transparent; color: #596070; font-size: 11px; }
+    .source-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; padding: 3px; background: #e8ecf2; border-radius: 8px; }
+    .source-tab { min-width: 0; min-height: 30px; padding: 0 4px; border: 0; background: transparent; color: #596070; font-size: 10px; }
     .source-tab.active { background: #fff; color: #17191f; box-shadow: 0 1px 3px rgb(23 25 31 / 10%); }
+    .servicesBtn { width: auto; min-width: 54px; min-height: 32px; padding: 0 8px; color: #303846; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
     .search-input { min-height: 40px; }
     .session-list { display: flex; flex-direction: column; gap: 12px; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
@@ -536,17 +706,23 @@ _MOBILE_HTML = r"""<!doctype html>
     .empty-state { padding: 28px 12px; color: #747d8b; text-align: center; font-size: 13px; line-height: 1.45; }
     .chat-title { font-size: 18px; font-weight: 900; line-height: 1.25; overflow-wrap: anywhere; }
     .chat-subtitle { color: #596070; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
-    .turns { display: flex; flex: 1; flex-direction: column; justify-content: flex-end; gap: 9px; padding-top: 2px; }
+    .turns { display: flex; min-height: 0; flex-direction: column; justify-content: flex-start; gap: 9px; overflow-y: auto; overscroll-behavior: contain; padding: 2px 1px 8px; }
     .olderMessagesBtn { display: none; align-self: center; width: auto; min-height: 32px; padding: 0 11px; border-color: #b9c6d8; color: #596070; font-size: 11px; }
     .turn { align-self: flex-start; max-width: 88%; padding: 9px 11px; border-radius: 8px; background: #eef2f7; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
     .turn.user { align-self: flex-end; background: #dcecff; }
     .turn.output { width: 100%; max-width: none; background: #111827; color: #e5e7eb; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
     .turn a, .subagent-turn a { color: #0969da; text-decoration: underline; text-underline-offset: 2px; }
-    .newMessagesBtn { position: fixed; left: 50%; bottom: 112px; z-index: 3; display: none; width: auto; min-height: 34px; padding: 0 12px; transform: translateX(-50%); border-color: #b9c6d8; background: #fff; box-shadow: 0 4px 14px rgb(23 25 31 / 14%); font-size: 12px; }
-    .chatComposer { position: fixed; left: 0; right: 0; bottom: 0; z-index: 3; display: flex; flex-direction: column; gap: 6px; padding: 8px 12px max(10px, env(safe-area-inset-bottom)); background: #fff; border-top: 1px solid #dde2ea; box-sizing: border-box; }
+    .turn code, .subagent-turn code { padding: 1px 4px; border-radius: 4px; background: rgba(127, 127, 127, .14); font: .92em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .turnToggle { display: block; margin: 6px 0 0; padding: 2px 0; border: 0; background: transparent; color: #526176; font-size: 11px; }
+    .newMessagesBtn { position: absolute; left: 50%; bottom: 8px; z-index: 3; display: none; width: auto; min-height: 34px; padding: 0 12px; transform: translateX(-50%); border-color: #b9c6d8; background: #fff; box-shadow: 0 4px 14px rgb(23 25 31 / 14%); font-size: 12px; }
+    .chatComposer { z-index: 3; display: flex; min-width: 0; flex-direction: column; gap: 6px; padding: 7px 10px max(8px, env(safe-area-inset-bottom)); background: #fff; border-top: 1px solid #dde2ea; box-sizing: border-box; }
     .composerRow { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 7px; align-items: end; }
     .chatComposer textarea { min-height: 44px; max-height: 132px; padding: 10px 11px; resize: none; overflow-y: auto; }
     .sendBtn { width: 44px; height: 44px; min-height: 44px; padding: 0; font-size: 20px; }
+    .sessionControls { display: flex; min-height: 30px; align-items: center; gap: 5px; }
+    .sessionControlBtn { width: auto; min-width: 0; min-height: 28px; padding: 0 8px; border-color: transparent; background: #eef2f7; color: #4d5665; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .sessionControls .status { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .stopBtn { display: none; width: 30px; min-width: 30px; min-height: 28px; padding: 0; border-color: #df9b9b; color: #a22b2b; font-size: 13px; }
     .composerMeta { display: flex; min-height: 18px; align-items: center; gap: 8px; }
     .composerMeta .status { flex: 1; }
     .retryBtn { display: none; width: auto; min-height: 28px; padding: 0 8px; border: 0; font-size: 12px; }
@@ -564,6 +740,16 @@ _MOBILE_HTML = r"""<!doctype html>
     .sheetHeader strong { grid-column: 2; text-align: center; }
     .sheetClose { grid-column: 3; }
     .subagentList { max-height: calc(78vh - 49px); overflow-y: auto; padding: 6px 12px max(14px, env(safe-area-inset-bottom)); }
+    .serviceList, .settingsBody { max-height: calc(78vh - 49px); overflow-y: auto; padding: 8px 12px max(14px, env(safe-area-inset-bottom)); }
+    .serviceItem { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: center; min-height: 54px; border-bottom: 1px solid #e3e7ed; }
+    .serviceName { min-width: 0; font-size: 13px; font-weight: 850; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .serviceState { margin-top: 2px; color: #747d8b; font-size: 10px; }
+    .serviceActions { display: flex; gap: 4px; }
+    .serviceActions button { width: 32px; min-height: 32px; padding: 0; font-size: 14px; }
+    .serviceUtilities { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; padding-top: 10px; }
+    .serviceUtilities button { min-width: 0; min-height: 34px; padding: 0 5px; font-size: 10px; }
+    .settingsBody { display: flex; flex-direction: column; gap: 12px; }
+    .settingsBody select, .settingsBody input { min-height: 40px; }
     .inboxList { max-height: calc(78vh - 49px); overflow-y: auto; padding-bottom: max(14px, env(safe-area-inset-bottom)); }
     .inboxGroup { position: sticky; top: 0; z-index: 1; padding: 8px 12px 6px; border-bottom: 1px solid #e3e7ed; background: #fff; color: #747d8b; font-size: 10px; font-weight: 900; text-transform: uppercase; }
     .inboxItem { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; align-items: center; min-height: 62px; padding: 9px 12px; border: 0; border-bottom: 1px solid #e3e7ed; border-radius: 0; color: inherit; text-align: left; }
@@ -582,6 +768,8 @@ _MOBILE_HTML = r"""<!doctype html>
     .subagentTurns { display: flex; flex-direction: column; gap: 6px; padding: 0 2px 12px; }
     .subagent-turn { padding: 8px; border-left: 2px solid #c8d1dc; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
     .status { font-size: 12px; color: #596070; min-height: 18px; }
+    .toast { position: fixed; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); z-index: 20; display: none; width: max-content; max-width: calc(100vw - 32px); padding: 9px 12px; transform: translateX(-50%); border-radius: 8px; background: #17191f; color: #fff; font-size: 12px; box-shadow: 0 8px 24px rgb(0 0 0 / 24%); }
+    .toast.show { display: block; }
     @media (prefers-color-scheme: dark) {
       body { background: #11151c; color: #f4f6f9; }
       header, select, textarea, input, button { background: #171d27; color: #f4f6f9; border-color: #303846; }
@@ -590,8 +778,7 @@ _MOBILE_HTML = r"""<!doctype html>
       .session-card { border-color: #303846; }
       .session-subtitle, .chat-subtitle { color: #a5adba; }
       .session-preview { color: #d6dbe4; }
-      .iconBtn, .menuPanel button { color: #d6dbe4; }
-      .menuPanel { background: #171d27; border-color: #303846; box-shadow: 0 8px 24px rgb(0 0 0 / 35%); }
+      .iconBtn, .servicesBtn { color: #d6dbe4; }
       .project-chip { color: #a5adba; }
       .project-chip.active { background: #f4f6f9; border-color: #f4f6f9; color: #17191f; }
       .source-tabs { background: #0d1117; }
@@ -605,8 +792,8 @@ _MOBILE_HTML = r"""<!doctype html>
       .turn.output { background: #080c12; }
       .turn a, .subagent-turn a { color: #78aaff; }
       .olderMessagesBtn { border-color: #3b4658; color: #a5adba; }
-      .newMessagesBtn, .suggestions, .bottomSheet, .inboxGroup { background: #171d27; border-color: #303846; }
-      .suggestion + .suggestion, .sheetHeader, .subagentItem, .inboxItem { border-color: #303846; }
+      .newMessagesBtn, .suggestions, .bottomSheet, .inboxGroup, .sessionControlBtn { background: #171d27; border-color: #303846; }
+      .suggestion + .suggestion, .sheetHeader, .subagentItem, .inboxItem, .serviceItem { border-color: #303846; }
       .suggestion-description, .suggestion-kind, .subagentStatus, .subagentPreview, .inboxItemCopy small, .inboxState { color: #a5adba; }
       button { color: #78aaff; }
       button.primary { background: #2f7eea; border-color: #2f7eea; color: white; }
@@ -625,23 +812,15 @@ _MOBILE_HTML = r"""<!doctype html>
   </section>
   <div id="mobileApp">
     <header>
-      <button class="iconBtn backBtn" id="backBtn" type="button" title="세션 목록" aria-label="세션 목록으로" style="display:none">&#8592;</button>
-      <h1>Marina</h1>
-      <div class="menuWrap">
-        <button class="iconBtn" id="menuBtn" type="button" title="메뉴" aria-label="메뉴" aria-expanded="false">&#9776;</button>
-        <div class="menuPanel" id="menuPanel">
-          <button id="inboxMenuBtn" type="button">받은 작업 <span id="inboxCount">0</span></button>
-          <button id="subagentMenuBtn" type="button" style="display:none">작업 에이전트 <span id="subagentCount">0</span></button>
-          <button id="refreshBtn" type="button">새로고침</button>
-          <button id="notifyBtn" type="button">알림</button>
-          <button id="logoutBtn" type="button">로그아웃</button>
-        </div>
+      <div class="shellRow">
+        <button class="iconBtn backBtn" id="backBtn" type="button" title="세션 목록" aria-label="세션 목록으로" style="display:none">&#8592;</button>
+        <div class="project-strip" id="projectTabs" aria-label="프로젝트"></div>
+        <button class="servicesBtn" id="servicesBtn" type="button" aria-label="서비스 상태">서버 <span id="servicesCount">-/-</span></button>
       </div>
+      <div class="source-tabs" id="sourceTabs" aria-label="세션 종류"></div>
     </header>
     <main>
       <section id="listView">
-        <div class="project-strip" id="projectTabs" aria-label="프로젝트"></div>
-        <div class="source-tabs" id="sourceTabs" aria-label="세션 종류"></div>
         <input class="search-input" id="sessionSearch" aria-label="세션 검색" placeholder="세션 검색" />
         <div class="session-list" id="sessionList"></div>
       </section>
@@ -658,16 +837,22 @@ _MOBILE_HTML = r"""<!doctype html>
       </section>
     </main>
     <div class="chatComposer" id="chatComposer" style="display:none">
+      <div class="sessionControls">
+        <button class="sessionControlBtn" id="settingsBtn" type="button">모델 · 기본값</button>
+        <button class="sessionControlBtn" id="subagentSessionBtn" type="button" style="display:none">서브에이전트 <span id="subagentCount">0</span></button>
+        <div class="status" id="status" aria-live="polite"></div>
+        <button class="stopBtn" id="stopBtn" type="button" title="현재 응답 중단" aria-label="현재 응답 중단">&#9632;</button>
+      </div>
       <div class="suggestions" id="suggestions" role="listbox"></div>
       <div class="composerRow">
         <textarea id="prompt" rows="1" placeholder="메시지" enterkeyhint="send"></textarea>
         <button class="primary sendBtn" id="sendBtn" type="button" title="보내기" aria-label="보내기">&#8593;</button>
       </div>
-      <div class="composerMeta"><div class="status" id="status" aria-live="polite"></div><button class="retryBtn" id="retryBtn" type="button">다시 보내기</button></div>
+      <div class="composerMeta"><button class="retryBtn" id="retryBtn" type="button">다시 보내기</button></div>
     </div>
     <div class="sheetBackdrop" id="subagentSheet" aria-hidden="true">
       <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="subagentSheetTitle">
-        <div class="sheetHeader"><strong id="subagentSheetTitle">작업 에이전트</strong><button class="iconBtn sheetClose" id="subagentCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+        <div class="sheetHeader"><strong id="subagentSheetTitle">서브에이전트</strong><button class="iconBtn sheetClose" id="subagentCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
         <div class="subagentList" id="subagentList"></div>
       </section>
     </div>
@@ -677,6 +862,24 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="inboxList" id="inboxList"></div>
       </section>
     </div>
+    <div class="sheetBackdrop" id="servicesSheet" aria-hidden="true">
+      <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="servicesSheetTitle">
+        <div class="sheetHeader"><strong id="servicesSheetTitle">서비스</strong><button class="iconBtn sheetClose" id="servicesCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+        <div class="serviceList"><div id="serviceList"></div><div class="serviceUtilities"><button id="inboxMenuBtn" type="button">받은 작업 <span id="inboxCount">0</span></button><button id="refreshBtn" type="button">새로고침</button><button id="logoutBtn" type="button">로그아웃</button></div></div>
+      </section>
+    </div>
+    <div class="sheetBackdrop" id="settingsSheet" aria-hidden="true">
+      <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="settingsSheetTitle">
+        <div class="sheetHeader"><strong id="settingsSheetTitle">세션 설정</strong><button class="iconBtn sheetClose" id="settingsCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+        <form class="settingsBody" id="settingsForm">
+          <label>모델<select id="modelSelect"></select></label>
+          <label id="customModelLabel" style="display:none">모델 이름<input id="customModelInput" autocomplete="off" autocapitalize="none" spellcheck="false" /></label>
+          <label>에포트<select id="effortSelect"></select></label>
+          <button class="primary" type="submit">적용</button>
+        </form>
+      </section>
+    </div>
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </div>
   <script>
     const cookieAuth = __MARINA_AUTH_ENABLED__;
@@ -704,8 +907,6 @@ _MOBILE_HTML = r"""<!doctype html>
     const chatView = document.getElementById("chatView");
     const chatComposer = document.getElementById("chatComposer");
     const backBtn = document.getElementById("backBtn");
-    const menuBtn = document.getElementById("menuBtn");
-    const menuPanel = document.getElementById("menuPanel");
     const chatTitle = document.getElementById("chatTitle");
     const chatSubtitle = document.getElementById("chatSubtitle");
     const rootSelect = document.getElementById("rootSelect");
@@ -721,7 +922,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const newMessagesBtn = document.getElementById("newMessagesBtn");
     const retryBtn = document.getElementById("retryBtn");
     const sendBtn = document.getElementById("sendBtn");
-    const subagentMenuBtn = document.getElementById("subagentMenuBtn");
+    const subagentSessionBtn = document.getElementById("subagentSessionBtn");
     const subagentCount = document.getElementById("subagentCount");
     const subagentSheet = document.getElementById("subagentSheet");
     const subagentList = document.getElementById("subagentList");
@@ -730,7 +931,21 @@ _MOBILE_HTML = r"""<!doctype html>
     const inboxSheet = document.getElementById("inboxSheet");
     const inboxList = document.getElementById("inboxList");
     const statusEl = document.getElementById("status");
-    let state = {worktrees: [], terms: []};
+    const servicesBtn = document.getElementById("servicesBtn");
+    const servicesCount = document.getElementById("servicesCount");
+    const servicesSheet = document.getElementById("servicesSheet");
+    const serviceList = document.getElementById("serviceList");
+    const settingsBtn = document.getElementById("settingsBtn");
+    const settingsSheet = document.getElementById("settingsSheet");
+    const settingsForm = document.getElementById("settingsForm");
+    const modelSelect = document.getElementById("modelSelect");
+    const customModelLabel = document.getElementById("customModelLabel");
+    const customModelInput = document.getElementById("customModelInput");
+    const effortSelect = document.getElementById("effortSelect");
+    const stopBtn = document.getElementById("stopBtn");
+    const toastEl = document.getElementById("toast");
+    let state = {worktrees: [], terms: [], sessions: [], agentOptions: {}};
+    let servicesState = {root: "", running: 0, defined: 0, services: []};
     const autoPollMs = 3000;
     let loading = false;
     let sending = false;
@@ -747,6 +962,10 @@ _MOBILE_HTML = r"""<!doctype html>
     let fileSuggestionTimer = 0;
     let fileSuggestionKey = "";
     let fileSuggestions = [];
+    let serviceLoading = false;
+    let serviceLoadedAt = 0;
+    let exitArmedUntil = 0;
+    let toastTimer = 0;
     const inboxReadKey = "marinaAgentInboxRead";
     let inboxRead;
     try {
@@ -755,6 +974,8 @@ _MOBILE_HTML = r"""<!doctype html>
     } catch (_) { inboxRead = new Set(); }
     const pendingTurns = {};
     const historyCache = {};
+    const expandedTurnIds = new Set();
+    const collapsedTurnIds = new Set();
     let historyLoading = false;
     const sourceMeta = {
       codex: {label: "Codex", badge: "CX"},
@@ -768,27 +989,23 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function showApp() {
       login.style.display = "none";
-      app.style.display = "flex";
+      app.style.display = "grid";
     }
     function showList() {
       listView.style.display = "flex";
       chatView.style.display = "none";
       chatComposer.style.display = "none";
       backBtn.style.display = "none";
-      closeMenu();
       closeSubagents();
       closeInbox();
     }
     function showChat() {
       listView.style.display = "none";
-      chatView.style.display = "flex";
+      chatView.style.display = "grid";
       chatComposer.style.display = "flex";
       backBtn.style.display = "inline-block";
     }
-    function closeMenu() {
-      menuPanel.classList.remove("open");
-      menuBtn.setAttribute("aria-expanded", "false");
-    }
+    function closeMenu() {}
     function closeSubagents() {
       subagentSheet.classList.remove("open");
       subagentSheet.setAttribute("aria-hidden", "true");
@@ -797,11 +1014,36 @@ _MOBILE_HTML = r"""<!doctype html>
       inboxSheet.classList.remove("open");
       inboxSheet.setAttribute("aria-hidden", "true");
     }
+    function closeServices() {
+      servicesSheet.classList.remove("open");
+      servicesSheet.setAttribute("aria-hidden", "true");
+    }
+    function closeSettings() {
+      settingsSheet.classList.remove("open");
+      settingsSheet.setAttribute("aria-hidden", "true");
+    }
+    function showToast(message) {
+      clearTimeout(toastTimer);
+      toastEl.textContent = message;
+      toastEl.classList.add("show");
+      toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1800);
+    }
+    function syncVisualViewport() {
+      const viewport = window.visualViewport;
+      const height = viewport ? viewport.height : window.innerHeight;
+      app.style.setProperty("--app-height", `${Math.round(height)}px`);
+    }
+    syncVisualViewport();
+    if (window.visualViewport) {
+      window.visualViewport.addEventListener("resize", syncVisualViewport);
+      window.visualViewport.addEventListener("scroll", syncVisualViewport);
+    }
+    window.addEventListener("resize", syncVisualViewport);
     async function logout() {
       localStorage.removeItem("marinaMobileToken");
       localStorage.removeItem("marinaMobileDraft");
       Object.keys(localStorage).filter(key => key.startsWith("marinaMobileDraft:")).forEach(key => localStorage.removeItem(key));
-      state = {worktrees: [], terms: []};
+      state = {worktrees: [], terms: [], sessions: [], agentOptions: {}};
       rootSelect.innerHTML = "";
       targetSelect.innerHTML = "";
       promptInput.value = "";
@@ -821,13 +1063,19 @@ _MOBILE_HTML = r"""<!doctype html>
     function esc(value) {
       return String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
     }
+    function renderInlineMarkdown(value) {
+      return esc(value)
+        .replace(/`([^`\n]+)`/g, "<code>$1</code>")
+        .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
+        .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    }
     function renderRichText(value) {
       const text = String(value ?? "");
       const pattern = /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)|(https?:\/\/[^\s<>]+)/g;
       let html = "";
       let cursor = 0;
       for (const match of text.matchAll(pattern)) {
-        html += esc(text.slice(cursor, match.index));
+        html += renderInlineMarkdown(text.slice(cursor, match.index));
         const label = match[1] || match[3];
         let url = match[2] || match[3];
         let suffix = "";
@@ -838,10 +1086,10 @@ _MOBILE_HTML = r"""<!doctype html>
             url = url.slice(0, -suffix.length);
           }
         }
-        html += `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${esc(label.slice(0, label.length - suffix.length))}</a>${esc(suffix)}`;
+        html += `<a href="${esc(url)}" target="_blank" rel="noopener noreferrer">${renderInlineMarkdown(label.slice(0, label.length - suffix.length))}</a>${esc(suffix)}`;
         cursor = match.index + match[0].length;
       }
-      html += esc(text.slice(cursor));
+      html += renderInlineMarkdown(text.slice(cursor));
       return html.replace(/\n/g, "<br>");
     }
     function draftKey(sessionKey=selectedSessionKey) {
@@ -865,10 +1113,10 @@ _MOBILE_HTML = r"""<!doctype html>
       promptInput.style.height = `${Math.min(promptInput.scrollHeight, 132)}px`;
     }
     function nearPageBottom() {
-      return window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 120;
+      return turnsEl.scrollTop + turnsEl.clientHeight >= turnsEl.scrollHeight - 120;
     }
-    function scrollToLatest() {
-      window.scrollTo({top: document.documentElement.scrollHeight, behavior: "smooth"});
+    function scrollToLatest(behavior="auto") {
+      turnsEl.scrollTo({top: turnsEl.scrollHeight, behavior});
       newMessagesBtn.style.display = "none";
     }
     function closeSuggestions() {
@@ -884,21 +1132,6 @@ _MOBILE_HTML = r"""<!doctype html>
       if (element.innerHTML === html) return false;
       element.innerHTML = html;
       return true;
-    }
-    function notifyChange(text) {
-      if (!text || text === "(터미널 없음)") return;
-      if ("vibrate" in navigator) navigator.vibrate(40);
-      if ("Notification" in window && Notification.permission === "granted") {
-        new Notification("Marina", { body: text.slice(-140) });
-      }
-    }
-    async function enableNotify() {
-      if (!("Notification" in window)) {
-        statusEl.textContent = "브라우저 알림 미지원";
-        return;
-      }
-      const permission = Notification.permission === "default" ? await Notification.requestPermission() : Notification.permission;
-      statusEl.textContent = permission === "granted" ? "알림 켜짐" : "알림 꺼짐";
     }
     function labelWt(w) { return [w.alias, w.sessionTitle, w.projectLabel, w.id].filter(Boolean).join(" · ") || w.root; }
     function projectId(w) { return String(w.projectId || w.projectLabel || w.alias || w.root || w.id || ""); }
@@ -949,7 +1182,6 @@ _MOBILE_HTML = r"""<!doctype html>
     function chooseSession(key) {
       const s = (state.sessions || []).find(item => item.key === key);
       if (!s) return;
-      closeMenu();
       if (key !== selectedSessionKey) clearFailedSend();
       selectedSessionKey = key;
       turnsStructureKey = "";
@@ -968,7 +1200,10 @@ _MOBILE_HTML = r"""<!doctype html>
         targetSelect.value = value;
       }
       showChat();
+      if (history.state && history.state.view === "chat") history.replaceState({view: "chat"}, "", location.href);
+      else history.pushState({view: "chat"}, "", location.href);
       render();
+      requestAnimationFrame(() => scrollToLatest("auto"));
     }
     function targetValue(target) {
       if (!target) return "shell";
@@ -1179,8 +1414,8 @@ _MOBILE_HTML = r"""<!doctype html>
       historyLoading = true;
       olderMessagesBtn.disabled = true;
       olderMessagesBtn.textContent = "불러오는 중";
-      const oldHeight = document.documentElement.scrollHeight;
-      const oldY = window.scrollY;
+      const oldHeight = turnsEl.scrollHeight;
+      const oldY = turnsEl.scrollTop;
       try {
         const params = new URLSearchParams({root: session.root, source: session.source, sid: session.sid, before: String(history.cursor)});
         const response = await fetch(`/mobile/api/transcript?${params}`, {headers: headers()});
@@ -1191,7 +1426,7 @@ _MOBILE_HTML = r"""<!doctype html>
         history.hasMore = Boolean(page.hasMore);
         turnsStructureKey = "";
         renderTurns(session);
-        requestAnimationFrame(() => window.scrollTo({top: oldY + document.documentElement.scrollHeight - oldHeight}));
+        requestAnimationFrame(() => { turnsEl.scrollTop = oldY + turnsEl.scrollHeight - oldHeight; });
       } catch (error) {
         statusEl.textContent = `이전 메시지 실패 · ${String(error)}`;
       } finally {
@@ -1226,7 +1461,17 @@ _MOBILE_HTML = r"""<!doctype html>
       if (nextKey === turnsStructureKey) return;
       const wasNearBottom = nearPageBottom();
       const hadTurns = Boolean(turnsStructureKey);
-      turnsEl.innerHTML = turns.map(t => `<div class="turn ${t.role === "user" ? "user" : t.role === "output" ? "output" : "assistant"}">${renderRichText(t.text || "")}</div>`).join("");
+      turnsEl.innerHTML = turns.map((t, index) => {
+        const text = String(t.text || "");
+        const id = `${selectedSessionKey}:${t.id || index}:${t.role || "assistant"}`;
+        const long = text.length > 420 || text.split("\n").length > 8;
+        const recent = index >= turns.length - 2;
+        const expanded = !long || expandedTurnIds.has(id) || (recent && !collapsedTurnIds.has(id));
+        const body = expanded ? renderRichText(text) : `${renderRichText(text.slice(0, 280).trimEnd())}&hellip;`;
+        const toggle = long ? `<button class="turnToggle" type="button" data-turn-toggle="${esc(id)}" data-expanded="${expanded ? "1" : "0"}">${expanded ? "접기" : "펼치기"}</button>` : "";
+        const role = t.role === "user" ? "user" : t.role === "output" ? "output" : "assistant";
+        return `<div class="turn ${role}"><div class="turnBody">${body}</div>${toggle}</div>`;
+      }).join("");
       turnsStructureKey = nextKey;
       requestAnimationFrame(() => {
         if (!hadTurns || wasNearBottom) scrollToLatest();
@@ -1236,7 +1481,7 @@ _MOBILE_HTML = r"""<!doctype html>
     function renderSubagents(session) {
       const subagents = (session && session.subagents) || [];
       subagentCount.textContent = String(subagents.length);
-      subagentMenuBtn.style.display = session && session.kind === "agent" ? "block" : "none";
+      subagentSessionBtn.style.display = subagents.length ? "inline-block" : "none";
       if (!subagents.length) {
         updateHtmlIfChanged(subagentList, '<div class="empty-state">이 세션의 작업 에이전트 기록이 없습니다.</div>');
         return;
@@ -1254,10 +1499,163 @@ _MOBILE_HTML = r"""<!doctype html>
       }
     }
     function openSubagents() {
-      closeMenu();
       renderSubagents(selectedSession());
       subagentSheet.classList.add("open");
       subagentSheet.setAttribute("aria-hidden", "false");
+    }
+    function renderServiceState() {
+      servicesCount.textContent = `${servicesState.running || 0}/${servicesState.defined || 0}`;
+      const labels = {running: "실행 중", starting: "시작 중", stopped: "정지", error: "오류"};
+      const html = (servicesState.services || []).map(item => {
+        const running = Boolean(item.running);
+        const stateLabel = labels[item.state] || item.state || (running ? "실행 중" : "정지");
+        const reason = item.stateReason ? ` · ${item.stateReason}` : item.port ? ` · :${item.port}` : "";
+        return `<div class="serviceItem" data-service-row="${esc(item.service)}">
+          <div><div class="serviceName">${esc(item.service)}</div><div class="serviceState">${esc(stateLabel + reason)}</div></div>
+          <div class="serviceActions">
+            ${item.openUrl ? `<button type="button" data-service-open="${esc(item.openUrl)}" title="웹 열기" aria-label="${esc(item.service)} 웹 열기">&#8599;</button>` : ""}
+            ${running ? `<button type="button" data-service-action="restart" data-service="${esc(item.service)}" title="재시작" aria-label="${esc(item.service)} 재시작">&#8635;</button><button type="button" data-service-action="stop" data-service="${esc(item.service)}" title="중지" aria-label="${esc(item.service)} 중지">&#9632;</button>` : `<button type="button" data-service-action="start" data-service="${esc(item.service)}" title="시작" aria-label="${esc(item.service)} 시작">&#9654;</button>`}
+          </div>
+        </div>`;
+      }).join("");
+      updateHtmlIfChanged(serviceList, html || '<div class="empty-state">이 워크트리에 정의된 서비스가 없습니다.</div>');
+    }
+    async function loadServices(force=false) {
+      const root = selectedRoot();
+      if (!root || serviceLoading) return;
+      if (!force && servicesState.root === root && Date.now() - serviceLoadedAt < 8000) {
+        renderServiceState();
+        return;
+      }
+      serviceLoading = true;
+      try {
+        const params = new URLSearchParams({root});
+        const response = await fetch(`/mobile/api/services?${params}`, {headers: headers()});
+        if (!response.ok) throw new Error(await response.text());
+        servicesState = await response.json();
+        serviceLoadedAt = Date.now();
+        renderServiceState();
+      } catch (error) {
+        servicesCount.textContent = "!";
+        if (servicesSheet.classList.contains("open")) {
+          serviceList.innerHTML = `<div class="empty-state">서비스 상태를 불러오지 못했습니다.<br>${esc(String(error))}</div>`;
+        }
+      } finally {
+        serviceLoading = false;
+      }
+    }
+    async function runServiceAction(service, action) {
+      const button = serviceList.querySelector(`[data-service="${CSS.escape(service)}"][data-service-action="${CSS.escape(action)}"]`);
+      if (button) button.disabled = true;
+      try {
+        const response = await fetch("/mobile/api/services/action", {
+          method: "POST", headers: headers(true),
+          body: JSON.stringify({root: selectedRoot(), service, action}),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        showToast(action === "stop" ? `${service} 중지 요청` : action === "restart" ? `${service} 재시작 요청` : `${service} 시작 요청`);
+        serviceLoadedAt = 0;
+        setTimeout(() => loadServices(true), action === "stop" ? 300 : 900);
+      } catch (error) {
+        showToast(`서비스 제어 실패 · ${String(error)}`);
+      } finally {
+        if (button) button.disabled = false;
+      }
+    }
+    function openServices() {
+      closeInbox();
+      closeSettings();
+      servicesSheet.classList.add("open");
+      servicesSheet.setAttribute("aria-hidden", "false");
+      loadServices(true);
+    }
+    function sessionStatusText(session) {
+      if (!session || session.kind !== "agent") return "";
+      const labels = {working: "작업 중", blocked: "응답 필요", waiting: "응답 대기", completed: "완료", failed: "실패", interrupted: "중단됨", idle: "대기"};
+      let text = labels[session.status] || session.status || "대기";
+      if (session.status === "working" && session.statusTs) {
+        const elapsed = Math.max(0, Math.round(Date.now() / 1000 - Number(session.statusTs)));
+        text += elapsed < 60 ? ` · ${elapsed}초` : ` · ${Math.floor(elapsed / 60)}분`;
+      }
+      return text;
+    }
+    function renderSessionControls(session) {
+      const isAgent = Boolean(session && session.kind === "agent");
+      settingsBtn.style.display = isAgent ? "inline-block" : "none";
+      if (isAgent) {
+        const current = (session.settings && session.settings.current) || {model: "", effort: ""};
+        const pending = (session.settings && session.settings.pending) || {model: "", effort: ""};
+        const currentLabel = `${current.model || "기본 모델"}${current.effort ? ` · ${current.effort}` : ""}`;
+        const pendingLabel = pending.model || pending.effort ? ` → 다음 ${pending.model || "기본 모델"}${pending.effort ? ` · ${pending.effort}` : ""}` : "";
+        settingsBtn.textContent = `${sourceMeta[sessionSource(session)].label} · ${currentLabel}${pendingLabel}`;
+      }
+      const running = isAgent && session.status === "working" && session.controllable;
+      stopBtn.style.display = running ? "inline-block" : "none";
+      if (!sending) statusEl.textContent = sessionStatusText(session);
+    }
+    function sourceOptions(session) {
+      return (state.agentOptions || {})[sessionSource(session)] || {models: [], efforts: [], manualModel: true};
+    }
+    function updateEffortChoices(session, selected="") {
+      const options = sourceOptions(session);
+      const model = modelSelect.value === "__custom__" ? customModelInput.value.trim() : modelSelect.value;
+      const modelItem = (options.models || []).find(item => item.value === model);
+      const efforts = (modelItem && modelItem.efforts && modelItem.efforts.length) ? modelItem.efforts : (options.efforts || []);
+      effortSelect.innerHTML = `<option value="">CLI 기본값</option>${efforts.map(value => `<option value="${esc(value)}">${esc(value)}</option>`).join("")}`;
+      if ([...effortSelect.options].some(item => item.value === selected)) effortSelect.value = selected;
+    }
+    function openSettings() {
+      const session = selectedSession();
+      if (!session || session.kind !== "agent") return;
+      closeServices();
+      const options = sourceOptions(session);
+      const current = (session.settings && session.settings.current) || {model: "", effort: ""};
+      const pending = (session.settings && session.settings.pending) || {model: "", effort: ""};
+      const selected = pending.model || pending.effort ? pending : current;
+      const known = (options.models || []).some(item => item.value === selected.model);
+      modelSelect.innerHTML = `<option value="">CLI 기본값</option>${(options.models || []).map(item => `<option value="${esc(item.value)}">${esc(item.label || item.value)}</option>`).join("")}<option value="__custom__">직접 입력</option>`;
+      modelSelect.value = selected.model && known ? selected.model : selected.model ? "__custom__" : "";
+      customModelInput.value = selected.model && !known ? selected.model : "";
+      customModelLabel.style.display = modelSelect.value === "__custom__" ? "flex" : "none";
+      updateEffortChoices(session, selected.effort || "");
+      settingsSheet.classList.add("open");
+      settingsSheet.setAttribute("aria-hidden", "false");
+    }
+    async function saveSettings() {
+      const session = selectedSession();
+      if (!session || session.kind !== "agent") return;
+      const model = modelSelect.value === "__custom__" ? customModelInput.value.trim() : modelSelect.value;
+      const effort = effortSelect.value;
+      const response = await fetch("/mobile/api/settings", {
+        method: "POST", headers: headers(true),
+        body: JSON.stringify({root: session.root, source: session.source, sid: session.sid, model, effort}),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const result = await response.json();
+      session.settings = session.settings || {current: {model: "", effort: ""}, pending: {model: "", effort: ""}};
+      session.settings.pending = {model: result.model || "", effort: result.effort || ""};
+      closeSettings();
+      renderSessionControls(session);
+      showToast("다음 resume 1회에 적용됩니다");
+    }
+    async function interruptCurrentTurn() {
+      const session = selectedSession();
+      if (!session || !session.controllable) return;
+      stopBtn.disabled = true;
+      try {
+        const response = await fetch("/mobile/api/interrupt", {
+          method: "POST", headers: headers(true),
+          body: JSON.stringify({root: session.root, target: session.target}),
+        });
+        if (!response.ok) throw new Error(await response.text());
+        statusEl.textContent = "중단 요청됨";
+        showToast("현재 응답을 중단했습니다");
+        setTimeout(() => load({quiet: true}), 400);
+      } catch (error) {
+        showToast(`중단 실패 · ${String(error)}`);
+      } finally {
+        stopBtn.disabled = false;
+      }
     }
     function inboxEventId(session) {
       return `${session.source || ""}:${session.sid || ""}:${session.status || "idle"}:${session.statusTs || session.ts || 0}`;
@@ -1303,8 +1701,8 @@ _MOBILE_HTML = r"""<!doctype html>
       updateHtmlIfChanged(inboxList, html || '<div class="empty-state">확인할 에이전트 작업이 없습니다.</div>');
     }
     function openInbox() {
-      closeMenu();
       closeSubagents();
+      closeServices();
       inboxSheet.classList.add("open");
       inboxSheet.setAttribute("aria-hidden", "false");
       renderInbox();
@@ -1416,14 +1814,11 @@ _MOBILE_HTML = r"""<!doctype html>
       restoreDraft();
       renderTurns(session);
       renderSubagents(session);
+      renderSessionControls(session);
       const source = sessionSource(session);
       promptInput.placeholder = source === "claude" ? "Claude에 메시지" : source === "codex" ? "Codex에 메시지" : "터미널에 입력";
-      const sessionTurns = (session && session.turns) || [];
-      const activityText = sessionTurns.length ? String(sessionTurns[sessionTurns.length - 1].text || "") : String((session && session.preview) || "");
-      if (sawActivity && activityText && activityText !== lastActivity) notifyChange(activityText);
-      lastActivity = activityText;
-      sawActivity = true;
       if (document.activeElement === promptInput) renderSuggestions();
+      loadServices(false);
     }
     async function load(options={}) {
       if (!cookieAuth && !token()) {
@@ -1449,7 +1844,7 @@ _MOBILE_HTML = r"""<!doctype html>
         state = await r.json();
         showApp();
         render();
-        if (!options.quiet) statusEl.textContent = "준비됨";
+        if (!options.quiet && !selectedSession()) statusEl.textContent = "준비됨";
       } finally {
         loading = false;
       }
@@ -1470,7 +1865,7 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       const requestContext = {root: selectedRoot(), sessionKey: selectedSessionKey, text, target, draftKey: activeDraftKey};
       const requestIsActive = () => selectedSessionKey === requestContext.sessionKey && selectedRoot() === requestContext.root;
-      statusEl.textContent = "보내는 중...";
+      statusEl.textContent = selectedSession() && selectedSession().controllable ? "지시 추가 중..." : "보내는 중...";
       sending = true;
       sendBtn.disabled = true;
       retryBtn.style.display = "none";
@@ -1497,6 +1892,7 @@ _MOBILE_HTML = r"""<!doctype html>
       } finally {
         sending = false;
         sendBtn.disabled = false;
+        renderSessionControls(selectedSession());
       }
     }
     promptInput.oninput = () => {
@@ -1516,6 +1912,11 @@ _MOBILE_HTML = r"""<!doctype html>
         send();
       }
     };
+    promptInput.onfocus = () => {
+      syncVisualViewport();
+      requestAnimationFrame(() => scrollToLatest("auto"));
+      setTimeout(() => scrollToLatest("auto"), 180);
+    };
     function isEditing() {
       return [rootSelect, targetSelect, sessionSearch].includes(document.activeElement);
     }
@@ -1530,14 +1931,6 @@ _MOBILE_HTML = r"""<!doctype html>
       loginStatus.textContent = "확인 중...";
       load().catch(e => showLogin(String(e)));
     };
-    menuBtn.onclick = event => {
-      event.stopPropagation();
-      const open = !menuPanel.classList.contains("open");
-      menuPanel.classList.toggle("open", open);
-      menuBtn.setAttribute("aria-expanded", open ? "true" : "false");
-    };
-    menuPanel.onclick = event => event.stopPropagation();
-    document.addEventListener("click", closeMenu);
     suggestionsEl.onclick = event => {
       const item = event.target.closest("[data-suggestion]");
       if (!item) return;
@@ -1549,15 +1942,24 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!btn || !projectTabs.contains(btn)) return;
       selectedProjectId = btn.getAttribute("data-project") || "";
       localStorage.setItem("marinaMobileProject", selectedProjectId);
+      const nextRoot = state.worktrees.find(item => projectId(item) === selectedProjectId);
+      if (nextRoot) {
+        rootSelect.value = nextRoot.root;
+        localStorage.setItem("marinaMobileRoot", nextRoot.root);
+      }
+      servicesState = {root: "", running: 0, defined: 0, services: []};
+      if (selectedSession() && sessionProjectId(selectedSession()) !== selectedProjectId) leaveChat(false);
       renderProjectTabs();
       renderSourceTabs();
       renderSessions();
+      loadServices(true);
     };
     sourceTabs.onclick = event => {
       const btn = event.target.closest("[data-source]");
       if (!btn || !sourceTabs.contains(btn)) return;
       sourceFilter = btn.getAttribute("data-source") || "all";
       localStorage.setItem("marinaMobileSource", sourceFilter);
+      if (selectedSession() && sourceFilter !== "all" && sessionSource(selectedSession()) !== sourceFilter) leaveChat(false);
       renderSourceTabs();
       renderSessions();
     };
@@ -1566,10 +1968,23 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!btn || !sessionList.contains(btn)) return;
       chooseSession(btn.getAttribute("data-key"));
     };
-    document.getElementById("refreshBtn").onclick = () => { closeMenu(); load().catch(e => statusEl.textContent = String(e)); };
-    backBtn.onclick = () => { saveDraft(); clearFailedSend(); selectedSessionKey = ""; activeDraftKey = ""; turnsStructureKey = ""; localStorage.removeItem("marinaMobileSession"); showList(); renderProjectTabs(); renderSourceTabs(); renderSessions(); };
-    document.getElementById("logoutBtn").onclick = () => { closeMenu(); logout(); };
-    document.getElementById("notifyBtn").onclick = () => { closeMenu(); enableNotify().catch(e => statusEl.textContent = String(e)); };
+    document.getElementById("refreshBtn").onclick = () => { closeServices(); load().catch(e => statusEl.textContent = String(e)); };
+    function leaveChat(updateHistory=true) {
+      saveDraft();
+      clearFailedSend();
+      selectedSessionKey = "";
+      activeDraftKey = "";
+      turnsStructureKey = "";
+      localStorage.removeItem("marinaMobileSession");
+      showList();
+      renderProjectTabs();
+      renderSourceTabs();
+      renderSessions();
+      if (updateHistory && history.state && history.state.view === "chat") history.back();
+      else if (!updateHistory && history.state && history.state.view === "chat") history.replaceState({view: "list"}, "", location.href);
+    }
+    backBtn.onclick = () => leaveChat(true);
+    document.getElementById("logoutBtn").onclick = () => { closeServices(); logout(); };
     sendBtn.onclick = () => send();
     retryBtn.onclick = () => {
       if (!failedSend || failedSend.sessionKey !== selectedSessionKey || failedSend.root !== selectedRoot()) { clearFailedSend(); return; }
@@ -1580,6 +1995,20 @@ _MOBILE_HTML = r"""<!doctype html>
     };
     newMessagesBtn.onclick = scrollToLatest;
     olderMessagesBtn.onclick = loadOlderMessages;
+    turnsEl.onclick = event => {
+      const toggle = event.target.closest("[data-turn-toggle]");
+      if (!toggle) return;
+      const id = toggle.getAttribute("data-turn-toggle") || "";
+      if (toggle.getAttribute("data-expanded") === "1") {
+        expandedTurnIds.delete(id);
+        collapsedTurnIds.add(id);
+      } else {
+        collapsedTurnIds.delete(id);
+        expandedTurnIds.add(id);
+      }
+      turnsStructureKey = "";
+      renderTurns(selectedSession());
+    };
     inboxMenuBtn.onclick = openInbox;
     inboxList.onclick = event => {
       const item = event.target.closest("[data-inbox-id]");
@@ -1587,19 +2016,65 @@ _MOBILE_HTML = r"""<!doctype html>
     };
     document.getElementById("inboxCloseBtn").onclick = closeInbox;
     inboxSheet.onclick = event => { if (event.target === inboxSheet) closeInbox(); };
-    subagentMenuBtn.onclick = openSubagents;
+    subagentSessionBtn.onclick = openSubagents;
     document.getElementById("subagentCloseBtn").onclick = closeSubagents;
     subagentSheet.onclick = event => { if (event.target === subagentSheet) closeSubagents(); };
+    servicesBtn.onclick = openServices;
+    document.getElementById("servicesCloseBtn").onclick = closeServices;
+    servicesSheet.onclick = event => { if (event.target === servicesSheet) closeServices(); };
+    serviceList.onclick = event => {
+      const open = event.target.closest("[data-service-open]");
+      if (open) {
+        window.open(open.getAttribute("data-service-open"), "_blank", "noopener");
+        return;
+      }
+      const action = event.target.closest("[data-service-action]");
+      if (action) runServiceAction(action.getAttribute("data-service") || "", action.getAttribute("data-service-action") || "");
+    };
+    settingsBtn.onclick = openSettings;
+    document.getElementById("settingsCloseBtn").onclick = closeSettings;
+    settingsSheet.onclick = event => { if (event.target === settingsSheet) closeSettings(); };
+    modelSelect.onchange = () => {
+      customModelLabel.style.display = modelSelect.value === "__custom__" ? "flex" : "none";
+      updateEffortChoices(selectedSession(), effortSelect.value);
+      if (modelSelect.value === "__custom__") customModelInput.focus();
+    };
+    customModelInput.oninput = () => updateEffortChoices(selectedSession(), effortSelect.value);
+    settingsForm.onsubmit = event => {
+      event.preventDefault();
+      saveSettings().catch(error => showToast(`설정 저장 실패 · ${String(error)}`));
+    };
+    stopBtn.onclick = interruptCurrentTurn;
     rootSelect.onchange = () => { rememberRoot(); render(); };
     targetSelect.onchange = () => { rememberTarget(); render(); };
     sessionSearch.oninput = renderSessions;
-    window.addEventListener("scroll", () => {
-      if (window.scrollY < 72 && olderMessagesBtn.style.display !== "none") loadOlderMessages();
+    turnsEl.addEventListener("scroll", () => {
+      if (turnsEl.scrollTop < 72 && olderMessagesBtn.style.display !== "none") loadOlderMessages();
     }, {passive: true});
+    if (!history.state || !history.state.view) {
+      history.replaceState({view: "base"}, "", location.href);
+      history.pushState({view: "list"}, "", location.href);
+    }
+    window.addEventListener("popstate", () => {
+      if (history.state && history.state.view === "list") {
+        if (selectedSessionKey) leaveChat(false);
+        return;
+      }
+      if (history.state && history.state.view === "chat") return;
+      if (Date.now() < exitArmedUntil) {
+        history.back();
+        return;
+      }
+      exitArmedUntil = Date.now() + 2000;
+      showToast("한 번 더 누르면 Marina를 나갑니다");
+      history.pushState({view: "list"}, "", location.href);
+    });
     setInterval(() => {
       if (document.visibilityState !== "hidden") load({quiet: true}).catch(e => statusEl.textContent = String(e));
     }, autoPollMs);
-    load().catch(e => { statusEl.textContent = `실패 · ${String(e)}`; });
+    load().then(() => {
+      if (selectedSessionKey && (!history.state || history.state.view !== "chat")) history.pushState({view: "chat"}, "", location.href);
+    }).catch(e => { statusEl.textContent = `실패 · ${String(e)}`; });
   </script>
 </body>
 </html>

@@ -35,21 +35,21 @@ The same context controls remain available in the session list and chat. Opening
 - The app uses a visual-viewport-sized shell. The transcript is the only scrolling region; the composer is a normal final grid row rather than page-fixed content.
 - `VisualViewport`, `100dvh`, and safe-area insets keep the composer above iOS and Android virtual keyboards.
 - Status above the composer distinguishes sending, working with elapsed time, waiting for input, complete, interrupted, and failed.
-- While an agent has a live Marina PTY, sending another message writes to that PTY as steering. Otherwise it starts the normal resume flow.
+- While an agent has a live Marina PTY, sending another message writes to that PTY as steering. If the same session is running in another app, terminal, or a pre-restart Marina process, mobile refuses to create an overlapping resume. Otherwise it starts the normal resume flow.
 - Stop sends Ctrl-C to the live PTY and preserves the underlying Claude/Codex session. It never kills the whole agent session.
 
 ## Session Settings
 
 - A compact control shows source, model, and effort for the selected session.
 - Claude resume receives `--model` and `--effort`; Codex resume receives `--model` and `-c model_reasoning_effort=...`.
-- Settings are persisted by session and restored on reconnect. The CLI/default configuration remains authoritative until the user chooses an override.
-- A setting changed while work is active applies to the next resume/turn and is labelled accordingly; it does not mutate the in-flight process.
+- The native Claude/Codex transcript is authoritative for the current model and effort. Marina never persists a competing current value.
+- A mobile change is persisted as a one-shot pending override for the next resume, is labelled accordingly, and is removed once that resume starts. It does not mutate an in-flight process or a turn steered through its existing PTY.
 - Model choices come from locally discoverable CLI/session metadata with a manual value fallback. Effort choices are constrained to values supported by the selected source/model when that metadata is available.
 
 ## Transcript Presentation
 
-- Markdown is rendered for headings, emphasis, lists, block quotes, links, inline code, and fenced code blocks.
-- Rendering is offline and sanitized. No remote CDN is required; raw HTML and unsafe URL schemes are removed.
+- Markdown is rendered for emphasis, links, and inline code. Raw HTML is escaped and only HTTP(S) links become anchors.
+- Rendering is offline and dependency-free. No remote CDN is required.
 - Short messages stay expanded. Older long messages default to a four-line preview; the latest user/assistant exchange and an active response stay expanded.
 - Collapsed long bodies are rendered lazily. Code blocks expose a copy action and horizontal scrolling.
 - Subagents are scoped to their parent session. A compact session row summarizes counts and state; individual subagents and their turns remain collapsed until opened.
