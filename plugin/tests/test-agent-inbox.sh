@@ -213,4 +213,160 @@ if (!summary.includes('▤ 1')) throw new Error(`blocked attention count missing
 console.log('ok desktop blocked inbox membership and attention count');
 JS
 
+PYTHONPATH="$SCR" python3 - <<'PY' | node
+import json
+from marina_mobile import render_mobile_html
+
+html = render_mobile_html()
+start = html.rfind("<script>")
+end = html.rfind("</script>")
+if start < 0 or end < 0 or end <= start:
+    raise SystemExit("mobile script boundaries missing")
+print("const mobileSource = " + json.dumps(html[start + len("<script>"):end]) + ";")
+print(r'''
+const assert = require("node:assert/strict");
+const vm = require("node:vm");
+
+class FakeClassList {
+  constructor() { this.values = new Set(); }
+  add(...values) { values.forEach(value => this.values.add(value)); }
+  remove(...values) { values.forEach(value => this.values.delete(value)); }
+  toggle(value, force) {
+    const next = force === undefined ? !this.values.has(value) : Boolean(force);
+    if (next) this.values.add(value); else this.values.delete(value);
+    return next;
+  }
+  contains(value) { return this.values.has(value); }
+}
+
+class FakeElement {
+  constructor() {
+    this.classList = new FakeClassList();
+    this.style = {};
+    this.attributes = {};
+    this.innerHTML = "";
+    this.textContent = "";
+    this.value = "";
+    this.scrollHeight = 0;
+    this.scrollTop = 0;
+  }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return this.attributes[name] ?? null; }
+  querySelectorAll() { return []; }
+  querySelector() { return null; }
+  contains() { return true; }
+}
+
+const ids = [
+  "mobileLogin", "mobileApp", "loginStatus", "listView", "chatView", "chatComposer",
+  "backBtn", "menuBtn", "menuPanel", "chatTitle", "chatSubtitle", "rootSelect",
+  "targetSelect", "prompt", "sessionSearch", "sessionList", "projectTabs", "sourceTabs",
+  "turns", "olderMessagesBtn", "suggestions", "newMessagesBtn", "retryBtn", "sendBtn",
+  "subagentMenuBtn", "subagentCount", "subagentSheet", "subagentList", "inboxMenuBtn",
+  "inboxCount", "inboxSheet", "inboxList", "status", "loginForm", "tokenInput",
+  "refreshBtn", "logoutBtn", "notifyBtn", "inboxCloseBtn", "subagentCloseBtn",
+];
+const elements = Object.fromEntries(ids.map(id => [id, new FakeElement()]));
+const storage = new Map([
+  ["marinaAgentInboxRead", JSON.stringify(["claude:blocked:blocked:300"])],
+]);
+const location = {href: "https://mobile.example.test/mobile", pathname: "/mobile", replaceCalls: []};
+const document = {
+  cookie: "",
+  visibilityState: "visible",
+  activeElement: null,
+  documentElement: {scrollHeight: 0},
+  getElementById(id) { return elements[id] || (elements[id] = new FakeElement()); },
+  addEventListener() {},
+};
+const window = {
+  innerHeight: 800,
+  scrollY: 0,
+  addEventListener() {},
+  scrollTo() {},
+};
+location.replace = value => location.replaceCalls.push(value);
+const context = {
+  console,
+  document,
+  window,
+  location,
+  history: {replaceState() {}},
+  localStorage: {
+    getItem: key => storage.has(key) ? storage.get(key) : null,
+    setItem: (key, value) => storage.set(key, String(value)),
+    removeItem: key => storage.delete(key),
+    keys: () => [...storage.keys()],
+  },
+  navigator: {},
+  URL,
+  setInterval() {},
+  setTimeout,
+  clearTimeout,
+  requestAnimationFrame: callback => callback(),
+  fetch: async () => { throw new Error("unexpected fetch"); },
+};
+vm.createContext(context);
+vm.runInContext(`${mobileSource}
+let chooseSessionCalls = [];
+chooseSession = key => chooseSessionCalls.push(key);
+this.mobileTest = {
+  setState: value => { state = value; },
+  inboxSessions,
+  openInbox,
+  inboxList,
+  inboxCount,
+  inboxSheet,
+  chooseSessionCalls,
+};`, context, {filename: "marina_mobile.py::_MOBILE_HTML"});
+
+const root = "/tmp/marina-project";
+const blocked = {
+  key: `agent:claude:blocked:${root}`, kind: "agent", source: "claude", sid: "blocked",
+  status: "blocked", statusTs: 300, title: "Needs approval", preview: "Approve access", root,
+};
+const waiting = {
+  key: `agent:claude:waiting:${root}`, kind: "agent", source: "claude", sid: "waiting",
+  status: "waiting", statusTs: 250, title: "Waiting", preview: "Ready for input", root,
+};
+const completed = {
+  key: `agent:codex:completed:${root}`, kind: "agent", source: "codex", sid: "completed",
+  status: "completed", statusTs: 200, title: "Finished", preview: "Done", root,
+};
+const working = {
+  key: `agent:codex:working:${root}`, kind: "agent", source: "codex", sid: "working",
+  status: "working", statusTs: 400, title: "Still working", preview: "In progress", root,
+};
+context.mobileTest.setState({
+  worktrees: [{root, projectId: "project", projectLabel: "Project"}],
+  sessions: [working, completed, blocked, waiting],
+});
+
+const items = context.mobileTest.inboxSessions();
+assert.equal(JSON.stringify(items.map(item => item.status)), JSON.stringify(["blocked", "waiting", "completed"]));
+assert.equal(items.some(item => item.sid === "working"), false);
+assert.ok(items.some(item => item.sid === "blocked"));
+assert.ok(items.every((item, index) => index === 0 || item.statusTs <= items[index - 1].statusTs));
+
+context.mobileTest.openInbox();
+const blockedEventId = "claude:blocked:blocked:300";
+const rendered = context.mobileTest.inboxList.innerHTML;
+const blockedMarkup = rendered.match(new RegExp(`class="inboxItem [^"]*"[^>]*data-inbox-id="${blockedEventId}"[\\s\\S]*?</button>`));
+assert.ok(blockedMarkup, `blocked Inbox item missing: ${rendered}`);
+assert.match(blockedMarkup[0], /class="inboxItem read"/);
+const label = blockedMarkup[0].match(/<span class="inboxState">([^<]+)<\/span>/);
+assert.ok(label, blockedMarkup[0]);
+assert.equal(label[1].split(" · ", 1)[0], "응답 필요");
+
+context.mobileTest.inboxList.onclick({
+  target: {closest: () => ({getAttribute: () => blockedEventId})},
+});
+assert.equal(JSON.stringify(context.mobileTest.chooseSessionCalls), JSON.stringify([blocked.key]));
+assert.equal(context.mobileTest.inboxSheet.classList.contains("open"), false);
+assert.deepEqual(JSON.parse(storage.get("marinaAgentInboxRead")), [blockedEventId]);
+assert.deepEqual(location.replaceCalls, []);
+console.log("ok mobile blocked Inbox behavior");
+''')
+PY
+
 echo "PASS test-agent-inbox"
