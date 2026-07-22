@@ -35,6 +35,9 @@ store.assign_resource_owner("worktree", root, member.id, actor_user_id=admin.id)
 assert store.resource_owner("worktree", root) == member.id
 
 policy = AccessPolicy(store, project_resolver=lambda _root: {"id": "beta"})
+unowned_root = str((Path(sys.argv[1]) / "project" / "unowned").resolve())
+assert policy.inherit_from_root("agent", "claude:unowned-agent", unowned_root) is None
+assert store.resource_owner("agent", "claude:unowned-agent") is None
 assert policy.can_project(admin_p, "alpha")
 assert policy.can_project(member_p, "beta")
 assert not policy.can_project(member_p, "alpha")

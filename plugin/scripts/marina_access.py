@@ -74,7 +74,9 @@ class AccessPolicy:
                 parent_type="worktree", parent_key=parent_key,
             )
             resource_owner = owner
-        elif self.store.resource_parent(resource_type, resource_key) != ("worktree", parent_key):
+        elif resource_owner is not None and self.store.resource_parent(
+            resource_type, resource_key
+        ) != ("worktree", parent_key):
             self.store.assign_resource_owner(
                 resource_type, resource_key, resource_owner,
                 parent_type="worktree", parent_key=parent_key,
