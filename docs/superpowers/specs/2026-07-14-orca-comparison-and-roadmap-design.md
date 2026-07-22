@@ -246,7 +246,8 @@ P0.8은 같은 Doctor에 Playwright·Chromium·ffmpeg·torch·TensorFlow·OpenCV
 
 ### P1. 낮은 비용의 Orca UX 차용
 
-- [ ] **P1.1 Agent Activity Inbox**: 완료·질문·최근 응답을 worktree 전체 피드로 보여준다.
+- [x] **P1.1 Agent Activity Inbox**: 완료·질문·최근 응답을 worktree 전체 피드로 보여준다. 데스크톱 헤더와 모바일
+  메뉴에서 프로젝트별 Claude/Codex 상태를 모아 보고 기존 세션으로 이동한다.
 - [ ] **P1.2 Quick Commands**: 프로젝트별 shell command와 agent prompt를 저장·실행한다.
 - [ ] **P1.3 Copy Context**: 로그·터미널 최근 범위를 bounded text로 복사한다.
 - [ ] **P1.4 Agent 상태 정확도**: working/idle/blocked를 hook 이벤트로 판정한다.

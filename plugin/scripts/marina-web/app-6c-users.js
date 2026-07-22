@@ -1,4 +1,5 @@
 (() => {
+  const setupButton = document.getElementById('authSetupBtn');
   const openButton = document.getElementById('userManagementBtn');
   const logoutButton = document.getElementById('accountLogoutBtn');
   const dialog = document.getElementById('userManagementDialog');
@@ -164,11 +165,17 @@
     location.replace('/login');
   };
   logoutButton.onclick = () => window.marinaAuth.logout();
+  setupButton.onclick = () => {
+    document.getElementById('settingsMenu').hidden = true;
+    location.assign('/login');
+  };
 
   window.marinaAuth.refresh().then(state => {
+    setupButton.hidden = state.enabled;
     logoutButton.hidden = !state.enabled;
     openButton.hidden = state.user?.role !== 'admin';
   }).catch(() => {
+    setupButton.hidden = true;
     logoutButton.hidden = true;
     openButton.hidden = true;
   });

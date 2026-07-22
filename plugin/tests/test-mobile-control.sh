@@ -4,6 +4,7 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"; CTRL="$SCR/marina-control.py"
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME"
+unset MARINA_CONTROL_HOST MARINA_CONTROL_PORT
 P="$TMP/proj"; mkdir -p "$P"; (cd "$P" && git init -q && git commit -q --allow-empty -m init)
 cat > "$MARINA_HOME/projects.json" <<JSON
 {"schemaVersion":1,"projects":[{"id":"proj","root":"$P","kind":"compose","composeFile":"docker-compose.yml","subrepos":[],"worktreeGlobs":[]}]}
