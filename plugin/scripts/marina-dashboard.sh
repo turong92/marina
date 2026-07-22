@@ -303,6 +303,31 @@ stop() {
   rm -f "$PID_FILE"
 }
 
+restart() {
+  if [[ "${MARINA_DRY_RUN:-}" == "1" ]]; then
+    stop
+    start
+    return
+  fi
+  if use_launchctl && [[ "${MARINA_RESTART_HELPER:-}" != "1" ]] \
+      && launchctl print "$(launchctl_domain)/$LABEL" >/dev/null 2>&1; then
+    local helper_label helper_script dashboard_script
+    helper_label="$LABEL.restart.$$.${RANDOM}"
+    dashboard_script="$SCRIPT_DIR/marina-dashboard.sh"
+    printf -v helper_script \
+      'sleep 1; MARINA_HOME=%q MARINA_RESTART_HELPER=1 bash %q restart; launchctl remove %q >/dev/null 2>&1 || true' \
+      "$MARINA_HOME" "$dashboard_script" "$helper_label"
+    if ! launchctl submit -l "$helper_label" -- /bin/bash -c "$helper_script"; then
+      echo "dashboard restart helper submit failed; dashboard left running" >&2
+      return 1
+    fi
+    echo "dashboard restart scheduled"
+    return
+  fi
+  stop
+  start
+}
+
 status() {
   local listeners
   listeners="$(listener_pids | paste -sd, -)"
@@ -318,7 +343,7 @@ status() {
 case "${1:-status}" in
   start) start ;;
   stop) stop ;;
-  restart) stop; start ;;
+  restart) restart ;;
   status) status ;;
   logs) tail -n 120 -f "$LOG_FILE" ;;
   -h|--help|help) usage ;;

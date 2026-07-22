@@ -49,6 +49,7 @@ try:
     assert command[:3] == ["/bin/launchctl", "submit", "-l"], command
     assert command[4:7] == ["--", "/bin/bash", "-c"], command
     assert "marina-dashboard.sh" in command[7] and " restart" in command[7], command
+    assert "MARINA_RESTART_HELPER=1" in command[7], command
     assert "launchctl remove" in command[7], command
     assert options.get("timeout") == 3, options
 

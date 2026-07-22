@@ -121,9 +121,36 @@ JSON
   rm -rf "$TMP"
 }
 
+assert_launchd_restart_escapes_dashboard_job() {
+  local TMP; TMP="$(mktemp -d)"
+  export MARINA_HOME="$TMP/.marina" HOME="$TMP" CLAUDE_CONFIG_DIR="$TMP/.claude"
+  mkdir -p "$MARINA_HOME" "$CLAUDE_CONFIG_DIR/plugins" "$TMP/fakebin"
+  printf '#!/usr/bin/env bash\necho Darwin\n' > "$TMP/fakebin/uname"
+  cat > "$TMP/fakebin/launchctl" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$MARINA_LAUNCHCTL_LOG"
+exit 0
+SH
+  cat > "$TMP/fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+printf '999999\n'
+SH
+  chmod +x "$TMP/fakebin/"*
+
+  local LOG="$TMP/launchctl.log" out
+  out="$(PATH="$TMP/fakebin:$PATH" MARINA_LAUNCHCTL_LOG="$LOG" MARINA_CONTROL_PORT=43991 bash "$DASH" restart 2>&1)"
+  grep -q '^print gui/.*/marina.dashboard$' "$LOG" || { echo "FAIL[restart-helper]: main service was not detected"; exit 1; }
+  grep -q '^submit -l marina.dashboard.restart\.' "$LOG" || { echo "FAIL[restart-helper]: helper was not submitted — $(cat "$LOG")"; exit 1; }
+  grep -q 'MARINA_RESTART_HELPER=1' "$LOG" || { echo "FAIL[restart-helper]: helper recursion guard missing"; exit 1; }
+  ! grep -q '^bootout ' "$LOG" || { echo "FAIL[restart-helper]: caller booted out its own job"; exit 1; }
+  echo "$out" | grep -q 'dashboard restart scheduled' || { echo "FAIL[restart-helper]: missing scheduled status — $out"; exit 1; }
+  rm -rf "$TMP"
+}
+
 run_case Linux  systemd
 run_case Darwin launchd
 assert_no_versioned_path_in_plist
 assert_dev_launcher_prefers_baked_source
 assert_bind_survives_restart
+assert_launchd_restart_escapes_dashboard_job
 echo "PASS test-dashboard-launch"

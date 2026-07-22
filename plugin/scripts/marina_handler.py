@@ -157,7 +157,7 @@ class Handler(BaseHTTPRequestHandler):
             with (MARINA_HOME / "restart-dry-run.log").open("a", encoding="utf-8") as fh:
                 fh.write(f"would run: bash {dash} restart\n")
             return
-        restart_script = f"sleep 1; bash {shlex.quote(str(dash))} restart"
+        restart_script = f"sleep 1; MARINA_RESTART_HELPER=1 bash {shlex.quote(str(dash))} restart"
         launchctl = shutil.which("launchctl") if sys.platform == "darwin" else None
         if launchctl:
             label = f"marina.dashboard.restart.{os.getpid()}.{time.time_ns()}"
