@@ -4,12 +4,6 @@
 
     let wtCreateOpen = false;
 
-    function wtCreateProjectRoot() {
-      // worktreeData 는 프로젝트당 main+worktree 엔트리 모두 projectRoot 를 동일하게 갖는다(marina_sessions.worktree_info).
-      const wt = worktreeData.find(w => w.projectId === selectedProjectId);
-      return wt ? wt.projectRoot : '';
-    }
-
     function closeWtCreate() {
       wtCreateOpen = false;
       const pop = document.getElementById('wtCreatePop');
@@ -18,8 +12,8 @@
 
     function openWtCreate() {
       if (wtCreateOpen) { closeWtCreate(); return; }   // 토글 — 다시 누르면 닫힘
-      const projectRoot = wtCreateProjectRoot();
-      if (!projectRoot) { showToast('먼저 프로젝트를 선택하세요', 'err'); return; }
+      const projectId = selectedProjectId;
+      if (!projectId) { showToast('먼저 프로젝트를 선택하세요', 'err'); return; }
       wtCreateOpen = true;
       const bar = document.getElementById('worktreeCreateBtn').closest('.sessions-bar');
       const pop = document.createElement('div');
@@ -46,7 +40,7 @@
         try {
           res = await api('/api/worktree-create', {
             method: 'POST', headers: {'content-type': 'application/json'},
-            body: JSON.stringify({ projectRoot, branch }),
+            body: JSON.stringify({ projectId, branch }),
           });
         } catch (e) {
           err.textContent = String(e.message || e); err.hidden = false;

@@ -17,6 +17,7 @@ ATTACH="$SCRIPT_DIR/attach-detached-subrepos.sh"
 RESOLVE="$SCRIPT_DIR/marina-resolve.sh"
 CLI="$SCRIPT_DIR/marina_cli.py"
 AUTH_CLI="$SCRIPT_DIR/marina_auth_cli.py"
+REMOTE_CLI="$SCRIPT_DIR/marina_remote_cli.py"
 # shellcheck source=/dev/null
 source "$RESOLVE"
 
@@ -64,6 +65,7 @@ usage (marina = 전역 CLI):
   accounts:
     marina auth status|reset-admin|disable
     marina user list|add|approve|reject|disable|reset-password
+    marina remote status|serve|funnel|off
   setup: marina attach | install-cli | uninstall-cli
 EOF
 }
@@ -199,6 +201,9 @@ command="${1:-dashboard}"
 shift || true
 
 case "$command" in
+  remote)
+    exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$REMOTE_CLI" "$@"
+    ;;
   auth|user)
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$AUTH_CLI" "$command" "$@"
     ;;

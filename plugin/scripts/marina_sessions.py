@@ -617,6 +617,22 @@ def codex_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]
     _codex_agents_cache = (now, by_root)
     return by_root
 
+
+def agent_belongs_to_root(root: Path, source: str, sid: str, refresh: bool = False) -> bool:
+    """Verify an agent id against the complete session index for a worktree."""
+    source = str(source).strip().lower()
+    sid = str(sid).strip()
+    if source not in ("claude", "codex") or not sid:
+        return False
+    roots = {str(root), str(root.resolve())}
+    sessions = claude_agent_sessions(refresh) if source == "claude" else codex_agent_sessions(refresh)
+    id_key = "cliSessionId" if source == "claude" else "sid"
+    return any(
+        str(entry.get(id_key) or "") == sid
+        for root_key in roots
+        for entry in sessions.get(root_key, [])
+    )
+
 def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
     # 카드 AGENTS 섹션 — 워크트리당 최대 3개(ts 내림차순), Claude 만 preview(마지막 assistant 텍스트 80자) 부여.
     claude_by_root = claude_agent_sessions(refresh)

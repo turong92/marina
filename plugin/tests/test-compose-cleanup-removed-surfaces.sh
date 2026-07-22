@@ -4,7 +4,7 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$HERE/../.." && pwd -P)"
 
-hits="$(grep -rnE "compose-mounts|compose-assist|compose-analyze|composeHostForward|composeMounts|_save_project_hostforward|mounts\\.json|_parse_mounts|--mount" \
+hits="$(grep -rnE "compose-mounts|compose-assist|compose-analyze|composeHostForward|composeMounts|_save_project_hostforward|mounts\\.json|_parse_mounts" \
   "$ROOT/plugin/scripts" 2>/dev/null || true)"
 if [[ -n "$hits" ]]; then
   echo "FAIL: removed compose cleanup refs remain"

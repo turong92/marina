@@ -128,7 +128,12 @@ bash "$SH" project add "$P" --compose "$P/docker-compose.yml" >/dev/null
 mrun() {
   (cd "$P" && MARINA_HOME="$MARINA_HOME" PATH="$TMP/bin:$PATH" \
     DOCKER_LOG="$DOCKER_LOG" DOCKER_CONFIG_FIXTURE="$DOCKER_CONFIG_FIXTURE" WATCH_UP_DONE="$WATCH_UP_DONE" \
-    WATCH_CONFIG_BARRIER="$WATCH_CONFIG_BARRIER" \
+    WATCH_CONFIG_BARRIER="$WATCH_CONFIG_BARRIER" WATCH_UP_BARRIER="$WATCH_UP_BARRIER" \
+    WATCH_PID_FILE="${WATCH_PID_FILE:-}" ASSERT_WATCH_STOPPED="${ASSERT_WATCH_STOPPED:-}" \
+    WATCH_LONG_UP="${WATCH_LONG_UP:-}" FAIL_UP="${FAIL_UP:-}" \
+    ASSERT_WATCH_STOPPED_DURING_PREBUILD="${ASSERT_WATCH_STOPPED_DURING_PREBUILD:-}" \
+    FAIL_PREBUILD="${FAIL_PREBUILD:-}" \
+    BLOCK_WATCH_REFRESH="${BLOCK_WATCH_REFRESH:-}" WATCH_LOCK_OWNER_PID="${WATCH_LOCK_OWNER_PID:-}" \
     bash "$SH" "$@")
 }
 
@@ -168,6 +173,35 @@ config_pid="$(head -n 1 "$WATCH_PID_FILE")"
 [[ "$config_pid" != "$second_pid" ]] || { echo "FAIL: Watch config change kept stale watcher"; exit 1; }
 second_pid="$config_pid"
 
+python3 - "$MARINA_HOME/project/docker-compose.yml" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+data["x-marina"] = {"prebuild": {"web": {
+    "cwd": ".",
+    "command": "if [ \"${ASSERT_WATCH_STOPPED_DURING_PREBUILD:-}\" = 1 ]; then "
+               "p=$(head -n 1 \"$WATCH_PID_FILE\" 2>/dev/null || true); "
+               "[ -z \"$p\" ] || ! kill -0 \"$p\" 2>/dev/null || exit 41; fi; "
+               "[ \"${FAIL_PREBUILD:-}\" != 1 ] || exit 42",
+}}}
+open(path, "w", encoding="utf-8").write(json.dumps(data))
+PY
+
+ASSERT_WATCH_STOPPED_DURING_PREBUILD=1 mrun rebuild --web >/dev/null
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after prebuild lifecycle"; exit 1; }
+prebuild_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$prebuild_pid" != "$second_pid" ]] || { echo "FAIL: rebuild did not stop Watch before prebuild"; exit 1; }
+second_pid="$prebuild_pid"
+
+if FAIL_PREBUILD=1 mrun rebuild --web >/dev/null 2>&1; then
+  echo "FAIL: forced prebuild failure succeeded"
+  exit 1
+fi
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after failed prebuild"; exit 1; }
+failed_prebuild_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$failed_prebuild_pid" != "$second_pid" ]] || { echo "FAIL: failed prebuild left old watcher lifecycle unchanged"; exit 1; }
+second_pid="$failed_prebuild_pid"
+
 # A refresh that passed its early active-build check must re-check under the
 # Watch lock before starting, because a build can begin during config lookup.
 rm -f "$WATCH_UP_DONE" "$WATCH_CONFIG_BARRIER" "$WATCH_UP_BARRIER"
@@ -176,27 +210,31 @@ stale_refresh_job=$!
 for _ in $(seq 1 50); do [[ -e "$WATCH_CONFIG_BARRIER" ]] && break; sleep 0.1; done
 [[ -e "$WATCH_CONFIG_BARRIER" ]] || { echo "FAIL: stale refresh barrier not reached"; exit 1; }
 printf '# race build\n' >> "$P/Dockerfile"
-ASSERT_WATCH_STOPPED=1 WATCH_LONG_UP=1 mrun start --web >/dev/null &
+export ASSERT_WATCH_STOPPED=1 WATCH_LONG_UP=1
+mrun rebuild --web >/dev/null &
 race_build_job=$!
-for _ in $(seq 1 50); do [[ -e "$WATCH_UP_BARRIER" ]] && break; sleep 0.1; done
-[[ -e "$WATCH_UP_BARRIER" ]] || { echo "FAIL: race build barrier not reached"; exit 1; }
+sleep 0.2
+[[ ! -e "$WATCH_UP_BARRIER" ]] || { echo "FAIL: race build bypassed active refresh lock"; exit 1; }
 wait "$stale_refresh_job"
+for _ in $(seq 1 150); do [[ -e "$WATCH_UP_BARRIER" ]] && break; sleep 0.1; done
+[[ -e "$WATCH_UP_BARRIER" ]] || { echo "FAIL: race build barrier not reached"; tail -n 30 "$DOCKER_LOG"; exit 1; }
 watch_restarted_during_build=0
 [[ ! -e "$WATCH_PID_FILE" ]] || watch_restarted_during_build=1
 wait "$race_build_job"
+unset ASSERT_WATCH_STOPPED WATCH_LONG_UP
 [[ "$watch_restarted_during_build" == 0 ]] || { echo "FAIL: refresh restarted Watch during active build"; exit 1; }
 wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after race build"; exit 1; }
 second_pid="$(head -n 1 "$WATCH_PID_FILE")"
 
 printf '# stale\n' >> "$P/Dockerfile"
-ASSERT_WATCH_STOPPED=1 mrun start --web >/dev/null
+ASSERT_WATCH_STOPPED=1 mrun rebuild --web >/dev/null
 wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after stale build"; exit 1; }
 stale_pid="$(head -n 1 "$WATCH_PID_FILE")"
 [[ "$stale_pid" != "$second_pid" ]] || { echo "FAIL: stale build did not replace watcher"; exit 1; }
 second_pid="$stale_pid"
 
 printf '# failed stale build\n' >> "$P/Dockerfile"
-if ASSERT_WATCH_STOPPED=1 FAIL_UP=1 mrun start --web >/dev/null 2>&1; then
+if ASSERT_WATCH_STOPPED=1 FAIL_UP=1 mrun rebuild --web >/dev/null 2>&1; then
   echo "FAIL: forced stale build failure succeeded"
   exit 1
 fi
@@ -207,7 +245,7 @@ second_pid="$failed_build_pid"
 
 # Failed builds intentionally leave the baseline stale. A successful retry
 # advances it so the following ps/config failure checks exercise fast Start.
-ASSERT_WATCH_STOPPED=1 mrun start --web >/dev/null
+ASSERT_WATCH_STOPPED=1 mrun rebuild --web >/dev/null
 wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after build retry"; exit 1; }
 retry_pid="$(head -n 1 "$WATCH_PID_FILE")"
 [[ "$retry_pid" != "$second_pid" ]] || { echo "FAIL: build retry did not replace watcher"; exit 1; }
@@ -219,7 +257,7 @@ sleep 30 &
 watch_lock_owner=$!
 set +e
 ASSERT_WATCH_STOPPED=1 FAIL_UP=1 BLOCK_WATCH_REFRESH=1 WATCH_LOCK_OWNER_PID="$watch_lock_owner" \
-  mrun start --web >/dev/null 2>&1
+  mrun rebuild --web >/dev/null 2>&1
 blocked_refresh_rc=$?
 set -e
 rm -f "$SD/compose.watch.lock"
@@ -259,6 +297,15 @@ kill -0 "$second_pid" 2>/dev/null && { echo "FAIL: watcher alive after service s
 mrun restart --web >/dev/null
 wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: restart did not start watcher"; exit 1; }
 restart_pid="$(head -n 1 "$WATCH_PID_FILE")"
+
+if ASSERT_WATCH_STOPPED=1 FAIL_UP=1 mrun restart --all >/dev/null 2>&1; then
+  echo "FAIL: forced full restart failure succeeded"
+  exit 1
+fi
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher not restored after failed full restart"; exit 1; }
+failed_restart_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$failed_restart_pid" != "$restart_pid" ]] || { echo "FAIL: full restart failure kept stale watcher pid"; exit 1; }
+restart_pid="$failed_restart_pid"
 
 mrun stop --all >/dev/null
 [[ ! -e "$WATCH_PID_FILE" ]] || { echo "FAIL: stop all left watcher pid"; exit 1; }

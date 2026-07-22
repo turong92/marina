@@ -152,23 +152,33 @@ marina mobile disable
 인증 초기화 전 `/mobile`은 token 로그인 shell을 보여주고 실제 상태 조회·전송 API는 mobile token을 요구한다.
 인증 초기화 후에는 계정 session cookie와 CSRF 검사를 사용하며 기존 mobile token은 거부한다. 구버전 호환용
 `/api/mobile-state`, `/api/mobile-send`도 남아 있지만, 인증 초기화 전 원격 프록시는 `/mobile*`만
-열면 된다. 일반 대시보드 API와 전체 터미널 탭은 기존 localhost 보호를 유지한다. 폰에서 접속하려면
-대시보드가 폰에서 닿는 주소에 있어야 하므로 Tailscale/터널을 쓰거나, 신뢰한 네트워크에서 대시보드를
-`MARINA_CONTROL_HOST=0.0.0.0`로 시작한다.
+열면 된다. 인증 초기화 후에는 desktop/mobile/터미널이 같은 계정과 소유권 정책을 사용한다.
 `marina mobile status`는 현재 `MARINA_CONTROL_HOST` 기준으로 `local-only`/`network-bind`/`custom host` 힌트를
 보여준다.
 
+### 안정적인 원격 주소
+
+인증을 초기화한 관리자는 설정의 **원격 접근**에서 Tailscale Serve를 켤 수 있다. Marina는
+`https://<장치>.<tailnet>.ts.net` 주소를 표시하고 backend를 `http://127.0.0.1:3900`으로 고정한다.
+기존 Tailscale 설정이 있거나 Marina가 저장한 fingerprint와 달라졌으면 덮어쓰지 않고 충돌로 중단한다.
+원격 끄기도 Marina가 만든 HTTPS 443 listener만 제거하며 `tailscale reset`을 사용하지 않는다.
+
+```bash
+marina remote status
+marina remote serve
+marina remote funnel   # 준비 조건 확인 + 관리자 비밀번호 재확인
+marina remote off
+```
+
+Funnel은 로그인 보호, 활성 관리자, localhost bind, 비로그인 API 차단, 로그인 rate limit을 모두 확인한 뒤에만
+활성화된다. `off`는 Tailscale 노출만 닫고 Marina 계정과 로그인 세션은 유지한다.
+
 권장 흐름:
 
-1. Tailscale 또는 터널 주소를 준비한다.
-2. 대시보드를 폰에서 닿는 바인드로 재시작한다. 예: `MARINA_CONTROL_HOST=0.0.0.0 marina dashboard restart`.
-3. `marina mobile enable <tailscale-host-or-tunnel-url>`로 token을 만들고, 처음 한 번 token URL로 접속하거나
-   `/mobile` 로그인 화면에 token을 입력한다.
-4. 평소에는 `marina mobile address <host>`가 출력하는 token 없는 주소를 북마크한다. 로컬 브라우저에서 열 때는
-   `marina mobile open <host>`.
-5. 토큰만 다시 볼 때는 `marina mobile token`, 폰 분실·공유 URL 폐기 시에는 `marina mobile rotate`를 쓴다.
-6. 안 열리면 `marina mobile doctor <host>`로 token 상태, 접속 주소, dashboard HTTP 응답, bind 힌트를 한 번에 본다.
-7. 외부 노출은 `/mobile*`만 프록시한다. 전체 `/api/*` 대시보드 기능은 localhost 보호를 유지하는 구성이 기본이다.
+1. Marina 인증을 초기화하고 사용자별 프로젝트와 작업 소유자를 지정한다.
+2. 설정에서 `Serve로 열기`를 누르고 표시된 HTTPS 주소를 폰에 북마크한다.
+3. Tailscale을 설치하지 않은 팀원에게 열 때만 준비 조건을 확인하고 Funnel을 선택한다.
+4. 안 열리면 `marina remote status`와 `marina mobile doctor`로 daemon, bind, dashboard HTTP를 확인한다.
 
 ### `marina` 명령 (PATH shim) — `install-cli`
 

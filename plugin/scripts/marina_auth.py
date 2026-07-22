@@ -17,7 +17,7 @@ from typing import Callable, Iterator
 
 MARINA_HOME = Path(os.environ.get("MARINA_HOME", str(Path.home() / ".marina")))
 AUTH_DB = Path(os.environ.get("MARINA_AUTH_DB", str(MARINA_HOME / "auth.db")))
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 PBKDF2_ALGORITHM = "pbkdf2_sha256"
 PBKDF2_ITERATIONS = 600_000
 PASSWORD_SALT_BYTES = 16
@@ -140,6 +140,13 @@ CREATE INDEX auth_sessions_user_idx ON auth_sessions(user_id);
 CREATE INDEX audit_events_created_idx ON audit_events(created_at);
 INSERT INTO meta(key, value) VALUES('schema_version', '1');
 PRAGMA user_version=1;
+""",
+    2: """
+ALTER TABLE resource_owners ADD COLUMN parent_type TEXT;
+ALTER TABLE resource_owners ADD COLUMN parent_key TEXT;
+CREATE INDEX resource_owners_parent_idx ON resource_owners(parent_type, parent_key);
+UPDATE meta SET value='2' WHERE key='schema_version';
+PRAGMA user_version=2;
 """,
 }
 
@@ -673,6 +680,202 @@ class AuthStore:
         with self._connect() as conn:
             rows = conn.execute("SELECT * FROM users ORDER BY username COLLATE NOCASE").fetchall()
             return [self._user(row) for row in rows]
+
+    def user_by_username(self, username: str) -> User:
+        self.initialize()
+        username = self._username(username)
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
+            if row is None:
+                raise AuthError("unknown_user", "Unknown user.", 404)
+            return self._user(row)
+
+    def active_admin_count(self) -> int:
+        self.initialize()
+        with self._connect() as conn:
+            return int(conn.execute(
+                "SELECT count(*) FROM users WHERE role='admin' AND status='active'"
+            ).fetchone()[0])
+
+    def first_active_admin(self) -> User | None:
+        self.initialize()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM users WHERE role='admin' AND status='active' ORDER BY id LIMIT 1"
+            ).fetchone()
+            return self._user(row) if row is not None else None
+
+    def project_access_for(self, user_id: int) -> set[str]:
+        self.initialize()
+        with self._connect() as conn:
+            return {
+                str(row[0]) for row in conn.execute(
+                    "SELECT project_id FROM project_access WHERE user_id=? ORDER BY project_id",
+                    (int(user_id),),
+                )
+            }
+
+    def set_project_access(
+        self,
+        user_id: int,
+        project_ids: list[str] | set[str] | tuple[str, ...],
+        actor_user_id: int | None = None,
+    ) -> set[str]:
+        self.initialize()
+        cleaned = sorted({str(value).strip() for value in project_ids if str(value).strip()})
+        with self._transaction() as conn:
+            if conn.execute("SELECT 1 FROM users WHERE id=?", (int(user_id),)).fetchone() is None:
+                raise AuthError("unknown_user", "Unknown user.", 404)
+            conn.execute("DELETE FROM project_access WHERE user_id=?", (int(user_id),))
+            conn.executemany(
+                "INSERT INTO project_access(user_id, project_id) VALUES(?, ?)",
+                [(int(user_id), project_id) for project_id in cleaned],
+            )
+            self._audit(
+                conn, "access.projects.set", "ok", actor_user_id, "user", str(user_id),
+                request_meta="projects=" + ",".join(cleaned),
+            )
+        return set(cleaned)
+
+    def resource_owner(self, resource_type: str, resource_key: str) -> int | None:
+        self.initialize()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT owner_user_id FROM resource_owners WHERE resource_type=? AND resource_key=?",
+                (str(resource_type), str(resource_key)),
+            ).fetchone()
+            return int(row[0]) if row is not None else None
+
+    def resource_parent(self, resource_type: str, resource_key: str) -> tuple[str, str] | None:
+        self.initialize()
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT parent_type, parent_key FROM resource_owners "
+                "WHERE resource_type=? AND resource_key=?",
+                (str(resource_type), str(resource_key)),
+            ).fetchone()
+            if row is None or not row["parent_type"] or not row["parent_key"]:
+                return None
+            return str(row["parent_type"]), str(row["parent_key"])
+
+    def resources_for(self, user_id: int, resource_type: str) -> set[str]:
+        self.initialize()
+        with self._connect() as conn:
+            return {
+                str(row[0]) for row in conn.execute(
+                    "SELECT resource_key FROM resource_owners WHERE owner_user_id=? AND resource_type=?",
+                    (int(user_id), str(resource_type)),
+                )
+            }
+
+    def all_resource_owners(self) -> dict[tuple[str, str], int]:
+        self.initialize()
+        with self._connect() as conn:
+            return {
+                (str(row["resource_type"]), str(row["resource_key"])): int(row["owner_user_id"])
+                for row in conn.execute(
+                    "SELECT resource_type, resource_key, owner_user_id FROM resource_owners"
+                )
+            }
+
+    def assign_resource_owner(
+        self,
+        resource_type: str,
+        resource_key: str,
+        owner_user_id: int,
+        actor_user_id: int | None = None,
+        parent_type: str | None = None,
+        parent_key: str | None = None,
+    ) -> None:
+        self.initialize()
+        resource_type = str(resource_type).strip()
+        resource_key = str(resource_key).strip()
+        if not resource_type or not resource_key:
+            raise AuthError("invalid_resource", "Resource type and key are required.")
+        parent_type = str(parent_type).strip() if parent_type is not None else None
+        parent_key = str(parent_key).strip() if parent_key is not None else None
+        if bool(parent_type) != bool(parent_key):
+            raise AuthError("invalid_resource", "Resource parent type and key must be provided together.")
+        now = self.clock()
+        with self._transaction() as conn:
+            if conn.execute("SELECT 1 FROM users WHERE id=?", (int(owner_user_id),)).fetchone() is None:
+                raise AuthError("unknown_user", "Unknown user.", 404)
+            conn.execute(
+                "INSERT INTO resource_owners(resource_type, resource_key, owner_user_id, parent_type, parent_key, created_at, updated_at) "
+                "VALUES(?, ?, ?, ?, ?, ?, ?) ON CONFLICT(resource_type, resource_key) DO UPDATE SET "
+                "owner_user_id=excluded.owner_user_id, "
+                "parent_type=COALESCE(excluded.parent_type, resource_owners.parent_type), "
+                "parent_key=COALESCE(excluded.parent_key, resource_owners.parent_key), "
+                "updated_at=excluded.updated_at",
+                (resource_type, resource_key, int(owner_user_id), parent_type, parent_key, now, now),
+            )
+            self._audit(
+                conn, "access.owner.set", "ok", actor_user_id, resource_type, resource_key,
+                request_meta=f"owner={int(owner_user_id)}",
+            )
+
+    def remove_resource_owner(
+        self,
+        resource_type: str,
+        resource_key: str,
+        actor_user_id: int | None = None,
+    ) -> bool:
+        self.initialize()
+        resource_type = str(resource_type).strip()
+        resource_key = str(resource_key).strip()
+        if not resource_type or not resource_key:
+            raise AuthError("invalid_resource", "Resource type and key are required.")
+        with self._transaction() as conn:
+            removed = conn.execute(
+                "DELETE FROM resource_owners WHERE resource_type=? AND resource_key=?",
+                (resource_type, resource_key),
+            ).rowcount > 0
+            if removed:
+                self._audit(
+                    conn, "access.owner.remove", "ok", actor_user_id, resource_type, resource_key
+                )
+            return removed
+
+    def remove_resources_by_parent(
+        self,
+        parent_type: str,
+        parent_key: str,
+        actor_user_id: int | None = None,
+    ) -> int:
+        self.initialize()
+        parent_type = str(parent_type).strip()
+        parent_key = str(parent_key).strip()
+        if not parent_type or not parent_key:
+            raise AuthError("invalid_resource", "Resource parent type and key are required.")
+        with self._transaction() as conn:
+            rows = conn.execute(
+                "SELECT resource_type, resource_key FROM resource_owners "
+                "WHERE parent_type=? AND parent_key=?",
+                (parent_type, parent_key),
+            ).fetchall()
+            conn.execute(
+                "DELETE FROM resource_owners WHERE parent_type=? AND parent_key=?",
+                (parent_type, parent_key),
+            )
+            for row in rows:
+                self._audit(
+                    conn, "access.owner.remove", "ok", actor_user_id,
+                    str(row["resource_type"]), str(row["resource_key"]),
+                )
+            return len(rows)
+
+    def audit_action(
+        self,
+        action: str,
+        result: str,
+        actor_user_id: int | None = None,
+        resource_type: str | None = None,
+        resource_key: str | None = None,
+        request_meta: str | None = None,
+    ) -> None:
+        self.initialize()
+        with self._transaction() as conn:
+            self._audit(conn, action, result, actor_user_id, resource_type, resource_key, request_meta)
 
     @staticmethod
     def _token_hash(value: str) -> bytes:

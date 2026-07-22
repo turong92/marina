@@ -1,6 +1,7 @@
 """marina_handler.py — marina-control.py 에서 분리(레이어드). 동작 변경 0."""
 from __future__ import annotations
 import glob
+import http.client
 import json
 import os
 import re
@@ -39,13 +40,44 @@ from marina_update import _serving_sha, update_claude, update_codex, update_stat
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
 from marina_mobile import mobile_catalog, mobile_request_ok, mobile_send, mobile_state, render_mobile_html
-from marina_sessions import activate_agent_payloads, agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_sessions import activate_agent_payloads, agent_belongs_to_root, agent_transcript, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 from marina_auth_http import AUTH_DENIED, auth_controller
+from marina_access import AccessPolicy, canonical_agent, canonical_root
+from marina_auth import AuthError
+from marina_auth_http import is_loopback_client
+from marina_remote import RemoteControlError, RemoteController
+from marina_remote_service import RemoteService
 
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
+
+_ADMIN_GET_PATHS = {
+    "/api/browse", "/api/repo-candidates", "/api/compose-detect", "/api/compose-config",
+    "/api/compose-export", "/api/compose-scaffold",
+}
+_ROOT_GET_PATHS = {
+    "/api/worktree-changes", "/api/git-graph", "/api/weave-map", "/api/git-wip-stat",
+    "/api/git-commit-info", "/api/git-diff", "/api/links", "/api/build-summary",
+    "/api/logs", "/api/logs/chunk", "/api/logs/download", "/api/logs/matches",
+}
+_ADMIN_POST_PATHS = {
+    "/api/compose-service-args", "/api/compose-service-profile", "/api/compose-prebuild",
+    "/api/infer-project", "/api/add-project", "/api/compose-scan", "/api/compose-validate",
+    "/api/compose-register", "/api/compose-import", "/api/remove-project",
+    "/api/restart-dashboard", "/api/update-claude", "/api/update-codex",
+    "/api/set-default-attach", "/api/forward-set", "/api/expose-set",
+}
+_ROOT_POST_PATHS = {
+    "/api/config", "/api/link-set", "/api/meta", "/api/stop-all", "/api/start-all",
+    "/api/cleanup", "/api/remove-worktree", "/api/clear-cache", "/api/clear-images",
+    "/api/git-commit", "/api/git-push", "/api/git-pull", "/api/git-merge",
+    "/api/git-rebase", "/api/git-fetch", "/api/git-stash", "/api/attach-subrepo",
+    "/api/detach-subrepo", "/api/start", "/api/stop", "/api/stop-external",
+    "/api/restart", "/api/rebuild", "/api/clean-rebuild",
+}
+_REMOTE_CONTROLLER: RemoteController | None = None
 
 def render_index_html() -> str:
     """marina-web/index.html 을 읽어 빌드 SHA 토큰을 치환해 반환 (프론트엔드는 marina-web/ 로 분리)."""
@@ -53,6 +85,143 @@ def render_index_html() -> str:
     return html.replace("{{MARINA_BUILD}}", _serving_sha() or "dev")
 
 class Handler(BaseHTTPRequestHandler):
+    def _remote_controller(self) -> RemoteController:
+        global _REMOTE_CONTROLLER
+        if _REMOTE_CONTROLLER is None:
+            _REMOTE_CONTROLLER = RemoteController(MARINA_HOME)
+        return _REMOTE_CONTROLLER
+
+    def _auth_guard_self_check(self) -> bool:
+        host, port = self.server.server_address[:2]
+        connect_host = "127.0.0.1" if str(host) in ("", "0.0.0.0", "::") else str(host)
+        def status(path: str) -> tuple[int, str]:
+            conn = http.client.HTTPConnection(connect_host, int(port), timeout=2)
+            try:
+                conn.request("GET", path, headers={"Host": f"127.0.0.1:{port}"})
+                response = conn.getresponse()
+                response.read()
+                return response.status, str(response.getheader("location") or "")
+            finally:
+                conn.close()
+        api_status, _ = status("/api/worktrees")
+        page_status, location = status("/")
+        return api_status == 401 and page_status == 302 and location.startswith("/login")
+
+    def _remote_service(self) -> RemoteService:
+        return RemoteService(
+            auth_controller().store,
+            self._remote_controller(),
+            home=MARINA_HOME,
+            control_host=HOST,
+            control_port=PORT,
+            guard_check=self._auth_guard_self_check,
+        )
+
+    def _host_allowed(self) -> bool:
+        if host_allowed(self.headers.get("host")):
+            return True
+        if not is_loopback_client(self) or str(self.headers.get("x-forwarded-proto") or "").lower() != "https":
+            return False
+        try:
+            supplied = urllib.parse.urlsplit("//" + str(self.headers.get("host") or "")).hostname
+            expected = self._remote_controller().status().get("dnsName")
+            return bool(supplied and expected and supplied.rstrip(".") == str(expected).rstrip("."))
+        except Exception:
+            return False
+
+    def _origin_allowed(self, allow_any_local_port: bool = False) -> bool:
+        origin = self.headers.get("origin")
+        if origin_allowed(origin, allow_any_local_port):
+            return True
+        if str(self.headers.get("x-forwarded-proto") or "").lower() != "https":
+            return False
+        try:
+            origin_parts = urllib.parse.urlsplit(str(origin))
+            host_parts = urllib.parse.urlsplit("//" + str(self.headers.get("host") or ""))
+            expected = str(self._remote_controller().status().get("dnsName") or "").rstrip(".").lower()
+            origin_host = str(origin_parts.hostname or "").rstrip(".").lower()
+            request_host = str(host_parts.hostname or "").rstrip(".").lower()
+            return bool(
+                expected and origin_parts.scheme == "https"
+                and origin_host == request_host == expected
+                and origin_parts.port in (None, 443)
+                and host_parts.port in (None, 443)
+            )
+        except (TypeError, ValueError):
+            return False
+
+    def _schedule_dashboard_restart(self) -> None:
+        dash = CONTROL_SCRIPT.parent / "marina-dashboard.sh"
+        if os.environ.get("MARINA_RESTART_DRY_RUN") == "1":
+            MARINA_HOME.mkdir(parents=True, exist_ok=True)
+            with (MARINA_HOME / "restart-dry-run.log").open("a", encoding="utf-8") as fh:
+                fh.write(f"would run: bash {dash} restart\n")
+            return
+        subprocess.Popen(
+            ["bash", "-c", f"sleep 1; exec bash {shlex.quote(str(dash))} restart"],
+            start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+
+    def _policy(self) -> AccessPolicy:
+        return AccessPolicy(auth_controller().store)
+
+    def _forbidden(self, message: str = "You do not have access to this resource.") -> bool:
+        self.send_json({"error": "access_denied", "message": message}, 403)
+        return False
+
+    def _require_admin_access(self) -> bool:
+        principal = getattr(self, "auth_principal", None)
+        if principal is None or principal.user.role == "admin":
+            return True
+        return self._forbidden("Administrator access is required.")
+
+    def _require_root_access(self, root: Path) -> bool:
+        if self._policy().can_root(getattr(self, "auth_principal", None), root):
+            return True
+        return self._forbidden()
+
+    def _term_allowed(self, term: dict[str, Any]) -> bool:
+        principal = getattr(self, "auth_principal", None)
+        tid = str(term.get("tid") or "")
+        root = str(term.get("root") or "")
+        return bool(tid and root and self._policy().can_resource(principal, "terminal", tid)
+                    and self._policy().can_root(principal, root))
+
+    def _term_access_allowed(self, tid: str) -> bool:
+        term = next(
+            (item for item in term_list().get("sessions", []) if str(item.get("tid") or "") == tid),
+            None,
+        )
+        return bool(term and self._term_allowed(term))
+
+    def _filter_mobile(self, payload: dict[str, Any]) -> dict[str, Any]:
+        principal = getattr(self, "auth_principal", None)
+        if principal is None or principal.user.role == "admin":
+            return payload
+        allowed_roots = {
+            canonical_root(item.get("root", "")) for item in payload.get("worktrees", [])
+            if item.get("root") and self._policy().can_root(principal, item["root"])
+        }
+        payload["worktrees"] = [item for item in payload.get("worktrees", [])
+                                if item.get("root") and canonical_root(item["root"]) in allowed_roots]
+        payload["terms"] = [item for item in payload.get("terms", []) if self._term_allowed(item)]
+        allowed_tids = {str(item.get("tid")) for item in payload["terms"]}
+        filtered = []
+        for item in payload.get("sessions", []):
+            root = item.get("root")
+            if not root or canonical_root(root) not in allowed_roots:
+                continue
+            if item.get("kind") == "term" and str(item.get("tid")) not in allowed_tids:
+                continue
+            if item.get("kind") == "agent":
+                key = canonical_agent(str(item.get("source") or ""), str(item.get("sid") or ""))
+                self._policy().inherit_from_root("agent", key, root)
+                if not self._policy().can_resource(principal, "agent", key):
+                    continue
+            filtered.append(item)
+        payload["sessions"] = filtered
+        return payload
+
     def send_json(self, payload: Any, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         data = json_bytes(payload)
         self.send_response(status)
@@ -78,7 +247,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urllib.parse.urlparse(self.path)
         host_guarded = parsed.path.startswith("/api/") and parsed.path not in ("/api/mobile-state",)
-        if host_guarded and not host_allowed(self.headers.get("host")):
+        if host_guarded and not self._host_allowed():
             self.send_json({"error": "forbidden host"}, 403)
             return
         controller = auth_controller()
@@ -88,6 +257,18 @@ class Handler(BaseHTTPRequestHandler):
         if principal is AUTH_DENIED:
             return
         self.auth_principal = principal
+        if parsed.path == "/api/remote/status":
+            try:
+                remote = self._remote_service().status()
+                browser_fields = (
+                    "installed", "online", "state", "mode", "dnsName", "url", "owned",
+                    "conflict", "actionUrl", "error", "message", "readiness",
+                    "dashboardHost", "dashboardPort",
+                )
+                self.send_json({key: remote[key] for key in browser_fields if key in remote})
+            except (AuthError, RemoteControlError) as exc:
+                self.send_json({"error": exc.code, "message": exc.message}, getattr(exc, "status", 409))
+            return
         if parsed.path == "/login":
             data = (_WEB_DIR / "login.html").read_bytes()
             self.send_response(200)
@@ -113,7 +294,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
-            self.send_json(mobile_state(refresh=query.get("refresh", ["0"])[0] == "1"))
+            self.send_json(self._filter_mobile(mobile_state(refresh=query.get("refresh", ["0"])[0] == "1")))
             return
         if parsed.path == "/mobile/api/catalog":
             if principal is None and not mobile_request_ok(self, parsed):
@@ -122,6 +303,8 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             try:
                 root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
                 self.send_json(mobile_catalog(root, query.get("source", [""])[0], query.get("q", [""])[0]))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
@@ -133,6 +316,13 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             try:
                 root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
+                agent_key = canonical_agent(query.get("source", [""])[0], query.get("sid", [""])[0])
+                self._policy().inherit_from_root("agent", agent_key, root)
+                if not self._policy().can_resource(principal, "agent", agent_key):
+                    self._forbidden()
+                    return
                 raw_before = query.get("before", [""])[0]
                 before = int(raw_before) if raw_before else None
                 payload = agent_transcript(root, query.get("source", [""])[0],
@@ -144,6 +334,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/gateway-status":
             light = urllib.parse.parse_qs(parsed.query).get("light", ["0"])[0] == "1"   # light=1: enabled/port 만(routes=비싼 스냅샷 생략 — 카드 URL 계산용)
+            if not light and not self._require_admin_access():
+                return
             out = {"enabled": _GATEWAY_ON, "caddy": bool(_gw().caddy_bin()), "port": _GATEWAY_PORT}
             if not light:
                 out["routes"] = _gw().build_caddyfile(_gateway_snapshot(), _GATEWAY_PORT)
@@ -191,8 +383,20 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path.startswith("/api/"):
             # Host 먼저 — origin_allowed 는 Origin 없는 요청을 통과시키는데 DNS 리바인딩된
             # same-origin GET 이 바로 그 모양이다(브라우저가 Origin 을 안 보낸다).
-            if not host_allowed(self.headers.get("host")):
+            if not self._host_allowed():
                 self.send_json({"error": "forbidden host"}, 403)
+                return
+
+        if parsed.path in _ADMIN_GET_PATHS and not self._require_admin_access():
+            return
+        if parsed.path in _ROOT_GET_PATHS:
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                guarded_root = safe_root(query.get("root", [""])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            if not self._require_root_access(guarded_root):
                 return
             if not origin_allowed(self.headers.get("origin"), False):
                 self.send_json({"error": "forbidden origin"}, 403)
@@ -200,9 +404,12 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/sessions":
             memory = memory_snapshot()
-            sessions = [session_payload(root, memory=memory) for root in discover_roots()]
+            roots = [root for root in discover_roots() if self._policy().can_root(principal, root)]
+            sessions = [session_payload(root, memory=memory) for root in roots]
             for item in sessions:
                 item["webPortConflictWith"] = []
+            if principal is not None and principal.user.role != "admin":
+                memory = {**memory, "containers": []}
             self.send_json({"sessions": sessions, "memory": memory})
             return
 
@@ -212,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
             # 세션 타이틀은 앱에서 수정 시 빨리 반영돼야 해 캐시된 worktree_info 밖에서 신선하게 덧씌운다.
             titles = claude_session_titles(refresh)       # Claude 데스크톱 (20s 캐시)
             codex_titles = codex_session_titles(refresh)  # Codex (60s 캐시)
-            roots = discover_all_roots(refresh)
+            roots = [root for root in discover_all_roots(refresh) if self._policy().can_root(principal, root)]
             live_agents_by_root: dict[str, set[tuple[str, str]]] = {}
             for term in term_list().get("sessions", []):
                 agent = term.get("agent") if isinstance(term.get("agent"), dict) else None
@@ -235,10 +442,27 @@ class Handler(BaseHTTPRequestHandler):
                     info["sessionTitle"] = codex_titles[str(root)]
                     info["titleSource"] = "codex"
                 agents = activate_agent_payloads(agents_payload(root, refresh), live_agents_by_root.get(str(root), set()))
+                if principal is not None and principal.user.role != "admin":
+                    visible_agents = []
+                    for agent in agents:
+                        key = canonical_agent(str(agent.get("source") or ""), str(agent.get("sid") or ""))
+                        self._policy().inherit_from_root("agent", key, root)
+                        if self._policy().can_resource(principal, "agent", key):
+                            visible_agents.append(agent)
+                    agents = visible_agents
                 if agents:
                     info["agents"] = agents
                 worktrees.append(info)
-            self.send_json({"worktrees": worktrees})
+            projects = []
+            for project in load_projects():
+                project_id = str(project.get("id") or "")
+                if not project_id or not self._policy().can_project(principal, project_id):
+                    continue
+                item = {"id": project_id, "label": project_id, "canCreate": True}
+                if principal is None or principal.user.role == "admin":
+                    item["root"] = str(project.get("root") or "")
+                projects.append(item)
+            self.send_json({"worktrees": worktrees, "projects": projects})
             return
 
         if parsed.path == "/api/update-status":
@@ -484,14 +708,22 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in ("/api/term-stream", "/api/term-list"):   # 터미널 — POST 쪽과 같은 로컬 전용 가드
-            if self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host"):
+            if principal is None and (self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host")):
                 self.send_json({"error": "터미널은 로컬 대시보드에서만 쓸 수 있어요"}, 403)
                 return
             if parsed.path == "/api/term-list":
-                self.send_json(term_list())
+                payload = term_list()
+                if principal is not None and principal.user.role != "admin":
+                    payload["sessions"] = [item for item in payload.get("sessions", []) if self._term_allowed(item)]
+                self.send_json(payload)
                 return
             query = urllib.parse.parse_qs(parsed.query)
             tids = [t for t in query.get("tid", [""])[0].split(",") if t]
+            if principal is not None and principal.user.role != "admin":
+                by_tid = {str(item.get("tid")): item for item in term_list().get("sessions", [])}
+                if any(tid not in by_tid or not self._term_allowed(by_tid[tid]) for tid in tids):
+                    self._forbidden()
+                    return
             froms: dict[str, int] = {}
             for pair in query.get("from", [""])[0].split(","):       # from=tid:off,tid:off
                 key, sep, value = pair.partition(":")
@@ -512,6 +744,13 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             try:
                 root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
+                agent_key = canonical_agent(query.get("source", [""])[0], query.get("sid", [""])[0])
+                self._policy().inherit_from_root("agent", agent_key, root)
+                if not self._policy().can_resource(principal, "agent", agent_key):
+                    self._forbidden()
+                    return
                 raw_before = query.get("before", [""])[0]
                 before = int(raw_before) if raw_before else None
                 payload = agent_transcript(root, query.get("source", [""])[0],
@@ -657,7 +896,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             parsed = urllib.parse.urlparse(self.path)
             host_guarded = parsed.path.startswith("/api/") and parsed.path not in ("/api/mobile-send",)
-            if host_guarded and not host_allowed(self.headers.get("host")):
+            if host_guarded and not self._host_allowed():
                 self.send_json({"error": "forbidden host"}, 403)
                 return
             controller = auth_controller()
@@ -667,40 +906,139 @@ class Handler(BaseHTTPRequestHandler):
             if principal is AUTH_DENIED:
                 return
             self.auth_principal = principal
+            if parsed.path in ("/api/remote/serve", "/api/remote/funnel", "/api/remote/off"):
+                if not self._require_admin_access():
+                    return
+                try:
+                    body = self.read_json()
+                    service = self._remote_service()
+                    if parsed.path == "/api/remote/off":
+                        result = service.off(principal)
+                    else:
+                        mode = parsed.path.rsplit("/", 1)[-1]
+                        result = service.activate(mode, principal, str(body.get("password") or ""))
+                    self.send_json(result)
+                    if result.get("restartRequired"):
+                        try:
+                            self.wfile.flush()
+                        except Exception:
+                            pass
+                        self._schedule_dashboard_restart()
+                except (AuthError, RemoteControlError) as exc:
+                    payload = {"error": exc.code, "message": exc.message}
+                    payload.update(getattr(exc, "details", {}) or {})
+                    self.send_json(payload, getattr(exc, "status", 409))
+                return
             if parsed.path in ("/mobile/api/send", "/api/mobile-send"):
                 if principal is None and not mobile_request_ok(self, parsed):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
-                self.send_json(mobile_send(self.read_json()))
+                mobile_body = self.read_json()
+                root = safe_root(str(mobile_body.get("root", "")))
+                if not self._require_root_access(root):
+                    return
+                target = mobile_body.get("target") if isinstance(mobile_body.get("target"), dict) else {}
+                target_type = str(target.get("type") or "shell")
+                if target_type == "term":
+                    tid = str(target.get("tid") or "")
+                    if not self._policy().can_resource(principal, "terminal", tid):
+                        self._forbidden()
+                        return
+                if target_type == "agent":
+                    source, sid = str(target.get("source") or ""), str(target.get("sid") or "")
+                    if not agent_belongs_to_root(root, source, sid):
+                        self._forbidden()
+                        return
+                    agent_key = canonical_agent(source, sid)
+                    self._policy().inherit_from_root("agent", agent_key, root)
+                    if not self._policy().can_resource(principal, "agent", agent_key):
+                        self._forbidden()
+                        return
+                result = mobile_send(mobile_body)
+                if principal is not None:
+                    self._policy().assign(principal, "terminal", str(result.get("tid") or ""), parent_root=root)
+                    if target_type == "agent":
+                        self._policy().assign(principal, "agent", agent_key, parent_root=root)
+                    controller.store.audit_action(
+                        "agent.prompt" if target_type == "agent" else "terminal.input",
+                        "ok", principal.user.id, target_type, agent_key if target_type == "agent" else str(result.get("tid") or ""),
+                    )
+                self.send_json(result)
                 return
-            if not host_allowed(self.headers.get("host")):
+            if not self._host_allowed():
                 self.send_json({"error": "forbidden host"}, 403)
                 return
-            if not origin_allowed(self.headers.get("origin"), self.path == "/api/console"):
+            if not self._origin_allowed(self.path == "/api/console"):
                 self.send_json({"error": "forbidden origin"}, 403)
                 return
 
             body = self.read_json()
+            if self.path in _ADMIN_POST_PATHS and not self._require_admin_access():
+                return
+            if self.path in _ROOT_POST_PATHS:
+                try:
+                    guarded_root = safe_root(str(body.get("root", "")))
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                    return
+                if not self._require_root_access(guarded_root):
+                    return
             if self.path == "/api/console":
                 self.send_json(append_console_log(body))
                 return
 
             # ── 터미널 탭 — PTY 셸 = 원격 코드 실행. 로컬 대시보드 전용: 게이트웨이/프록시 경유(X-Forwarded-*) 거부 ──
             if self.path in ("/api/term-open", "/api/term-input", "/api/term-resize", "/api/term-kill"):
-                if self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host"):
+                if principal is None and (self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host")):
                     self.send_json({"error": "터미널은 로컬 대시보드에서만 쓸 수 있어요"}, 403)
                     return
                 if self.path == "/api/term-open":
                     agent = body.get("agent") or {}
-                    self.send_json(term_open(safe_root(str(body.get("root", ""))),
-                                             int(body.get("cols") or 80), int(body.get("rows") or 24),
-                                             agent_source=str(agent.get("source", "")), agent_sid=str(agent.get("sid", ""))))
+                    root = safe_root(str(body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    agent_key = canonical_agent(str(agent.get("source", "")), str(agent.get("sid", "")))
+                    if agent.get("sid"):
+                        if not agent_belongs_to_root(
+                            root, str(agent.get("source", "")), str(agent.get("sid", ""))
+                        ):
+                            self._forbidden()
+                            return
+                        self._policy().inherit_from_root("agent", agent_key, root)
+                        if not self._policy().can_resource(principal, "agent", agent_key):
+                            self._forbidden()
+                            return
+                    result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24),
+                                       agent_source=str(agent.get("source", "")), agent_sid=str(agent.get("sid", "")))
+                    if principal is not None:
+                        self._policy().assign(principal, "terminal", str(result.get("tid") or ""), parent_root=root)
+                        if agent.get("sid"):
+                            self._policy().assign(principal, "agent", agent_key, parent_root=root)
+                        controller.store.audit_action(
+                            "terminal.open", "ok", principal.user.id, "terminal", str(result.get("tid") or "")
+                        )
+                    self.send_json(result)
                 elif self.path == "/api/term-input":
-                    self.send_json(term_input(str(body.get("tid", "")), str(body.get("data", ""))))
+                    tid = str(body.get("tid", ""))
+                    if not self._term_access_allowed(tid):
+                        self._forbidden()
+                        return
+                    self.send_json(term_input(tid, str(body.get("data", ""))))
                 elif self.path == "/api/term-resize":
-                    self.send_json(term_resize(str(body.get("tid", "")), int(body.get("cols") or 80), int(body.get("rows") or 24)))
+                    tid = str(body.get("tid", ""))
+                    if not self._term_access_allowed(tid):
+                        self._forbidden()
+                        return
+                    self.send_json(term_resize(tid, int(body.get("cols") or 80), int(body.get("rows") or 24)))
                 else:
-                    self.send_json(term_kill(str(body.get("tid", ""))))
+                    tid = str(body.get("tid", ""))
+                    if not self._term_access_allowed(tid):
+                        self._forbidden()
+                        return
+                    result = term_kill(tid)
+                    if principal is not None:
+                        controller.store.audit_action("terminal.kill", "ok", principal.user.id, "terminal", tid)
+                    self.send_json(result)
                 return
 
             if self.path == "/api/compose-service-args":   # ⓘ 모달에서 build args 저장 → ~/.marina/<id>/build-args.json
@@ -827,12 +1165,22 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/api/worktree-create":   # A4 — 대시보드에서 워크트리 생성 (marina worktree create CLI 재사용)
-                target = Path(str(body.get("projectRoot", "")).strip()).expanduser()
-                if not str(body.get("projectRoot", "")).strip() or not target.is_dir():
-                    raise ValueError(f"디렉토리 없음: {body.get('projectRoot', '')}")
-                proj = containing_project_for(target)              # 등록 프로젝트 root 자신만 허용 — 워크트리/하위경로에서는 거부
+                project_id = str(body.get("projectId") or "").strip()
+                if project_id:
+                    proj = next((item for item in load_projects() if str(item.get("id")) == project_id), None)
+                    if not proj:
+                        raise ValueError("등록된 프로젝트를 찾지 못했습니다")
+                    target = Path(proj["root"])
+                else:
+                    target = Path(str(body.get("projectRoot", "")).strip()).expanduser()
+                    if not str(body.get("projectRoot", "")).strip() or not target.is_dir():
+                        raise ValueError(f"디렉토리 없음: {body.get('projectRoot', '')}")
+                    proj = containing_project_for(target)
                 if not proj or proj["root"].resolve() != target.resolve():
                     raise ValueError("등록된 프로젝트 root 가 아닙니다 — 그 프로젝트의 main 카드에서 시도하세요")
+                if not self._policy().can_project(principal, str(proj.get("id") or "")):
+                    self._forbidden()
+                    return
                 branch = str(body.get("branch", "")).strip()
                 if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or ".." in branch:
                     raise ValueError("브랜치명은 영문/숫자/./_/-(슬래시 포함)만 가능 — 공백·'..' 금지")
@@ -849,6 +1197,14 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     san = re.sub(r"[/:]", "-", branch)
                     new_root = str(target / ".claude" / "worktrees" / san)
+                if principal is not None:
+                    owner_root = canonical_root(new_root)
+                    controller.store.assign_resource_owner(
+                        "worktree", owner_root, principal.user.id, actor_user_id=principal.user.id
+                    )
+                    controller.store.audit_action(
+                        "worktree.create", "ok", principal.user.id, "worktree", owner_root
+                    )
                 self.send_json({"ok": True, "root": new_root, "output": out.strip()[-2000:]})
                 return
 
@@ -995,16 +1351,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()   # 데몬 종료 전 응답이 클라이언트에 전달되도록 명시 flush
                 except Exception:
                     pass
-                dash = CONTROL_SCRIPT.parent / "marina-dashboard.sh"
-                if os.environ.get("MARINA_RESTART_DRY_RUN") == "1":
-                    MARINA_HOME.mkdir(parents=True, exist_ok=True)
-                    with (MARINA_HOME / "restart-dry-run.log").open("a", encoding="utf-8") as fh:
-                        fh.write(f"would run: bash {dash} restart\n")
-                    return
-                subprocess.Popen(
-                    ["bash", "-c", f"sleep 1; exec bash {shlex.quote(str(dash))} restart"],
-                    start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                )
+                self._schedule_dashboard_restart()
                 return
 
             if self.path == "/api/update-claude":
@@ -1145,19 +1492,47 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/api/stop-all":
-                self.send_json(stop_all(root))
+                result = stop_all(root)
+                if principal is not None:
+                    controller.store.audit_action("service.stop_all", "ok", principal.user.id, "worktree", canonical_root(root))
+                self.send_json(result)
                 return
 
             if self.path == "/api/start-all":
-                self.send_json(start_all(root, force=bool(body.get("force"))))
+                result = start_all(root, force=bool(body.get("force")))
+                if principal is not None:
+                    controller.store.audit_action("service.start_all", "ok", principal.user.id, "worktree", canonical_root(root))
+                self.send_json(result)
                 return
 
             if self.path == "/api/cleanup":
-                self.send_json(cleanup_session(root))
+                result = cleanup_session(root)
+                if principal is not None:
+                    controller.store.audit_action("worktree.cleanup", "ok", principal.user.id, "worktree", canonical_root(root))
+                self.send_json(result)
                 return
 
             if self.path == "/api/remove-worktree":
-                self.send_json(remove_worktree(root, force=bool(body.get("force"))))
+                result = remove_worktree(root, force=bool(body.get("force")))
+                root_result = result.get("root") if isinstance(result, dict) else None
+                removed = isinstance(root_result, dict) and (
+                    "removed" in root_result or "missing" in root_result
+                )
+                actor_id = principal.user.id if principal is not None else None
+                if removed:
+                    parent_key = canonical_root(root)
+                    controller.store.remove_resources_by_parent(
+                        "worktree", parent_key, actor_user_id=actor_id
+                    )
+                    controller.store.remove_resource_owner(
+                        "worktree", parent_key, actor_user_id=actor_id
+                    )
+                if principal is not None:
+                    controller.store.audit_action(
+                        "worktree.remove", "ok" if removed else "failed", actor_id,
+                        "worktree", canonical_root(root),
+                    )
+                self.send_json(result)
                 return
 
             if self.path == "/api/clear-cache":
@@ -1257,6 +1632,11 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_json({"error": "not found"}, 404)
                 return
+            if principal is not None:
+                controller.store.audit_action(
+                    "service." + self.path.rsplit("/", 1)[-1], "ok", principal.user.id,
+                    "worktree", canonical_root(root), request_meta="service=" + service,
+                )
             self.send_json(result)
         except Exception as exc:
             self.send_json({"error": str(exc)}, 400)

@@ -149,6 +149,9 @@
     function projectSummaries() {
       // worktreeData 가 모든 등록 프로젝트의 main 엔트리를 포함 → projectId 로 그룹.
       const byId = new Map();
+      for (const project of (typeof projectData === 'undefined' ? [] : projectData)) {
+        byId.set(project.id, {id: project.id, label: project.label || project.id, root: project.root || '', on: 0, conflict: 0});
+      }
       for (const wt of worktreeData) {
         if (!byId.has(wt.projectId)) {
           byId.set(wt.projectId, { id: wt.projectId, label: wt.projectLabel || wt.projectId, root: wt.projectRoot, on: 0, conflict: 0 });

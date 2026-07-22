@@ -123,6 +123,7 @@
     }
 
     let worktreeData = [];
+    let projectData = [];
     // 게이트웨이 — enabled 면 서비스 카드에 <wt>[-<svc>].<proj>.localhost URL 표시. 1회만 조회(env 고정).
     let gatewayState = { enabled: false, port: 80, loaded: false };
     const GW_WEB_NAMES = ['web', 'fe', 'frontend', 'app', 'ui'];   // marina-gateway WEB_NAMES 와 동기
@@ -166,11 +167,12 @@
     let worktreesLoaded = false;  // 첫 /api/worktrees 응답 전엔 "빈 레지스트리" 판정 보류 (cold load 스퓨리어스 등록 모달 방지)
     async function loadWorktrees(refresh = false) {
       const data = await api(`/api/worktrees${refresh ? '?refresh=1' : ''}`);
-      const nextSignature = JSON.stringify(data.worktrees ?? []);
+      const nextSignature = JSON.stringify([data.worktrees ?? [], data.projects ?? []]);
       // 변화 없으면 재렌더 스킵 — 60초 폴링이 입력·진행 중 버튼을 흔들지 않게
       if (!refresh && nextSignature === worktreeSignature) return;
       worktreeSignature = nextSignature;
       worktreeData = data.worktrees ?? [];
+      projectData = data.projects ?? [];
       worktreesLoaded = true;
       render(); // 카드의 디스크·캐시·배지 라인 갱신
     }

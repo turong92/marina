@@ -32,9 +32,9 @@ def get(path, host=None, extra=None):
     c.close()
     return r.status, body
 
-def post(path, host=None):
+def post(path, host=None, extra=None):
     c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
-    h = {"content-type": "application/json"}
+    h = {"content-type": "application/json", **(extra or {})}
     if host:
         h["Host"] = host
     c.request("POST", path, body=b"{}", headers=h)
@@ -71,6 +71,18 @@ try:
     # ── 정적 파일은 가드 밖(대시보드 자체 로딩) — /api/ 만 막는다 ──
     st, _ = get("/", host="evil.com:1234")
     assert st != 403, "정적 라우트까지 막으면 안 된다(가드는 /api/ 전용)"
+
+    class FakeRemote:
+        def status(self):
+            return {"dnsName": "marina.tail.ts.net"}
+
+    MH._REMOTE_CONTROLLER = FakeRemote()
+    proxy = {"X-Forwarded-Proto": "https", "Origin": "https://marina.tail.ts.net"}
+    assert post("/api/console", host="marina.tail.ts.net", extra=proxy) != 403, \
+        "검증된 MagicDNS same-origin POST가 거부됨"
+    proxy["Origin"] = "https://evil.example"
+    assert post("/api/console", host="marina.tail.ts.net", extra=proxy) == 403, \
+        "MagicDNS Host에서 다른 Origin을 허용하면 CSRF 우회"
 finally:
     srv.shutdown()
     srv.server_close()

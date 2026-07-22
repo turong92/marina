@@ -25,7 +25,7 @@ with sqlite3.connect(db) as conn:
     }
     assert expected <= names, names
     assert conn.execute("pragma journal_mode").fetchone()[0].lower() == "wal"
-    assert conn.execute("select value from meta where key='schema_version'").fetchone()[0] == "1"
+    assert conn.execute("select value from meta where key='schema_version'").fetchone()[0] == "2"
 
 algorithm, iterations, salt, key = store.password_record("correct horse battery staple")
 assert algorithm == "pbkdf2_sha256"

@@ -198,23 +198,41 @@ compose_main() {
           *)     die "compose: 알 수 없는 인자 '$a' (서비스는 --<name>, 전체는 --all)" ;;
         esac
       done
-      [[ -n "$envvar" ]] && envargs+=("--env=$envvar=${MARINA_COMPOSE_ENV:-$envdef}")
-      mkdir -p "$sd"
-      local MARINA_WATCH_STARTED_NS=""
-      if [[ "$command" == "stop" ]]; then
+	      [[ -n "$envvar" ]] && envargs+=("--env=$envvar=${MARINA_COMPOSE_ENV:-$envdef}")
+	      mkdir -p "$sd"
+	      cname="$(python3 "$cp" name "${nameargs[@]}")"
+	      local MARINA_WATCH_STARTED_NS=""
+	      local watch_paused=0
+	      if [[ "$command" == "stop" ]]; then
         if [[ ${#svcs[@]} -gt 0 ]]; then
           for x in "${svcs[@]}"; do _compose_watch_mark_stop "${x#--service=}"; done
         else
           _compose_watch_mark_stop ""
         fi
-      else
-        MARINA_WATCH_STARTED_NS="$(_compose_watch_now_ns)"
-      fi
-      [[ "$command" == "stop" ]] || ensure_external_worktrees || return 1   # 외부 레포 마운트 보장(up 전) — 실패 시 중단(빌드컨텍스트 없음)
-      [[ "$command" == "stop" ]] || run_prebuild_hooks "$stored" "$cp" \
-        "$MARINA_HOME/$pid/prebuild.json" "$ver" \
-        ${svcs[@]+"${svcs[@]}"} ${envargs[@]+"${envargs[@]}"} || return 1
-	      [[ "$command" == "stop" ]] || apply_glob_links "" "$stored" "$cp"   # opt-in 링크(x-marina.links 우선) — 호스트 deps/config, 빌드출력 제외.
+	      else
+	        MARINA_WATCH_STARTED_NS="$(_compose_watch_now_ns)"
+	      fi
+	      case "$command" in
+	        rebuild|clean-rebuild|restart) _compose_watch_stop; watch_paused=1 ;;
+	      esac
+	      if [[ "$command" != "stop" ]]; then
+	        if ! ensure_external_worktrees; then
+	          [[ "$watch_paused" -eq 0 ]] || refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+	            ${envargs[@]+"${envargs[@]}"} || true
+	          return 1
+	        fi
+	        if ! run_prebuild_hooks "$stored" "$cp" "$MARINA_HOME/$pid/prebuild.json" "$ver" \
+	          ${svcs[@]+"${svcs[@]}"} ${envargs[@]+"${envargs[@]}"}; then
+	          [[ "$watch_paused" -eq 0 ]] || refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+	            ${envargs[@]+"${envargs[@]}"} || true
+	          return 1
+	        fi
+	        if ! apply_glob_links "" "$stored" "$cp"; then
+	          [[ "$watch_paused" -eq 0 ]] || refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+	            ${envargs[@]+"${envargs[@]}"} || true
+	          return 1
+	        fi
+	      fi
       local -a bargs=(); local _ba                              # 서비스별 build args(build-args.json) → overlay 주입
       while IFS= read -r _ba; do [[ -n "$_ba" ]] && bargs+=("--build-arg=$_ba"); done < <(
         python3 - "$MARINA_HOME/$pid/build-args.json" <<'PY'
@@ -317,7 +335,7 @@ PY
           if [[ ${#svcs[@]} -gt 0 ]]; then
             # bounce 대신 up 재적용 — build 없이 빠르게 설정 변경·컨테이너 상태를 반영한다.
             local restart_up_rc=0
-            python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" \
+	            python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" \
               "${svcs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || restart_up_rc=$?
             cname="$(python3 "$cp" name "${nameargs[@]}")"
             if [[ "$restart_up_rc" -ne 0 ]]; then
@@ -331,11 +349,20 @@ PY
             refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
               ${envargs[@]+"${envargs[@]}"}
           else
-            _compose_watch_stop
-            _compose_logtail_stop
-            python3 "$cp" down "${nameargs[@]}"
-            python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || return $?
-            cname="$(python3 "$cp" name "${nameargs[@]}")"
+	            _compose_logtail_stop
+	            local restart_down_rc=0 restart_all_up_rc=0
+	            python3 "$cp" down "${nameargs[@]}" || restart_down_rc=$?
+	            if [[ "$restart_down_rc" -ne 0 ]]; then
+	              refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+	                ${envargs[@]+"${envargs[@]}"} || true
+	              return "$restart_down_rc"
+	            fi
+	            python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || restart_all_up_rc=$?
+	            if [[ "$restart_all_up_rc" -ne 0 ]]; then
+	              refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
+	                ${envargs[@]+"${envargs[@]}"} || true
+	              return "$restart_all_up_rc"
+	            fi
             local -a restart_svcs=()
             while IFS= read -r x; do
               if [[ -n "$x" ]]; then restart_svcs+=("$x"); _compose_logtail_start "$cname" "$x"; fi

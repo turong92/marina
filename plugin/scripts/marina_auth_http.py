@@ -170,11 +170,59 @@ class AuthHTTPController:
         rows = []
         for user in users:
             row = user.to_dict()
+            row["projectIds"] = sorted(self.store.project_access_for(user.id))
             final_admin = user.role == "admin" and user.status == "active" and active_admins <= 1
             row["canDisable"] = user.status != "disabled" and not final_admin
             row["canResetPassword"] = user.status != "disabled" and not final_admin
             rows.append(row)
         return rows
+
+    def _resource_rows(self) -> list[dict[str, object]]:
+        from marina_access import canonical_agent, canonical_root
+        from marina_registry import containing_project_for, discover_all_roots
+        from marina_sessions import agents_payload
+        from marina_term import term_list
+
+        admin = self.store.first_active_admin()
+        if admin is None:
+            return []
+        resources: list[tuple[str, str, str, str]] = []
+        for root in discover_all_roots():
+            key = canonical_root(root)
+            project = containing_project_for(root)
+            resources.append(("worktree", key, Path(key).name, str((project or {}).get("id") or "")))
+            try:
+                for agent in agents_payload(root):
+                    source, sid = str(agent.get("source") or ""), str(agent.get("sid") or "")
+                    if source and sid:
+                        resources.append(("agent", canonical_agent(source, sid), str(agent.get("title") or sid), key))
+            except Exception:
+                pass
+        for term in term_list().get("sessions", []):
+            tid = str(term.get("tid") or "")
+            if tid:
+                resources.append(("terminal", tid, str(term.get("fg") or term.get("cmd") or tid), str(term.get("root") or "")))
+        owners = self.store.all_resource_owners()
+        for resource_type, key, _label, context in resources:
+            owner = owners.get((resource_type, key))
+            parent_key = canonical_root(context) if resource_type != "worktree" and context else None
+            parent = ("worktree", parent_key) if parent_key else None
+            if owner is None:
+                owner = admin.id
+            if (resource_type, key) not in owners or self.store.resource_parent(resource_type, key) != parent:
+                self.store.assign_resource_owner(
+                    resource_type, key, owner, actor_user_id=admin.id,
+                    parent_type="worktree" if parent_key else None, parent_key=parent_key,
+                )
+        owners = self.store.all_resource_owners()
+        usernames = {user.id: user.username for user in self.store.list_users()}
+        return [
+            {
+                "resourceType": resource_type, "resourceKey": key, "label": label,
+                "context": context, "owner": usernames.get(owners.get((resource_type, key)), ""),
+            }
+            for resource_type, key, label, context in resources
+        ]
 
     def dispatch(self, handler: Any, method: str, parsed: urllib.parse.ParseResult) -> bool:
         path = parsed.path
@@ -228,7 +276,49 @@ class AuthHTTPController:
             if path == "/api/auth/users" and method == "GET":
                 if self._require_principal(handler, method, admin=True) is None:
                     return True
-                handler.send_json({"users": self._user_rows()})
+                from marina_registry import load_projects
+                projects = [
+                    {"id": str(project.get("id") or ""), "label": str(project.get("label") or project.get("id") or "")}
+                    for project in load_projects() if project.get("id")
+                ]
+                handler.send_json({"users": self._user_rows(), "projects": projects})
+                return True
+            if path == "/api/auth/access/projects" and method == "POST":
+                principal = self._require_principal(handler, method, admin=True)
+                if principal is None:
+                    return True
+                body = handler.read_json()
+                user = self.store.user_by_username(body.get("username", ""))
+                project_ids = body.get("projectIds")
+                if not isinstance(project_ids, list) or not all(isinstance(item, str) for item in project_ids):
+                    raise AuthError("invalid_projects", "projectIds must be a list of strings.")
+                from marina_registry import load_projects
+                known = {str(project.get("id")) for project in load_projects() if project.get("id")}
+                unknown = sorted(set(project_ids) - known)
+                if unknown:
+                    raise AuthError("unknown_project", "Unknown project: " + ", ".join(unknown), 404)
+                assigned = self.store.set_project_access(user.id, project_ids, principal.user.id)
+                handler.send_json({"ok": True, "projectIds": sorted(assigned)})
+                return True
+            if path == "/api/auth/access/owner" and method == "POST":
+                principal = self._require_principal(handler, method, admin=True)
+                if principal is None:
+                    return True
+                body = handler.read_json()
+                user = self.store.user_by_username(body.get("username", ""))
+                resource_type = str(body.get("resourceType") or "")
+                resource_key = str(body.get("resourceKey") or "")
+                if resource_type not in ("worktree", "terminal", "agent"):
+                    raise AuthError("invalid_resource", "Unsupported resource type.")
+                self.store.assign_resource_owner(
+                    resource_type, resource_key, user.id, actor_user_id=principal.user.id
+                )
+                handler.send_json({"ok": True})
+                return True
+            if path == "/api/auth/access/resources" and method == "GET":
+                if self._require_principal(handler, method, admin=True) is None:
+                    return True
+                handler.send_json({"resources": self._resource_rows()})
                 return True
             if path == "/api/auth/sessions/revoke-all" and method == "POST":
                 principal = self._require_principal(handler, method, admin=True)
