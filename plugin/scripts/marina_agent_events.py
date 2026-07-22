@@ -95,7 +95,7 @@ def _directory_flags() -> int:
 def _file_flags(flags: int) -> int:
     if not hasattr(os, "O_NOFOLLOW"):
         raise OSError("safe journal handling requires O_NOFOLLOW")
-    return flags | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    return flags | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0)
 
 
 def _open_home_directory(home: Path) -> int | None:
@@ -156,6 +156,13 @@ def _source_directory(home: Path, source: str, *, create: bool) -> Iterator[int]
                 pass
 
 
+def _private_regular_stat(fd: int, name: str) -> os.stat_result:
+    file_stat = os.fstat(fd)
+    if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+        raise OSError(f"unsafe journal file: {name}")
+    return file_stat
+
+
 def _open_regular_at(source_fd: int, name: str, *, create: bool = False, writable: bool = False) -> int | None:
     flags = os.O_RDWR if writable else os.O_RDONLY
     try:
@@ -173,8 +180,7 @@ def _open_regular_at(source_fd: int, name: str, *, create: bool = False, writabl
         except FileExistsError:
             fd = os.open(name, _file_flags(flags), 0o600, dir_fd=source_fd)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError(f"unsafe journal file: {name}")
+        _private_regular_stat(fd, name)
         os.fchmod(fd, 0o600)
         return fd
     except Exception:
@@ -227,10 +233,11 @@ def _valid_row(row: object) -> dict[str, Any] | None:
 
 def _read_rows(source_fd: int, name: str, *, source: str, sid: str) -> list[dict[str, Any]]:
     """Read only a bounded tail and retain rows for the expected journal."""
-    fd = _open_regular_at(source_fd, name)
-    if fd is None:
-        return []
+    fd: int | None = None
     try:
+        fd = _open_regular_at(source_fd, name)
+        if fd is None:
+            return []
         size = os.fstat(fd).st_size
         offset = max(0, size - MAX_JOURNAL_READ_BYTES)
         os.lseek(fd, offset, os.SEEK_SET)
@@ -286,15 +293,21 @@ def _write_rows(source_fd: int, name: str, rows: list[dict[str, Any]]) -> None:
             0o600,
             dir_fd=source_fd,
         )
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise OSError("unsafe journal temporary file")
+        _private_regular_stat(fd, temp_name)
         os.fchmod(fd, 0o600)
         for row in rows:
+            _private_regular_stat(fd, temp_name)
             _write_all(fd, json.dumps(row, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n")
         os.fsync(fd)
-        os.close(fd)
-        fd = None
+        expected = _private_regular_stat(fd, temp_name)
         os.replace(temp_name, name, src_dir_fd=source_fd, dst_dir_fd=source_fd)
+        final_stat = os.lstat(name, dir_fd=source_fd)
+        if (
+            not stat.S_ISREG(final_stat.st_mode)
+            or final_stat.st_nlink != 1
+            or (final_stat.st_dev, final_stat.st_ino) != (expected.st_dev, expected.st_ino)
+        ):
+            raise OSError("journal replacement did not preserve temporary inode")
         replaced = True
     finally:
         if fd is not None:

@@ -95,11 +95,11 @@ codex plugin add marina@marina-dev
 
 **에이전트 규약(자동)**: 등록 프로젝트에서 에이전트가 dev 서버를 직접 띄우는 것(`npm run dev`·
 `./gradlew bootRun`·`docker compose up` 등)은 PreToolUse 훅이 **차단**하고 `marina start` 를
-안내한다 — Claude Code 에서 검증됐다. Codex 도 동일 hooks.json 의 PreToolUse 와이어를
-지원하나(스키마 확인) 실동작은 미검증 — 미동작이어도 SessionStart 규칙·dev-server 스킬이 안내한다.
+안내한다 — Claude Code 에서 검증됐다. Codex 는 매니페스트가 별도 `hooks/codex-hooks.json`을
+선택해 같은 PreToolUse 규약을 등록한다(스키마 확인) — 미동작이어도 SessionStart 규칙·dev-server 스킬이 안내한다.
 미등록 레포에서는 세션 시작 시 등록 힌트 1줄만 준다(레지스트리 판독 불가 시엔 침묵). 사람이/
 에이전트가 의도적으로 직접 실행해야 하면 명령 앞에 `MARINA_DIRECT=1 ` 을 붙인다(차단 우회).
-참고: 플러그인 업데이트로 hooks.json 이 바뀌면 Codex 는 훅을 다시 신뢰해야 할 수 있다.
+참고: 플러그인 업데이트로 `hooks/codex-hooks.json` 이 바뀌면 Codex 는 훅을 다시 신뢰해야 할 수 있다.
 
 대시보드 데몬은 OS supervisor 로 등록되어 로그인·부팅 후 자동 기동된다:
 
@@ -704,7 +704,7 @@ marina/
 ├── README.md · LICENSE
 └── plugin/                           설치되는 플러그인 (Claude·Codex 공용)
     ├── .claude-plugin/plugin.json · .codex-plugin/plugin.json
-    ├── hooks/hooks.json              SessionStart 훅 선언
+    ├── hooks/hooks.json · hooks/codex-hooks.json  Claude·Codex host별 훅 선언
     ├── commands/                     슬래시 명령(/marina:project 등)
     └── scripts/
         ├── marina.sh                    세션별 launcher + 레지스트리 CLI (start/stop/restart · project)

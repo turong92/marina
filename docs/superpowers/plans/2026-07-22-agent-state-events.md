@@ -324,3 +324,9 @@ Expected: every repository shell test exits zero, `git diff --check` is clean, a
 - [x] Keep lifecycle recorders synchronous with `async: false` and a two-second host timeout while preserving SessionStart and PreToolUse behavior.
 - [x] Replace journal path traversal with retained descriptor-relative opens for every journal-tree component, journal/lock files, and temporary replacement files; use `O_DIRECTORY`, `O_NOFOLLOW`, `fstat`, `fchmod`, and directory-fd replacement/cleanup.
 - [x] Add regressions for an actual invalid UTF-8 byte, missing-reader no-create behavior, host manifest separation, and a deterministic ancestor-replacement race that leaves the external target untouched.
+
+## Correction Set 4 (2026-07-22)
+
+- [x] Open journal and lock candidates with `O_NONBLOCK | O_NOFOLLOW`; reject FIFO and every non-regular descriptor before permission changes, reads, or writes.
+- [x] Require `st_nlink == 1` for journal, lock, and temporary descriptors so a hard-linked outside inode is never chmodded or written.
+- [x] Retain and verify the temporary inode through replacement; fail closed when a substituted source path cannot produce the expected final inode, while allowing a later writer to replace that unsafe journal entry.
