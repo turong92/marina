@@ -2,6 +2,7 @@
 from __future__ import annotations
 import glob
 import json
+import math
 import mmap
 import os
 import re
@@ -26,6 +27,7 @@ from marina_registry import default_attach_of, discover_all_roots, discover_root
 from marina_paths import ensure_current_log, log_run_payload, read_config, read_meta, service_log, session_dir, session_id
 from marina_compose_svc import _compose_services, _log_tail_line, compose_service_names, compose_service_subrepos, missing_env_vars
 from marina_memory import enrich_session_memory, memory_snapshot
+from marina_agent_events import BLOCKED_REASONS, MAX_FUTURE_SECONDS, latest_agent_event
 
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(["git", *args], cwd=str(cwd), text=True, stderr=subprocess.STDOUT)
@@ -501,17 +503,24 @@ def _agent_state_rows(path: Path) -> tuple[list[dict[str, Any]], float]:
     return rows, stat.st_mtime
 
 
-def agent_status(path: Path, source: str, terminal_active: bool = False) -> dict[str, Any]:
+EVENT_TO_STATUS = {
+    "working": "working",
+    "blocked": "blocked",
+    "ended": "completed",
+    "failed": "failed",
+}
+
+
+def _native_agent_status(path: Path, source: str, *, now: float | None = None) -> dict[str, Any]:
     """Normalize native Claude/Codex turn boundaries without reading an entire rollout."""
     rows, mtime = _agent_state_rows(path)
-    ended = "waiting" if terminal_active else "completed"
     if source == "codex":
         for obj in reversed(rows):
             payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
             event = payload.get("type") if obj.get("type") == "event_msg" else None
             ts = _agent_event_ts(obj, mtime)
             if event == "task_complete":
-                return {"status": ended, "statusTs": ts}
+                return {"status": "completed", "statusTs": ts}
             if event == "turn_aborted":
                 reason = str(payload.get("reason") or "aborted")
                 return {"status": "failed", "statusTs": ts, "statusReason": reason[:120]}
@@ -530,17 +539,70 @@ def agent_status(path: Path, source: str, terminal_active: bool = False) -> dict
                 errors = obj.get("hookErrors") if isinstance(obj.get("hookErrors"), list) else []
                 if errors:
                     return {"status": "failed", "statusTs": ts, "statusReason": "stop hook failed"}
-                return {"status": ended, "statusTs": ts}
+                return {"status": "completed", "statusTs": ts}
             if typ == "assistant":
                 message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
                 if message.get("stop_reason") == "end_turn":
-                    return {"status": ended, "statusTs": ts}
+                    return {"status": "completed", "statusTs": ts}
                 return {"status": "working", "statusTs": ts}
             if typ == "user":
                 return {"status": "working", "statusTs": ts}
-    if mtime and time.time() - mtime < 120:
+    current = time.time() if now is None else now
+    if mtime and current - mtime < 120:
         return {"status": "working", "statusTs": int(mtime), "statusReason": "recent activity"}
     return {"status": "idle", "statusTs": int(mtime or 0)}
+
+
+def merge_agent_status(
+    native: dict[str, Any], event: dict[str, Any] | None, terminal_active: bool = False,
+) -> dict[str, Any]:
+    """Prefer a valid newest lifecycle event, then derive waiting from a live terminal."""
+    result = dict(native)
+    try:
+        native_ts = float(result.get("statusTs") or 0)
+    except (TypeError, ValueError):
+        native_ts = 0
+
+    if isinstance(event, dict):
+        event_name = event.get("event")
+        raw_ts = event.get("ts")
+        try:
+            event_ts = float(raw_ts)
+        except (TypeError, ValueError):
+            event_ts = float("nan")
+        if (
+            event_name in EVENT_TO_STATUS
+            and math.isfinite(event_ts)
+            and event_ts <= time.time() + MAX_FUTURE_SECONDS
+            and event_ts >= native_ts
+        ):
+            status = EVENT_TO_STATUS[str(event_name)]
+            result = {"status": status, "statusTs": int(event_ts)}
+            reason = event.get("reason")
+            if status == "blocked" and reason in BLOCKED_REASONS:
+                result["statusReason"] = str(reason)[:120]
+
+    if terminal_active and result.get("status") == "completed":
+        result["status"] = "waiting"
+    return result
+
+
+def agent_status(
+    path: Path,
+    source: str,
+    terminal_active: bool = False,
+    *,
+    sid: str = "",
+    root: Path | None = None,
+    event_home: Path | None = None,
+    now: float | None = None,
+) -> dict[str, Any]:
+    """Resolve native transcript state with an optional explicit lifecycle event."""
+    native = _native_agent_status(path, source, now=now)
+    event = None
+    if sid and root is not None:
+        event = latest_agent_event(source, sid, Path(root), home=event_home, now=now)
+    return merge_agent_status(native, event, terminal_active)
 
 def claude_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
     # worktreePath → [{"source":"claude","title","ts"(파일 mtime),"cliSessionId"}] — claude_session_titles 와 같은 소스·캐시 리듬(20s)
@@ -641,6 +703,8 @@ def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
     entries = [*claude_by_root.get(key, []), *codex_by_root.get(key, [])]
     entries.sort(key=lambda e: e["ts"], reverse=True)
     agents: list[dict[str, Any]] = []
+    event_home = Path.home()
+    canonical_root = root.resolve()
     for e in entries[:AGENTS_MAX_PER_ROOT]:
         item: dict[str, Any] = {"source": e["source"], "title": e["title"], "ts": int(e["ts"])}
         cli_sid = e.get("cliSessionId")
@@ -648,14 +712,16 @@ def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
             item["sid"] = cli_sid   # 행 클릭=대화 열기 (agent-transcript) 식별자
             jpath = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{cli_sid}.jsonl"
             if jpath.is_file():
-                item.update(agent_status(jpath, "claude"))
+                item.update(agent_status(jpath, "claude", sid=cli_sid, root=canonical_root,
+                                         event_home=event_home))
                 preview = _jsonl_last_assistant_preview(jpath)
                 if preview:
                     from marina_logtext import redact_text   # 카드 payload 도 로그와 같은 마스킹(codex P2)
                     item["preview"] = redact_text(preview)
         elif e["source"] == "codex" and e.get("sid"):
             item["sid"] = e["sid"]
-            item.update(agent_status(Path(e["path"]), "codex"))
+            item.update(agent_status(Path(e["path"]), "codex", sid=e["sid"], root=canonical_root,
+                                     event_home=event_home))
         if "status" not in item:
             item.update({"status": "idle", "statusTs": int(e["ts"])})
         agents.append(item)

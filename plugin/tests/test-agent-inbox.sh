@@ -15,6 +15,7 @@ from pathlib import Path
 scr, tmp = sys.argv[1:3]
 sys.path.insert(0, scr)
 import marina_sessions as ms
+from marina_agent_events import record_hook_event
 
 tmp = Path(tmp)
 
@@ -60,6 +61,80 @@ assert ms.agent_status(codex_done, "codex", terminal_active=False)["status"] == 
 failed = ms.agent_status(codex_failed, "codex")
 assert failed["status"] == "failed" and failed.get("statusReason") == "interrupted", failed
 assert ms.agent_status(tmp / "missing.jsonl", "claude")["status"] == "idle"
+
+# Native transcript parsing remains the fallback, but an explicit lifecycle event at
+# the same or newer timestamp is authoritative for this root/session only.
+events = tmp / "events-home"
+claude_done_ts = 1784538062
+record_hook_event({
+    "hook_event_name": "Notification", "notification_type": "permission_prompt",
+    "session_id": "claude-1", "cwd": str(tmp),
+    "transcript_path": str(tmp / ".claude" / "projects" / "root" / "claude-1.jsonl"),
+}, home=events, now=claude_done_ts + 10)
+blocked = ms.agent_status(
+    claude_done, "claude", sid="claude-1", root=tmp,
+    event_home=events, now=claude_done_ts + 11,
+)
+assert blocked == {"status": "blocked", "statusTs": claude_done_ts + 10,
+                   "statusReason": "permission_prompt"}, blocked
+
+record_hook_event({
+    "hook_event_name": "UserPromptSubmit", "session_id": "claude-1", "cwd": str(tmp),
+    "transcript_path": str(tmp / ".claude" / "projects" / "root" / "claude-1.jsonl"),
+}, home=events, now=claude_done_ts + 20)
+working = ms.agent_status(
+    claude_done, "claude", sid="claude-1", root=tmp,
+    event_home=events, now=claude_done_ts + 21,
+)
+assert working == {"status": "working", "statusTs": claude_done_ts + 20}, working
+
+record_hook_event({
+    "hook_event_name": "Stop", "thread_id": "codex-1", "cwd": str(tmp),
+    "transcript_path": str(tmp / ".codex" / "sessions" / "rollout.jsonl"),
+}, home=events, now=1784538000)
+older = ms.agent_status(
+    codex_done, "codex", sid="codex-1", root=tmp,
+    event_home=events, now=1784538200,
+)
+assert older == {"status": "completed", "statusTs": 1784538245}, older
+
+record_hook_event({
+    "hook_event_name": "Notification", "notification_type": "idle_prompt",
+    "thread_id": "codex-equal", "cwd": str(tmp),
+    "transcript_path": str(tmp / ".codex" / "sessions" / "rollout.jsonl"),
+}, home=events, now=1784538245)
+equal = ms.agent_status(
+    codex_done, "codex", sid="codex-equal", root=tmp,
+    event_home=events, now=1784538250,
+)
+assert equal == {"status": "blocked", "statusTs": 1784538245,
+                 "statusReason": "idle_prompt"}, equal
+
+record_hook_event({
+    "hook_event_name": "UserPromptSubmit", "thread_id": "codex-future", "cwd": str(tmp),
+    "transcript_path": str(tmp / ".codex" / "sessions" / "rollout.jsonl"),
+}, home=events, now=1784538600)
+future = ms.agent_status(
+    codex_done, "codex", sid="codex-future", root=tmp,
+    event_home=events, now=1784538250,
+)
+assert future == {"status": "completed", "statusTs": 1784538245}, future
+
+waiting = ms.merge_agent_status(
+    {"status": "completed", "statusTs": claude_done_ts},
+    {"event": "ended", "ts": claude_done_ts + 1},
+    True,
+)
+assert waiting == {"status": "waiting", "statusTs": claude_done_ts + 1}, waiting
+assert ms.merge_agent_status(
+    {"status": "failed", "statusTs": claude_done_ts + 2},
+    {"event": "ended", "ts": claude_done_ts + 1},
+    True,
+)["status"] == "failed"
+assert ms.merge_agent_status(
+    {"status": "blocked", "statusTs": claude_done_ts}, None, True,
+)["status"] == "blocked"
+print("ok journal/native status precedence")
 print("ok native agent status normalization")
 PY
 
