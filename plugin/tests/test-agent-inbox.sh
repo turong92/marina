@@ -365,6 +365,7 @@ assert.equal(JSON.stringify(context.mobileTest.chooseSessionCalls), JSON.stringi
 assert.equal(context.mobileTest.inboxSheet.classList.contains("open"), false);
 assert.deepEqual(JSON.parse(storage.get("marinaAgentInboxRead")), [blockedEventId]);
 assert.deepEqual(location.replaceCalls, []);
+assert.equal(location.href, "https://mobile.example.test/mobile");
 console.log("ok mobile blocked Inbox behavior");
 ''')
 PY
