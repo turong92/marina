@@ -66,6 +66,8 @@ grep -q -- '--app-height' <<<"$mobile_html" || { echo "FAIL: /mobile should size
 grep -q 'hiddenSelect' <<<"$mobile_html" || { echo "FAIL: /mobile page should hide technical selects"; exit 1; }
 grep -q 'pendingTurns' <<<"$mobile_html" || { echo "FAIL: /mobile page should show sent messages immediately"; exit 1; }
 grep -q 'pendingDeliveryLabel' <<<"$mobile_html" || { echo "FAIL: /mobile pending messages should identify steer/queue state"; exit 1; }
+grep -q '전달 확인 안 됨' <<<"$mobile_html" || { echo "FAIL: /mobile pending messages should surface unconfirmed delivery"; exit 1; }
+grep -q 'externalActive' <<<"$mobile_html" || { echo "FAIL: /mobile should distinguish external agent activity from controllability"; exit 1; }
 grep -q 'd.delivery' <<<"$mobile_html" || { echo "FAIL: /mobile should render the server-confirmed delivery mode"; exit 1; }
 grep -q 'selectAgentAfterSend' <<<"$mobile_html" || { echo "FAIL: /mobile page should keep agent sends in the agent chat"; exit 1; }
 ! grep -q 'menuPanel' <<<"$mobile_html" || { echo "FAIL: /mobile primary navigation should not hide behind a utility menu"; exit 1; }
@@ -91,9 +93,20 @@ grep -q 'failedSend.sessionKey !== selectedSessionKey' <<<"$mobile_html" || { ec
 grep -q 'const requestContext = {root: selectedRoot(), sessionKey: selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile send should capture its session before the request"; exit 1; }
 grep -q 'failedSend = requestContext' <<<"$mobile_html" || { echo "FAIL: /mobile failed send should retry in its original session"; exit 1; }
 grep -q 'async function responseError' <<<"$mobile_html" || { echo "FAIL: /mobile should show the server send failure reason"; exit 1; }
-grep -q 'class="usageRail"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose agent context usage"; exit 1; }
+! grep -q 'class="usageRail"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not permanently expose agent context usage"; exit 1; }
+grep -q 'id="usageBtn"' <<<"$mobile_html" || { echo "FAIL: /mobile compact header should expose a usage button"; exit 1; }
+grep -q 'id="usagePanel"' <<<"$mobile_html" || { echo "FAIL: /mobile usage button should open a usage panel"; exit 1; }
+grep -q 'id="chatNavTitle"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should use a compact navigation title"; exit 1; }
+grep -q 'data-view="chat"' <<<"$mobile_html" || { echo "FAIL: /mobile shell should switch to compact chat mode"; exit 1; }
+grep -q '#mobileApp\[data-view="chat"\] #projectTabs' <<<"$mobile_html" || { echo "FAIL: project navigation should hide while chatting"; exit 1; }
+grep -q '#mobileApp\[data-view="chat"\] #sourceTabs' <<<"$mobile_html" || { echo "FAIL: source navigation should hide while chatting"; exit 1; }
+grep -q '#mobileApp\[data-view="chat"\] #servicesBtn' <<<"$mobile_html" || { echo "FAIL: service summary should hide while chatting"; exit 1; }
 grep -q 'loadAgentUsage' <<<"$mobile_html" || { echo "FAIL: /mobile should load usage lazily for the selected agent"; exit 1; }
 grep -q '"/mobile/api/usage"' <<<"$mobile_html" || { echo "FAIL: /mobile should use the scoped usage endpoint"; exit 1; }
+grep -q 'accountUsage' <<<"$mobile_html" || { echo "FAIL: /mobile should render provider account usage"; exit 1; }
+grep -q 'fableWeekly' <<<"$mobile_html" || { echo "FAIL: /mobile should render Claude Fable weekly usage"; exit 1; }
+grep -q 'class="usageAccountTrack"' <<<"$mobile_html" || { echo "FAIL: account quota windows should render progress bars"; exit 1; }
+grep -q '제공되지 않음' <<<"$mobile_html" || { echo "FAIL: missing five-hour quota should be explicit"; exit 1; }
 grep -q 'formatTokens' <<<"$mobile_html" || { echo "FAIL: /mobile should compact large token values"; exit 1; }
 grep -q 'suggestions' <<<"$mobile_html" || { echo "FAIL: /mobile composer should render native suggestions"; exit 1; }
 grep -q 'renderSuggestions' <<<"$mobile_html" || { echo "FAIL: /mobile composer should adapt suggestions to Claude/Codex"; exit 1; }
@@ -115,20 +128,47 @@ grep -q 'servicesSheet' <<<"$mobile_html" || { echo "FAIL: /mobile should render
 grep -q 'settingsBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose model and effort settings"; exit 1; }
 grep -q 'stopBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose current-turn interruption"; exit 1; }
 grep -q '"/mobile/api/interrupt"' <<<"$mobile_html" || { echo "FAIL: /mobile stop should call the scoped interrupt API"; exit 1; }
-grep -q '앱에서 실행 중' <<<"$mobile_html" || { echo "FAIL: app-owned working sessions should be labeled"; exit 1; }
+grep -q '외부에서 실행 중' <<<"$mobile_html" || { echo "FAIL: external working sessions should be labeled"; exit 1; }
 grep -q 'history.pushState({view: "chat"}' <<<"$mobile_html" || { echo "FAIL: /mobile chat should own a browser history entry"; exit 1; }
 grep -q '한 번 더 누르면 Marina를 나갑니다' <<<"$mobile_html" || { echo "FAIL: /mobile main back should show a two-step exit guard"; exit 1; }
 grep -q 'turnsEl.scrollHeight' <<<"$mobile_html" || { echo "FAIL: /mobile chat should scroll its transcript rather than the page"; exit 1; }
-grep -q 'data-turn-toggle' <<<"$mobile_html" || { echo "FAIL: /mobile chat should collapse long historical messages"; exit 1; }
-grep -q 'collapsedTurnIds' <<<"$mobile_html" || { echo "FAIL: /mobile chat should remember manual message collapse state"; exit 1; }
-grep -q 'function timelineSections' <<<"$mobile_html" || { echo "FAIL: /mobile chat should derive the latest conversation pair"; exit 1; }
-grep -q 'class="previousConversation"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should collapse older conversation together"; exit 1; }
+! grep -q 'data-turn-toggle' <<<"$mobile_html" || { echo "FAIL: /mobile chat messages should remain fully visible"; exit 1; }
+! grep -q 'collapsedTurnIds' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not collapse question or answer bubbles"; exit 1; }
+grep -q 'function conversationExchanges' <<<"$mobile_html" || { echo "FAIL: /mobile chat should partition loaded pages into Q&A exchanges"; exit 1; }
+grep -q 'class="conversationSequence"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render each Q&A as a visible sequence"; exit 1; }
+! grep -q 'class="conversationExchange"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not collapse complete Q&A exchanges"; exit 1; }
+! grep -q 'class="previousConversation"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not lump all history into one container"; exit 1; }
+! grep -q 'id="olderMessagesBtn"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not expose the legacy history button"; exit 1; }
 grep -q 'class="activityGroup"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should collapse native work events"; exit 1; }
 grep -q 'data-activity-detail' <<<"$mobile_html" || { echo "FAIL: /mobile work details should expand independently"; exit 1; }
 grep -q 'mergeTimelineItems' <<<"$mobile_html" || { echo "FAIL: /mobile history should merge paged timeline events"; exit 1; }
 grep -q 'openTimelineDetailIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened timeline details"; exit 1; }
 grep -q 'data-timeline-detail' <<<"$mobile_html" || { echo "FAIL: /mobile timeline details need stable identities"; exit 1; }
-grep -q 'renderActivityGroup(sections.activities, "current")' <<<"$mobile_html" || { echo "FAIL: current work group identity should survive appended activity"; exit 1; }
+grep -q 'renderActivityGroup(sections.activities, `exchange:${exchange.id}`)' <<<"$mobile_html" || { echo "FAIL: each answer process should keep a stable collapsible work group"; exit 1; }
+grep -q 'class="turnMeta"' <<<"$mobile_html" || { echo "FAIL: each agent exchange should expose its actual model and effort"; exit 1; }
+grep -q 'class="liveAction"' <<<"$mobile_html" || { echo "FAIL: the latest exchange should expose its current action inline"; exit 1; }
+grep -q 'data-live-action' <<<"$mobile_html" || { echo "FAIL: the inline current action should open its full work history"; exit 1; }
+grep -q 'flex: 0 0 auto' <<<"$mobile_html" || { echo "FAIL: visible conversation sequences should grow the transcript scroll surface"; exit 1; }
+grep -q 'let followLatest = true' <<<"$mobile_html" || { echo "FAIL: /mobile chat should track explicit bottom-follow intent"; exit 1; }
+grep -q 'function captureScrollAnchor' <<<"$mobile_html" || { echo "FAIL: /mobile polling should capture the visible exchange"; exit 1; }
+grep -q 'function restoreScrollAnchor' <<<"$mobile_html" || { echo "FAIL: /mobile polling should restore the visible exchange"; exit 1; }
+grep -q 'data-timeline-message-id' <<<"$mobile_html" || { echo "FAIL: page-boundary regrouping needs a stable message anchor"; exit 1; }
+grep -q 'anchor.messageId' <<<"$mobile_html" || { echo "FAIL: scroll restoration should survive a changed exchange id"; exit 1; }
+grep -q 'const followLatestBefore = followLatest' <<<"$mobile_html" || { echo "FAIL: polling should preserve follow-latest intent before rendering"; exit 1; }
+! grep -q 'function nearPageBottom' <<<"$mobile_html" || { echo "FAIL: polling still uses the loose near-bottom jump heuristic"; exit 1; }
+! grep -q 'olderMessagesBtn' <<<"$mobile_html" || { echo "FAIL: legacy previous-message state remains in mobile script"; exit 1; }
+grep -q 'historyStatus' <<<"$mobile_html" || { echo "FAIL: cursor loading should use transient inline status"; exit 1; }
+
+PYTHONPATH="$SCR" python3 - <<'PY'
+from marina_mobile import render_mobile_html
+
+script = render_mobile_html().rsplit("<script>", 1)[1].split("</script>", 1)[0]
+latest_loader = script.split("async function loadSessionMessages", 1)[1].split("async function loadOlderMessages", 1)[0]
+older_loader = script.split("async function loadOlderMessages", 1)[1].split("const activityTypeLabels", 1)[0]
+assert 'turnsStructureKey = ""' not in latest_loader, "polling invalidates the render key and jumps to the bottom"
+assert 'turnsStructureKey = ""' not in older_loader, "history prepend invalidates the render key and loses the scroll anchor"
+print("ok mobile loaders preserve scroll intent")
+PY
 
 PYTHONPATH="$SCR" python3 - <<'PY' | node
 from marina_mobile import render_mobile_html
@@ -147,6 +187,32 @@ if (quoted.includes('onclick="')) throw new Error(`quote escaped from href: ${qu
 const markdown = renderRichText('**모델**은 `gpt-test`');
 if (!markdown.includes('<strong>모델</strong>') || !markdown.includes('<code>gpt-test</code>')) throw new Error(`basic markdown missing: ${markdown}`);
 console.log('ok mobile rich text safety');
+''')
+PY
+
+PYTHONPATH="$SCR" python3 - <<'PY' | node
+from marina_mobile import render_mobile_html
+script = render_mobile_html().rsplit("<script>", 1)[1].split("</script>", 1)[0]
+print(script[script.index("function conversationExchanges"):script.index("function renderTimelineMessage")])
+print(r'''
+const current = [
+  {id:'u1',kind:'message',role:'user',text:'question one'},
+  {id:'a1',kind:'activity',activityType:'command',label:'run'},
+  {id:'m1',kind:'message',role:'assistant',text:'answer one'},
+  {id:'u2',kind:'message',role:'user',text:'question two'},
+  {id:'m2',kind:'message',role:'assistant',text:'answer two'},
+];
+let exchanges = conversationExchanges(current);
+if (exchanges.length !== 2 || exchanges[0].id !== 'u1' || exchanges[1].id !== 'u2') throw new Error(`bad exchange split: ${JSON.stringify(exchanges)}`);
+let first = exchangeSections(exchanges[0]);
+if (first.user.text !== 'question one' || first.activities.length !== 1 || first.assistant.text !== 'answer one') throw new Error(`bad exchange sections: ${JSON.stringify(first)}`);
+const older = [
+  {id:'u0',kind:'message',role:'user',text:'older question'},
+  {id:'m0',kind:'message',role:'assistant',text:'older answer'},
+];
+exchanges = conversationExchanges(older.concat(current));
+if (exchanges.map(item => item.id).join(',') !== 'u0,u1,u2') throw new Error(`prepend did not regroup pages: ${JSON.stringify(exchanges)}`);
+console.log('ok paged Q&A exchange grouping');
 ''')
 PY
 
@@ -210,6 +276,11 @@ assert inputs == [
 ], inputs
 assert pauses == [True], pauses
 
+original_pending_settings = mm.mobile_pending_session_settings
+mm.mobile_pending_session_settings = lambda root_arg, source, sid: (
+    {"model": "claude-fable-5", "effort": "high"}
+    if source == "claude" else {"model": "", "effort": ""}
+)
 queued = mm.mobile_send({
     "root": str(root),
     "target": {"type": "agent", "source": "claude", "sid": "claude-session-0001"},
@@ -221,6 +292,7 @@ assert inputs[-2:] == [
     ("live-agent-2", "\r"),
 ], inputs
 assert pauses == [True, True], pauses
+mm.mobile_pending_session_settings = original_pending_settings
 
 codex_queued = mm.mobile_send({**body, "delivery": "queue", "text": "Follow up next turn"})
 assert codex_queued == {"ok": True, "tid": "live-agent-1", "opened": False, "delivery": "queue"}, codex_queued
@@ -230,6 +302,24 @@ assert inputs[-2:] == [
 ], inputs
 assert pauses == [True, True, True], pauses
 assert not opens, opens
+
+original_native_active = mm._native_agent_active
+original_clear_pending = mm._clear_pending_session_settings
+mm.mobile_pending_session_settings = lambda *args: {"model": "gpt-5.6-sol", "effort": "high"}
+mm._native_agent_active = lambda *args: True
+cleared = []
+mm._clear_pending_session_settings = lambda *args: cleared.append(args)
+input_offset = len(inputs)
+active_queued = mm.mobile_send({**body, "delivery": "queue", "text": "Keep this queued while busy"})
+assert active_queued["delivery"] == "queue", active_queued
+assert inputs[input_offset:] == [
+    ("live-agent-1", "Keep this queued while busy"),
+    ("live-agent-1", "\t"),
+], inputs[input_offset:]
+assert not cleared, cleared
+mm.mobile_pending_session_settings = original_pending_settings
+mm._native_agent_active = original_native_active
+mm._clear_pending_session_settings = original_clear_pending
 
 stopped = mm.mobile_interrupt({"root": str(root), "target": body["target"]})
 assert stopped == {"ok": True, "tid": "live-agent-1", "interrupted": True}, stopped
@@ -318,7 +408,10 @@ saved = mm.mobile_update_session_settings({
     "model": "gpt-5.6-sol", "effort": "high",
 })
 assert saved["model"] == "gpt-5.6-sol" and saved["effort"] == "high", saved
-assert mm.mobile_pending_session_settings(root, "codex", "codex-session-0001") == saved
+assert saved["applyMode"] == "pending", saved
+assert mm.mobile_pending_session_settings(root, "codex", "codex-session-0001") == {
+    "model": "gpt-5.6-sol", "effort": "high",
+}
 mode = mm.PENDING_SETTINGS_FILE.stat().st_mode & 0o777
 assert mode == 0o600, oct(mode)
 try:
@@ -329,6 +422,41 @@ try:
     raise AssertionError("invalid model persisted")
 except ValueError:
     pass
+
+original_mobile_agent_options = mm.mobile_agent_options
+mm.mobile_agent_options = lambda: {"codex": {"models": [
+    {"value": "gpt-5.6-sol", "label": "Sol", "efforts": ["low", "medium", "high"]},
+    {"value": "gpt-5.6-terra", "label": "Terra", "efforts": ["low", "medium", "high"]},
+    {"value": "gpt-5.6-luna", "label": "Luna", "efforts": ["low", "medium", "high", "xhigh", "max"]},
+]}}
+mm._live_agent_tid = lambda *args: "live-codex-1"
+mm._native_agent_active = lambda *args: False
+inputs = []
+pauses = []
+mm.term_input = lambda tid, data: inputs.append((tid, data)) or {"ok": True}
+mm._agent_input_pause = lambda: pauses.append(True)
+
+applied = mm.mobile_update_session_settings({
+    "root": str(root), "source": "codex", "sid": "codex-session-0001",
+    "model": "gpt-5.6-luna", "effort": "high",
+})
+assert applied == {"model": "gpt-5.6-luna", "effort": "high", "applyMode": "live"}, applied
+assert inputs[:2] == [("live-codex-1", "/model"), ("live-codex-1", "\r")], inputs
+assert inputs[2][0] == "live-codex-1" and inputs[2][1].endswith("\r") and inputs[2][1].count("\x1b[B") == 2, inputs[2]
+assert inputs[3][0] == "live-codex-1" and inputs[3][1].endswith("\r") and inputs[3][1].count("\x1b[B") == 2, inputs[3]
+assert len(pauses) >= 3, pauses
+assert mm.mobile_pending_session_settings(root, "codex", "codex-session-0001") == {"model": "", "effort": ""}
+
+mm._native_agent_active = lambda *args: True
+pending = mm.mobile_update_session_settings({
+    "root": str(root), "source": "codex", "sid": "codex-session-0001",
+    "model": "gpt-5.6-sol", "effort": "medium",
+})
+assert pending == {"model": "gpt-5.6-sol", "effort": "medium", "applyMode": "pending"}, pending
+assert mm.mobile_pending_session_settings(root, "codex", "codex-session-0001") == {
+    "model": "gpt-5.6-sol", "effort": "medium",
+}
+mm.mobile_agent_options = original_mobile_agent_options
 
 mm.CODEX_MODELS_FILE = tmp / "models_cache.json"
 mm.CODEX_MODELS_FILE.write_text(json.dumps({"models": [{
@@ -572,6 +700,7 @@ keys = [s["key"] for s in state["sessions"]]
 assert "agent:codex:sid0001:%s" % root in keys, keys
 agent = next(s for s in state["sessions"] if s["key"].startswith("agent:codex:"))
 assert agent["tid"] == "agent-term" and agent["controllable"] is True, agent
+assert agent["externalActive"] is False, agent
 assert "subagents" not in agent, agent
 assert "catalog" not in agent, agent
 assert "term:shell-term" in keys, keys

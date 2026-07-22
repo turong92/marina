@@ -3,8 +3,8 @@
 ## Goal
 
 Make Marina Mobile chat use the available viewport, preserve the reader's
-position during polling, and render paginated history as nearby question/work/
-answer exchanges instead of one oversized previous-conversation group.
+position during polling, and keep paginated questions and answers visible while
+collapsing only the work performed between them.
 
 ## History Model
 
@@ -18,9 +18,12 @@ timeline at user messages. Each partition becomes one exchange containing:
 2. activity emitted after that question; and
 3. assistant messages up to the next user question.
 
-The newest exchange is expanded. Every older loaded exchange is a separate
-collapsed row whose summary is derived from its question and work count. There
-is no catch-all `Previous conversation` container.
+Every loaded user question is always visible as a right-aligned bubble. Its
+final assistant answer is always visible as a left-aligned bubble. Commands,
+skills, diffs, tool calls, progress messages, and other activity between them
+are grouped into one collapsed work row. Expanding that row reveals individual
+activity details. Neither an exchange-level accordion nor a catch-all
+`Previous conversation` container is used.
 
 When the reader scrolls to the top, Marina fetches one previous page and prepends
 it. The same partitioning runs over the combined loaded pages, so an exchange
@@ -30,13 +33,14 @@ messages` button is removed.
 
 ## Scroll Ownership
 
-The transcript element is the only scrolling surface. Conversation and activity
-details use `flex: 0 0 auto` so opening them increases transcript scroll height
+The transcript element is the only scrolling surface. Conversation sequences
+and activity details use `flex: 0 0 auto` so opening work increases transcript scroll height
 instead of shrinking and clipping their content.
 
-Before prepending a history page, the client records the first visible exchange
-ID and its viewport offset. After rendering, it restores that exchange to the
-same offset. This avoids jumps while loading older pages.
+Before prepending a history page, the client records the first visible exchange,
+its first stable message ID, and their viewport offsets. After rendering, it
+prefers the message anchor so a page-boundary regroup can change the exchange ID
+without moving the reader. This avoids jumps while loading older pages.
 
 Polling never opts the reader back into bottom-follow mode. Bottom-follow is an
 explicit state:
@@ -81,8 +85,9 @@ Usage fetch failures leave the panel values as dashes without affecting chat.
 
 ## Verification
 
-Regression tests cover page-boundary exchange joining, old-button removal,
-single-surface scrolling, bottom-follow transitions, anchor restoration, compact
-chat mode, and usage-panel toggling. Browser QA uses a live working Codex session
-at 390 x 844 and verifies opening long middle exchanges, loading one older page,
-polling while scrolled up, keyboard focus, and composer non-overlap.
+Regression tests cover always-visible question/answer bubbles, activity-only
+collapse, page-boundary exchange joining, old-button removal, single-surface
+scrolling, bottom-follow transitions, anchor restoration, compact chat mode,
+and usage-panel toggling. Browser QA uses a live working Codex session at 390 x
+844 and verifies opening middle activity, loading one older page, polling while
+scrolled up, keyboard focus, and composer non-overlap.

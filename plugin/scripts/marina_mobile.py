@@ -50,12 +50,8 @@ def mobile_pending_session_settings(root: Path, source: str, sid: str) -> dict[s
     return {"model": str(raw.get("model") or ""), "effort": str(raw.get("effort") or "")}
 
 
-def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
-    root = safe_root(str(body.get("root") or ""))
-    source = str(body.get("source") or "")
-    sid = str(body.get("sid") or "")
-    value = {"model": str(body.get("model") or ""), "effort": str(body.get("effort") or "")}
-    _agent_cli(source, sid, model=value["model"], effort=value["effort"])
+def _persist_pending_session_settings(root: Path, source: str, sid: str,
+                                      value: dict[str, str]) -> None:
     key = _session_settings_key(root, source, sid)
     with _SESSION_SETTINGS_LOCK:
         payload = _read_json(PENDING_SETTINGS_FILE)
@@ -71,7 +67,25 @@ def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
-    return value
+
+
+def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
+    root = safe_root(str(body.get("root") or ""))
+    source = str(body.get("source") or "")
+    sid = str(body.get("sid") or "")
+    value = {"model": str(body.get("model") or ""), "effort": str(body.get("effort") or "")}
+    _agent_cli(source, sid, model=value["model"], effort=value["effort"])
+    with _AGENT_SEND_LOCK:
+        tid = _live_agent_tid(root, source, sid)
+        if tid and source == "codex" and not _native_agent_active(root, source, sid):
+            try:
+                if _apply_live_codex_settings(tid, value["model"], value["effort"]):
+                    _clear_pending_session_settings(root, source, sid)
+                    return {**value, "applyMode": "live"}
+            except (OSError, ValueError):
+                pass
+        _persist_pending_session_settings(root, source, sid, value)
+    return {**value, "applyMode": "pending"}
 
 
 def _clear_pending_session_settings(root: Path, source: str, sid: str) -> None:
@@ -424,6 +438,7 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                     "statusReason": agent.get("statusReason") or "",
                     "tid": str((agent_terms.get((source, sid)) or {}).get("tid") or ""),
                     "controllable": bool((agent_terms.get((source, sid)) or {}).get("tid")),
+                    "externalActive": _agent_process_active(source, sid),
                     "settings": {
                         "current": agent_runtime_settings(root, source, sid),
                         "pending": mobile_pending_session_settings(root, source, sid),
@@ -569,6 +584,33 @@ def _deliver_agent_input(tid: str, source: str, text: str, requested: str = "") 
     return delivery
 
 
+def _apply_live_codex_settings(tid: str, model: str, effort: str) -> bool:
+    """Drive Codex's native /model picker in its Marina-owned PTY."""
+    models = (mobile_agent_options().get("codex") or {}).get("models") or []
+    model_index = next((index for index, item in enumerate(models)
+                        if isinstance(item, dict) and item.get("value") == model), None)
+    if model_index is None:
+        return False
+    model_item = models[model_index]
+    efforts = [str(value) for value in (model_item.get("efforts") or [])]
+    if effort and effort not in efforts:
+        return False
+
+    term_input(tid, "/model")
+    _agent_input_pause()
+    term_input(tid, "\r")
+    _agent_input_pause()
+    term_input(tid, "\x1b[A" * (len(models) + 2) + "\x1b[B" * model_index + "\r")
+    _agent_input_pause()
+    if effort:
+        effort_index = efforts.index(effort)
+        term_input(tid, "\x1b[A" * (len(efforts) + 2) + "\x1b[B" * effort_index + "\r")
+    else:
+        term_input(tid, "\r")
+    _agent_input_pause()
+    return True
+
+
 def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
     root = safe_root(str(body.get("root", "")))
     target = body.get("target") if isinstance(body.get("target"), dict) else {}
@@ -591,6 +633,15 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
         with _AGENT_SEND_LOCK:
             tid = _live_agent_tid(root, source, sid)
             if tid:
+                saved = mobile_pending_session_settings(root, source, sid)
+                if (
+                    source == "codex"
+                    and (saved["model"] or saved["effort"])
+                    and not _native_agent_active(root, source, sid)
+                ):
+                    if not _apply_live_codex_settings(tid, saved["model"], saved["effort"]):
+                        raise ValueError("예약한 모델 설정을 현재 CLI에 적용할 수 없어요. 세션을 다시 열어주세요")
+                    _clear_pending_session_settings(root, source, sid)
                 delivery = _deliver_agent_input(tid, source, text, str(body.get("delivery") or ""))
                 return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
             if _agent_process_active(source, sid) or _native_agent_active(root, source, sid):
@@ -649,7 +700,7 @@ _MOBILE_HTML = r"""<!doctype html>
     #mobileApp { --app-height: 100dvh; height: var(--app-height); min-height: 0; display: none; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
     #mobileLogin { min-height: 100vh; display: none; align-items: stretch; justify-content: center; flex-direction: column; padding: 24px; box-sizing: border-box; gap: 14px; }
     #mobileLogin form { display: flex; flex-direction: column; gap: 10px; }
-    header { z-index: 4; display: grid; gap: 4px; padding: 4px 8px 6px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
+    header { position: relative; z-index: 4; display: grid; gap: 4px; padding: 4px 8px 6px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
     .shellRow { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 5px; align-items: center; min-height: 38px; }
     h2 { margin: 0; font-size: 22px; }
     p { margin: 0; color: #596070; line-height: 1.45; }
@@ -665,7 +716,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .iconBtn { width: 36px; height: 36px; min-height: 36px; padding: 0; border-color: transparent; background: transparent; color: #303846; font-size: 19px; line-height: 1; }
     .backBtn { grid-column: 1; }
     #listView { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow-y: auto; overscroll-behavior: contain; }
-    #chatView { position: relative; display: none; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); gap: 8px; overflow: hidden; }
+    #chatView { position: relative; display: none; min-height: 0; grid-template-rows: auto minmax(0, 1fr); gap: 5px; overflow: hidden; }
     .hiddenSelect { display: none !important; }
     .project-strip { display: flex; min-width: 0; gap: 5px; padding: 1px 0; overflow-x: auto; scrollbar-width: none; }
     .project-strip::-webkit-scrollbar { display: none; }
@@ -676,6 +727,15 @@ _MOBILE_HTML = r"""<!doctype html>
     .source-tab { min-width: 0; min-height: 30px; padding: 0 4px; border: 0; background: transparent; color: #596070; font-size: 10px; }
     .source-tab.active { background: #fff; color: #17191f; box-shadow: 0 1px 3px rgb(23 25 31 / 10%); }
     .servicesBtn { width: auto; min-width: 54px; min-height: 32px; padding: 0 8px; color: #303846; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .shellActions { display: flex; align-items: center; gap: 3px; }
+    .chatNavTitle { display: none; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
+    .usageBtn { display: none; width: 32px; min-width: 32px; height: 32px; min-height: 32px; padding: 0; border-color: transparent; background: transparent; color: #4d5665; font-size: 18px; }
+    #mobileApp[data-view="chat"] header { gap: 0; padding-bottom: 4px; }
+    #mobileApp[data-view="chat"] .shellRow { grid-template-columns: 32px minmax(0, 1fr) 32px; min-height: 34px; }
+    #mobileApp[data-view="chat"] #projectTabs, #mobileApp[data-view="chat"] #sourceTabs, #mobileApp[data-view="chat"] #servicesBtn { display: none; }
+    #mobileApp[data-view="chat"] .chatNavTitle { display: block; }
+    #mobileApp[data-view="chat"] .usageBtn.available { display: inline-flex; align-items: center; justify-content: center; }
+    #mobileApp[data-view="chat"] main { padding: 6px 10px; }
     .search-input { min-height: 40px; }
     .session-list { display: flex; flex-direction: column; gap: 12px; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
@@ -690,30 +750,49 @@ _MOBILE_HTML = r"""<!doctype html>
     .session-subtitle { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #596070; font-size: 12px; line-height: 1.25; margin-top: 3px; }
     .session-preview { display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: #303846; font-size: 12px; line-height: 1.3; margin-top: 6px; }
     .empty-state { padding: 28px 12px; color: #747d8b; text-align: center; font-size: 13px; line-height: 1.45; }
-    .chat-title { font-size: 18px; font-weight: 900; line-height: 1.25; overflow-wrap: anywhere; }
-    .chat-subtitle { color: #596070; font-size: 12px; line-height: 1.35; overflow-wrap: anywhere; }
-    .usageRail { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 10px; margin-top: 7px; padding-top: 7px; border-top: 1px solid #dde2ea; font-variant-numeric: tabular-nums; }
+    .usagePanel { position: absolute; top: 42px; right: 8px; z-index: 7; display: none; width: min(250px, calc(100vw - 16px)); padding: 10px; box-sizing: border-box; border: 1px solid #ccd3dd; border-radius: 8px; background: #fff; box-shadow: 0 8px 24px rgb(23 25 31 / 16%); font-variant-numeric: tabular-nums; }
+    .usagePanel.open { display: block; }
+    .usageSection + .usageSection { margin-top: 10px; padding-top: 9px; border-top: 1px solid #e4e8ee; }
+    .usageSectionTitle { margin-bottom: 5px; color: #747d8b; font-size: 9px; font-weight: 900; letter-spacing: .02em; }
+    .usageAccountRows { display: grid; gap: 5px; }
+    .usageAccountRow { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px 8px; align-items: baseline; }
+    .usageAccountLabel { min-width: 0; overflow: hidden; color: #303846; font-size: 11px; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+    .usageAccountValue { color: #303846; font-size: 11px; font-weight: 900; }
+    .usageAccountReset { grid-column: 1 / -1; margin-top: -4px; color: #8992a0; font-size: 9px; }
+    .usageAccountTrack { grid-column: 1 / -1; height: 3px; overflow: hidden; border-radius: 2px; background: #dfe5ec; }
+    .usageAccountFill { display: block; width: 0; height: 100%; background: #26845b; transition: width .18s ease; }
+    .usageAccountRow[data-level="warn"] .usageAccountFill { background: #bd7418; }
+    .usageAccountRow[data-level="critical"] .usageAccountFill { background: #c43d3d; }
+    .usageAccountRow.unavailable .usageAccountFill { background: transparent; }
+    .usageUnavailable { color: #8992a0; font-size: 10px; }
+    .usageMetrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px 10px; }
     .usageMetric { min-width: 0; }
     .usageLabel { display: block; color: #747d8b; font-size: 9px; font-weight: 800; }
     .usageValue { display: block; margin-top: 1px; overflow: hidden; color: #303846; font-size: 12px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
-    .usageTrack { grid-column: 1 / -1; height: 3px; overflow: hidden; border-radius: 2px; background: #dfe5ec; }
+    .usageTrack { grid-column: 1 / -1; height: 3px; margin-top: 6px; overflow: hidden; border-radius: 2px; background: #dfe5ec; }
     .usageFill { display: block; width: 0; height: 100%; background: #26845b; transition: width .18s ease; }
-    .usageRail[data-level="warn"] .usageFill { background: #bd7418; }
-    .usageRail[data-level="critical"] .usageFill { background: #c43d3d; }
+    .usagePanel[data-level="warn"] .usageFill { background: #bd7418; }
+    .usagePanel[data-level="critical"] .usageFill { background: #c43d3d; }
+    .historyStatus { display: none; min-height: 24px; align-items: center; justify-content: center; color: #747d8b; font-size: 10px; }
     .turns { display: flex; min-height: 0; flex-direction: column; justify-content: flex-start; gap: 9px; overflow-y: auto; overscroll-behavior: contain; padding: 2px 1px 8px; }
-    .olderMessagesBtn { display: none; align-self: center; width: auto; min-height: 32px; padding: 0 11px; border-color: #b9c6d8; color: #596070; font-size: 11px; }
+    .turns > *, .conversationSequence, .activityGroup, .turn { flex: 0 0 auto; }
+    .conversationSequence { display: flex; align-self: stretch; flex-direction: column; gap: 8px; }
     .turn { align-self: flex-start; max-width: 88%; padding: 9px 11px; border-radius: 8px; background: #eef2f7; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
     .turn.user { align-self: flex-end; background: #dcecff; }
     .turn.output { width: 100%; max-width: none; background: #111827; color: #e5e7eb; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
     .turn.pending { opacity: .82; }
     .turnState { margin-top: 5px; color: #687083; font-size: 10px; font-weight: 750; }
+    .turnMeta { align-self: flex-start; margin-top: -3px; color: #747d8b; font-size: 9px; font-weight: 800; }
+    .liveAction { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 7px; align-items: center; width: 100%; min-height: 34px; padding: 0 8px; border: 0; border-radius: 0; background: transparent; color: #303846; text-align: left; }
+    .liveActionDot { width: 7px; height: 7px; border: 2px solid #c8d1dc; border-top-color: #0b63ce; border-radius: 50%; animation: liveActionSpin .8s linear infinite; }
+    .liveActionLabel { min-width: 0; overflow: hidden; font-size: 11px; font-weight: 850; text-overflow: ellipsis; white-space: nowrap; }
+    .liveActionMeta { color: #747d8b; font-size: 9px; font-weight: 800; white-space: nowrap; }
+    @keyframes liveActionSpin { to { transform: rotate(360deg); } }
     .turn a, .subagent-turn a { color: #0969da; text-decoration: underline; text-underline-offset: 2px; }
     .turn code, .subagent-turn code { padding: 1px 4px; border-radius: 4px; background: rgba(127, 127, 127, .14); font: .92em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
-    .turnToggle { display: block; margin: 6px 0 0; padding: 2px 0; border: 0; background: transparent; color: #526176; font-size: 11px; }
-    .previousConversation, .activityGroup { align-self: stretch; overflow: hidden; border: 1px solid #d8dee7; border-radius: 8px; background: #f8f9fb; }
-    .previousConversation > summary, .activityGroup > summary { min-height: 38px; padding: 0 10px; color: #526176; font-size: 11px; font-weight: 850; line-height: 38px; cursor: pointer; list-style-position: inside; }
-    .previousConversation[open] > summary, .activityGroup[open] > summary { border-bottom: 1px solid #e2e6ec; }
-    .previousConversationBody { display: flex; flex-direction: column; gap: 8px; padding: 9px; }
+    .activityGroup { align-self: stretch; overflow: hidden; border: 1px solid #d8dee7; border-radius: 8px; background: #f8f9fb; }
+    .activityGroup > summary { min-height: 38px; padding: 0 10px; color: #526176; font-size: 11px; font-weight: 850; line-height: 38px; cursor: pointer; list-style-position: inside; }
+    .activityGroup[open] > summary { border-bottom: 1px solid #e2e6ec; }
     .activityList { display: flex; flex-direction: column; padding: 3px 9px 7px; }
     .activityItem { border-bottom: 1px solid #e5e8ed; }
     .activityItem:last-child { border-bottom: 0; }
@@ -789,14 +868,19 @@ _MOBILE_HTML = r"""<!doctype html>
       label, p, .status { color: #a5adba; }
       .chatComposer { background: #171d27; border-color: #303846; }
       .session-card { border-color: #303846; }
-      .session-subtitle, .chat-subtitle, .usageLabel { color: #a5adba; }
-      .usageRail { border-color: #303846; }
+      .session-subtitle, .usageLabel { color: #a5adba; }
+      .usagePanel { border-color: #303846; background: #171d27; }
+      .usageSection + .usageSection { border-color: #303846; }
+      .usageAccountLabel, .usageAccountValue { color: #e3e7ed; }
+      .usageAccountReset, .usageUnavailable, .usageSectionTitle { color: #a5adba; }
       .usageValue { color: #e3e7ed; }
-      .usageTrack { background: #303846; }
-      .previousConversation, .activityGroup { border-color: #303846; background: #171d27; }
-      .previousConversation > summary, .activityGroup > summary { color: #b9c1ce; }
-      .previousConversation[open] > summary, .activityGroup[open] > summary, .activityItem { border-color: #303846; }
+      .usageTrack, .usageAccountTrack { background: #303846; }
+      .activityGroup { border-color: #303846; background: #171d27; }
+      .activityGroup > summary { color: #b9c1ce; }
+      .activityGroup[open] > summary, .activityItem { border-color: #303846; }
       .activityItem > summary { color: #e3e7ed; }
+      .turnMeta, .liveActionMeta { color: #a5adba; }
+      .liveAction { color: #e3e7ed; }
       .session-preview { color: #d6dbe4; }
       .iconBtn, .servicesBtn { color: #d6dbe4; }
       .project-chip { color: #a5adba; }
@@ -811,7 +895,6 @@ _MOBILE_HTML = r"""<!doctype html>
       .turn.user { background: #182f4f; }
       .turn.output { background: #080c12; }
       .turn a, .subagent-turn a { color: #78aaff; }
-      .olderMessagesBtn { border-color: #3b4658; color: #a5adba; }
       .newMessagesBtn, .suggestions, .bottomSheet, .inboxGroup, .sessionControlBtn { background: #171d27; border-color: #303846; }
       .suggestion + .suggestion, .sheetHeader, .subagentItem, .inboxItem, .serviceItem { border-color: #303846; }
       .suggestion-description, .suggestion-kind, .subagentStatus, .subagentPreview, .inboxItemCopy small, .inboxState { color: #a5adba; }
@@ -835,9 +918,27 @@ _MOBILE_HTML = r"""<!doctype html>
       <div class="shellRow">
         <button class="iconBtn backBtn" id="backBtn" type="button" title="세션 목록" aria-label="세션 목록으로" style="display:none">&#8592;</button>
         <div class="project-strip" id="projectTabs" aria-label="프로젝트"></div>
-        <button class="servicesBtn" id="servicesBtn" type="button" aria-label="서비스 상태">서버 <span id="servicesCount">-/-</span></button>
+        <div class="chatNavTitle" id="chatNavTitle"></div>
+        <div class="shellActions">
+          <button class="usageBtn" id="usageBtn" type="button" title="토큰 사용량" aria-label="토큰 사용량">&#9684;</button>
+          <button class="servicesBtn" id="servicesBtn" type="button" aria-label="서비스 상태">서버 <span id="servicesCount">-/-</span></button>
+        </div>
       </div>
       <div class="source-tabs" id="sourceTabs" aria-label="세션 종류"></div>
+      <div class="usagePanel" id="usagePanel" aria-label="사용량" aria-hidden="true">
+        <div class="usageSection">
+          <div class="usageSectionTitle">계정 한도</div>
+          <div class="usageAccountRows" id="usageAccountRows"><span class="usageUnavailable">확인 안 됨</span></div>
+        </div>
+        <div class="usageSection">
+          <div class="usageSectionTitle">현재 세션 컨텍스트</div>
+          <div class="usageMetrics">
+          <div class="usageMetric"><span class="usageLabel">컨텍스트</span><span class="usageValue" id="usagePercent">-</span></div>
+          <div class="usageMetric"><span class="usageLabel">사용</span><span class="usageValue" id="usageUsed">-</span></div>
+          <div class="usageMetric"><span class="usageLabel">남음</span><span class="usageValue" id="usageRemaining">-</span></div>
+        </div>
+        <div class="usageTrack"><span class="usageFill" id="usageFill"></span></div>
+      </div>
     </header>
     <main>
       <section id="listView">
@@ -845,19 +946,9 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="session-list" id="sessionList"></div>
       </section>
       <section id="chatView">
-        <div class="chatHeader">
-          <div class="chat-title" id="chatTitle">세션을 선택하세요</div>
-          <div class="chat-subtitle" id="chatSubtitle"></div>
-          <div class="usageRail" id="usageRail" aria-label="컨텍스트 사용량" style="display:none">
-            <div class="usageMetric"><span class="usageLabel">컨텍스트</span><span class="usageValue" id="usagePercent">-</span></div>
-            <div class="usageMetric"><span class="usageLabel">사용</span><span class="usageValue" id="usageUsed">-</span></div>
-            <div class="usageMetric"><span class="usageLabel">남음</span><span class="usageValue" id="usageRemaining">-</span></div>
-            <div class="usageTrack"><span class="usageFill" id="usageFill"></span></div>
-          </div>
-        </div>
         <label class="hiddenSelect">워크트리<select id="rootSelect"></select></label>
         <label class="hiddenSelect">대상<select id="targetSelect"></select></label>
-        <button class="olderMessagesBtn" id="olderMessagesBtn" type="button">이전 메시지</button>
+        <div class="historyStatus" id="historyStatus" aria-live="polite"></div>
         <div class="turns" id="turns"></div>
         <button class="newMessagesBtn" id="newMessagesBtn" type="button">새 메시지</button>
       </section>
@@ -943,13 +1034,14 @@ _MOBILE_HTML = r"""<!doctype html>
     const chatView = document.getElementById("chatView");
     const chatComposer = document.getElementById("chatComposer");
     const backBtn = document.getElementById("backBtn");
-    const chatTitle = document.getElementById("chatTitle");
-    const chatSubtitle = document.getElementById("chatSubtitle");
-    const usageRail = document.getElementById("usageRail");
+    const chatNavTitle = document.getElementById("chatNavTitle");
+    const usageBtn = document.getElementById("usageBtn");
+    const usagePanel = document.getElementById("usagePanel");
     const usagePercent = document.getElementById("usagePercent");
     const usageUsed = document.getElementById("usageUsed");
     const usageRemaining = document.getElementById("usageRemaining");
     const usageFill = document.getElementById("usageFill");
+    const usageAccountRows = document.getElementById("usageAccountRows");
     const rootSelect = document.getElementById("rootSelect");
     const targetSelect = document.getElementById("targetSelect");
     const promptInput = document.getElementById("prompt");
@@ -958,7 +1050,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const projectTabs = document.getElementById("projectTabs");
     const sourceTabs = document.getElementById("sourceTabs");
     const turnsEl = document.getElementById("turns");
-    const olderMessagesBtn = document.getElementById("olderMessagesBtn");
+    const historyStatus = document.getElementById("historyStatus");
     const suggestionsEl = document.getElementById("suggestions");
     const newMessagesBtn = document.getElementById("newMessagesBtn");
     const retryBtn = document.getElementById("retryBtn");
@@ -1005,6 +1097,8 @@ _MOBILE_HTML = r"""<!doctype html>
     let fileSuggestions = [];
     let serviceLoading = false;
     let serviceLoadedAt = 0;
+    let followLatest = true;
+    let suppressScrollTracking = false;
     let exitArmedUntil = 0;
     let toastTimer = 0;
     const inboxReadKey = "marinaAgentInboxRead";
@@ -1018,8 +1112,6 @@ _MOBILE_HTML = r"""<!doctype html>
     const activityCache = {};
     const catalogCache = {};
     const usageCache = {};
-    const expandedTurnIds = new Set();
-    const collapsedTurnIds = new Set();
     const openTimelineDetailIds = new Set();
     let historyLoading = false;
     const sourceMeta = {
@@ -1037,18 +1129,26 @@ _MOBILE_HTML = r"""<!doctype html>
       app.style.display = "grid";
     }
     function showList() {
+      app.setAttribute("data-view", "list");
       listView.style.display = "flex";
       chatView.style.display = "none";
       chatComposer.style.display = "none";
       backBtn.style.display = "none";
+      closeUsagePanel();
       closeSubagents();
       closeInbox();
     }
     function showChat() {
+      app.setAttribute("data-view", "chat");
       listView.style.display = "none";
       chatView.style.display = "grid";
       chatComposer.style.display = "flex";
       backBtn.style.display = "inline-block";
+    }
+    function closeUsagePanel() {
+      usagePanel.classList.remove("open");
+      usagePanel.setAttribute("aria-hidden", "true");
+      usageBtn.setAttribute("aria-expanded", "false");
     }
     function closeMenu() {}
     function closeSubagents() {
@@ -1160,12 +1260,39 @@ _MOBILE_HTML = r"""<!doctype html>
       promptInput.style.height = "auto";
       promptInput.style.height = `${Math.min(promptInput.scrollHeight, 132)}px`;
     }
-    function nearPageBottom() {
-      return turnsEl.scrollTop + turnsEl.clientHeight >= turnsEl.scrollHeight - 120;
+    function atPageBottom() {
+      return turnsEl.scrollTop + turnsEl.clientHeight >= turnsEl.scrollHeight - 16;
     }
     function scrollToLatest(behavior="auto") {
+      followLatest = true;
+      suppressScrollTracking = true;
       turnsEl.scrollTo({top: turnsEl.scrollHeight, behavior});
       newMessagesBtn.style.display = "none";
+      requestAnimationFrame(() => { suppressScrollTracking = false; });
+    }
+    function captureScrollAnchor() {
+      const viewportTop = turnsEl.getBoundingClientRect().top;
+      const exchange = [...turnsEl.querySelectorAll("[data-exchange-id]")].find(item => item.getBoundingClientRect().bottom > viewportTop + 1);
+      const message = exchange && exchange.querySelector("[data-timeline-message-id]");
+      return exchange ? {
+        id: exchange.getAttribute("data-exchange-id") || "",
+        offset: exchange.getBoundingClientRect().top - viewportTop,
+        messageId: message ? message.getAttribute("data-timeline-message-id") || "" : "",
+        messageOffset: message ? message.getBoundingClientRect().top - viewportTop : 0,
+        scrollTop: turnsEl.scrollTop,
+        scrollHeight: turnsEl.scrollHeight,
+      } : {id: "", offset: 0, messageId: "", messageOffset: 0, scrollTop: turnsEl.scrollTop, scrollHeight: turnsEl.scrollHeight};
+    }
+    function restoreScrollAnchor(anchor) {
+      if (!anchor) return;
+      const viewportTop = turnsEl.getBoundingClientRect().top;
+      const exchange = [...turnsEl.querySelectorAll("[data-exchange-id]")].find(item => item.getAttribute("data-exchange-id") === anchor.id);
+      const message = anchor.messageId ? [...turnsEl.querySelectorAll("[data-timeline-message-id]")].find(item => item.getAttribute("data-timeline-message-id") === anchor.messageId) : null;
+      suppressScrollTracking = true;
+      if (message) turnsEl.scrollTop += message.getBoundingClientRect().top - viewportTop - anchor.messageOffset;
+      else if (exchange) turnsEl.scrollTop += exchange.getBoundingClientRect().top - viewportTop - anchor.offset;
+      else turnsEl.scrollTop = anchor.scrollTop + Math.max(0, turnsEl.scrollHeight - Number(anchor.scrollHeight || turnsEl.scrollHeight));
+      requestAnimationFrame(() => { suppressScrollTracking = false; });
     }
     function closeSuggestions() {
       suggestionsEl.classList.remove("open");
@@ -1231,7 +1358,9 @@ _MOBILE_HTML = r"""<!doctype html>
       const s = (state.sessions || []).find(item => item.key === key);
       if (!s) return;
       if (key !== selectedSessionKey) clearFailedSend();
+      closeUsagePanel();
       selectedSessionKey = key;
+      followLatest = true;
       turnsStructureKey = "";
       fileSuggestions = [];
       fileSuggestionKey = "";
@@ -1269,9 +1398,10 @@ _MOBILE_HTML = r"""<!doctype html>
       if (a.type === "agent") return a.source === b.source && a.sid === b.sid;
       return a.type === b.type;
     }
-    function pendingDeliveryLabel(delivery) {
-      if (delivery === "steer") return "현재 작업에 전달 중";
-      if (delivery === "queue") return "다음 작업 대기열";
+    function pendingDeliveryLabel(delivery, createdAt=0) {
+      if (createdAt && Date.now() - Number(createdAt) > 10000) return "전달 확인 안 됨";
+      if (delivery === "steer") return "현재 작업에 전달됨";
+      if (delivery === "queue") return "다음 작업 대기열에 추가됨";
       if (delivery === "started") return "새 작업 시작 중";
       return "전송 확인 중";
     }
@@ -1281,7 +1411,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const confirmedCount = ((cached && cached.turns) || (session && session.turns) || []).filter(turn => turn.role === "user" && String(turn.text || "") === text).length;
       const existing = pendingTurns[key] || [];
       const pendingCount = existing.filter(turn => String(turn.text || "") === text).length;
-      pendingTurns[key] = existing.concat([{role: "user", text, baseline: confirmedCount + pendingCount, pending: true, delivery}]).slice(-12);
+      pendingTurns[key] = existing.concat([{role: "user", text, baseline: confirmedCount + pendingCount, pending: true, delivery, createdAt: Date.now()}]).slice(-12);
     }
     function selectAgentAfterSend(text, target, delivery="pending") {
       const root = selectedRoot();
@@ -1384,12 +1514,28 @@ _MOBILE_HTML = r"""<!doctype html>
       const html = tabs.map(tab => `<button class="source-tab ${tab.id === sourceFilter ? "active" : ""}" type="button" data-source="${tab.id}">${tab.label} ${counts[tab.id]}</button>`).join("");
       updateHtmlIfChanged(sourceTabs, html);
     }
+    function displayModel(model) {
+      const value = String(model || "");
+      const short = value.match(/^gpt-[\d.]+-(sol|terra|luna)$/i);
+      if (short) return short[1].charAt(0).toUpperCase() + short[1].slice(1).toLowerCase();
+      if (value.startsWith("claude-")) return value.slice(7).replaceAll("-", " ");
+      return value;
+    }
+    function runtimeLabel(runtime, includeSource="") {
+      const parts = [includeSource, displayModel(runtime && runtime.model), runtime && runtime.effort].filter(Boolean);
+      return parts.join(" · ");
+    }
+    function sessionSubtitle(session) {
+      const current = session && session.settings && session.settings.current;
+      const runtime = runtimeLabel(current);
+      return [session.subtitle || session.root || "", runtime].filter(Boolean).join(" · ");
+    }
     function sessionCard(session) {
       const source = sessionSource(session);
       const meta = sourceMeta[source];
       return `<button class="session-card ${session.key === selectedSessionKey ? "active" : ""}" type="button" data-key="${esc(session.key)}">
         <span class="session-card-top"><span class="source-badge ${source}">${meta.badge}</span><span class="session-title" data-session-title>${esc(session.title || session.key)}</span></span>
-        <span class="session-subtitle" data-session-subtitle>${esc(session.subtitle || session.root || "")}</span>
+        <span class="session-subtitle" data-session-subtitle>${esc(sessionSubtitle(session))}</span>
         <span class="session-preview" data-session-preview>${esc(session.preview || "(최근 작업 없음)")}</span>
       </button>`;
     }
@@ -1426,7 +1572,7 @@ _MOBILE_HTML = r"""<!doctype html>
         if (!card) return;
         card.classList.toggle("active", session.key === selectedSessionKey);
         card.querySelector("[data-session-title]").textContent = session.title || session.key;
-        card.querySelector("[data-session-subtitle]").textContent = session.subtitle || session.root || "";
+        card.querySelector("[data-session-subtitle]").textContent = sessionSubtitle(session);
         card.querySelector("[data-session-preview]").textContent = session.preview || "(최근 작업 없음)";
       });
     }
@@ -1488,19 +1634,53 @@ _MOBILE_HTML = r"""<!doctype html>
       if (amount >= 1_000) return `${(amount / 1_000).toFixed(amount >= 100_000 ? 0 : 1)}K`;
       return String(Math.round(amount));
     }
+    function formatUsageReset(value) {
+      const timestamp = Number(value);
+      if (!Number.isFinite(timestamp) || timestamp <= 0) return "리셋 시각 확인 안 됨";
+      return `리셋 ${new Date(timestamp * 1000).toLocaleString("ko-KR", {month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit"})}`;
+    }
+    function renderAccountUsage(account) {
+      const windows = account && Array.isArray(account.windows) ? account.windows : [];
+      const source = account && account.source;
+      if (!source) {
+        usageAccountRows.innerHTML = '<span class="usageUnavailable">확인 안 됨</span>';
+        return;
+      }
+      const labels = {fiveHour: "5시간", weekly: "주간", fableWeekly: "Fable 주간"};
+      const indexed = new Map(windows.map(item => [item.key, item]));
+      const expected = source === "claude" ? ["fiveHour", "weekly", "fableWeekly"] : ["fiveHour", "weekly"];
+      windows.forEach(item => { if (!expected.includes(item.key)) expected.push(item.key); });
+      usageAccountRows.innerHTML = expected.map(key => {
+        const item = indexed.get(key);
+        if (!item) {
+          return `<div class="usageAccountRow unavailable" data-account-usage="${esc(key)}"><span class="usageAccountLabel">${esc(labels[key] || key)}</span><span class="usageAccountValue">제공되지 않음</span><span class="usageAccountReset">현재 계정 응답에 없음</span><span class="usageAccountTrack"><span class="usageAccountFill" style="width:0%"></span></span></div>`;
+        }
+        const used = Number(item.usedPercent);
+        const usedText = Number.isFinite(used) ? `${used.toFixed(1)}% 사용 · ${Number(item.remainingPercent).toFixed(1)}% 남음` : "확인 안 됨";
+        const label = labels[item.key] || item.label || item.key || "사용량";
+        const percent = Number.isFinite(used) ? Math.max(0, Math.min(100, used)) : 0;
+        const level = percent >= 90 ? "critical" : percent >= 70 ? "warn" : "normal";
+        return `<div class="usageAccountRow" data-level="${level}" data-account-usage="${esc(item.key || "window")}"><span class="usageAccountLabel">${esc(label)}</span><span class="usageAccountValue">${esc(usedText)}</span><span class="usageAccountReset">${esc(formatUsageReset(item.resetsAt))}</span><span class="usageAccountTrack"><span class="usageAccountFill" style="width:${percent}%"></span></span></div>`;
+      }).join("");
+    }
     function renderAgentUsage(session) {
       const isAgent = Boolean(session && session.kind === "agent");
-      usageRail.style.display = isAgent ? "grid" : "none";
-      if (!isAgent) return;
+      usageBtn.classList.toggle("available", isAgent);
+      if (!isAgent) {
+        closeUsagePanel();
+        renderAccountUsage(null);
+        return;
+      }
       const entry = usageCache[session.key];
       const usage = entry && entry.data;
+      renderAccountUsage(usage && usage.accountUsage);
       const percent = usage && Number.isFinite(Number(usage.contextPercent)) ? Number(usage.contextPercent) : null;
       usagePercent.textContent = percent == null ? "-" : `${percent.toFixed(1)}%`;
       usageUsed.textContent = formatTokens(usage && usage.usedTokens);
       usageRemaining.textContent = formatTokens(usage && usage.remainingTokens);
       usageFill.style.width = `${percent == null ? 0 : Math.max(0, Math.min(100, percent))}%`;
-      usageRail.dataset.level = percent != null && percent >= 90 ? "critical" : percent != null && percent >= 70 ? "warn" : "normal";
-      usageRail.title = usage && usage.contextWindow ? `컨텍스트 ${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindow)}` : "컨텍스트 한도 정보 없음";
+      usagePanel.dataset.level = percent != null && percent >= 90 ? "critical" : percent != null && percent >= 70 ? "warn" : "normal";
+      usagePanel.title = usage && usage.contextWindow ? `컨텍스트 ${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindow)}` : "컨텍스트 한도 정보 없음";
     }
     async function loadAgentUsage(session) {
       if (!session || session.kind !== "agent") {
@@ -1544,7 +1724,6 @@ _MOBILE_HTML = r"""<!doctype html>
         }
         history.loaded = true;
         if (selectedSessionKey === session.key) {
-          turnsStructureKey = "";
           renderTurns(session);
         }
       } finally {
@@ -1556,10 +1735,8 @@ _MOBILE_HTML = r"""<!doctype html>
       const history = sessionHistory(session);
       if (!session || !history || !history.hasMore || historyLoading || history.cursor == null) return;
       historyLoading = true;
-      olderMessagesBtn.disabled = true;
-      olderMessagesBtn.textContent = "불러오는 중";
-      const oldHeight = turnsEl.scrollHeight;
-      const oldY = turnsEl.scrollTop;
+      historyStatus.textContent = "이전 대화 불러오는 중";
+      historyStatus.style.display = "flex";
       try {
         const params = new URLSearchParams({root: session.root, source: session.source, sid: session.sid, before: String(history.cursor)});
         const response = await fetch(`/mobile/api/transcript?${params}`, {headers: headers()});
@@ -1570,57 +1747,72 @@ _MOBILE_HTML = r"""<!doctype html>
         history.cursor = page.cursor ?? null;
         history.hasMore = Boolean(page.hasMore);
         history.paged = true;
-        turnsStructureKey = "";
-        renderTurns(session);
-        requestAnimationFrame(() => { turnsEl.scrollTop = oldY + turnsEl.scrollHeight - oldHeight; });
+        if (selectedSessionKey === session.key) renderTurns(session);
+        historyStatus.style.display = "none";
       } catch (error) {
-        statusEl.textContent = `이전 메시지 실패 · ${String(error)}`;
+        historyStatus.textContent = "이전 대화 로딩 실패 · 위로 스크롤해 재시도";
+        historyStatus.style.display = "flex";
       } finally {
         historyLoading = false;
-        olderMessagesBtn.disabled = false;
-        olderMessagesBtn.textContent = "이전 메시지";
       }
     }
     const activityTypeLabels = {skill: "Skill", command: "명령", diff: "Diff", file: "파일", agent: "에이전트", progress: "진행", tool: "도구"};
-    function timelineSections(items) {
-      const list = (items || []).slice();
-      let latestUserIndex = -1;
-      for (let index = list.length - 1; index >= 0; index -= 1) {
-        if (list[index].kind === "message" && list[index].role === "user") { latestUserIndex = index; break; }
-      }
-      if (latestUserIndex < 0) {
-        let assistantIndex = -1;
-        for (let index = list.length - 1; index >= 0; index -= 1) {
-          if (list[index].kind === "message" && list[index].role === "assistant") { assistantIndex = index; break; }
+    function conversationExchanges(items) {
+      const exchanges = [];
+      let current = null;
+      (items || []).forEach((item, index) => {
+        const startsExchange = item.kind === "message" && item.role === "user";
+        if (startsExchange) {
+          if (current && current.items.length) exchanges.push(current);
+          current = {id: String(item.id || `user:${index}`), user: item, items: [item]};
+          return;
         }
-        return {previous: assistantIndex >= 0 ? list.slice(0, assistantIndex) : list, user: null, activities: [], assistant: assistantIndex >= 0 ? list[assistantIndex] : null};
-      }
+        if (!current) current = {id: String(item.id || `leading:${index}`), user: null, items: []};
+        current.items.push(item);
+      });
+      if (current && current.items.length) exchanges.push(current);
+      return exchanges;
+    }
+    function exchangeSections(exchange) {
+      const items = (exchange && exchange.items) || [];
+      const user = exchange && exchange.user;
       let assistantIndex = -1;
-      for (let index = list.length - 1; index > latestUserIndex; index -= 1) {
-        if (list[index].kind === "message" && list[index].role === "assistant") { assistantIndex = index; break; }
+      for (let index = items.length - 1; index >= 0; index -= 1) {
+        if (items[index].kind === "message" && items[index].role === "assistant") { assistantIndex = index; break; }
       }
-      const activityEnd = assistantIndex >= 0 ? assistantIndex : list.length;
-      const activities = list.slice(latestUserIndex + 1, activityEnd).map((item, index) => {
+      const activities = items.filter((item, index) => item !== user && index !== assistantIndex).map((item, index) => {
         if (item.kind === "activity") return item;
         return {id: `progress:${item.id || index}`, kind: "activity", activityType: "progress", label: "진행 메모", detail: item.text || "", result: "", status: "completed"};
       });
-      if (assistantIndex >= 0) {
-        list.slice(assistantIndex + 1).forEach(item => {
-          if (item.kind === "activity") activities.push(item);
-        });
-      }
-      return {previous: list.slice(0, latestUserIndex), user: list[latestUserIndex], activities, assistant: assistantIndex >= 0 ? list[assistantIndex] : null};
+      return {user, activities, assistant: assistantIndex >= 0 ? items[assistantIndex] : null};
     }
-    function renderTimelineMessage(item, latest=false) {
+    function exchangeRuntime(exchange, session=null, allowFallback=false) {
+      const items = ((exchange && exchange.items) || []).slice().reverse();
+      const item = items.find(value => value && (value.model || value.effort));
+      if (item) return {model: item.model || "", effort: item.effort || ""};
+      if (allowFallback && session && session.settings) return session.settings.current || {model: "", effort: ""};
+      return {model: "", effort: ""};
+    }
+    function renderTurnMeta(exchange, session, allowFallback=false) {
+      const runtime = exchangeRuntime(exchange, session, allowFallback);
+      const label = runtimeLabel(runtime, sourceMeta[sessionSource(session)].label);
+      return label ? `<div class="turnMeta">${esc(label)}</div>` : "";
+    }
+    function renderLiveAction(exchange, sections, session, isLatest) {
+      if (!isLatest || !session || session.status !== "working") return "";
+      const running = sections.activities.filter(item => item.status === "running");
+      const current = running[running.length - 1] || sections.activities[sections.activities.length - 1];
+      const label = current ? (current.label || current.name || activityTypeLabels[current.activityType] || "작업 중") : "응답 작성 중";
+      const runtime = exchangeRuntime(exchange, session, true);
+      const meta = runtimeLabel(runtime);
+      const target = sections.activities.length ? `group:exchange:${exchange.id}` : "";
+      return `<button class="liveAction" type="button" data-live-action="${esc(target)}"><span class="liveActionDot"></span><span class="liveActionLabel">${esc(label)}</span><span class="liveActionMeta">${esc(meta)}</span></button>`;
+    }
+    function renderTimelineMessage(item) {
       const text = String(item.text || "");
-      const id = `${selectedSessionKey}:${item.id || text.slice(0, 32)}:${item.role || "assistant"}`;
-      const long = text.length > 420 || text.split("\n").length > 8;
-      const expanded = !long || expandedTurnIds.has(id) || (latest && !collapsedTurnIds.has(id));
-      const body = expanded ? renderRichText(text) : `${renderRichText(text.slice(0, 280).trimEnd())}&hellip;`;
-      const toggle = long ? `<button class="turnToggle" type="button" data-turn-toggle="${esc(id)}" data-expanded="${expanded ? "1" : "0"}">${expanded ? "접기" : "펼치기"}</button>` : "";
       const role = item.role === "user" ? "user" : item.role === "output" ? "output" : "assistant";
-      const pendingState = item.pending ? `<div class="turnState">${esc(pendingDeliveryLabel(item.delivery))}</div>` : "";
-      return `<div class="turn ${role}${item.pending ? " pending" : ""}"><div class="turnBody">${body}</div>${toggle}${pendingState}</div>`;
+      const pendingState = item.pending ? `<div class="turnState">${esc(pendingDeliveryLabel(item.delivery, item.createdAt))}</div>` : "";
+      return `<div class="turn ${role}${item.pending ? " pending" : ""}" data-timeline-message-id="${esc(item.id || "")}"><div class="turnBody">${renderRichText(text)}</div>${pendingState}</div>`;
     }
     function timelineDetailAttrs(id) {
       const value = String(id || "detail");
@@ -1652,30 +1844,33 @@ _MOBILE_HTML = r"""<!doctype html>
       const flush = () => { if (activities.length) html.push(renderActivityGroup(activities)); activities = []; };
       (items || []).forEach(item => {
         if (item.kind === "activity") activities.push(item);
-        else { flush(); html.push(renderTimelineMessage(item, false)); }
+        else { flush(); html.push(renderTimelineMessage(item)); }
       });
       flush();
       return html.join("");
     }
-    function renderPreviousConversation(items) {
-      if (!items.length) return "";
-      const messages = items.filter(item => item.kind === "message").length;
-      const activities = items.filter(item => item.kind === "activity").length;
-      const summary = [`이전 대화 ${messages}개`, activities ? `작업 ${activities}개` : ""].filter(Boolean).join(" · ");
-      return `<details class="previousConversation" ${timelineDetailAttrs("previous")}><summary>${esc(summary)}</summary><div class="previousConversationBody">${renderTimelineSequence(items)}</div></details>`;
+    function renderConversationSequence(exchange, session, isLatest=false) {
+      const sections = exchangeSections(exchange);
+      const body = [
+        sections.user ? renderTimelineMessage(sections.user) : "",
+        renderActivityGroup(sections.activities, `exchange:${exchange.id}`),
+        sections.assistant ? renderTimelineMessage(sections.assistant) : "",
+        renderTurnMeta(exchange, session, isLatest),
+        renderLiveAction(exchange, sections, session, isLatest),
+      ].join("");
+      return `<section class="conversationSequence" data-exchange-id="${esc(exchange.id)}">${body}</section>`;
     }
     function renderTurns(session) {
       if (!session) {
         turnsEl.innerHTML = "";
         turnsStructureKey = "";
         newMessagesBtn.style.display = "none";
-        olderMessagesBtn.style.display = "none";
+        historyStatus.style.display = "none";
         return;
       }
       const history = sessionHistory(session);
       const serverTurns = history ? history.turns : ((session && session.turns) || []);
       const serverTimeline = history && history.timeline.length ? history.timeline : timelineFromTurns(serverTurns);
-      olderMessagesBtn.style.display = history && history.hasMore ? "block" : "none";
       const confirmedUsers = new Map();
       serverTurns.filter(t => t.role === "user").forEach(t => {
         const text = String(t.text || "");
@@ -1688,25 +1883,24 @@ _MOBILE_HTML = r"""<!doctype html>
       if (session && session.kind === "term" && session.preview) {
         timeline.push({kind: "message", role: "output", text: session.preview, id: "terminal-preview"});
       }
-      const nextKey = JSON.stringify(timeline.map(item => [item.id || "", item.kind, item.role, item.text, item.activityType, item.label, item.status, item.detail, item.result]));
+      const nextKey = JSON.stringify([session.status, timeline.map(item => [item.id || "", item.kind, item.role, item.text, item.activityType, item.label, item.status, item.detail, item.result, item.model, item.effort])]);
       if (nextKey === turnsStructureKey) return;
-      const wasNearBottom = nearPageBottom();
       const hadTurns = Boolean(turnsStructureKey);
+      const followLatestBefore = followLatest;
+      const scrollAnchor = hadTurns && !followLatestBefore ? captureScrollAnchor() : null;
       if (session.kind !== "agent") {
         turnsEl.innerHTML = renderTimelineSequence(timeline);
       } else {
-        const sections = timelineSections(timeline);
-        turnsEl.innerHTML = [
-          renderPreviousConversation(sections.previous),
-          sections.user ? renderTimelineMessage(sections.user, true) : "",
-          renderActivityGroup(sections.activities, "current"),
-          sections.assistant ? renderTimelineMessage(sections.assistant, true) : "",
-        ].join("");
+        const exchanges = conversationExchanges(timeline);
+        turnsEl.innerHTML = exchanges.map((exchange, index) => renderConversationSequence(exchange, session, index === exchanges.length - 1)).join("");
       }
       turnsStructureKey = nextKey;
       requestAnimationFrame(() => {
-        if (!hadTurns || wasNearBottom) scrollToLatest();
-        else newMessagesBtn.style.display = "block";
+        if (!hadTurns || followLatestBefore) scrollToLatest();
+        else {
+          restoreScrollAnchor(scrollAnchor);
+          newMessagesBtn.style.display = "block";
+        }
       });
     }
     function sessionActivity(session) {
@@ -1837,7 +2031,7 @@ _MOBILE_HTML = r"""<!doctype html>
         const elapsed = Math.max(0, Math.round(Date.now() / 1000 - Number(session.statusTs)));
         text += elapsed < 60 ? ` · ${elapsed}초` : ` · ${Math.floor(elapsed / 60)}분`;
       }
-      if (session.status === "working" && !session.controllable) text += " · 앱에서 실행 중";
+      if (session.status === "working" && session.externalActive && !session.controllable) text += " · 외부에서 실행 중";
       return text;
     }
     function renderSessionControls(session) {
@@ -1894,10 +2088,16 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!response.ok) throw new Error(await response.text());
       const result = await response.json();
       session.settings = session.settings || {current: {model: "", effort: ""}, pending: {model: "", effort: ""}};
-      session.settings.pending = {model: result.model || "", effort: result.effort || ""};
+      const settings = {model: result.model || "", effort: result.effort || ""};
+      if (result.applyMode === "live") {
+        session.settings.current = settings;
+        session.settings.pending = {model: "", effort: ""};
+      } else {
+        session.settings.pending = settings;
+      }
       closeSettings();
       renderSessionControls(session);
-      showToast("다음 resume 1회에 적용됩니다");
+      showToast(result.applyMode === "live" ? "현재 CLI에 적용했습니다" : "다음 Marina 연결에 적용합니다");
     }
     async function interruptCurrentTurn() {
       const session = selectedSession();
@@ -2094,8 +2294,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const session = selectedSession();
       if (session) showChat();
       else showList();
-      chatTitle.textContent = session ? (session.title || "세션") : "세션을 선택하세요";
-      chatSubtitle.textContent = session ? (session.subtitle || session.root || "") : "";
+      chatNavTitle.textContent = session ? (session.title || "세션") : "";
       renderAgentUsage(session);
       restoreDraft();
       renderTurns(session);
@@ -2167,6 +2366,7 @@ _MOBILE_HTML = r"""<!doctype html>
           autoGrowComposer();
           closeSuggestions();
           failedSend = null;
+          followLatest = true;
           selectReturnedTerm(d.tid, text, target, d.delivery || (target.type === "agent" ? "started" : "sent"));
           statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(d.delivery || "started") : `보냄 · ${d.tid}`;
         }
@@ -2203,8 +2403,10 @@ _MOBILE_HTML = r"""<!doctype html>
     };
     promptInput.onfocus = () => {
       syncVisualViewport();
-      requestAnimationFrame(() => scrollToLatest("auto"));
-      setTimeout(() => scrollToLatest("auto"), 180);
+      if (followLatest) {
+        requestAnimationFrame(() => scrollToLatest("auto"));
+        setTimeout(() => { if (followLatest) scrollToLatest("auto"); }, 180);
+      }
     };
     function isEditing() {
       return [rootSelect, targetSelect, sessionSearch].includes(document.activeElement);
@@ -2273,6 +2475,17 @@ _MOBILE_HTML = r"""<!doctype html>
       else if (!updateHistory && history.state && history.state.view === "chat") history.replaceState({view: "list"}, "", location.href);
     }
     backBtn.onclick = () => leaveChat(true);
+    usageBtn.onclick = event => {
+      event.stopPropagation();
+      const opening = !usagePanel.classList.contains("open");
+      usagePanel.classList.toggle("open", opening);
+      usagePanel.setAttribute("aria-hidden", opening ? "false" : "true");
+      usageBtn.setAttribute("aria-expanded", opening ? "true" : "false");
+    };
+    usagePanel.onclick = event => event.stopPropagation();
+    document.addEventListener("click", event => {
+      if (usagePanel.classList.contains("open") && !usagePanel.contains(event.target) && event.target !== usageBtn) closeUsagePanel();
+    });
     document.getElementById("logoutBtn").onclick = () => { closeServices(); logout(); };
     sendBtn.onclick = () => send();
     retryBtn.onclick = () => {
@@ -2283,21 +2496,6 @@ _MOBILE_HTML = r"""<!doctype html>
       send();
     };
     newMessagesBtn.onclick = scrollToLatest;
-    olderMessagesBtn.onclick = loadOlderMessages;
-    turnsEl.onclick = event => {
-      const toggle = event.target.closest("[data-turn-toggle]");
-      if (!toggle) return;
-      const id = toggle.getAttribute("data-turn-toggle") || "";
-      if (toggle.getAttribute("data-expanded") === "1") {
-        expandedTurnIds.delete(id);
-        collapsedTurnIds.add(id);
-      } else {
-        collapsedTurnIds.delete(id);
-        expandedTurnIds.add(id);
-      }
-      turnsStructureKey = "";
-      renderTurns(selectedSession());
-    };
     turnsEl.addEventListener("toggle", event => {
       const detail = event.target.closest && event.target.closest("details[data-timeline-detail]");
       if (!detail || !turnsEl.contains(detail)) return;
@@ -2305,6 +2503,17 @@ _MOBILE_HTML = r"""<!doctype html>
       if (detail.open) openTimelineDetailIds.add(key);
       else openTimelineDetailIds.delete(key);
     }, true);
+    turnsEl.addEventListener("click", event => {
+      const action = event.target.closest && event.target.closest("[data-live-action]");
+      if (!action) return;
+      const target = action.getAttribute("data-live-action");
+      if (!target) return;
+      const detail = [...turnsEl.querySelectorAll("details[data-timeline-detail]")]
+        .find(item => item.getAttribute("data-timeline-detail") === target);
+      if (!detail) return;
+      detail.open = true;
+      detail.scrollIntoView({block: "nearest", behavior: "smooth"});
+    });
     inboxMenuBtn.onclick = openInbox;
     inboxList.onclick = event => {
       const item = event.target.closest("[data-inbox-id]");
@@ -2345,7 +2554,12 @@ _MOBILE_HTML = r"""<!doctype html>
     targetSelect.onchange = () => { rememberTarget(); render(); };
     sessionSearch.oninput = renderSessions;
     turnsEl.addEventListener("scroll", () => {
-      if (turnsEl.scrollTop < 72 && olderMessagesBtn.style.display !== "none") loadOlderMessages();
+      if (suppressScrollTracking) return;
+      followLatest = atPageBottom();
+      if (followLatest) newMessagesBtn.style.display = "none";
+      const session = selectedSession();
+      const history = sessionHistory(session);
+      if (!followLatest && turnsEl.scrollTop < 72 && history && history.hasMore) loadOlderMessages();
     }, {passive: true});
     if (!history.state || !history.state.view) {
       history.replaceState({view: "base"}, "", location.href);

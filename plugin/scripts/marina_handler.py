@@ -40,7 +40,7 @@ from marina_update import _serving_sha, update_claude, update_codex, update_stat
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
 from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_catalog, mobile_interrupt, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, render_mobile_html, rotate_mobile_token
-from marina_sessions import activate_agent_payloads, agent_activity, agent_belongs_to_root, agent_transcript, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_sessions import activate_agent_payloads, agent_activity, agent_belongs_to_root, agent_transcript, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
@@ -426,6 +426,7 @@ class Handler(BaseHTTPRequestHandler):
                     self._forbidden()
                     return
                 payload = agent_usage(root, source, sid)
+                payload["accountUsage"] = provider_account_usage(source, root)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return

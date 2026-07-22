@@ -14,7 +14,7 @@ import tempfile
 import threading
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -420,6 +420,11 @@ def codex_session_titles(refresh: bool = False) -> dict[str, str]:
 # CLI 트랜스크립트(~/.claude/projects/<슬러그>/<cliSessionId>.jsonl) — Claude Code 가 절대경로의 '/'·'.'을 '-'로 치환해 만드는 디렉토리명.
 CLAUDE_PROJECTS_DIR = Path(os.environ.get("CLAUDE_PROJECTS_DIR", str(Path.home() / ".claude" / "projects")))
 CLAUDE_CONFIG_FILE = Path(os.environ.get("CLAUDE_CONFIG_FILE", str(Path.home() / ".claude.json")))
+CLAUDE_USAGE_CACHE_FILE = Path(os.environ.get(
+    "CLAUDE_USAGE_CACHE_FILE",
+    str(Path.home() / ".claude" / "plugins" / "claude-hud" / ".usage-cache.json"),
+))
+CLAUDE_USAGE_CACHE_MAX_AGE_MS = int(os.environ.get("CLAUDE_USAGE_CACHE_MAX_AGE_MS", "300000"))
 
 AGENTS_MAX_PER_ROOT = 3
 
@@ -989,10 +994,11 @@ def _activity_failed(value: Any, container: dict[str, Any]) -> bool:
 
 
 def _new_timeline_activity(source: str, offset: int, index: int, name: str,
-                           call_id: str, raw_input: Any) -> dict[str, Any]:
+                           call_id: str, raw_input: Any, model: str = "",
+                           effort: str = "") -> dict[str, Any]:
     detail = _activity_value_text(raw_input)
     activity_type = _activity_type(name, detail)
-    return {
+    item = {
         "id": f"{source}:activity:{call_id or f'{offset}:{index}'}",
         "kind": "activity",
         "activityType": activity_type,
@@ -1002,17 +1008,40 @@ def _new_timeline_activity(source: str, offset: int, index: int, name: str,
         "result": "",
         "status": "running",
     }
+    if model:
+        item["model"] = model
+    if effort:
+        item["effort"] = effort
+    return item
 
 
 def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) -> list[dict[str, Any]]:
     timeline: list[dict[str, Any]] = []
     calls: dict[str, dict[str, Any]] = {}
+    runtime = {"model": "", "effort": ""}
+
+    def with_runtime(item: dict[str, Any], model: str = "", effort: str = "") -> dict[str, Any]:
+        resolved_model = model or runtime["model"]
+        resolved_effort = effort or runtime["effort"]
+        if resolved_model:
+            item["model"] = resolved_model
+        if resolved_effort:
+            item["effort"] = resolved_effort
+        return item
+
     for offset, obj in rows:
         if source == "claude":
             role = str(obj.get("type") or "")
-            content = (obj.get("message") or {}).get("content")
+            message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            content = message.get("content")
             if role not in ("user", "assistant") or not isinstance(content, list):
                 continue
+            message_model = str(message.get("model") or "") if role == "assistant" else ""
+            message_effort = str(message.get("effort") or message.get("reasoning_effort") or "") if role == "assistant" else ""
+            if message_model:
+                runtime["model"] = message_model
+            if message_effort:
+                runtime["effort"] = message_effort
             for index, block in enumerate(content):
                 if not isinstance(block, dict):
                     continue
@@ -1020,12 +1049,14 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                 if block_type == "text":
                     text = _safe_activity_text(block.get("text"))
                     if text.strip():
-                        timeline.append({"id": f"{source}:message:{offset}:{index}", "kind": "message",
-                                         "role": role, "text": text})
+                        timeline.append(with_runtime(
+                            {"id": f"{source}:message:{offset}:{index}", "kind": "message",
+                             "role": role, "text": text}, message_model, message_effort,
+                        ))
                 elif block_type == "tool_use":
                     call_id = str(block.get("id") or "")
                     item = _new_timeline_activity(source, offset, index, str(block.get("name") or ""),
-                                                  call_id, block.get("input"))
+                                                  call_id, block.get("input"), message_model, message_effort)
                     timeline.append(item)
                     if call_id:
                         calls[call_id] = item
@@ -1038,6 +1069,10 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
         else:
             payload = obj.get("payload") or {}
             payload_type = payload.get("type")
+            if obj.get("type") == "turn_context":
+                runtime["model"] = str(payload.get("model") or runtime["model"])
+                runtime["effort"] = str(payload.get("effort") or payload.get("reasoning_effort") or runtime["effort"])
+                continue
             if obj.get("type") != "response_item":
                 continue
             if payload_type == "message":
@@ -1046,13 +1081,15 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                     continue
                 for index, text in enumerate(_texts_of(payload.get("content"))):
                     safe_text = _safe_activity_text(text)
-                    timeline.append({"id": f"{source}:message:{offset}:{index}", "kind": "message",
-                                     "role": role, "text": safe_text})
+                    timeline.append(with_runtime(
+                        {"id": f"{source}:message:{offset}:{index}", "kind": "message",
+                         "role": role, "text": safe_text},
+                    ))
             elif payload_type in ("function_call", "custom_tool_call"):
                 call_id = str(payload.get("call_id") or payload.get("id") or "")
                 raw_input = payload.get("arguments") if payload_type == "function_call" else payload.get("input")
                 item = _new_timeline_activity(source, offset, 0, str(payload.get("name") or ""),
-                                              call_id, raw_input)
+                                              call_id, raw_input, runtime["model"], runtime["effort"])
                 timeline.append(item)
                 if call_id:
                     calls[call_id] = item
@@ -1267,10 +1304,13 @@ def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
         if source == "claude" and obj.get("type") == "assistant":
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
             model, effort = str(message.get("model") or ""), str(message.get("effort") or "")
-        elif source == "codex" and obj.get("type") == "turn_context":
+        elif source == "codex" and obj.get("type") in ("turn_context", "event_msg"):
             payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
-            model = str(payload.get("model") or "")
-            effort = str(payload.get("effort") or payload.get("reasoning_effort") or "")
+            if obj.get("type") == "event_msg" and payload.get("type") != "thread_settings_applied":
+                continue
+            settings = payload.get("thread_settings") if isinstance(payload.get("thread_settings"), dict) else payload
+            model = str(settings.get("model") or "")
+            effort = str(settings.get("effort") or settings.get("reasoning_effort") or "")
         else:
             continue
         if model or effort:
@@ -1322,6 +1362,149 @@ def _empty_agent_usage(source: str, model: str = "") -> dict[str, Any]:
         "remainingTokens": None,
         "contextPercent": None,
     }
+
+
+def _usage_percent(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+        return None
+    return min(100.0, max(0.0, round(float(value), 1)))
+
+
+def _usage_reset_timestamp(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)) and math.isfinite(value):
+        return int(value)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return int(parsed.timestamp())
+    except ValueError:
+        return None
+
+
+def _usage_window(key: str, label: str, used: Any, reset: Any) -> dict[str, Any] | None:
+    percent = _usage_percent(used)
+    if percent is None:
+        return None
+    return {
+        "key": key,
+        "label": label,
+        "usedPercent": percent,
+        "remainingPercent": round(100.0 - percent, 1),
+        "resetsAt": _usage_reset_timestamp(reset),
+    }
+
+
+def _claude_fable_limit(data: dict[str, Any]) -> tuple[Any, Any]:
+    """Find Fable's model-scoped weekly limit across native usage shapes."""
+    direct_percent_keys = ("fableWeekly", "fable_weekly", "sevenDayFable", "seven_day_fable")
+    direct_reset_keys = ("fableWeeklyResetAt", "fable_weekly_reset_at", "sevenDayFableResetAt",
+                         "seven_day_fable_reset_at")
+    percent = next((data.get(name) for name in direct_percent_keys if name in data), None)
+    reset = next((data.get(name) for name in direct_reset_keys if name in data), None)
+    if percent is not None:
+        return percent, reset
+
+    def visit(value: Any) -> tuple[Any, Any] | None:
+        if isinstance(value, dict):
+            name = " ".join(str(value.get(key, "")) for key in ("display_name", "displayName", "name", "model"))
+            if "fable" in name.lower():
+                used = next((value.get(key) for key in ("utilization", "used_percent", "usedPercent", "percentage")
+                             if key in value), None)
+                reset_at = next((value.get(key) for key in ("resets_at", "resetAt", "resetsAt") if key in value), None)
+                if used is not None:
+                    return used, reset_at
+            for child in value.values():
+                found = visit(child)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for child in value:
+                found = visit(child)
+                if found:
+                    return found
+        return None
+
+    return visit(data) or (None, None)
+
+
+def account_usage_from_rate_limits(rate_limits: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize Codex primary/secondary quota windows for the mobile UI."""
+    limits = rate_limits if isinstance(rate_limits, dict) else {}
+    by_minutes = {300: ("fiveHour", "5시간"), 10080: ("weekly", "주간")}
+    windows_by_key: dict[str, dict[str, Any]] = {}
+    for name in ("primary", "secondary"):
+        item = limits.get(name)
+        if not isinstance(item, dict) or item.get("window_minutes") not in by_minutes:
+            continue
+        key, label = by_minutes[item["window_minutes"]]
+        normalized = _usage_window(key, label, item.get("used_percent"), item.get("resets_at"))
+        if normalized:
+            windows_by_key[key] = normalized
+    windows = [windows_by_key[key] for key in ("fiveHour", "weekly") if key in windows_by_key]
+    return {"source": "codex", "windows": windows}
+
+
+def account_usage_from_claude_cache(cache: dict[str, Any] | None) -> dict[str, Any]:
+    """Normalize Claude HUD usage data, including optional Fable weekly quota."""
+    value = cache.get("data") if isinstance(cache, dict) and isinstance(cache.get("data"), dict) else cache
+    data = value if isinstance(value, dict) else {}
+    windows: list[dict[str, Any]] = []
+    for key, label, percent_keys, reset_keys in (
+        ("fiveHour", "5시간", ("fiveHour", "five_hour"), ("fiveHourResetAt", "five_hour_reset_at")),
+        ("weekly", "주간", ("sevenDay", "seven_day"), ("sevenDayResetAt", "seven_day_reset_at")),
+        ("fableWeekly", "Fable 주간", (), ()),
+    ):
+        if key == "fableWeekly":
+            percent, reset = _claude_fable_limit(data)
+        else:
+            percent = next((data.get(name) for name in percent_keys if name in data), None)
+            reset = next((data.get(name) for name in reset_keys if name in data), None)
+            if isinstance(percent, dict):
+                item = percent
+                percent = next((item.get(name) for name in ("utilization", "used_percent", "usedPercent", "percentage")
+                                if name in item), None)
+                reset = next((item.get(name) for name in ("resets_at", "resetAt", "resetsAt") if name in item), reset)
+        normalized = _usage_window(key, label, percent, reset)
+        if normalized:
+            windows.append(normalized)
+    return {"source": "claude", "windows": windows}
+
+
+def _latest_codex_rate_limits(root: Path | None = None) -> dict[str, Any] | None:
+    paths: list[Path] = []
+    if root is not None:
+        paths = [Path(str(item.get("path"))) for item in codex_agent_sessions().get(str(root), []) if item.get("path")]
+    if not paths:
+        for base in CODEX_ROLLOUT_DIRS:
+            if base.is_dir():
+                paths.extend(Path(path) for path in glob.iglob(str(base / "**" / "rollout-*.jsonl"), recursive=True))
+    for path in sorted(paths, key=lambda item: item.stat().st_mtime if item.is_file() else 0, reverse=True):
+        for obj in _reverse_json_objects(path):
+            payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
+            limits = payload.get("rate_limits")
+            if obj.get("type") == "event_msg" and payload.get("type") == "token_count" and isinstance(limits, dict):
+                return limits
+    return None
+
+
+def provider_account_usage(source: str, root: Path | None = None) -> dict[str, Any]:
+    if source == "codex":
+        return account_usage_from_rate_limits(_latest_codex_rate_limits(root))
+    if source == "claude":
+        try:
+            cache = json.loads(CLAUDE_USAGE_CACHE_FILE.read_text(encoding="utf-8"))
+            timestamp = cache.get("timestamp") if isinstance(cache, dict) else None
+            if not isinstance(timestamp, (int, float)) or time.time() * 1000 - timestamp > CLAUDE_USAGE_CACHE_MAX_AGE_MS:
+                return {"source": "claude", "windows": []}
+            return account_usage_from_claude_cache(cache)
+        except (OSError, ValueError):
+            return {"source": "claude", "windows": []}
+    return {"source": source, "windows": []}
 
 
 def _normalized_agent_usage(source: str, model: str, used: int,

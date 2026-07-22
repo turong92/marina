@@ -139,7 +139,7 @@ PY
 MOBILE="$SCR/marina_mobile.py"
 HANDLER="$SCR/marina_handler.py"
 MODALS="$SCR/marina-web/app-6-modals.js"
-grep -q 'id="olderMessagesBtn"' "$MOBILE" || { echo "FAIL mobile older-message control missing"; exit 1; }
+! grep -q 'id="olderMessagesBtn"' "$MOBILE" || { echo "FAIL legacy mobile older-message control remains"; exit 1; }
 grep -q 'function loadOlderMessages' "$MOBILE" || { echo "FAIL mobile older-message loader missing"; exit 1; }
 grep -q 'historyCursor' "$MOBILE" || { echo "FAIL mobile history cursor missing"; exit 1; }
 grep -q 'async function loadSessionMessages' "$MOBILE" || { echo "FAIL mobile latest-history loader missing"; exit 1; }
