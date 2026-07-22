@@ -59,12 +59,12 @@
 - Consumes: `page.timeline`, with fallback conversion from `page.turns`.
 - Produces: `timelineSections(items)` and collapsible previous-conversation/activity markup.
 
-- [ ] Add failing source assertions for a collapsed previous-conversation row, categorized activity summary, independently expandable detail, and latest-pair rendering.
-- [ ] Run `bash plugin/tests/test-mobile-control.sh`; expect failure on the missing timeline UI.
-- [ ] Merge timeline pages by stable ID, derive the latest user/assistant pair, move intermediate assistant progress notes into the current activity group, and render older content in one closed `<details>` element.
-- [ ] Render consecutive work events in closed `<details>` groups with category counts, status, escaped targets, and bounded code/detail blocks.
-- [ ] Preserve pending-message de-duplication, scroll position, older-page loading, rich links, and the fixed composer.
-- [ ] Re-run mobile, timeline, and pagination tests; expect all to pass.
+- [x] Add failing source assertions for a collapsed previous-conversation row, categorized activity summary, independently expandable detail, and latest-pair rendering.
+- [x] Run `bash plugin/tests/test-mobile-control.sh`; expect failure on the missing timeline UI.
+- [x] Merge timeline pages by stable ID, derive the latest user/assistant pair, move intermediate assistant progress notes into the current activity group, and render older content in one closed `<details>` element.
+- [x] Render consecutive work events in closed `<details>` groups with category counts, status, escaped targets, and bounded code/detail blocks.
+- [x] Preserve pending-message de-duplication, scroll position, older-page loading, rich links, opened details, and the fixed composer.
+- [x] Re-run mobile, timeline, and pagination tests; expect all to pass.
 
 ### Task 4: Live Verification And Commit
 
@@ -74,7 +74,7 @@
 **Interfaces:**
 - Produces: verified dashboard behavior at `http://127.0.0.1:3900/mobile`.
 
-- [ ] Run `test-agent-timeline.sh`, `test-agent-history-pagination.sh`, `test-mobile-control.sh`, `test-mobile-admin-http.sh`, and `test-agent-inbox.sh`.
-- [ ] Run Python compilation, shell syntax checks, and `git diff --check`.
-- [ ] Restart the dashboard from this worktree and verify a real Codex session plus a 390 px mobile viewport.
-- [ ] Mark this checklist complete and commit the implementation without pushing.
+- [x] Run `test-agent-timeline.sh`, `test-agent-history-pagination.sh`, `test-mobile-control.sh`, `test-mobile-admin-http.sh`, and `test-agent-inbox.sh`.
+- [x] Run Python compilation, shell syntax checks, and `git diff --check`.
+- [x] Restart the dashboard from this worktree and verify a real Codex session plus a 390 px mobile viewport.
+- [x] Mark this checklist complete and commit the implementation without pushing.

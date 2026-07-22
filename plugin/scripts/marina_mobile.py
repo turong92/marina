@@ -710,6 +710,23 @@ _MOBILE_HTML = r"""<!doctype html>
     .turn a, .subagent-turn a { color: #0969da; text-decoration: underline; text-underline-offset: 2px; }
     .turn code, .subagent-turn code { padding: 1px 4px; border-radius: 4px; background: rgba(127, 127, 127, .14); font: .92em/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; }
     .turnToggle { display: block; margin: 6px 0 0; padding: 2px 0; border: 0; background: transparent; color: #526176; font-size: 11px; }
+    .previousConversation, .activityGroup { align-self: stretch; overflow: hidden; border: 1px solid #d8dee7; border-radius: 8px; background: #f8f9fb; }
+    .previousConversation > summary, .activityGroup > summary { min-height: 38px; padding: 0 10px; color: #526176; font-size: 11px; font-weight: 850; line-height: 38px; cursor: pointer; list-style-position: inside; }
+    .previousConversation[open] > summary, .activityGroup[open] > summary { border-bottom: 1px solid #e2e6ec; }
+    .previousConversationBody { display: flex; flex-direction: column; gap: 8px; padding: 9px; }
+    .activityList { display: flex; flex-direction: column; padding: 3px 9px 7px; }
+    .activityItem { border-bottom: 1px solid #e5e8ed; }
+    .activityItem:last-child { border-bottom: 0; }
+    .activityItem > summary { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 7px; align-items: center; min-height: 34px; color: #303846; font-size: 11px; cursor: pointer; list-style: none; }
+    .activityItem > summary::-webkit-details-marker { display: none; }
+    .activityDot { width: 6px; height: 6px; border-radius: 50%; background: #26845b; }
+    .activityItem.running .activityDot { background: #bd7418; }
+    .activityItem.failed .activityDot { background: #c43d3d; }
+    .activityLabel { min-width: 0; overflow: hidden; font-weight: 800; text-overflow: ellipsis; white-space: nowrap; }
+    .activityType { color: #747d8b; font-size: 9px; font-weight: 800; text-transform: uppercase; }
+    .activityBody { display: grid; gap: 6px; padding: 0 0 8px 15px; }
+    .activityBodyLabel { color: #747d8b; font-size: 9px; font-weight: 800; }
+    .activityCode { max-height: 220px; margin: 0; overflow: auto; padding: 7px 8px; border-radius: 6px; background: #111827; color: #e5e7eb; font: 10px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
     .newMessagesBtn { position: absolute; left: 50%; bottom: 8px; z-index: 3; display: none; width: auto; min-height: 34px; padding: 0 12px; transform: translateX(-50%); border-color: #b9c6d8; background: #fff; box-shadow: 0 4px 14px rgb(23 25 31 / 14%); font-size: 12px; }
     .chatComposer { z-index: 3; display: flex; min-width: 0; flex-direction: column; gap: 6px; padding: 7px 10px max(8px, env(safe-area-inset-bottom)); background: #fff; border-top: 1px solid #dde2ea; box-sizing: border-box; }
     .composerRow { display: grid; grid-template-columns: minmax(0, 1fr) 44px; gap: 7px; align-items: end; }
@@ -776,6 +793,10 @@ _MOBILE_HTML = r"""<!doctype html>
       .usageRail { border-color: #303846; }
       .usageValue { color: #e3e7ed; }
       .usageTrack { background: #303846; }
+      .previousConversation, .activityGroup { border-color: #303846; background: #171d27; }
+      .previousConversation > summary, .activityGroup > summary { color: #b9c1ce; }
+      .previousConversation[open] > summary, .activityGroup[open] > summary, .activityItem { border-color: #303846; }
+      .activityItem > summary { color: #e3e7ed; }
       .session-preview { color: #d6dbe4; }
       .iconBtn, .servicesBtn { color: #d6dbe4; }
       .project-chip { color: #a5adba; }
@@ -999,6 +1020,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const usageCache = {};
     const expandedTurnIds = new Set();
     const collapsedTurnIds = new Set();
+    const openTimelineDetailIds = new Set();
     let historyLoading = false;
     const sourceMeta = {
       codex: {label: "Codex", badge: "CX"},
@@ -1428,17 +1450,34 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       return out;
     }
+    function timelineFromTurns(turns) {
+      return (turns || []).map((turn, index) => ({
+        ...turn, kind: "message", id: turn.id || `legacy:message:${index}:${turn.role || "assistant"}`,
+      }));
+    }
+    function mergeTimelineItems(existing, incoming, prepend=false) {
+      const ordered = prepend ? (incoming || []).concat(existing || []) : (existing || []).concat(incoming || []);
+      const seen = new Set();
+      return ordered.filter((item, index) => {
+        const id = String(item.id || `legacy:${item.kind || "message"}:${item.role || ""}:${index}:${item.text || item.label || ""}`);
+        if (seen.has(id)) return false;
+        seen.add(id);
+        return true;
+      });
+    }
     function sessionHistory(session) {
       if (!session || session.kind !== "agent") return null;
       let history = historyCache[session.key];
       if (!history) {
         history = historyCache[session.key] = {
           turns: (session.turns || []).slice(), cursor: session.historyCursor ?? null,
+          timeline: (session.timeline || []).slice(),
           hasMore: Boolean(session.hasMoreHistory), loaded: Boolean(session.historyLoaded),
           loading: false, paged: false,
         };
       } else {
         history.turns = mergeHistoryTurns(history.turns, session.turns || []);
+        history.timeline = mergeTimelineItems(history.timeline, session.timeline || []);
       }
       return history;
     }
@@ -1498,6 +1537,7 @@ _MOBILE_HTML = r"""<!doctype html>
         if (!response.ok) throw new Error(await response.text());
         const page = await response.json();
         history.turns = mergeHistoryTurns(history.turns, page.turns || []);
+        history.timeline = mergeTimelineItems(history.timeline, page.timeline || timelineFromTurns(page.turns || []));
         if (!history.paged) {
           history.cursor = page.cursor ?? null;
           history.hasMore = Boolean(page.hasMore);
@@ -1526,6 +1566,7 @@ _MOBILE_HTML = r"""<!doctype html>
         if (!response.ok) throw new Error(await response.text());
         const page = await response.json();
         history.turns = mergeHistoryTurns(history.turns, page.turns || []);
+        history.timeline = mergeTimelineItems(history.timeline, page.timeline || timelineFromTurns(page.turns || []), true);
         history.cursor = page.cursor ?? null;
         history.hasMore = Boolean(page.hasMore);
         history.paged = true;
@@ -1540,6 +1581,89 @@ _MOBILE_HTML = r"""<!doctype html>
         olderMessagesBtn.textContent = "이전 메시지";
       }
     }
+    const activityTypeLabels = {skill: "Skill", command: "명령", diff: "Diff", file: "파일", agent: "에이전트", progress: "진행", tool: "도구"};
+    function timelineSections(items) {
+      const list = (items || []).slice();
+      let latestUserIndex = -1;
+      for (let index = list.length - 1; index >= 0; index -= 1) {
+        if (list[index].kind === "message" && list[index].role === "user") { latestUserIndex = index; break; }
+      }
+      if (latestUserIndex < 0) {
+        let assistantIndex = -1;
+        for (let index = list.length - 1; index >= 0; index -= 1) {
+          if (list[index].kind === "message" && list[index].role === "assistant") { assistantIndex = index; break; }
+        }
+        return {previous: assistantIndex >= 0 ? list.slice(0, assistantIndex) : list, user: null, activities: [], assistant: assistantIndex >= 0 ? list[assistantIndex] : null};
+      }
+      let assistantIndex = -1;
+      for (let index = list.length - 1; index > latestUserIndex; index -= 1) {
+        if (list[index].kind === "message" && list[index].role === "assistant") { assistantIndex = index; break; }
+      }
+      const activityEnd = assistantIndex >= 0 ? assistantIndex : list.length;
+      const activities = list.slice(latestUserIndex + 1, activityEnd).map((item, index) => {
+        if (item.kind === "activity") return item;
+        return {id: `progress:${item.id || index}`, kind: "activity", activityType: "progress", label: "진행 메모", detail: item.text || "", result: "", status: "completed"};
+      });
+      if (assistantIndex >= 0) {
+        list.slice(assistantIndex + 1).forEach(item => {
+          if (item.kind === "activity") activities.push(item);
+        });
+      }
+      return {previous: list.slice(0, latestUserIndex), user: list[latestUserIndex], activities, assistant: assistantIndex >= 0 ? list[assistantIndex] : null};
+    }
+    function renderTimelineMessage(item, latest=false) {
+      const text = String(item.text || "");
+      const id = `${selectedSessionKey}:${item.id || text.slice(0, 32)}:${item.role || "assistant"}`;
+      const long = text.length > 420 || text.split("\n").length > 8;
+      const expanded = !long || expandedTurnIds.has(id) || (latest && !collapsedTurnIds.has(id));
+      const body = expanded ? renderRichText(text) : `${renderRichText(text.slice(0, 280).trimEnd())}&hellip;`;
+      const toggle = long ? `<button class="turnToggle" type="button" data-turn-toggle="${esc(id)}" data-expanded="${expanded ? "1" : "0"}">${expanded ? "접기" : "펼치기"}</button>` : "";
+      const role = item.role === "user" ? "user" : item.role === "output" ? "output" : "assistant";
+      const pendingState = item.pending ? `<div class="turnState">${esc(pendingDeliveryLabel(item.delivery))}</div>` : "";
+      return `<div class="turn ${role}${item.pending ? " pending" : ""}"><div class="turnBody">${body}</div>${toggle}${pendingState}</div>`;
+    }
+    function timelineDetailAttrs(id) {
+      const value = String(id || "detail");
+      return `data-timeline-detail="${esc(value)}"${openTimelineDetailIds.has(`${selectedSessionKey}:${value}`) ? " open" : ""}`;
+    }
+    function renderActivityGroup(items, stableId="") {
+      if (!items.length) return "";
+      const counts = {};
+      items.forEach(item => { const key = item.activityType || "tool"; counts[key] = (counts[key] || 0) + 1; });
+      const categories = ["skill", "command", "diff", "file", "agent"].filter(key => counts[key]).map(key => `${activityTypeLabels[key]} ${counts[key]}`);
+      const summary = [`작업 ${items.length}`, ...categories].join(" · ");
+      const rows = items.map(item => {
+        const type = item.activityType || "tool";
+        const status = ["running", "failed"].includes(item.status) ? item.status : "completed";
+        const detail = String(item.detail || "");
+        const result = String(item.result || "");
+        const body = [
+          detail ? `<span class="activityBodyLabel">입력</span><pre class="activityCode">${esc(detail)}</pre>` : "",
+          result ? `<span class="activityBodyLabel">결과</span><pre class="activityCode">${esc(result)}</pre>` : "",
+        ].join("");
+        return `<details class="activityItem ${status}" data-activity-detail ${timelineDetailAttrs(`item:${item.id || item.label || "activity"}`)}><summary><span class="activityDot"></span><span class="activityLabel">${esc(item.label || item.name || activityTypeLabels[type] || "작업")}</span><span class="activityType">${esc(activityTypeLabels[type] || "도구")}</span></summary>${body ? `<div class="activityBody">${body}</div>` : ""}</details>`;
+      }).join("");
+      const groupId = stableId ? `group:${stableId}` : `group:${items[0].id || "first"}`;
+      return `<details class="activityGroup" ${timelineDetailAttrs(groupId)}><summary>${esc(summary)}</summary><div class="activityList">${rows}</div></details>`;
+    }
+    function renderTimelineSequence(items) {
+      const html = [];
+      let activities = [];
+      const flush = () => { if (activities.length) html.push(renderActivityGroup(activities)); activities = []; };
+      (items || []).forEach(item => {
+        if (item.kind === "activity") activities.push(item);
+        else { flush(); html.push(renderTimelineMessage(item, false)); }
+      });
+      flush();
+      return html.join("");
+    }
+    function renderPreviousConversation(items) {
+      if (!items.length) return "";
+      const messages = items.filter(item => item.kind === "message").length;
+      const activities = items.filter(item => item.kind === "activity").length;
+      const summary = [`이전 대화 ${messages}개`, activities ? `작업 ${activities}개` : ""].filter(Boolean).join(" · ");
+      return `<details class="previousConversation" ${timelineDetailAttrs("previous")}><summary>${esc(summary)}</summary><div class="previousConversationBody">${renderTimelineSequence(items)}</div></details>`;
+    }
     function renderTurns(session) {
       if (!session) {
         turnsEl.innerHTML = "";
@@ -1550,6 +1674,7 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       const history = sessionHistory(session);
       const serverTurns = history ? history.turns : ((session && session.turns) || []);
+      const serverTimeline = history && history.timeline.length ? history.timeline : timelineFromTurns(serverTurns);
       olderMessagesBtn.style.display = history && history.hasMore ? "block" : "none";
       const confirmedUsers = new Map();
       serverTurns.filter(t => t.role === "user").forEach(t => {
@@ -1558,26 +1683,26 @@ _MOBILE_HTML = r"""<!doctype html>
       });
       const pending = (pendingTurns[selectedSessionKey] || []).filter(t => (confirmedUsers.get(String(t.text || "")) || 0) <= Number(t.baseline || 0));
       pendingTurns[selectedSessionKey] = pending;
-      const turns = history ? serverTurns.concat(pending) : serverTurns.concat(pending).slice(-40);
+      const pendingTimeline = pending.map((turn, index) => ({...turn, kind: "message", id: turn.id || `pending:${index}:${turn.text || ""}`}));
+      const timeline = history ? serverTimeline.concat(pendingTimeline) : serverTimeline.concat(pendingTimeline).slice(-40);
       if (session && session.kind === "term" && session.preview) {
-        turns.push({role: "output", text: session.preview});
+        timeline.push({kind: "message", role: "output", text: session.preview, id: "terminal-preview"});
       }
-      const nextKey = JSON.stringify(turns.map(t => [t.id || "", t.role, t.text]));
+      const nextKey = JSON.stringify(timeline.map(item => [item.id || "", item.kind, item.role, item.text, item.activityType, item.label, item.status, item.detail, item.result]));
       if (nextKey === turnsStructureKey) return;
       const wasNearBottom = nearPageBottom();
       const hadTurns = Boolean(turnsStructureKey);
-      turnsEl.innerHTML = turns.map((t, index) => {
-        const text = String(t.text || "");
-        const id = `${selectedSessionKey}:${t.id || index}:${t.role || "assistant"}`;
-        const long = text.length > 420 || text.split("\n").length > 8;
-        const recent = index >= turns.length - 2;
-        const expanded = !long || expandedTurnIds.has(id) || (recent && !collapsedTurnIds.has(id));
-        const body = expanded ? renderRichText(text) : `${renderRichText(text.slice(0, 280).trimEnd())}&hellip;`;
-        const toggle = long ? `<button class="turnToggle" type="button" data-turn-toggle="${esc(id)}" data-expanded="${expanded ? "1" : "0"}">${expanded ? "접기" : "펼치기"}</button>` : "";
-        const role = t.role === "user" ? "user" : t.role === "output" ? "output" : "assistant";
-        const pendingState = t.pending ? `<div class="turnState">${esc(pendingDeliveryLabel(t.delivery))}</div>` : "";
-        return `<div class="turn ${role}${t.pending ? " pending" : ""}"><div class="turnBody">${body}</div>${toggle}${pendingState}</div>`;
-      }).join("");
+      if (session.kind !== "agent") {
+        turnsEl.innerHTML = renderTimelineSequence(timeline);
+      } else {
+        const sections = timelineSections(timeline);
+        turnsEl.innerHTML = [
+          renderPreviousConversation(sections.previous),
+          sections.user ? renderTimelineMessage(sections.user, true) : "",
+          renderActivityGroup(sections.activities, "current"),
+          sections.assistant ? renderTimelineMessage(sections.assistant, true) : "",
+        ].join("");
+      }
       turnsStructureKey = nextKey;
       requestAnimationFrame(() => {
         if (!hadTurns || wasNearBottom) scrollToLatest();
@@ -2173,6 +2298,13 @@ _MOBILE_HTML = r"""<!doctype html>
       turnsStructureKey = "";
       renderTurns(selectedSession());
     };
+    turnsEl.addEventListener("toggle", event => {
+      const detail = event.target.closest && event.target.closest("details[data-timeline-detail]");
+      if (!detail || !turnsEl.contains(detail)) return;
+      const key = `${selectedSessionKey}:${detail.getAttribute("data-timeline-detail") || "detail"}`;
+      if (detail.open) openTimelineDetailIds.add(key);
+      else openTimelineDetailIds.delete(key);
+    }, true);
     inboxMenuBtn.onclick = openInbox;
     inboxList.onclick = event => {
       const item = event.target.closest("[data-inbox-id]");

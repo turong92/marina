@@ -44,6 +44,9 @@ write_jsonl(codex_path, [
     {"type": "response_item", "payload": {"type": "function_call", "name": "apply_patch", "call_id": "call-patch", "arguments":
         json.dumps({"patch": "*** Begin Patch\n+ghp_abcdefghijklmnopqrstuvwxyz012345\n*** End Patch"})}},
     {"type": "response_item", "payload": {"type": "function_call_output", "call_id": "call-patch", "output": "Done!"}},
+    {"type": "response_item", "payload": {"type": "custom_tool_call", "name": "exec", "call_id": "call-nested-patch", "input":
+        "const patch = '*** Update File: /repo/web.js'; await tools.apply_patch(patch);"}},
+    {"type": "response_item", "payload": {"type": "custom_tool_call_output", "call_id": "call-nested-patch", "output": "Done!"}},
     {"type": "response_item", "payload": {"type": "function_call", "name": "spawn_agent", "call_id": "call-agent", "arguments":
         json.dumps({"message": "Review the change"})}},
     {"type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [
@@ -54,13 +57,14 @@ write_jsonl(codex_path, [
 codex = ms.agent_transcript(root, "codex", codex_sid)
 assert [turn["text"] for turn in codex["turns"]] == ["Inspect it", "Finished"], codex
 assert [item["kind"] for item in codex["timeline"]] == [
-    "message", "activity", "activity", "activity", "message",
+    "message", "activity", "activity", "activity", "activity", "message",
 ], codex["timeline"]
 codex_activities = [item for item in codex["timeline"] if item["kind"] == "activity"]
-assert [item["activityType"] for item in codex_activities] == ["skill", "diff", "agent"], codex_activities
-assert [item["status"] for item in codex_activities] == ["completed", "completed", "running"], codex_activities
+assert [item["activityType"] for item in codex_activities] == ["skill", "diff", "diff", "agent"], codex_activities
+assert [item["status"] for item in codex_activities] == ["completed", "completed", "completed", "running"], codex_activities
 assert "[redacted]" in codex_activities[1]["detail"], codex_activities[1]
 assert "ghp_" not in codex_activities[1]["detail"], codex_activities[1]
+assert codex_activities[2]["label"] == "/repo/web.js", codex_activities[2]
 
 claude_sid = "claude-timeline-0001"
 claude_path = claude_projects / re.sub(r"[/.]", "-", str(root)) / f"{claude_sid}.jsonl"

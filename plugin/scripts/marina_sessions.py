@@ -946,7 +946,7 @@ def _activity_type(name: str, detail: str) -> str:
     detail_lower = detail.lower()
     if lowered == "skill" or re.search(r"(?:^|/)skills/[^/]+/skill\.md(?:\s|$|['\"])", detail_lower):
         return "skill"
-    if lowered in ("apply_patch", "edit", "multiedit", "patch"):
+    if lowered in ("apply_patch", "edit", "multiedit", "patch") or "tools.apply_patch(" in detail_lower or re.search(r"\*\*\*\s+(?:update|add|delete)\s+file:", detail_lower):
         return "diff"
     if lowered in ("write", "read", "notebookedit"):
         return "file"
@@ -967,9 +967,13 @@ def _activity_label(name: str, activity_type: str, raw_input: Any, detail: str) 
         return skill or "Skill"
     if activity_type == "command":
         command = str(payload.get("cmd") or payload.get("command") or "").strip()
-        return (command.splitlines()[0][:140] if command else name) or "Command"
+        fallback = detail.strip().splitlines()[0][:140] if detail.strip() else name
+        return (command.splitlines()[0][:140] if command else fallback) or "Command"
     if activity_type in ("diff", "file"):
         target = str(payload.get("file_path") or payload.get("path") or payload.get("file") or "").strip()
+        if not target and activity_type == "diff":
+            match = re.search(r"\*\*\*\s+(?:update|add|delete)\s+file:\s*([^\s'\";\\]+)", detail, re.I)
+            target = match.group(1) if match else ""
         return target or name or ("Diff" if activity_type == "diff" else "File")
     if activity_type == "agent":
         prompt = str(payload.get("message") or payload.get("prompt") or payload.get("task") or "").strip()

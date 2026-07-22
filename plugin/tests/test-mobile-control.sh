@@ -121,6 +121,14 @@ grep -q '한 번 더 누르면 Marina를 나갑니다' <<<"$mobile_html" || { ec
 grep -q 'turnsEl.scrollHeight' <<<"$mobile_html" || { echo "FAIL: /mobile chat should scroll its transcript rather than the page"; exit 1; }
 grep -q 'data-turn-toggle' <<<"$mobile_html" || { echo "FAIL: /mobile chat should collapse long historical messages"; exit 1; }
 grep -q 'collapsedTurnIds' <<<"$mobile_html" || { echo "FAIL: /mobile chat should remember manual message collapse state"; exit 1; }
+grep -q 'function timelineSections' <<<"$mobile_html" || { echo "FAIL: /mobile chat should derive the latest conversation pair"; exit 1; }
+grep -q 'class="previousConversation"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should collapse older conversation together"; exit 1; }
+grep -q 'class="activityGroup"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should collapse native work events"; exit 1; }
+grep -q 'data-activity-detail' <<<"$mobile_html" || { echo "FAIL: /mobile work details should expand independently"; exit 1; }
+grep -q 'mergeTimelineItems' <<<"$mobile_html" || { echo "FAIL: /mobile history should merge paged timeline events"; exit 1; }
+grep -q 'openTimelineDetailIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened timeline details"; exit 1; }
+grep -q 'data-timeline-detail' <<<"$mobile_html" || { echo "FAIL: /mobile timeline details need stable identities"; exit 1; }
+grep -q 'renderActivityGroup(sections.activities, "current")' <<<"$mobile_html" || { echo "FAIL: current work group identity should survive appended activity"; exit 1; }
 
 PYTHONPATH="$SCR" python3 - <<'PY' | node
 from marina_mobile import render_mobile_html
