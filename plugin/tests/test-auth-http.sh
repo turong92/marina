@@ -109,6 +109,13 @@ try:
     admin_cookies = cookie_jar(headers)
     assert set(admin_cookies) == {"marina_session", "marina_csrf"}
 
+    # localhost 는 포트와 무관하게 쿠키를 공유한다 — 다른 앱이 심은 SimpleCookie 가
+    # 못 읽는 이름('$'/'{'/JSON 값)이 세션 쿠키보다 앞에 와도 로그인이 유지돼야 한다.
+    polluted = {"AMP_MKTG_${/junk/id": "JTdCJTIy", "ajs_user": '{"id":1}', **admin_cookies}
+    status, headers, body = request("GET", "/api/auth/status", cookies=polluted)
+    assert status == 200 and (body.get("user") or {}).get("username") == "owner", \
+        f"오염된 쿠키 헤더에서 세션 유실: {status} {body}"
+
     status, headers, body = request("GET", "/api/auth/status", cookies=admin_cookies)
     assert status == 200 and body["user"]["role"] == "admin"
 

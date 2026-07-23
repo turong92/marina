@@ -39,17 +39,21 @@ class AuthHTTPController:
         self.store = store
 
     @staticmethod
-    def _cookies(handler: Any) -> SimpleCookie[str]:
-        cookies: SimpleCookie[str] = SimpleCookie()
-        try:
-            cookies.load(handler.headers.get("cookie", ""))
-        except Exception:
-            return SimpleCookie()
-        return cookies
+    def _request_cookie(handler: Any, name: str) -> str:
+        # SimpleCookie.load 는 못 읽는 조각을 만나면 나머지 전부를 버린다 — localhost 는
+        # 포트와 무관하게 쿠키를 공유해서 다른 앱의 '$'/'{' 든 이름이 세션보다 앞에 온다.
+        header = str(handler.headers.get("cookie") or "")
+        for part in header.split(";"):
+            key, sep, value = part.partition("=")
+            if sep and key.strip() == name:
+                value = value.strip()
+                if len(value) >= 2 and value[0] == value[-1] == '"':
+                    value = value[1:-1]
+                return value
+        return ""
 
     def _session_token(self, handler: Any) -> str:
-        morsel = self._cookies(handler).get(SESSION_COOKIE)
-        return morsel.value if morsel else ""
+        return self._request_cookie(handler, SESSION_COOKIE)
 
     def _principal(self, handler: Any) -> SessionPrincipal | None:
         return self.store.resolve_session(self._session_token(handler))
