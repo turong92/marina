@@ -20,6 +20,26 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-pretooluse-hook.sh\""
           }
         ]
+      },
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-question-hook.sh\""
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-question-hook.sh\""
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [

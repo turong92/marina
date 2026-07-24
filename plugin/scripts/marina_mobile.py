@@ -397,6 +397,27 @@ def mobile_request_ok(handler: Any, parsed: urllib.parse.ParseResult) -> bool:
     return bool(expected and supplied and hmac.compare_digest(expected, supplied))
 
 
+AGENT_QUESTIONS_DIR = MARINA_HOME / "agent-questions"
+_QUESTION_STALE_S = 900   # PostToolUse 로 지워지는 게 정상이나, 고아(세션 죽음 등) 방지용 상한
+
+
+def mobile_pending_question(source: str, sid: str) -> dict[str, Any] | None:
+    # PreToolUse 훅(marina_question.py)이 기록한 pending AskUserQuestion 을 읽는다.
+    # 트랜스크립트엔 답 전까지 질문이 없으므로, pending 창 동안 카드를 그리는 유일한 라이브 소스.
+    if source != "claude" or not sid:
+        return None
+    try:
+        data = json.loads((AGENT_QUESTIONS_DIR / f"claude-{sid}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    questions = data.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return None
+    if time.time() - float(data.get("ts") or 0) > _QUESTION_STALE_S:
+        return None
+    return {"questions": questions, "toolUseId": str(data.get("toolUseId") or "")}
+
+
 def mobile_state(refresh: bool = False) -> dict[str, Any]:
     worktrees: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []
@@ -430,6 +451,9 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                 source = str(agent.get("source") or "")
                 sid = str(agent.get("sid") or "")
                 preview = str(agent.get("preview") or "")
+                pending_question = mobile_pending_question(source, sid)
+                # pending 질문 = 에이전트가 '작업 실행 중'이 아니라 '답을 기다리는 중' → blocked(응답 필요)로 표시(형 지적).
+                status = "blocked" if pending_question else (agent.get("status") or "idle")
                 sessions.append({
                     "key": f"agent:{source}:{sid}:{root}",
                     "kind": "agent",
@@ -441,9 +465,9 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                     "sid": sid,
                     "target": {"type": "agent", "source": source, "sid": sid},
                     "ts": agent.get("ts") or 0,
-                    "status": agent.get("status") or "idle",
+                    "status": status,
                     "statusTs": agent.get("statusTs") or agent.get("ts") or 0,
-                    "statusReason": agent.get("statusReason") or "",
+                    "statusReason": "pending_question" if pending_question else (agent.get("statusReason") or ""),
                     "tid": str((agent_terms.get((source, sid)) or {}).get("tid") or ""),
                     "controllable": bool((agent_terms.get((source, sid)) or {}).get("tid")),
                     "externalActive": _agent_process_active(source, sid),
@@ -451,6 +475,7 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                         "current": agent_runtime_settings(root, source, sid),
                         "pending": mobile_pending_session_settings(root, source, sid),
                     },
+                    "pendingQuestion": pending_question,
                 })
             for term in root_terms:
                 tid = str(term.get("tid") or "")
@@ -752,15 +777,22 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
     sid = str(target.get("sid") or "")
     if source != "claude":
         raise ValueError("이 질문 응답은 Claude 세션만 지원해요")
+    answer_text = str(body.get("text") or "")
+    tid = _live_agent_tid(root, source, sid)
+    if not tid:
+        raise ValueError("실행 중인 에이전트가 없어요")
+    if answer_text:
+        # 기타(직접 입력): 셀렉터에 텍스트를 타이핑 후 확정 — best-effort(실 셀렉터 동작 검증 필요).
+        term_input(tid, answer_text[:2000])
+        _agent_input_pause()
+        term_input(tid, "\r")
+        return {"ok": True, "tid": tid, "text": True}
     try:
         option_index = int(body.get("optionIndex", 0))
     except (TypeError, ValueError):
         raise ValueError("optionIndex 필요")
     if option_index < 0 or option_index > 50:
         raise ValueError("optionIndex 범위")
-    tid = _live_agent_tid(root, source, sid)
-    if not tid:
-        raise ValueError("실행 중인 에이전트가 없어요")
     if option_index:
         term_input(tid, "\x1b[B" * option_index)
         _agent_input_pause()
@@ -926,6 +958,8 @@ _MOBILE_HTML = r"""<!doctype html>
     .turnAttachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
     .turnAttachments img { max-width: 180px; max-height: 180px; border-radius: 6px; object-fit: cover; }
     .turnAttachments a { font-size: 11px; }
+    .liveQuestion:empty { display: none; }
+    .liveQuestion { margin-bottom: 2px; }
     .questionCard { align-self: stretch; display: flex; flex-direction: column; gap: 8px; padding: 11px 12px; border: 1px solid #b9d4f2; border-radius: 10px; background: #f2f8ff; }
     .questionHeader { color: #0b63ce; font-size: 9px; font-weight: 850; text-transform: uppercase; letter-spacing: .04em; }
     .questionText { font-size: 13px; font-weight: 650; line-height: 1.45; }
@@ -935,6 +969,10 @@ _MOBILE_HTML = r"""<!doctype html>
     .questionOptLabel { font-size: 12px; font-weight: 800; color: #1f2733; }
     .questionOptDesc { font-size: 10px; color: #63708a; line-height: 1.4; }
     .questionMore { color: #63708a; font-size: 10px; }
+    .questionOther { color: #4d5665; font-weight: 700; }
+    .questionOtherRow { display: flex; gap: 6px; margin-top: 2px; }
+    .questionOtherInput { flex: 1; min-height: 38px; max-height: 100px; padding: 8px 10px; resize: none; }
+    .questionOtherSend { width: auto; min-width: 0; min-height: 38px; padding: 0 14px; }
     .sessionControls { display: flex; min-height: 30px; align-items: center; gap: 5px; }
     .sessionControlBtn { width: auto; min-width: 0; min-height: 28px; padding: 0 8px; border-color: transparent; background: #eef2f7; color: #4d5665; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sessionControls .status { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1085,6 +1123,7 @@ _MOBILE_HTML = r"""<!doctype html>
       </section>
     </main>
     <div class="chatComposer" id="chatComposer" style="display:none">
+      <div class="liveQuestion" id="liveQuestion"></div>
       <div class="sessionControls">
         <button class="sessionControlBtn" id="settingsBtn" type="button">모델 · 기본값</button>
         <button class="sessionControlBtn" id="subagentSessionBtn" type="button" style="display:none">서브에이전트 <span id="subagentCount">0</span></button>
@@ -1189,6 +1228,40 @@ _MOBILE_HTML = r"""<!doctype html>
     const newMessagesBtn = document.getElementById("newMessagesBtn");
     const updateBanner = document.getElementById("updateBanner");
     updateBanner.onclick = () => location.reload();
+    const liveQuestionEl = document.getElementById("liveQuestion");
+    let questionAnsweredAt = 0;   // 탭 직후 잠깐 카드 숨김(낙관적) — 실제론 PostToolUse 훅이 상태파일 지워 사라짐
+    // pending AskUserQuestion(훅이 잡은 라이브 소스)을 입력창 위에 카드로. 트랜스크립트엔 답 전까지 없으므로 이게 유일한 라이브 표시.
+    function renderLiveQuestion(session) {
+      const pq = session && session.pendingQuestion;
+      const suppress = Date.now() - questionAnsweredAt < 4000;   // 방금 답함 — 상태파일 정리될 시간 줌
+      if (!pq || !Array.isArray(pq.questions) || !pq.questions.length || suppress) {
+        if (liveQuestionEl.innerHTML) liveQuestionEl.innerHTML = "";
+        return;
+      }
+      const canAnswer = session.kind === "agent" && session.controllable && sessionSource(session) === "claude";
+      const item = {name: "AskUserQuestion", detail: JSON.stringify({questions: pq.questions})};
+      const html = renderQuestionCard(item, canAnswer);
+      if (liveQuestionEl.innerHTML !== html) liveQuestionEl.innerHTML = html;
+    }
+    liveQuestionEl.addEventListener("click", event => {
+      const opt = event.target.closest && event.target.closest("[data-answer-option]");
+      if (opt) {
+        const index = parseInt(opt.getAttribute("data-answer-option"), 10);
+        if (!Number.isNaN(index)) { questionAnsweredAt = Date.now(); liveQuestionEl.innerHTML = ""; answerQuestion({optionIndex: index}); }
+        return;
+      }
+      if (event.target.closest && event.target.closest("[data-answer-other]")) {
+        const row = liveQuestionEl.querySelector("[data-question-other-row]");
+        if (row) { row.style.display = "flex"; const ta = row.querySelector("textarea"); if (ta) ta.focus(); }
+        return;
+      }
+      if (event.target.closest && event.target.closest("[data-answer-other-send]")) {
+        const ta = liveQuestionEl.querySelector(".questionOtherInput");
+        const text = ta ? ta.value.trim() : "";
+        if (text) { questionAnsweredAt = Date.now(); liveQuestionEl.innerHTML = ""; answerQuestion({text}); }
+        return;
+      }
+    });
     const retryBtn = document.getElementById("retryBtn");
     const sendBtn = document.getElementById("sendBtn");
     const subagentSessionBtn = document.getElementById("subagentSessionBtn");
@@ -1996,8 +2069,10 @@ _MOBILE_HTML = r"""<!doctype html>
     function renderLiveAction(exchange, sections, session, isLatest) {
       if (!isLatest || !session || session.status !== "working") return "";
       const running = sections.activities.filter(item => item.status === "running");
-      const current = running[running.length - 1] || sections.activities[sections.activities.length - 1];
-      const label = current ? (current.label || current.name || activityTypeLabels[current.activityType] || "작업 중") : "응답 작성 중";
+      // 실제 '실행 중'인 활동이 있을 때만 스피너. 활동 없이 대기/응답만 남은 상태를 실행 중처럼 보이게 하지 않기(형 지적).
+      const current = running[running.length - 1];
+      if (!current) return "";
+      const label = current.label || current.name || activityTypeLabels[current.activityType] || "작업 중";
       const runtime = exchangeRuntime(exchange, session, true);
       const meta = runtimeLabel(runtime);
       const target = sections.activities.length ? `group:exchange:${exchange.id}` : "";
@@ -2093,8 +2168,13 @@ _MOBILE_HTML = r"""<!doctype html>
         const attrs = interactive ? `data-answer-option="${index}"` : "disabled";
         return `<button class="questionOpt" type="button" ${attrs}><span class="questionOptLabel">${label}</span>${desc}</button>`;
       }).join("");
+      // 기타(직접 입력) — AskUserQuestion 은 항상 자유 입력을 허용한다.
+      const other = interactive
+        ? `<button class="questionOpt questionOther" type="button" data-answer-other>&#9998; 기타 (직접 입력)</button>`
+          + `<div class="questionOtherRow" data-question-other-row style="display:none"><textarea class="questionOtherInput" rows="1" placeholder="직접 입력..." enterkeyhint="send"></textarea><button class="primary questionOtherSend" type="button" data-answer-other-send>보내기</button></div>`
+        : "";
       const note = interactive ? "" : `<div class="questionMore">이 세션이 실행 중일 때만 응답할 수 있어요</div>`;
-      return `<div class="questionCard">${header}${q}<div class="questionOpts">${buttons}</div>${more}${note}</div>`;
+      return `<div class="questionCard">${header}${q}<div class="questionOpts">${buttons}${other}</div>${more}${note}</div>`;
     }
     function renderConversationSequence(exchange, session, isLatest=false) {
       const sections = exchangeSections(exchange);
@@ -2360,6 +2440,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const running = isAgent && session.controllable && session.status === "working";
       stopBtn.style.display = running ? "inline-block" : "none";
       if (!sending) statusEl.textContent = optimisticWorking ? "작업 중…" : sessionStatusText(session);
+      renderLiveQuestion(session);
     }
     function sourceOptions(session) {
       return (state.agentOptions || {})[sessionSource(session)] || {models: [], efforts: [], manualModel: true};
@@ -2886,7 +2967,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (detail.open) openTimelineDetailIds.add(key);
       else openTimelineDetailIds.delete(key);
     }, true);
-    async function answerQuestion(optionIndex) {
+    async function answerQuestion(payload) {
       const session = selectedSession();
       if (!session || session.kind !== "agent") return;
       const value = currentTargetValue();
@@ -2894,8 +2975,10 @@ _MOBILE_HTML = r"""<!doctype html>
       const [, source, sid] = value.split(":");
       statusEl.textContent = "응답 전송 중...";
       try {
-        const r = await fetch("/mobile/api/answer", {method: "POST", headers: headers(true),
-          body: JSON.stringify({root: selectedRoot(), target: {type: "agent", source, sid}, optionIndex})});
+        const body = {root: selectedRoot(), target: {type: "agent", source, sid}};
+        if (payload && payload.text != null) body.text = payload.text;
+        else body.optionIndex = (payload && payload.optionIndex) || 0;
+        const r = await fetch("/mobile/api/answer", {method: "POST", headers: headers(true), body: JSON.stringify(body)});
         if (!r.ok) throw new Error(await responseError(r));
         followLatest = true;
         setTimeout(() => load({quiet: true}).catch(() => {}), 400);
@@ -2915,7 +2998,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const answer = event.target.closest && event.target.closest("[data-answer-option]");
       if (answer) {
         const index = parseInt(answer.getAttribute("data-answer-option"), 10);
-        if (!Number.isNaN(index)) { answer.disabled = true; answerQuestion(index); }
+        if (!Number.isNaN(index)) { answer.disabled = true; answerQuestion({optionIndex: index}); }
         return;
       }
       const action = event.target.closest && event.target.closest("[data-live-action]");
