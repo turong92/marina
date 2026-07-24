@@ -165,15 +165,34 @@
     }
     let worktreeSignature = '';
     let worktreesLoaded = false;  // 첫 /api/worktrees 응답 전엔 "빈 레지스트리" 판정 보류 (cold load 스퓨리어스 등록 모달 방지)
+    // 구조 시그니처 — 에이전트의 "표시 상태" 필드는 전부 제외한다(구조가 아니라 라이브 값).
+    //   에이전트 status/statusTs/preview/statusReason/ts 는 활성 세션이 working↔waiting↔completed 로
+    //   수시로 바뀐다. 이를 시그니처에 포함하면 그때마다 전체 render() 가 돌아 → 열린 ⋯메뉴·입력·포커스·
+    //   드롭다운이 통째로 리셋된다("전부 취소됨" — 형 피드백 2026-07-24). 이 값들의 화면 반영(dot·label·
+    //   행 상태클래스·relTime·preview·접힘요약)은 부분 패치(updateServiceStates)가 5s 마다 신선하게
+    //   유지하므로 full render 가 필요 없다. 시그니처는 "구조"만 잡는다: 어떤 카드/에이전트가 있고(sid),
+    //   제목·순서·서비스 구성·깃 배지(verdict/ahead/clean)·디스크가 바뀔 때만 render — updateServiceStates
+    //   가 패치하지 못하는 것들이다. (sid·title 은 남겨 add/remove/rename 시 행이 재구성되게.)
+    function worktreeStructureSig(worktrees, projects) {
+      const STRIP = new Set(['status', 'statusTs', 'ts', 'preview', 'statusReason']);
+      const lean = worktrees.map(w => {
+        if (!w.agents || !w.agents.length) return w;
+        return { ...w, agents: w.agents.map(a => {
+          const o = {}; for (const k in a) if (!STRIP.has(k)) o[k] = a[k]; return o;
+        }) };
+      });
+      return JSON.stringify([lean, projects]);
+    }
     async function loadWorktrees(refresh = false) {
       const data = await api(`/api/worktrees${refresh ? '?refresh=1' : ''}`);
-      const nextSignature = JSON.stringify([data.worktrees ?? [], data.projects ?? []]);
-      // 변화 없으면 재렌더 스킵 — 60초 폴링이 입력·진행 중 버튼을 흔들지 않게
-      if (!refresh && nextSignature === worktreeSignature) return;
-      worktreeSignature = nextSignature;
+      // 데이터는 항상 갱신 — 부분 패치 경로(updateServiceStates)가 신선한 worktreeData 를 읽어야 한다.
       worktreeData = data.worktrees ?? [];
       projectData = data.projects ?? [];
       worktreesLoaded = true;
+      // 구조 시그니처(휘발성 에이전트 필드 제외)가 동일하면 전체 render 스킵 — 부분 패치가 라이브 값을 갱신한다.
+      const nextSignature = worktreeStructureSig(worktreeData, projectData);
+      if (!refresh && nextSignature === worktreeSignature) return;
+      worktreeSignature = nextSignature;
       render(); // 카드의 디스크·캐시·배지 라인 갱신
     }
 

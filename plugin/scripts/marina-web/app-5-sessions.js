@@ -256,19 +256,34 @@
           const acts = row.querySelector('[data-svc-acts]');
           if (acts && !acts.querySelector('button:disabled')) fillSvcActs(acts, session, svc);
         }
-        // A1 — AGENTS 행은 preview 를 다시 쓰지 않는다(정적, 60s worktrees 폴링에서만 갱신) — ts/뱃지/접힘요약만 이 5s 틱에서 신선하게.
+        // A1 — AGENTS 행은 render() 없이 여기서 신선하게 유지한다. 구조 시그니처가 표시상태 필드(status/statusTs/
+        // preview/ts)를 전부 제외하므로(app-3-util worktreeStructureSig) 이 5s 부분 패치가 그 값들의 유일한 갱신
+        // 경로다 — 상태 변화에 full render 를 돌리지 않아 열린 메뉴·입력·포커스가 보존된다. 행 순서는 render() 가
+        // agents 배열 순서로 그리므로(순서 변화는 시그니처에 잡혀 재구성됨) index 로 신선한 agent 에 매핑해
+        // dot·label·행 상태클래스·relTime·preview 를 renderAgentRow 와 동일 계약으로 덮는다.
         const wt = worktreeData.find(w => w.root === session.root);
         const agents = wt?.agents || [];
         if (agents.length) {
           const agentsCounts = card.querySelector('[data-agents-counts]');
           if (agentsCounts) agentsCounts.innerHTML = expandedRoots.has(session.root) ? '' : agentsSummary(agents);
-          card.querySelectorAll('[data-agent-row]').forEach(row => {
-            const ts = Number(row.dataset.agentTs) || 0;
-            const active = agentActive(ts);
+          const rows = card.querySelectorAll('[data-agent-row]');
+          rows.forEach((row, i) => {
+            const agent = agents[i];
+            if (!agent) return;
+            const state = agentState(agent);
+            const meta = AGENT_STATUS_META[state] || AGENT_STATUS_META.idle;
+            const ts = agent.statusTs || agent.ts;
+            row.dataset.agentTs = ts || '';
+            // 행 상태 클래스(agent-working/agent-blocked…) 교체 — renderAgentRow 만 세팅하던 것을 in-place 로.
+            row.className = row.className.replace(/\bagent-(working|blocked|waiting|completed|failed|idle)\b/g, `agent-${state}`);
             const dot = row.querySelector('.wt-dot');
-            if (dot) dot.className = `wt-dot ${active ? 'boot' : 'stop'}`;
+            if (dot) { dot.className = `wt-dot ${meta.dot}`; dot.title = meta.title; }
+            const labelEl = row.querySelector('.agent-state-label');
+            if (labelEl) labelEl.textContent = meta.label;
             const relEl = row.querySelector('[data-agent-relts]');
             if (relEl) relEl.textContent = relTime(ts);
+            const tailEl = row.querySelector('.svc-tail');
+            if (tailEl && agent.preview) { tailEl.textContent = agent.preview; tailEl.title = agent.preview; }
           });
         }
       }
@@ -282,7 +297,10 @@
 
     function render() {
       const sessionsEl = document.getElementById('sessions');
-      sessionsEl.innerHTML = '';
+      // 카드는 detached fragment 에 쌓아 마지막에 replaceChildren 로 원자 교체한다 — innerHTML='' 후 append 하던
+      // 방식은 매 render(토글·구조변화)마다 리스트를 빈 상태로 만들었다 다시 채워 카드가 깜빡이고, 다른 카드의
+      // 열린 드롭다운·포커스가 소실됐다(빈 순간이 없어야 함).
+      const frag = document.createDocumentFragment();
 
       const wtByRoot = new Map(worktreeData.map(w => [w.root, w]));
       // 등록 프로젝트 목록 — 선택 보정(선택이 사라졌으면 첫 프로젝트로 폴백)
@@ -339,7 +357,7 @@
             const label = document.createElement('div');
             label.className = 'src-group-label';
             label.innerHTML = `<span class="src-chip ${g}">${SRC_LABEL[g] || '기타'}</span><span class="src-cnt">${srcCounts[g] ?? ''}</span>`;
-            sessionsEl.appendChild(label);
+            frag.appendChild(label);
           }
         }
         const card = document.createElement('div');
@@ -458,8 +476,9 @@
           if (peek) peek.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTranscript === 'function') openAgentTranscript(session, agent); };
         });
         renderServiceTree(card.querySelector('.svc-list'), session, wt);
-        sessionsEl.appendChild(card);
+        frag.appendChild(card);
       }
+      sessionsEl.replaceChildren(frag);   // 원자 교체 — 빈 순간 없음(깜빡임·드롭다운 소실 방지)
       const collapseBtn = document.getElementById('collapseAll');
       collapseBtn.textContent = expandedRoots.size ? '⇈' : '⇊';
       collapseBtn.dataset.tip = expandedRoots.size ? '세션 카드 모두 접기' : '세션 카드 모두 펼치기';

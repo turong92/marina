@@ -17,6 +17,7 @@
     let termOpening = 0;                        // termNewShell 한복판인 셸 수 — 그 안에선 termPlace 가 어차피 그린다
                                                 // (boolean 이면 먼저 끝난 open 의 finally 가 남의 probe 창을 열어둔 채 푼다)
     let termNewWtSig = null;                    // 마지막으로 그린 새 셸 드롭다운 내용 — 같으면 DOM 을 안 건드린다
+    let termSideSig = null;                      // 마지막으로 그린 사이드바 목록 내용 — 같으면 innerHTML 재구성 안 함(열린 드롭다운 보존)
     const termSideWKey = 'marinaTermSideW';     // 사이드바 폭(px) — 0/없음이면 CSS 기본(200px)
     let termSideW = Number(localStorage.getItem(termSideWKey)) || 0;
 
@@ -204,6 +205,7 @@
     function termEnsureShell(pane) {
       if (pane.querySelector('[data-term-side]')) return;
       termNewWtSig = null;   // 골격을 새로 만들면 select 도 빈 채로 새로 생긴다 — 캐시를 안 비우면 영영 안 채워진다
+      termSideSig = null;    // 사이드바 목록도 빈 채로 새로 생기므로 시그니처 무효화(안 그러면 목록이 영영 안 그려짐)
       pane.innerHTML = `<div class="term-root">
           <div class="term-side" data-term-side>
             <div class="term-side-head">
@@ -253,7 +255,23 @@
 
     function termRenderSide() {
       const side = termPane.querySelector('[data-term-side-list]');
-      const wts = [...new Set(TermIO.list().map(s => s.root))];
+      const list = TermIO.list();
+      const wts = [...new Set(list.map(s => s.root))];
+      // 멱등 가드 — 목록 표시에 영향 주는 상태(세션·이름·부제·활동닷·배치칸·포커스)가 그대로면 재구성하지 않는다.
+      // 3s 폴이 목록을 매번 innerHTML 로 갈아엎으면 그 reflow 가 바로 위 형제(`새 셸` select)의 열린 네이티브
+      // 드롭다운을 닫아 버린다(형 피드백 2026-07-24). termRenderNewWt 와 같은 시그니처 패턴으로 막는다.
+      const sig = JSON.stringify({
+        f: termFocus,
+        items: list.map(s => [s.tid, s.root, termLabel(s), s.preview || '', s.agent?.source || '',
+                              termVisible(s.tid) ? termSlotOf(s.tid) : -1, termDirty.has(s.tid) ? 1 : 0]),
+      });
+      if (termSideSig === sig) return;
+      // 살아있는 셸의 부제(마지막 출력)는 매 폴에서 진짜로 바뀌므로 sig 만으론 재구성을 못 막는다. 그런데 재구성이
+      // 해로운 건 오직 바로 위 `새 셸` select 의 네이티브 드롭다운이 열려 있을 때다(reflow 가 팝업을 닫는다). 그때만
+      // 미룬다 — termSideSig 를 안 올려 드롭다운이 닫힌 다음 폴에서 신선하게 다시 그린다(형 피드백 2026-07-24).
+      const newWtSel = termPane.querySelector('[data-term-new-wt]');
+      if (newWtSel && document.activeElement === newWtSel) return;
+      termSideSig = sig;
       side.innerHTML = wts.map(root => {
         const rows = TermIO.list().filter(s => s.root === root).sort((a, b) => a.created - b.created).map(s => {
           const slot = termSlotOf(s.tid);
