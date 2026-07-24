@@ -872,6 +872,19 @@ _MOBILE_HTML = r"""<!doctype html>
     .session-card.active { border-color: #0b63ce; box-shadow: 0 0 0 1px #0b63ce inset; }
     .session-card-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
     .session-title { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 850; line-height: 1.25; }
+    :root { --st-run: #1f9d6b; --st-boot: #c07f14; --st-err: #d13438; --st-stop: #8a8f98; }
+    .session-status { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
+    .session-status-label { font-size: 10px; font-weight: 850; color: #747d8b; white-space: nowrap; }
+    .wt-dot { flex: none; width: 13px; height: 13px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; line-height: 1; box-sizing: border-box; }
+    .wt-dot.run { border: 1.5px solid var(--st-run); color: var(--st-run); }
+    .wt-dot.run::after { content: "✓"; }
+    .wt-dot.boot { border: 1.5px solid var(--st-boot); border-left-color: transparent; color: var(--st-boot); animation: liveActionSpin 1.3s linear infinite; }
+    .wt-dot.part { border: 1.5px solid var(--st-boot); color: var(--st-boot); }
+    .wt-dot.part::after { content: "◐"; font-size: 10px; }
+    .wt-dot.bad { border: 1.5px solid var(--st-err); color: var(--st-err); }
+    .wt-dot.bad::after { content: "✕"; }
+    .wt-dot.stop { border: 1.5px solid var(--st-stop); color: var(--st-stop); }
+    .wt-dot.stop::after { content: "■"; font-size: 6px; }
     .source-badge { flex: 0 0 auto; display: inline-flex; align-items: center; min-height: 20px; padding: 0 6px; border-radius: 4px; background: #e9edf3; color: #4d5665; font-size: 9px; font-weight: 900; line-height: 1; text-transform: uppercase; }
     .source-badge.codex { background: #e6f5ec; color: #17643a; }
     .source-badge.claude { background: #fff0e8; color: #9a421d; }
@@ -1025,6 +1038,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .toast { position: fixed; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); z-index: 20; display: none; width: max-content; max-width: calc(100vw - 32px); padding: 9px 12px; transform: translateX(-50%); border-radius: 8px; background: #17191f; color: #fff; font-size: 12px; box-shadow: 0 8px 24px rgb(0 0 0 / 24%); }
     .toast.show { display: block; }
     @media (prefers-color-scheme: dark) {
+      :root { --st-run: #34c98e; --st-boot: #f0a132; --st-err: #e5484d; --st-stop: #5a5f6a; }
       body { background: #11151c; color: #f4f6f9; }
       header, select, textarea, input, button { background: #171d27; color: #f4f6f9; border-color: #303846; }
       label, p, .status { color: #a5adba; }
@@ -1330,6 +1344,17 @@ _MOBILE_HTML = r"""<!doctype html>
       claude: {label: "Claude", badge: "CC"},
       terminal: {label: "Terminal", badge: "TERM"},
     };
+    // 웹 대시보드(app-1-core.js AGENT_STATUS_META)와 동일하게 통일 — 같은 상태를 같은 dot/라벨로.
+    const AGENT_STATUS_META = {
+      working:   {dot: "boot", label: "작업 중"},
+      blocked:   {dot: "bad",  label: "응답 필요"},
+      waiting:   {dot: "part", label: "응답 대기"},
+      completed: {dot: "run",  label: "완료"},
+      failed:    {dot: "bad",  label: "실패"},
+      interrupted: {dot: "stop", label: "중단됨"},
+      idle:      {dot: "stop", label: "유휴"},
+    };
+    function agentStatusMeta(status) { return AGENT_STATUS_META[status] || AGENT_STATUS_META.idle; }
     function showLogin(message="") {
       app.style.display = "none";
       login.style.display = "flex";
@@ -1792,8 +1817,10 @@ _MOBILE_HTML = r"""<!doctype html>
     function sessionCard(session) {
       const source = sessionSource(session);
       const meta = sourceMeta[source];
+      const sm = session.kind === "agent" ? agentStatusMeta(session.status) : null;
+      const statusHtml = sm ? `<span class="session-status" data-session-status><span class="wt-dot ${sm.dot}"></span><span class="session-status-label">${sm.label}</span></span>` : "";
       return `<button class="session-card ${session.key === selectedSessionKey ? "active" : ""}" type="button" data-key="${esc(session.key)}">
-        <span class="session-card-top"><span class="source-badge ${source}">${meta.badge}</span><span class="session-title" data-session-title>${esc(session.title || session.key)}</span></span>
+        <span class="session-card-top"><span class="source-badge ${source}">${meta.badge}</span><span class="session-title" data-session-title>${esc(session.title || session.key)}</span>${statusHtml}</span>
         <span class="session-subtitle" data-session-subtitle>${esc(sessionSubtitle(session))}</span>
         <span class="session-preview" data-session-preview>${esc(session.preview || "(최근 작업 없음)")}</span>
       </button>`;
@@ -1813,7 +1840,7 @@ _MOBILE_HTML = r"""<!doctype html>
         return;
       }
       const sources = sourceFilter === "all" ? ["codex", "claude", "terminal"] : [sourceFilter];
-      const structure = sessions.map(s => `${sessionSource(s)}:${s.key}`).sort().join("|");
+      const structure = sessions.map(s => `${sessionSource(s)}:${s.key}:${s.status || ""}`).sort().join("|");   // status 포함 → 상태 dot 이 폴마다 갱신
       const nextStructureKey = `${selectedProjectId}|${sourceFilter}|${q}|${structure}`;
       if (sessionStructureKey !== nextStructureKey) {
         sessionList.innerHTML = sources.map(source => {
@@ -2415,8 +2442,7 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function sessionStatusText(session) {
       if (!session || session.kind !== "agent") return "";
-      const labels = {working: "작업 중", blocked: "응답 필요", waiting: "응답 대기", completed: "완료", failed: "실패", interrupted: "중단됨", idle: "대기"};
-      let text = labels[session.status] || session.status || "대기";
+      let text = agentStatusMeta(session.status).label;   // 웹과 통일된 라벨(idle=유휴 등)
       if (session.status === "working" && session.statusTs) {
         const elapsed = Math.max(0, Math.round(Date.now() / 1000 - Number(session.statusTs)));
         text += elapsed < 60 ? ` · ${elapsed}초` : ` · ${Math.floor(elapsed / 60)}분`;
