@@ -521,6 +521,13 @@ EVENT_TO_STATUS = {
 }
 
 
+def _is_tool_result_only(content: Any) -> bool:
+    """tool_result 블록만 담은 user 메시지 판정 — 사용자가 친 프롬프트가 아니라 tool 완료 기록."""
+    if not isinstance(content, list) or not content:
+        return False
+    return all(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+
+
 def _native_agent_status(path: Path, source: str, *, now: float | None = None) -> dict[str, Any]:
     """Normalize native Claude/Codex turn boundaries without reading an entire rollout."""
     rows, mtime = _agent_state_rows(path)
@@ -573,7 +580,20 @@ def _native_agent_status(path: Path, source: str, *, now: float | None = None) -
                 else:
                     offer("working", ts)
             elif typ == "user":
-                offer("working", ts)
+                content = (obj.get("message") or {}).get("content") if isinstance(obj.get("message"), dict) else None
+                if _is_tool_result_only(content):
+                    continue                # tool_result = 능동 작업 아니라 tool 완료(수동) 기록.
+                    # 턴이 tool 로 끝나면 마지막 항목이 tool_result 라, 이걸 working 으로 offer 하면 그 tool_result
+                    # 의 ts 가 Stop 훅 ended 보다 커져 merge 가 훅을 무시하고 working 에 고착된다(형 피드백:
+                    # "재시작한다고 배시로 끝났을 때 워킹"). 그 앞 assistant tool_use 가 이미 더 이른 ts 로 working
+                    # 을 offer 하므로 ended 훅이 그걸 덮어 completed→waiting 로 정상 전환된다.
+                texts = _texts_of(content)
+                if _is_interrupt_marker(texts):
+                    offer("completed", ts)  # 사용자 중단 = 턴 종료
+                elif _is_injected_user(obj, source, texts):
+                    continue                # 주입 user(Continue 등)는 턴 경계 아님 — working 고착 방지
+                else:
+                    offer("working", ts)
     if best is not None:
         return best
     if mtime and mtime <= current and current - mtime < 120:
@@ -607,7 +627,14 @@ def merge_agent_status(
             result = {"status": status, "statusTs": event_ts}
             reason = event.get("reason")
             if status == "blocked" and reason in BLOCKED_REASONS:
-                result["statusReason"] = str(reason)[:120]
+                # idle_prompt = 턴을 끝내고 프롬프트에서 유휴 대기(막힘 아님) → waiting("응답 대기").
+                # permission_prompt·elicitation_dialog 만 진짜 blocked("응답 필요", red) — 작업 진행에 사용자
+                # 조치가 필요한 상태다. idle_prompt 를 red 로 두면 끝난 세션이 오류처럼 보인다(형 피드백 2026-07-24).
+                # "completed + 터미널 살아있음 → waiting"(아래) 과 동일한 의미 — 프로세스는 살아서 입력만 기다린다.
+                if reason == "idle_prompt":
+                    result["status"] = "waiting"
+                else:
+                    result["statusReason"] = str(reason)[:120]
 
     if terminal_active and result.get("status") == "completed":
         result["status"] = "waiting"
@@ -630,6 +657,82 @@ def agent_status(
     if sid and root is not None:
         event = latest_agent_event(source, sid, Path(root), home=event_home, now=now)
     return merge_agent_status(native, event, terminal_active)
+
+def _read_transcript_cwd(path: Path, max_lines: int = 40) -> str | None:
+    # CLI 트랜스크립트 앞부분에서 첫 top-level cwd. 선두 메타 라인(last-prompt/mode)엔 없다.
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                cwd = o.get("cwd") if isinstance(o, dict) else None
+                if isinstance(cwd, str) and cwd:
+                    return cwd
+    except OSError:
+        return None
+    return None
+
+
+_SHELL_NOISE_RE = re.compile(
+    r"^(cd|ls|cat|git|npm|npx|yarn|pnpm|python3?|pip3?|bash|sh|zsh|export|source|rm|cp|mv|mkdir|echo|curl|docker|make|go|cargo)\b|^[~./]"
+)
+
+
+def _looks_like_shell_noise(s: str) -> bool:
+    # cd/경로/순수 셸명령 — 세션 제목으로 부적절(호출부가 커밋제목으로 폴백).
+    return bool(_SHELL_NOISE_RE.match(s.strip()))
+
+
+def _read_transcript_title(path: Path, max_lines: int = 40) -> str:
+    # aiTitle 우선(claude 가 지은 제목). 없으면 lastPrompt 지만 cd/경로/셸명령 노이즈는 제외.
+    title = ""
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(o, dict):
+                    continue
+                if isinstance(o.get("aiTitle"), str) and o["aiTitle"].strip():
+                    return o["aiTitle"].strip()[:120]
+                if not title and isinstance(o.get("lastPrompt"), str) and o["lastPrompt"].strip():
+                    title = o["lastPrompt"].strip()[:120]
+    except OSError:
+        return ""
+    return "" if _looks_like_shell_noise(title) else title
+
+
+def _claude_cli_sessions(now: float, cutoff: float) -> dict[str, list[dict[str, Any]]]:
+    # ~/.claude/projects/<slug>/<sid>.jsonl 스캔 → cwd 로 worktree, 파일 stem 으로 진짜 sid.
+    by_root: dict[str, list[dict[str, Any]]] = {}
+    if not CLAUDE_PROJECTS_DIR.is_dir():
+        return by_root
+    for raw in glob.iglob(str(CLAUDE_PROJECTS_DIR / "*" / "*.jsonl")):
+        path = Path(raw)
+        try:
+            mtime = os.path.getmtime(raw)
+        except OSError:
+            continue
+        if mtime < cutoff:                      # 7일 필터를 파일 열기 전에 (싸게)
+            continue
+        cwd = _read_transcript_cwd(path)
+        if not cwd:
+            continue
+        sid = path.stem
+        title = _read_transcript_title(path) or repo_head_subject(Path(cwd)) or sid[:8]
+        by_root.setdefault(cwd, []).append({
+            "source": "claude", "title": title, "ts": mtime, "cliSessionId": sid,
+        })
+    return by_root
+
 
 def claude_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
     # worktreePath → [{"source":"claude","title","ts"(파일 mtime),"cliSessionId"}] — claude_session_titles 와 같은 소스·캐시 리듬(20s)
@@ -657,6 +760,14 @@ def claude_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any
                 "source": "claude", "title": title, "ts": mtime,
                 "cliSessionId": data.get("cliSessionId") or "",
             })
+    # CLI 트랜스크립트 소스 병합 — Desktop local_*.json 이 없는 순수 CLI 세션도 잡는다.
+    # 진짜 sid(파일 stem)를 cliSessionId 로 실어 agents_payload 가 상태/preview 를 진짜 sid 로 조회.
+    for cli_root, cli_entries in _claude_cli_sessions(now, cutoff).items():
+        existing = by_root.setdefault(cli_root, [])
+        seen = {str(e.get("cliSessionId") or "") for e in existing}
+        for entry in cli_entries:
+            if entry["cliSessionId"] not in seen:      # Desktop 이 같은 sid 를 이미 가지면 skip
+                existing.append(entry)
     _claude_agents_cache = (now, by_root)
     return by_root
 
@@ -722,6 +833,57 @@ def agent_belongs_to_root(root: Path, source: str, sid: str, refresh: bool = Fal
         for entry in sessions.get(root_key, [])
     )
 
+_live_sids_cache: tuple[float, set[tuple[str, str]]] = (0.0, set())
+
+
+def _live_resume_sids(refresh: bool = False) -> set[tuple[str, str]]:
+    # 살아있는 claude/codex resume 프로세스의 (source, sid) — 5s 캐시(세션마다 ps 호출 방지).
+    global _live_sids_cache
+    now = time.time()
+    if not refresh and now - _live_sids_cache[0] < 5.0:
+        return _live_sids_cache[1]
+    sids: set[tuple[str, str]] = set()
+    try:
+        result = subprocess.run(["ps", "-axo", "command="], check=False,
+                                capture_output=True, text=True, timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        return _live_sids_cache[1]
+    for line in result.stdout.splitlines():
+        try:
+            argv = shlex.split(line)
+        except ValueError:
+            continue
+        for index, token in enumerate(argv):
+            name = Path(token).name
+            if name not in ("claude", "codex"):
+                continue
+            tail = argv[index + 1:]
+            if name == "codex" and "resume" in tail:
+                for t in tail[tail.index("resume") + 1:]:
+                    if not t.startswith("-"):
+                        sids.add(("codex", t))
+                        break
+            elif name == "claude":
+                for t in tail:
+                    if t.startswith("--resume="):
+                        sids.add(("claude", t[len("--resume="):]))
+                if "--resume" in tail:
+                    ri = tail.index("--resume")
+                    if ri + 1 < len(tail):
+                        sids.add(("claude", tail[ri + 1]))
+    _live_sids_cache = (now, sids)
+    return sids
+
+
+def _downgrade_if_dead(item: dict[str, Any], live_sids: set[tuple[str, str]]) -> dict[str, Any]:
+    # 프로세스가 없으면 작업중일 수 없다 — working/blocked 를 idle 로 강등.
+    if item.get("status") in ("working", "blocked") and \
+            (str(item.get("source") or ""), str(item.get("sid") or "")) not in live_sids:
+        item["status"] = "idle"
+        item["statusReason"] = "프로세스 없음"
+    return item
+
+
 def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
     # 카드 AGENTS 섹션 — 워크트리당 최대 3개(ts 내림차순), Claude 만 preview(마지막 assistant 텍스트 80자) 부여.
     claude_by_root = claude_agent_sessions(refresh)
@@ -752,6 +914,9 @@ def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
         if "status" not in item:
             item.update({"status": "idle", "statusTs": int(e["ts"])})
         agents.append(item)
+    live = _live_resume_sids(refresh)
+    for item in agents:
+        _downgrade_if_dead(item, live)
     return agents
 
 
@@ -832,6 +997,44 @@ def _reverse_json_objects(path: Path):
                     yield obj
 
 
+# 사용자 라인 중 하네스/도구가 주입한 것 — 진짜 입력이 아니라 turn 에서 뺀다.
+_CLAUDE_INJECT_PREFIXES = ("<task-notification>", "<system-reminder>",
+                           "[SYSTEM NOTIFICATION")
+_CODEX_INJECT_PREFIXES = ("# AGENTS.md instructions", "<INSTRUCTIONS>",
+                          "<user_instructions>", "<environment_context>")
+
+
+def _is_injected_user(obj: dict[str, Any], source: str, texts: list[str]) -> bool:
+    if source == "claude" and obj.get("isMeta"):
+        return True
+    prefixes = _CLAUDE_INJECT_PREFIXES if source == "claude" else _CODEX_INJECT_PREFIXES
+    # 모든 텍스트 블록이 주입 래퍼로 시작하면 주입 라인(혼합이면 진짜 입력이 섞인 것 → 보존).
+    return bool(texts) and all(t.lstrip().startswith(prefixes) for t in texts)
+
+
+_NOOP_ASSISTANT = "No response requested"
+_INTERRUPT_PREFIX = "[Request interrupted"
+
+
+def _is_noop_assistant(texts: list[str]) -> bool:
+    # 하네스 재개(Continue)에 대한 무응답 마커 — 대화에 표시할 내용이 없다.
+    return bool(texts) and all(t.strip().rstrip(". ").strip() == _NOOP_ASSISTANT for t in texts)
+
+
+def _is_interrupt_marker(texts: list[str]) -> bool:
+    # 사용자 중단([Request interrupted by user]) — 턴 종료 신호이자 렌더 숨김 대상.
+    return bool(texts) and all(t.lstrip().startswith(_INTERRUPT_PREFIX) for t in texts)
+
+
+def _is_hidden_turn(obj: dict[str, Any], role: str, source: str, texts: list[str]) -> bool:
+    # 대화 렌더에서 숨길 턴 — 주입/중단 user + noop assistant.
+    if role == "user":
+        return _is_injected_user(obj, source, texts) or _is_interrupt_marker(texts)
+    if role == "assistant":
+        return _is_noop_assistant(texts)
+    return False
+
+
 def _transcript_object_turns(obj: dict[str, Any], source: str,
                              line_offset: int | None = None) -> list[dict[str, str]]:
     if source == "claude":
@@ -845,8 +1048,11 @@ def _transcript_object_turns(obj: dict[str, Any], source: str,
         content = payload.get("content")
     if role not in ("user", "assistant"):
         return []
+    texts = _texts_of(content)
+    if _is_hidden_turn(obj, role, source, texts):
+        return []
     turns: list[dict[str, str]] = []
-    for index, text in enumerate(_texts_of(content)):
+    for index, text in enumerate(texts):
         turn = {"role": str(role), "text": text[:AGENT_TURN_MAX_CHARS]}
         if line_offset is not None:
             turn["id"] = f"{line_offset}:{index}"
@@ -1034,8 +1240,14 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
             role = str(obj.get("type") or "")
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
             content = message.get("content")
-            if role not in ("user", "assistant") or not isinstance(content, list):
+            if role not in ("user", "assistant"):
                 continue
+            if isinstance(content, str):   # 사용자 직접 입력은 content 가 str — timeline 에서 빠지지 않게 정규화
+                content = [{"type": "text", "text": content}] if content.strip() else []
+            if not isinstance(content, list):
+                continue
+            if _is_hidden_turn(obj, role, source, _texts_of(content)):
+                continue                    # 주입 user + noop assistant 제외(turns 와 동일)
             message_model = str(message.get("model") or "") if role == "assistant" else ""
             message_effort = str(message.get("effort") or message.get("reasoning_effort") or "") if role == "assistant" else ""
             if message_model:
@@ -1079,7 +1291,10 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                 role = str(payload.get("role") or "")
                 if role not in ("user", "assistant"):
                     continue
-                for index, text in enumerate(_texts_of(payload.get("content"))):
+                msg_texts = _texts_of(payload.get("content"))
+                if _is_hidden_turn(obj, role, source, msg_texts):
+                    continue                # 주입 user + noop assistant 제외
+                for index, text in enumerate(msg_texts):
                     safe_text = _safe_activity_text(text)
                     timeline.append(with_runtime(
                         {"id": f"{source}:message:{offset}:{index}", "kind": "message",
@@ -1325,6 +1540,21 @@ def _usage_token_count(usage: dict[str, Any], key: str) -> int:
     return max(0, int(value))
 
 
+# Claude Code CLI 가 받는 모델 + 네이티브 컨텍스트 윈도우(권위 자료: claude-api 스킬, 2026).
+# codex 는 ~/.codex/models_cache.json 을 쓰지만 Claude Code 는 완전한 모델 캐시가 없다
+# (~/.claude.json additionalModelOptionsCache 는 사용자가 직접 만진 커스텀 모델만 담아 불완전).
+# 그래서 모바일 모델 드롭다운과 컨텍스트 윈도우 폴백을 이 큐레이트 목록에서 공급한다.
+# 기본값 + 정식 버전만(형 지시 — opus/sonnet/haiku alias '최신' 항목은 헷갈려 제거). 목록에 없는 건 "직접 입력"으로.
+CLAUDE_MODEL_CATALOG = [
+    {"value": "default", "label": "기본값 (CLI 설정 모델)", "window": None},
+    {"value": "claude-opus-4-8", "label": "Opus 4.8", "window": 1_000_000},
+    {"value": "claude-sonnet-5", "label": "Sonnet 5", "window": 1_000_000},
+    {"value": "claude-haiku-4-5", "label": "Haiku 4.5", "window": 200_000},
+    {"value": "claude-fable-5", "label": "Fable 5", "window": 1_000_000},
+]
+_CLAUDE_WINDOW_BY_MODEL = {m["value"]: m["window"] for m in CLAUDE_MODEL_CATALOG if m["window"]}
+
+
 def _model_context_window(value: str) -> int | None:
     match = re.search(r"\[(\d+(?:\.\d+)?)([km])\]$", value.strip().lower())
     if not match:
@@ -1340,17 +1570,18 @@ def _claude_context_window(model: str) -> int | None:
     try:
         config = json.loads(CLAUDE_CONFIG_FILE.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return None
+        config = None
     options = config.get("additionalModelOptionsCache") if isinstance(config, dict) else None
-    if not isinstance(options, list):
-        return None
-    for option in options:
-        value = str(option.get("value") or "") if isinstance(option, dict) else ""
-        if value.split("[", 1)[0] == model:
-            window = _model_context_window(value)
-            if window is not None:
-                return window
-    return None
+    if isinstance(options, list):
+        for option in options:
+            value = str(option.get("value") or "") if isinstance(option, dict) else ""
+            if value.split("[", 1)[0] == model:
+                window = _model_context_window(value)
+                if window is not None:
+                    return window
+    # 폴백 — 트랜스크립트의 message.model 은 접미사 없는 bare id(claude-opus-4-8)라 위 두 경로가 못 잡는다.
+    # 알려진 Claude 모델의 네이티브 윈도우로 컨텍스트% 를 계산(없으면 모바일 usage 패널이 "-" 로 뜬다).
+    return _CLAUDE_WINDOW_BY_MODEL.get(model)
 
 
 def _empty_agent_usage(source: str, model: str = "") -> dict[str, Any]:

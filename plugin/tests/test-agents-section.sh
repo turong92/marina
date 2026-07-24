@@ -29,6 +29,7 @@ os.environ["CLAUDE_PROJECTS_DIR"] = proj_dir
 os.environ["CODEX_HOME"] = codex_home
 sys.path.insert(0, scr)
 import marina_sessions as ms
+ms._downgrade_if_dead = lambda item, live_sids: item  # 이 테스트는 프로세스 생존 무관 — 강등 비활성(강등은 test-transcript-inject-filter 유닛)
 from marina_agent_events import record_hook_event
 from pathlib import Path
 
@@ -78,6 +79,20 @@ assert recent.get("preview"), f"preview 없음: {recent}"
 assert len(recent["preview"]) == 80, f"preview 80자 절단 실패(len={len(recent['preview'])})"
 assert "preview" not in agents[1], "트랜스크립트 없는 세션은 preview 생략"
 print("ok claude_agent_sessions/agents_payload (매칭·ts·preview 80자·7일 필터·최대3)")
+
+# ── A 회귀: Desktop local_*.json 없는 순수 CLI 세션이 진짜 sid 로 발견되는지 ──
+cli_only_sid = "aaaabbbb-1111-2222-3333-444455556666"
+write_transcript(wt, cli_only_sid, [
+    json.dumps({"type": "attachment", "cwd": wt, "aiTitle": "CLI 세션"}),
+    json.dumps({"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": "hi"}]}}),
+    json.dumps({"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": "답"}]}}),
+])
+os.utime(Path(proj_dir) / re.sub(r"[/.]", "-", wt) / f"{cli_only_sid}.jsonl", (now + 5, now + 5))
+claude_map = ms.claude_agent_sessions(refresh=True)
+cli_entry = next((e for e in claude_map.get(wt, []) if e["cliSessionId"] == cli_only_sid), None)
+assert cli_entry is not None, f"CLI-only 세션 미발견: {claude_map.get(wt)}"
+assert cli_entry["title"] == "CLI 세션", cli_entry
+print("ok A-merge cli-only 세션 발견(진짜 sid)")
 
 # ── 행 클릭 뷰어(agent_transcript) — sid 노출 + user/assistant 텍스트 턴 + sid 검증 ──
 assert recent.get("sid") == "cli-recent", f"claude sid 노출 실패: {recent}"
@@ -149,6 +164,21 @@ expected_status = {"status": "blocked", "statusTs": event_ts,
 assert {key: claude_event[key] for key in expected_status} == expected_status, claude_event
 assert {key: codex_event[key] for key in expected_status} == expected_status, codex_event
 print("ok agents_payload journal resolution (Claude/Codex sid·canonical root·HOME)")
+
+# ── C 정합성 회귀: CLI-only 발견 세션(진짜 sid)이 native(completed)보다 최신 working 이벤트를
+# 조인해 working 을 반영해야 한다. A 가 진짜 sid 를 공급하지 못하면(합성 sid) 조인 실패 → completed 유지. ──
+record_hook_event({
+    "source": "claude",
+    "hook_event_name": "UserPromptSubmit",
+    "session_id": cli_only_sid,
+    "cwd": wt,
+    "transcript_path": str(Path(proj_dir) / re.sub(r"[/.]", "-", wt) / f"{cli_only_sid}.jsonl"),
+}, home=Path(fake_home), now=int(now) + 10)
+cli_payload = ms.agents_payload(Path(wt), refresh=True)
+cli_row = next((a for a in cli_payload if a.get("sid") == cli_only_sid), None)
+assert cli_row is not None, f"CLI-only 세션이 카드에 없음: {[a.get('sid') for a in cli_payload]}"
+assert cli_row["status"] == "working", f"진짜 sid 이벤트 조인 실패: {cli_row}"
+print("ok C-join: CLI-only 세션 상태 working (sid 정합성)")
 PY
 
 # ── 2) 실서버: /api/worktrees payload 에 agents 노출 ──
