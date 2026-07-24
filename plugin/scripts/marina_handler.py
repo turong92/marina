@@ -39,7 +39,7 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
-from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_catalog, mobile_interrupt, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, render_mobile_html, rotate_mobile_token
+from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_interrupt, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
 from marina_sessions import activate_agent_payloads, agent_activity, agent_belongs_to_root, agent_transcript, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
@@ -405,6 +405,24 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, 400)
                 return
             self.send_json(payload)
+            return
+        if parsed.path == "/mobile/api/file":
+            if principal is None and not mobile_request_ok(self, parsed):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                data, content_type = mobile_upload_file(query.get("name", [""])[0])
+            except (FileNotFoundError, ValueError):
+                self.send_json({"error": "not found"}, 404)
+                return
+            self.send_response(200)
+            self.send_header("content-type", content_type)
+            self.send_header("cache-control", "private, max-age=86400")
+            self.send_header("content-length", str(len(data)))
+            auth_controller().add_security_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
             return
         if parsed.path == "/mobile/api/usage":
             if principal is None and not mobile_request_ok(self, parsed):
@@ -1087,6 +1105,33 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 self.send_json(result)
                 return
+            if parsed.path == "/mobile/api/upload":
+                if principal is None and not mobile_request_ok(self, parsed):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    query = urllib.parse.parse_qs(parsed.query)
+                    root = safe_root(query.get("root", [""])[0])
+                    if not self._require_root_access(root):
+                        return
+                    length = int(self.headers.get("content-length", "0"))
+                    if length <= 0:
+                        raise ValueError("빈 파일")
+                    if length > 20 * 1024 * 1024:
+                        raise ValueError("파일이 너무 큽니다(최대 20MB)")
+                    data = self.rfile.read(length)
+                    raw_name = self.headers.get("x-marina-filename")
+                    filename = (urllib.parse.unquote(raw_name) if raw_name
+                                else query.get("filename", [""])[0] or "file")
+                    result = mobile_upload(root, filename, data)
+                    if principal is not None:
+                        controller.store.audit_action(
+                            "mobile.upload", "ok", principal.user.id, "worktree", canonical_root(root),
+                        )
+                    self.send_json(result)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
             if parsed.path == "/mobile/api/interrupt":
                 if principal is None and not mobile_request_ok(self, parsed):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
@@ -1105,6 +1150,34 @@ class Handler(BaseHTTPRequestHandler):
                     if principal is not None:
                         controller.store.audit_action(
                             "agent.interrupt", "ok", principal.user.id, "agent", canonical_agent(source, sid),
+                        )
+                    self.send_json(result)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
+            if parsed.path == "/mobile/api/answer":
+                if principal is None and not mobile_request_ok(self, parsed):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    mobile_body = self.read_json()
+                    root = safe_root(str(mobile_body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    target = mobile_body.get("target") if isinstance(mobile_body.get("target"), dict) else {}
+                    source, sid = str(target.get("source") or ""), str(target.get("sid") or "")
+                    if not agent_belongs_to_root(root, source, sid):
+                        self._forbidden()
+                        return
+                    agent_key = canonical_agent(source, sid)
+                    self._policy().inherit_from_root("agent", agent_key, root)
+                    if not self._policy().can_resource(principal, "agent", agent_key):
+                        self._forbidden()
+                        return
+                    result = mobile_answer(mobile_body)
+                    if principal is not None:
+                        controller.store.audit_action(
+                            "agent.answer", "ok", principal.user.id, "agent", agent_key,
                         )
                     self.send_json(result)
                 except Exception as exc:

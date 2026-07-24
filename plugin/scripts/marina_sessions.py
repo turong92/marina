@@ -1225,6 +1225,13 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
     timeline: list[dict[str, Any]] = []
     calls: dict[str, dict[str, Any]] = {}
     runtime = {"model": "", "effort": ""}
+    seen_queue: set[str] = set()   # 큐 메시지 content dedup(시스템이 enqueue→remove 후 재enqueue 하는 아티팩트 방지)
+    # 큐 소비 여부: remove 오퍼레이션이 있는 content = 이미 처리됨(대기 중 아님). 미리 스캔해 배지 구분에 쓴다.
+    removed_queue: set[str] = {
+        _safe_activity_text(o.get("content")).strip()
+        for _, o in rows
+        if o.get("type") == "queue-operation" and o.get("operation") == "remove"
+    }
 
     def with_runtime(item: dict[str, Any], model: str = "", effort: str = "") -> dict[str, Any]:
         resolved_model = model or runtime["model"]
@@ -1238,6 +1245,19 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
     for offset, obj in rows:
         if source == "claude":
             role = str(obj.get("type") or "")
+            # 큐 메시지: Claude Code 는 작업 중 큐로 넣은 사용자 메시지를 type:user 가 아니라 queue-operation(enqueue/remove)
+            # 으로만 기록한다. user/assistant 만 읽으면 통째로 사라지고 그 작업이 앞 exchange 에 묶인다. enqueue 를 user 메시지로 렌더.
+            if role == "queue-operation":
+                if obj.get("operation") == "enqueue":
+                    qtext = _safe_activity_text(obj.get("content"))
+                    key = qtext.strip()
+                    if key and key not in seen_queue:
+                        seen_queue.add(key)
+                        timeline.append(with_runtime(
+                            {"id": f"{source}:queue:{offset}", "kind": "message", "role": "user", "text": qtext,
+                             "queued": True, "queuedConsumed": key in removed_queue},
+                        ))
+                continue
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
             content = message.get("content")
             if role not in ("user", "assistant"):
@@ -1249,7 +1269,9 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
             if _is_hidden_turn(obj, role, source, _texts_of(content)):
                 continue                    # 주입 user + noop assistant 제외(turns 와 동일)
             message_model = str(message.get("model") or "") if role == "assistant" else ""
-            message_effort = str(message.get("effort") or message.get("reasoning_effort") or "") if role == "assistant" else ""
+            if message_model == "<synthetic>":   # 합성 메시지는 실모델 아님 — 직전 실모델 유지(라벨/설정에 synthetic 새는 것 방지)
+                message_model = ""
+            message_effort = str(obj.get("effort") or message.get("effort") or message.get("reasoning_effort") or "") if role == "assistant" else ""   # effort 는 row 최상위에 있음
             if message_model:
                 runtime["model"] = message_model
             if message_effort:
@@ -1518,7 +1540,11 @@ def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
     for obj in _reverse_json_objects(path):
         if source == "claude" and obj.get("type") == "assistant":
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
-            model, effort = str(message.get("model") or ""), str(message.get("effort") or "")
+            # effort 는 Claude Code 가 row 최상위에 기록한다(message 안이 아님) — 그래서 지금껏 항상 빈 값이었음.
+            model = str(message.get("model") or "")
+            effort = str(obj.get("effort") or message.get("effort") or "")
+            if model == "<synthetic>":   # Claude Code 합성 어시스턴트 메시지 — 실모델 아님, 더 뒤로 스캔
+                continue
         elif source == "codex" and obj.get("type") in ("turn_context", "event_msg"):
             payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
             if obj.get("type") == "event_msg" and payload.get("type") != "thread_settings_applied":
