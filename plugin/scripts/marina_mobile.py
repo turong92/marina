@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
-from marina_sessions import activate_agent_payloads, agent_runtime_settings, agents_payload, safe_root, worktree_info
+from marina_sessions import CLAUDE_MODEL_CATALOG, activate_agent_payloads, agent_runtime_settings, agents_payload, safe_root, worktree_info
 from marina_state import MARINA_HOME, PORT
 from marina_term import _agent_cli, term_input, term_list, term_open
 
@@ -120,9 +120,12 @@ def mobile_agent_options() -> dict[str, Any]:
             if isinstance(level, dict) and level.get("effort")
         ]
         codex_models.append({"value": value, "label": str(item.get("display_name") or value), "efforts": efforts})
+    # Claude 는 codex 의 models_cache.json 같은 완전한 캐시가 없어 큐레이트 카탈로그로 드롭다운을 채운다
+    # (marina_sessions.CLAUDE_MODEL_CATALOG — 컨텍스트 윈도우 폴백과 같은 출처). manualModel 로 "직접 입력"도 유지.
+    claude_models = [{"value": m["value"], "label": m["label"]} for m in CLAUDE_MODEL_CATALOG]
     return {
         "codex": {"models": codex_models, "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "manualModel": True},
-        "claude": {"models": [], "efforts": ["low", "medium", "high", "xhigh", "max"], "manualModel": True},
+        "claude": {"models": claude_models, "efforts": ["low", "medium", "high", "xhigh", "max"], "manualModel": True},
     }
 
 
@@ -1399,18 +1402,43 @@ _MOBILE_HTML = r"""<!doctype html>
       return a.type === b.type;
     }
     function pendingDeliveryLabel(delivery, createdAt=0) {
-      if (createdAt && Date.now() - Number(createdAt) > 10000) return "전달 확인 안 됨";
+      // queue/steer/started 는 서버가 이미 전달을 확정한 상태 — 에이전트가 현재 턴을 끝내야 트랜스크립트에
+      // 나타나므로(긴 턴이면 수 분) 나이와 무관하게 제 라벨을 유지한다. 예전엔 10초 지나면 무조건
+      // "전달 확인 안 됨" 으로 뒤집혀 큐 메시지가 오탐으로 실패처럼 보였다(형 피드백).
       if (delivery === "steer") return "현재 작업에 전달됨";
-      if (delivery === "queue") return "다음 작업 대기열에 추가됨";
+      if (delivery === "queue") return "작업 끝나면 전달돼요 · 대기열";
       if (delivery === "started") return "새 작업 시작 중";
+      // delivery 미확정(서버 응답 전 pending)만 오래되면 실패로 표기.
+      if (createdAt && Date.now() - Number(createdAt) > 15000) return "전달 확인 안 됨";
       return "전송 확인 중";
+    }
+    // 확정 user 메시지 카운트 — trim 정규화 + turns/timeline per-text 최댓값(이중계수 방지). reconcile·baseline 공용.
+    function normUserText(raw) { return String(raw || "").trim(); }
+    function confirmedUserCounts(turns, timeline) {
+      const tally = (arr, pred) => {
+        const map = new Map();
+        (arr || []).forEach(item => {
+          if (!pred(item)) return;
+          const text = normUserText(item.text);
+          if (text) map.set(text, (map.get(text) || 0) + 1);
+        });
+        return map;
+      };
+      const fromTurns = tally(turns, t => t.role === "user");
+      const fromTimeline = tally(timeline, it => (it.kind === "message" || !it.kind) && it.role === "user");
+      const out = new Map();
+      new Set([...fromTurns.keys(), ...fromTimeline.keys()]).forEach(text =>
+        out.set(text, Math.max(fromTurns.get(text) || 0, fromTimeline.get(text) || 0)));
+      return out;
     }
     function queuePendingTurn(key, text, delivery="pending") {
       const session = (state.sessions || []).find(item => item.key === key);
       const cached = sessionHistory(session);
-      const confirmedCount = ((cached && cached.turns) || (session && session.turns) || []).filter(turn => turn.role === "user" && String(turn.text || "") === text).length;
+      const norm = normUserText(text);
+      const confirmed = confirmedUserCounts((cached && cached.turns) || (session && session.turns) || [], cached && cached.timeline);
+      const confirmedCount = confirmed.get(norm) || 0;
       const existing = pendingTurns[key] || [];
-      const pendingCount = existing.filter(turn => String(turn.text || "") === text).length;
+      const pendingCount = existing.filter(turn => normUserText(turn.text) === norm).length;
       pendingTurns[key] = existing.concat([{role: "user", text, baseline: confirmedCount + pendingCount, pending: true, delivery, createdAt: Date.now()}]).slice(-12);
     }
     function selectAgentAfterSend(text, target, delivery="pending") {
@@ -1716,8 +1744,12 @@ _MOBILE_HTML = r"""<!doctype html>
         const response = await fetch(`/mobile/api/transcript?${params}`, {headers: headers()});
         if (!response.ok) throw new Error(await response.text());
         const page = await response.json();
-        history.turns = mergeHistoryTurns(history.turns, page.turns || []);
-        history.timeline = mergeTimelineItems(history.timeline, page.timeline || timelineFromTurns(page.turns || []));
+        const fresh = page.turns || [];
+        const freshTimeline = page.timeline || timelineFromTurns(fresh);
+        // 최신 로드는 서버 응답으로 교체 — 서버가 필터한 주입 메시지(Continue/task-notification 등)가
+        // 클라 캐시에 눌러앉지 않게. 이전 대화(paged)를 스크롤한 상태에서만 병합을 유지한다.
+        history.turns = history.paged ? mergeHistoryTurns(history.turns, fresh) : fresh;
+        history.timeline = history.paged ? mergeTimelineItems(history.timeline, freshTimeline) : freshTimeline;
         if (!history.paged) {
           history.cursor = page.cursor ?? null;
           history.hasMore = Boolean(page.hasMore);
@@ -1871,12 +1903,11 @@ _MOBILE_HTML = r"""<!doctype html>
       const history = sessionHistory(session);
       const serverTurns = history ? history.turns : ((session && session.turns) || []);
       const serverTimeline = history && history.timeline.length ? history.timeline : timelineFromTurns(serverTurns);
-      const confirmedUsers = new Map();
-      serverTurns.filter(t => t.role === "user").forEach(t => {
-        const text = String(t.text || "");
-        confirmedUsers.set(text, (confirmedUsers.get(text) || 0) + 1);
-      });
-      const pending = (pendingTurns[selectedSessionKey] || []).filter(t => (confirmedUsers.get(String(t.text || "")) || 0) <= Number(t.baseline || 0));
+      // 확정 user 메시지 카운트 — turns 와 timeline 둘 다 보고(모바일은 timeline 렌더라 turns 가 놓칠 수 있음)
+      // 텍스트는 trim 비교(큐 제출 시 공백/개행 차이로 매칭 실패해 pending 이 영영 안 지워지던 문제, 형 피드백).
+      // 두 소스는 같은 메시지를 이중 계수하지 않도록 per-text 최댓값을 취한다.
+      const confirmedUsers = confirmedUserCounts(serverTurns, serverTimeline);
+      const pending = (pendingTurns[selectedSessionKey] || []).filter(t => (confirmedUsers.get(normUserText(t.text)) || 0) <= Number(t.baseline || 0));
       pendingTurns[selectedSessionKey] = pending;
       const pendingTimeline = pending.map((turn, index) => ({...turn, kind: "message", id: turn.id || `pending:${index}:${turn.text || ""}`}));
       const timeline = history ? serverTimeline.concat(pendingTimeline) : serverTimeline.concat(pendingTimeline).slice(-40);
