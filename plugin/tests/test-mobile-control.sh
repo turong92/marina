@@ -381,25 +381,17 @@ mm.agents_payload = lambda value, refresh=False: [{
 }]
 mm.term_open = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("native-active resume opened"))
 
-try:
-    mm.mobile_send({
+# 작업 중인 세션에는 끼어들지 않는다 — 차단이 아니라 **보류**(끝나면 자동 전달).
+# 진행 중이던 턴을 끊는 것은 어떤 경우에도 하지 않는다.
+for source, sid in (("codex", "codex-session-0001"), ("claude", "claude-session-0001")):
+    out = mm.mobile_send({
         "root": str(root),
-        "target": {"type": "agent", "source": "codex", "sid": "codex-session-0001"},
+        "target": {"type": "agent", "source": source, "sid": sid},
         "text": "do not overlap the desktop app",
     })
-    raise AssertionError("mobile accepted a session active in a native app")
-except ValueError as exc:
-    assert "다른 앱" in str(exc), exc
-try:
-    mm.mobile_send({
-        "root": str(root),
-        "target": {"type": "agent", "source": "claude", "sid": "claude-session-0001"},
-        "text": "do not overlap the Claude app",
-    })
-    raise AssertionError("mobile accepted a Claude session active in a native app")
-except ValueError as exc:
-    assert "다른 앱" in str(exc), exc
-print("ok mobile blocks native-app duplicate resume")
+    assert out["delivery"] == "queue" and out["tid"] == "", out
+    assert mm.mobile_outbox_pending(root, source, sid) == ["do not overlap the desktop app"]
+print("ok mobile queues instead of interrupting a busy native-app session")
 PY
 
 PYTHONPATH="$SCR" python3 - "$TMP" "$P" <<'PY'
@@ -475,6 +467,27 @@ mm.CODEX_MODELS_FILE.write_text(json.dumps({"models": [{
 catalog = mm.mobile_agent_options()
 assert catalog["codex"]["models"] == [{"value": "gpt-test", "label": "GPT Test", "efforts": ["low", "high"]}], catalog
 assert catalog["claude"]["efforts"] == ["low", "medium", "high", "xhigh", "max"], catalog
+
+# claude 드롭다운 = 큐레이트 카탈로그 + CLI 가 캐시한 추가 모델(병합). 캐시가 비어도 목록은 유지된다.
+import marina_sessions as ms
+claude_values = [m["value"] for m in catalog["claude"]["models"]]
+assert "claude-opus-5" in claude_values, claude_values
+
+config = tmp / "claude.json"
+config.write_text(json.dumps({"additionalModelOptionsCache": [
+    {"value": "claude-brandnew-9[1m]", "label": "Brandnew"},   # 카탈로그에 없는 신모델
+    {"value": "claude-opus-5[1m]", "label": "중복"},            # 이미 있는 건 한 번만
+]}), encoding="utf-8")
+ms.CLAUDE_CONFIG_FILE = config
+merged = ms.claude_model_catalog()
+values = [m["value"] for m in merged]
+assert values.count("claude-opus-5") == 1, values
+new = next(m for m in merged if m["value"] == "claude-brandnew-9")
+assert new["window"] == 1_000_000, new         # [1m] 마커에서 컨텍스트 창을 읽는다
+assert "[" not in new["value"], new            # CLI 인자로 넘길 값엔 마커가 없어야 한다
+
+ms.CLAUDE_CONFIG_FILE = tmp / "nonexistent.json"
+assert [m["value"] for m in ms.claude_model_catalog()] == [m["value"] for m in ms.CLAUDE_MODEL_CATALOG]
 print("ok mobile session settings")
 PY
 

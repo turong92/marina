@@ -285,9 +285,42 @@ def append_console_log(payload: dict[str, Any]) -> dict[str, Any]:
 # 신선도 분리(실측): 깃 배지(dirty/ahead/branch)는 root 당 ~0.1s 로 싸서 짧게,
 # du(diskMb/cacheCats)는 root 당 ~1.5s 라 장수 캐시 + 만료 시 백그라운드 갱신.
 WORKTREE_INFO_TTL = 15.0
+# 이 나이를 넘으면 옛 값을 주지 않고 동기 계산한다(오래된 배지를 무한정 보여주지 않기 위해).
+WORKTREE_INFO_MAX_STALE = float(_env("WORKTREE_INFO_MAX_STALE", "120") or "120")
 WORKTREE_DU_TTL = 600.0
 _du_inflight: set[str] = set()
 _du_lock = threading.Lock()
+_info_inflight: set[str] = set()
+_info_lock = threading.Lock()
+
+
+def _kick_worktree_refresh(root: Path) -> None:
+    """만료된 worktree_info 를 백그라운드에서 한 번만 갱신한다(single-flight, fail-open)."""
+    key = str(root)
+    with _info_lock:
+        if key in _info_inflight:
+            return
+        _info_inflight.add(key)
+
+    def _run() -> None:
+        try:
+            worktree_info(root, refresh=True)
+        except Exception:
+            pass
+        finally:
+            with _info_lock:
+                _info_inflight.discard(key)
+
+    threading.Thread(target=_run, daemon=True, name=f"wt-info-{key[-24:]}").start()
+
+
+def warm_worktree_info(roots: list[Path]) -> None:
+    """부팅 직후 캐시를 채운다 — 첫 요청이 콜드 캐시를 기다리지 않게."""
+    for root in roots:
+        try:
+            worktree_info(root)
+        except Exception:
+            continue
 
 def _compute_du(root: Path, is_main: bool) -> tuple[float, Any, dict[str, int], int, dict[str, int]]:
     # main 체크아웃 전체 du 는 수백 GB 라 비싸고 UI 에서도 안 씀 → 스킵
@@ -1694,12 +1727,49 @@ def _usage_token_count(usage: dict[str, Any], key: str) -> int:
 # 기본값 + 정식 버전만(형 지시 — opus/sonnet/haiku alias '최신' 항목은 헷갈려 제거). 목록에 없는 건 "직접 입력"으로.
 CLAUDE_MODEL_CATALOG = [
     {"value": "default", "label": "기본값 (CLI 설정 모델)", "window": None},
+    {"value": "claude-opus-5", "label": "Opus 5", "window": 1_000_000},
     {"value": "claude-opus-4-8", "label": "Opus 4.8", "window": 1_000_000},
     {"value": "claude-sonnet-5", "label": "Sonnet 5", "window": 1_000_000},
     {"value": "claude-haiku-4-5", "label": "Haiku 4.5", "window": 200_000},
     {"value": "claude-fable-5", "label": "Fable 5", "window": 1_000_000},
 ]
 _CLAUDE_WINDOW_BY_MODEL = {m["value"]: m["window"] for m in CLAUDE_MODEL_CATALOG if m["window"]}
+
+
+def claude_model_catalog() -> list[dict[str, Any]]:
+    """큐레이트 카탈로그 + CLI 가 캐시해 둔 추가 모델. 새 모델이 나와도 CLI 를 한 번 쓰면 따라온다.
+
+    codex 처럼 완전한 목록 캐시(models_cache.json)가 claude 엔 없다. `~/.claude.json` 의
+    additionalModelOptionsCache 는 '기본 목록에 더해진' 것만 담고(지금 이 머신엔 1개뿐) 비어 있을
+    수도 있어서, 그것만으로 드롭다운을 채우면 오히려 목록이 무너진다 — 그래서 병합이다.
+    캐시 값은 `claude-fable-5[1m]` 처럼 컨텍스트 마커가 붙어 오는데, CLI 인자로 넘길 값은
+    마커를 뗀 모델 id 다(_MODEL_RE 가 대괄호를 허용하지 않는다)."""
+    catalog = list(CLAUDE_MODEL_CATALOG)
+    known = {str(m["value"]) for m in catalog}
+    try:
+        config = json.loads(CLAUDE_CONFIG_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return catalog
+    if not isinstance(config, dict):
+        return catalog
+    for key in ("additionalModelOptionsCache", "modelAccessCache"):
+        options = config.get(key)
+        if not isinstance(options, list):
+            continue
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            raw = str(option.get("value") or "")
+            value = raw.split("[", 1)[0].strip()
+            if not value or value in known:
+                continue
+            known.add(value)
+            catalog.append({
+                "value": value,
+                "label": str(option.get("label") or value),
+                "window": _model_context_window(raw),
+            })
+    return catalog
 
 
 def _model_context_window(value: str) -> int | None:
@@ -2058,8 +2128,16 @@ def repo_ahead_of_main(repo: Path) -> int | None:
 def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
     key = str(root)
     cached = _worktree_info_cache.get(key)
-    if cached and not refresh and time.time() - cached[0] < WORKTREE_INFO_TTL:
-        return cached[1]
+    if cached and not refresh:
+        age = time.time() - cached[0]
+        if age < WORKTREE_INFO_TTL:
+            return cached[1]
+        if age < WORKTREE_INFO_MAX_STALE:
+            # 만료됐지만 아직 쓸 만하다 — **기다리지 않고** 옛 값을 주고 뒤에서 갱신한다(du 와 같은 방식).
+            # 이게 없으면 TTL 이 끝나는 15초마다 한 번씩 요청이 root 전체의 git 서브프로세스를 기다린다
+            # (첫 화면이 늦는 진짜 이유). 너무 오래된 값은 아래로 떨어져 동기 계산한다.
+            _kick_worktree_refresh(root)
+            return cached[1]
 
     is_main = is_source_checkout(root)
     subs = subrepos_of(root)

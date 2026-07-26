@@ -297,19 +297,21 @@ def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "") -
         cmd += ["--model", model]
     if effort:
         cmd += ["--effort", effort]
-    cmd += ["--resume", sid]
+    if sid:                 # sid 없음 = 새 세션(직접 launch) — resume 이 아니다
+        cmd += ["--resume", sid]
     if prompt:
         cmd.append(prompt)
     return cmd
 
 
 def _codex_cli(sid: str, prompt: str = "", model: str = "", effort: str = "") -> list[str]:
-    cmd = ["codex", "resume"]
+    cmd = ["codex", "resume"] if sid else ["codex"]   # sid 없음 = 새 세션(직접 launch)
     if model:
         cmd += ["--model", model]
     if effort:
         cmd += ["-c", f'model_reasoning_effort="{effort}"']
-    cmd.append(sid)
+    if sid:
+        cmd.append(sid)
     if prompt:
         cmd.append(prompt)
     return cmd
@@ -321,7 +323,9 @@ _AGENT_CLIS = {"claude": _claude_cli, "codex": _codex_cli}
 def _agent_cli(source: str, sid: str, prompt: str = "", model: str = "", effort: str = "") -> list[str]:
     if source not in _AGENT_CLIS:
         raise ValueError("unknown agent source")
-    if not _SID_RE.fullmatch(sid or ""):
+    # sid 빈 값 = **새 세션 직접 launch**(resume 아님). 그 세션의 sid 는 시작 시점엔 알 수 없고,
+    # 훅이 남기는 {sid, pid} 를 marina_agent_procs 가 입양할 때 붙는다.
+    if sid and not _SID_RE.fullmatch(sid):
         raise ValueError("invalid session id")
     if model and not _MODEL_RE.fullmatch(model):
         raise ValueError("invalid agent model")
@@ -346,7 +350,9 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
     agent = None
     if agent_source:
         cmd = _agent_cli(agent_source, agent_sid, agent_prompt, agent_model, agent_effort)
-        key = "" if agent_prompt else f"{cwd}::agent:{agent_source}:{agent_sid}"
+        # 재사용 키는 **같은 세션의 이중 resume** 을 막는 장치다. sid 가 없으면(새 세션 launch) 막을
+        # 대상 자체가 없으므로 키를 만들지 않는다 — 안 그러면 ＋Claude 두 번이 한 PTY 로 합쳐진다.
+        key = "" if (agent_prompt or not agent_sid) else f"{cwd}::agent:{agent_source}:{agent_sid}"
         agent = {"source": agent_source, "sid": agent_sid}
         if agent_model:
             agent["model"] = agent_model
@@ -502,12 +508,66 @@ def _preview(term: _Term) -> str:
     return ""
 
 
+_adopt_cache = 0.0
+ADOPT_INTERVAL_S = 5.0
+
+
+def adopt_agent_terms() -> int:
+    """PTY 안에서 **손으로** 띄운 에이전트를 사후 등록한다(입양). 붙인 개수를 돌려준다.
+
+    marina 가 직접 띄운 CLI 는 term_open 이 agent 를 찍어주지만, 형이 셸에서 `claude` 를 치면
+    그 PTY 는 영영 agent=None 이라 제어(질문 응답·전송)가 막힌다. 훅이 남긴 {sid, pid}
+    (marina_agent_procs)에서 pid 조상 체인을 타고 이 PTY 의 셸 pid 에 닿으면 그 term 의 세션이다.
+    fail-open: 등록부가 없거나 ps 가 실패하면 아무것도 하지 않는다(기존 동작 유지)."""
+    try:
+        import marina_agent_procs
+    except Exception:
+        return 0
+    try:
+        records = marina_agent_procs.live_records()
+        if not records:
+            return 0
+        table = marina_agent_procs.ps_table()
+        # 입양 대상 = 세션을 아직 모르는 term. (a) 손으로 띄운 셸(agent 없음), (b) sid 없이 직접
+        # launch 한 에이전트(agent 는 있지만 sid 가 빈 값 — 시작 시점엔 sid 를 알 수 없다).
+        with _lock:
+            by_pid = {t.pid: t for t in _by_tid.values()
+                      if t.alive and not (t.agent or {}).get("sid")}
+        if not by_pid:
+            return 0
+        adopted = 0
+        for record in records:
+            pid = int(record.get("pid") or 0)
+            source, sid = str(record.get("source") or ""), str(record.get("sid") or "")
+            if pid <= 1 or not source or not sid:
+                continue
+            # 에이전트 프로세스 자신부터 위로 — PTY 의 셸(term.pid)이 조상에 있으면 그 term 이다.
+            for ancestor in [pid] + marina_agent_procs.ancestors(pid, table):
+                term = by_pid.get(ancestor)
+                if term is None or (term.agent or {}).get("sid"):
+                    continue
+                if (term.agent or {}).get("source") not in ("", None, source):
+                    continue          # ＋Codex 로 띄운 칸에 claude 기록을 붙이지 않는다
+                term.agent = {**(term.agent or {}), "source": source, "sid": sid}
+                _persist_term(term)
+                adopted += 1
+                break
+        return adopted
+    except Exception:
+        return 0
+
+
 def term_list() -> dict[str, Any]:
     """살아있는 세션 목록 — 프론트가 새로고침 후 tid 를 되찾는 유일한 길(고아 PTY 방지).
     오프셋은 싣지 않는다: 재개(from)의 기준값은 SSE 이벤트의 off 로 프론트가 누적한다.
     fg/cmd/preview 는 사이드바 라벨용 — 뷰가 이 목록을 주기적으로 다시 받아 이름을 신선하게 유지한다."""
+    global _adopt_cache
     _reconstruct_registry()
     _reap_idle()
+    now = time.time()
+    if now - _adopt_cache >= ADOPT_INTERVAL_S:   # 폴링마다 ps 를 두 번 더 띄우지 않게 간격을 둔다
+        _adopt_cache = now
+        adopt_agent_terms()
     with _lock:
         terms = sorted(_by_tid.values(), key=lambda t: t.created)
     return {"sessions": [{"tid": t.tid, "root": t.root, "agent": t.agent,

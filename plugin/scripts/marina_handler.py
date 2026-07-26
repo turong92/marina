@@ -39,7 +39,7 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
-from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_interrupt, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
+from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_interrupt, mobile_launch, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
 from marina_sessions import agent_activity, agent_belongs_to_root, agent_transcript, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
@@ -1124,6 +1124,27 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return
+            if parsed.path == "/mobile/api/launch":
+                # 에이전트 새 세션 직접 launch — 워크트리 만들고 셸 열고 `claude` 치던 3스텝을 한 번으로.
+                # sid 가 없는 새 세션이라 agent 자원 권한 검사는 root 권한으로 갈음한다(세션이 아직 없다).
+                if principal is None and not mobile_request_ok(self, parsed):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    mobile_body = self.read_json()
+                    root = safe_root(str(mobile_body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    result = mobile_launch(mobile_body)
+                    if principal is not None:
+                        self._policy().assign(principal, "terminal", str(result.get("tid") or ""), parent_root=root)
+                        controller.store.audit_action(
+                            "agent.launch", "ok", principal.user.id, "terminal", str(result.get("tid") or ""),
+                        )
+                    self.send_json(result)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
             if parsed.path == "/mobile/api/interrupt":
                 if principal is None and not mobile_request_ok(self, parsed):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
@@ -2047,4 +2068,32 @@ def main() -> None:
                 time.sleep(max(2, int(_env("GATEWAY_POLL", "5") or "5")))   # MARINA_GATEWAY_POLL (빈 문자열 방어)
         threading.Thread(target=_gw_loop, daemon=True).start()
         print(f"marina gateway: caddy {'있음' if _gw().caddy_bin() else '미설치(안내)'} · :{_GATEWAY_PORT} · 폴링+이벤트 동적반영")
+    # 모바일 보류함 드레이너 — 작업 중이라 미뤄둔 메시지를 세션이 유휴가 되는 순간 전달한다.
+    # (진행 중인 턴을 끊지 않기 위한 장치이므로 폴링 주기는 짧게. 할 일이 없으면 즉시 반환한다.)
+    import threading as _threading
+    import time as _time
+
+    def _outbox_loop() -> None:
+        from marina_mobile import mobile_outbox_drain
+        while True:
+            try:
+                mobile_outbox_drain()
+            except Exception:
+                pass
+            _time.sleep(max(2, int(_env("OUTBOX_POLL", "3") or "3")))
+
+    _threading.Thread(target=_outbox_loop, daemon=True, name="mobile-outbox").start()
+
+    def _warm_loop() -> None:
+        # 부팅 직후 worktree 배지 캐시를 채운다 — 첫 화면이 git 서브프로세스를 기다리지 않게.
+        # (이후 만료는 worktree_info 의 stale-while-revalidate 가 알아서 처리한다.)
+        try:
+            from marina_registry import discover_all_roots
+            from marina_sessions import warm_worktree_info
+
+            warm_worktree_info(list(discover_all_roots()))
+        except Exception:
+            pass
+
+    _threading.Thread(target=_warm_loop, daemon=True, name="worktree-warm").start()
     server.serve_forever()

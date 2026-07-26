@@ -470,12 +470,23 @@ def latest_agent_event(
 
 
 def main() -> int:
+    payload: Any = None
     try:
         raw = sys.stdin.buffer.read(MAX_HOOK_INPUT_BYTES + 1)
         if len(raw) > MAX_HOOK_INPUT_BYTES:
             return 0
         payload = json.loads(raw)
         record_hook_event(payload)
+    except Exception:
+        pass
+    if payload is None:
+        return 0
+    try:
+        # sid ↔ pid 등록 — marina 가 "이 PTY 안에서 도는 세션"을 사후에 알아보는 유일한 단서.
+        # 저널 기록과 독립적으로(실패해도 서로 안 막게) 별도 try 로 돌린다.
+        import marina_agent_procs
+
+        marina_agent_procs.record_from_hook(payload, source=_source(payload, os.environ) or "")
     except Exception:
         pass
     return 0

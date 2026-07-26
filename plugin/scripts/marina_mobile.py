@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import signal
 import subprocess
 import threading
 import time
@@ -15,11 +16,11 @@ from typing import Any
 
 from marina_registry import discover_all_roots
 from marina_sessions import (
-    CLAUDE_MODEL_CATALOG,
     _live_agent_cwds,
     _root_has_live_agent,
     agent_runtime_settings,
     agents_payload,
+    claude_model_catalog,
     safe_root,
     worktree_info,
 )
@@ -36,6 +37,8 @@ CODEX_MODELS_FILE = CODEX_USER_HOME / "models_cache.json"
 _SESSION_SETTINGS_LOCK = threading.Lock()
 _AGENT_SEND_LOCK = threading.Lock()
 AGENT_INPUT_SETTLE_S = 0.16
+# 인수인계(takeover): SIGTERM 후 이만큼 기다렸다가 안 죽으면 SIGKILL.
+TAKEOVER_TIMEOUT_S = float(os.environ.get("MARINA_TAKEOVER_TIMEOUT_S", "3"))
 _SERVER_INSTANCE = secrets.token_hex(8)   # 프로세스마다 새 값 — 데몬 재시작 감지용(모바일이 바뀌면 자동 새로고침)
 
 
@@ -133,7 +136,7 @@ def mobile_agent_options() -> dict[str, Any]:
     # 모바일 표기 통일: 실모델은 "Claude Opus 4.8" 처럼 브랜드 포함(default 안내문구는 그대로). 데스크톱 카탈로그(CLAUDE_MODEL_CATALOG)는 불변.
     claude_models = [
         {"value": m["value"], "label": m["label"] if m["value"] == "default" else f"Claude {m['label']}"}
-        for m in CLAUDE_MODEL_CATALOG
+        for m in claude_model_catalog()
     ]
     return {
         "codex": {"models": codex_models, "efforts": ["low", "medium", "high", "xhigh", "max", "ultra"], "manualModel": True},
@@ -541,17 +544,180 @@ def _term_root(tid: str) -> Path | None:
 
 
 def _live_agent_tid(root: Path, source: str, sid: str) -> str:
+    """조작 가능한 PTY 의 tid. detached(marina 재시작으로 master fd 를 잃은) term 은 제외한다 —
+    tid 를 돌려줘 봐야 term_input 이 거부하므로, 호출자가 인수인계 경로로 내려가게 둔다."""
     resolved = root.resolve()
     for item in term_list().get("sessions", []):
         agent = item.get("agent") if isinstance(item.get("agent"), dict) else {}
         if (
             bool(item.get("alive", True))
+            and not bool(item.get("detached"))
             and str(item.get("root") or "") == str(resolved)
             and str(agent.get("source") or "") == source
             and str(agent.get("sid") or "") == sid
         ):
             return str(item.get("tid") or "")
     return ""
+
+
+def _detached_agent_pid(root: Path, source: str, sid: str) -> int:
+    """detached term 이 쥐고 있는 에이전트 프로세스 pid — 인수인계 대상."""
+    resolved = str(root.resolve())
+    for item in term_list().get("sessions", []):
+        agent = item.get("agent") if isinstance(item.get("agent"), dict) else {}
+        if (
+            bool(item.get("alive", True))
+            and bool(item.get("detached"))
+            and str(item.get("root") or "") == resolved
+            and str(agent.get("source") or "") == source
+            and str(agent.get("sid") or "") == sid
+        ):
+            try:
+                return int(item.get("pid") or 0)
+            except (TypeError, ValueError):
+                return 0
+    return 0
+
+
+def _agent_holder_pid(root: Path, source: str, sid: str) -> int:
+    """이 세션을 붙들고 있지만 marina 가 입력을 넣을 수 없는 프로세스의 pid (없으면 0).
+
+    두 출처 모두 sid 단위로 정확하다 — 훅 등록부(손으로 띄운 세션)와 detached term(marina 가
+    띄웠지만 재시작으로 fd 를 잃은 세션). 데스크톱 앱처럼 둘 다 없는 경우는 0 이고, 그때는
+    종전대로 차단한다(정확히 누구를 끊어야 할지 모르는 채로 죽이지 않는다)."""
+    try:
+        import marina_agent_procs
+
+        record = marina_agent_procs.lookup(source, sid)
+        if record:
+            return int(record.get("pid") or 0)
+    except Exception:
+        pass
+    return _detached_agent_pid(root, source, sid)
+
+
+OUTBOX_DIR = MARINA_HOME / "mobile-outbox"
+# 보류 메시지 수명 — 이보다 오래된 건 버린다(며칠 뒤 유령 전달 방지).
+OUTBOX_MAX_AGE_S = float(os.environ.get("MARINA_OUTBOX_MAX_AGE_S", str(24 * 3600)))
+_OUTBOX_LOCK = threading.Lock()
+
+
+def _outbox_path(source: str, sid: str) -> Path:
+    return OUTBOX_DIR / f"{source}-{sid}.json"
+
+
+def mobile_outbox_put(root: Path, source: str, sid: str, text: str,
+                      model: str = "", effort: str = "") -> dict[str, Any]:
+    """작업 중인 세션으로 갈 메시지를 보류함에 넣는다.
+
+    **진행 중이던 턴은 절대 끊지 않는다** — 몇 시간짜리 작업을 끼어들기로 날리지 않기 위해서다.
+    유휴가 되는 순간 드레이너가 인수인계 후 전달한다(그때는 잃을 게 없다)."""
+    with _OUTBOX_LOCK:
+        OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(OUTBOX_DIR, 0o700)
+        except OSError:
+            pass
+        path = _outbox_path(source, sid)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+            messages = list(record.get("messages") or [])
+        except (OSError, ValueError):
+            messages = []
+        messages.append(text)
+        record = {
+            "source": source, "sid": sid, "root": str(root.resolve()),
+            "messages": messages, "model": model, "effort": effort, "ts": time.time(),
+        }
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return {"queued": len(messages)}
+
+
+def mobile_outbox_pending(root: Path, source: str, sid: str) -> list[str]:
+    try:
+        record = json.loads(_outbox_path(source, sid).read_text(encoding="utf-8"))
+        if str(record.get("root") or "") != str(root.resolve()):
+            return []
+        return [str(m) for m in (record.get("messages") or [])]
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def mobile_outbox_drain() -> int:
+    """유휴가 된 세션에 보류 메시지를 전달한다. 전달한 세션 수를 돌려준다(fail-open)."""
+    delivered = 0
+    try:
+        entries = sorted(OUTBOX_DIR.iterdir())
+    except OSError:
+        return 0
+    for entry in entries:
+        if entry.suffix != ".json":
+            continue
+        try:
+            record = json.loads(entry.read_text(encoding="utf-8"))
+            source, sid = str(record.get("source") or ""), str(record.get("sid") or "")
+            messages = [str(m) for m in (record.get("messages") or []) if str(m)]
+            root = Path(str(record.get("root") or ""))
+            if not source or not sid or not messages or not root.is_dir():
+                entry.unlink(missing_ok=True)
+                continue
+            if time.time() - float(record.get("ts") or 0) > OUTBOX_MAX_AGE_S:
+                entry.unlink(missing_ok=True)
+                continue
+            if _native_agent_active(root, source, sid):
+                continue                      # 아직 작업 중 — 기다린다(끊지 않는다)
+            text = "\n\n".join(messages)
+            body = {"root": str(root), "target": {"type": "agent", "source": source, "sid": sid},
+                    "text": text, "_from_outbox": True}
+            if record.get("model"):
+                body["model"] = str(record["model"])
+            if record.get("effort"):
+                body["effort"] = str(record["effort"])
+            mobile_send(body)
+            entry.unlink(missing_ok=True)
+            delivered += 1
+        except Exception:
+            continue                          # 한 건이 실패해도 나머지는 계속
+    return delivered
+
+
+def _takeover_agent(source: str, sid: str, pid: int) -> bool:
+    """붙들고 있는 프로세스를 정중히 끊고(SIGTERM) 세션을 넘겨받는다.
+
+    SIGKILL 로 시작하지 않는 이유: CLI 가 트랜스크립트를 flush 할 틈을 줘야 resume 이 깨끗하다.
+    죽지 않으면 마지막에만 SIGKILL."""
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        return False
+    deadline = time.time() + TAKEOVER_TIMEOUT_S
+    while time.time() < deadline:
+        time.sleep(0.05)
+        try:
+            os.kill(pid, 0)
+        except OSError:
+            break
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            time.sleep(0.1)
+        except OSError:
+            pass
+    try:
+        import marina_agent_procs
+
+        marina_agent_procs.forget(source, sid)   # 넘겨받았으니 옛 기록으로 다시 입양되면 안 된다
+    except Exception:
+        pass
+    return True
 
 
 def _native_agent_active(root: Path, source: str, sid: str) -> bool:
@@ -687,6 +853,7 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
     target_type = str(target.get("type") or "shell")
     opened = False
     prompt_submitted = False
+    took_over = False       # 붙들고 있던 프로세스를 끊고 넘겨받았는지 — 응답에 실어 UI 가 알린다
     if target_type == "term":
         tid = str(target.get("tid") or "")
         if not tid:
@@ -713,14 +880,25 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
                     _clear_pending_session_settings(root, source, sid)
                 delivery = _deliver_agent_input(tid, source, text, str(body.get("delivery") or ""))
                 return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
-            # 이중 실행 가드는 **세션(sid) 단위**다. 워크트리 단위(_root_has_live_agent)로 판정하면
-            # 같은 워크트리에 다른 세션(터미널·데스크톱 앱)이 하나라도 살아 있다는 이유로 이어받기가
-            # 통째로 막힌다 — "워크트리=세션 1:1" 은 상태 표시엔 맞아도 전송 타게팅엔 성립하지 않는다
-            # (워크트리 하나에 터미널·데스크톱·모바일 세션이 공존한다).
-            # 남은 구멍: marina 밖에서 **유휴로** 살아있는 동일 세션은 트랜스크립트가 working 이 아니라
-            # 여기서 못 걸러진다(이어받으면 이중 실행). 그건 sid↔pid 를 훅으로 등록해야 정확해진다.
+            # 여기까지 왔다 = 조작 가능한 PTY 가 없다. 이중 실행 판정은 **세션(sid) 단위**다
+            # (워크트리 단위로 보면 같은 워크트리의 다른 세션까지 통째로 막힌다 — 워크트리 하나에
+            # 터미널·데스크톱·모바일 세션이 공존하므로 "워크트리=세션 1:1" 은 전송 타게팅엔 안 맞는다).
+            #
+            # **작업 중인 세션은 절대 끊지 않는다** — 몇 시간짜리 진행을 끼어들기로 날릴 수 없다.
+            # 보류함에 넣고, 유휴가 되는 순간 드레이너가 인수인계 후 전달한다(그땐 잃을 게 없다).
             if _native_agent_active(root, source, sid):
-                raise ValueError("이 세션은 다른 앱이나 터미널에서 실행 중입니다. 완료된 뒤 다시 보내주세요")
+                if body.get("_from_outbox"):
+                    # 드레이너가 유휴를 보고 들어왔는데 그새 작업이 다시 시작됐다 — 보류를 유지한다.
+                    raise ValueError("세션이 다시 작업 중입니다 — 보류 유지")
+                queued = mobile_outbox_put(root, source, sid, text,
+                                           str(body.get("model") or ""), str(body.get("effort") or ""))
+                return {"ok": True, "tid": "", "opened": False, "delivery": "queue", **queued}
+            # 여기부터는 유휴 세션이다. 붙들고 있는 프로세스를 지목할 수 있으면 끊고 넘겨받는다.
+            # 지목 못 해도(데스크톱 앱처럼 pid 를 모르는 경우) resume 으로 이어받는다 — 유휴 상태라
+            # 진행 중인 작업이 없고, "다른 앱에서 하던 걸 모바일로 잇는다"가 이 기능의 목적이다.
+            holder = _agent_holder_pid(root, source, sid)
+            if holder:
+                took_over = _takeover_agent(source, sid, holder)
             saved = mobile_pending_session_settings(root, source, sid)
             model = str(body.get("model") if "model" in body else saved["model"])
             effort = str(body.get("effort") if "effort" in body else saved["effort"])
@@ -744,7 +922,24 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
         opened = True
     if not prompt_submitted:
         term_input(tid, _input_payload(text))
-    return {"ok": True, "tid": tid, "opened": opened}
+    result = {"ok": True, "tid": tid, "opened": opened}
+    if took_over:
+        result["takeover"] = True
+    return result
+
+
+def mobile_launch(body: dict[str, Any]) -> dict[str, Any]:
+    """이 워크트리에서 에이전트 **새 세션**을 띄운다(resume 아님).
+
+    sid 는 시작 시점에 알 수 없다 — 훅이 남기는 {sid, pid} 를 marina 가 입양(adopt_agent_terms)할 때
+    이 PTY 에 붙는다. 그전까지는 터미널 세션으로 보이고, 첫 프롬프트를 보내면 에이전트로 승격된다."""
+    root = safe_root(str(body.get("root", "")))
+    source = str(body.get("source") or "")
+    if source not in ("claude", "codex"):
+        raise ValueError("source 는 claude 또는 codex")
+    result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24),
+                       agent_source=source, agent_sid="")
+    return {"ok": True, "tid": str(result.get("tid") or ""), "source": source}
 
 
 def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
@@ -810,7 +1005,9 @@ _MOBILE_HTML = r"""<!doctype html>
     #mobileLogin { min-height: 100vh; display: none; align-items: stretch; justify-content: center; flex-direction: column; padding: 24px; box-sizing: border-box; gap: 14px; }
     #mobileLogin form { display: flex; flex-direction: column; gap: 10px; }
     header { position: relative; z-index: 4; display: grid; gap: 4px; padding: 4px 8px 6px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
-    .shellRow { display: grid; grid-template-columns: 36px minmax(0, 1fr) auto; gap: 5px; align-items: center; min-height: 38px; }
+    /* 마지막 칼럼을 auto 로 두면 "서버 12/14" 의 글자수만큼 액션이 넓어지고 그만큼 프로젝트 스트립이
+       좁아진다(스크롤 폭 침범). 액션은 상한을 못박고 스트립이 잔여폭을 전부 갖게 한다. */
+    .shellRow { display: grid; grid-template-columns: 36px minmax(0, 1fr) minmax(0, max-content); gap: 5px; align-items: center; min-height: 38px; }
     h2 { margin: 0; font-size: 22px; }
     p { margin: 0; color: #596070; line-height: 1.45; }
     main { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow: hidden; padding: 10px 12px; }
@@ -835,8 +1032,10 @@ _MOBILE_HTML = r"""<!doctype html>
     .source-tabs { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; padding: 3px; background: #e8ecf2; border-radius: 8px; }
     .source-tab { min-width: 0; min-height: 30px; padding: 0 4px; border: 0; background: transparent; color: #596070; font-size: 10px; }
     .source-tab.active { background: #fff; color: #17191f; box-shadow: 0 1px 3px rgb(23 25 31 / 10%); }
-    .servicesBtn { width: auto; min-width: 54px; min-height: 32px; padding: 0 8px; color: #303846; font-size: 11px; font-variant-numeric: tabular-nums; white-space: nowrap; }
-    .shellActions { display: flex; align-items: center; gap: 3px; }
+    /* 상한 92px — 세 자릿수(999/999)까지 tabular-nums 로 들어가고, 그 이상은 말줄임으로 흡수해
+       스트립을 더 잠식하지 않는다. */
+    .servicesBtn { width: auto; min-width: 54px; max-width: 92px; min-height: 32px; padding: 0 8px; overflow: hidden; color: #303846; font-size: 11px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+    .shellActions { display: flex; flex: none; min-width: 0; align-items: center; gap: 3px; }
     .chatNavTitle { display: none; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
     .usageBtn { display: none; width: 32px; min-width: 32px; height: 32px; min-height: 32px; padding: 0; border-color: transparent; background: transparent; color: #4d5665; font-size: 18px; }
     #mobileApp[data-view="chat"] header { gap: 0; padding-bottom: 4px; }
@@ -848,6 +1047,15 @@ _MOBILE_HTML = r"""<!doctype html>
     .search-input { min-height: 40px; }
     .session-list { display: flex; flex-direction: column; gap: 12px; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
+    /* 워크트리 = 단위. 헤더에서 바로 새 에이전트를 띄운다(웹 카드의 ＋CC/＋CX 와 같은 멘탈모델). */
+    .wt-group { display: block; }
+    .wt-group > .session-card { margin-top: 6px; }
+    .wt-group-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; cursor: pointer; list-style: none; }
+    .wt-group-head::-webkit-details-marker { display: none; }
+    .wt-group-name { display: inline-flex; min-width: 0; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wt-group-acts { display: inline-flex; flex: none; align-items: center; gap: 4px; }
+    .wt-group-count { min-width: 16px; text-align: right; }
+    .wtLaunchBtn { min-width: 34px; min-height: 26px; padding: 0 5px; border-radius: 7px; font-size: 10px; font-weight: 900; }
     .session-group-title { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; color: #596070; font-size: 11px; font-weight: 900; text-transform: uppercase; }
     .session-card { display: block; min-height: 88px; height: auto; padding: 10px 11px; text-align: left; color: inherit; border-color: #d8dee7; overflow: hidden; }
     .session-card.active { border-color: #0b63ce; box-shadow: 0 0 0 1px #0b63ce inset; }
@@ -1871,15 +2079,33 @@ _MOBILE_HTML = r"""<!doctype html>
         }
         return;
       }
-      const sources = sourceFilter === "all" ? ["codex", "claude", "terminal"] : [sourceFilter];
       const structure = sessions.map(s => `${sessionSource(s)}:${s.key}:${s.status || ""}`).sort().join("|");   // status 포함 → 상태 dot 이 폴마다 갱신
       const nextStructureKey = `${selectedProjectId}|${sourceFilter}|${q}|${structure}`;
       if (sessionStructureKey !== nextStructureKey) {
-        sessionList.innerHTML = sources.map(source => {
-          const grouped = sessions.filter(s => sessionSource(s) === source);
-          if (!grouped.length) return "";
-          const meta = sourceMeta[source];
-          return `<section class="session-group"><div class="session-group-title"><span>${meta.label}</span><span>${grouped.length}</span></div>${grouped.map(sessionCard).join("")}</section>`;
+        // 웹과 같은 멘탈모델로 — **워크트리가 단위**이고 세션은 그 아래 산다. 워크트리 헤더에서
+        // 바로 새 에이전트를 띄울 수 있어 "만들고 → 셸 열고 → claude 치기" 3스텝이 사라진다.
+        const order = [];
+        const byRoot = new Map();
+        sessions.forEach(session => {
+          const root = String(session.root || "");
+          if (!byRoot.has(root)) { byRoot.set(root, []); order.push(root); }
+          byRoot.get(root).push(session);
+        });
+        sessionList.innerHTML = order.map(root => {
+          const grouped = byRoot.get(root);
+          const name = root.split("/").filter(Boolean).pop() || root || "워크트리";
+          const busy = grouped.some(s => s.kind === "agent" && s.status === "working");
+          const asking = grouped.some(s => s.pendingQuestion);
+          const dot = asking ? "boot" : (busy ? "run" : "stop");
+          return `<details class="session-group wt-group" open data-wt-root="${esc(root)}">
+            <summary class="session-group-title wt-group-head">
+              <span class="wt-group-name"><span class="wt-dot ${dot}"></span>${esc(name)}</span>
+              <span class="wt-group-acts">
+                <button class="wtLaunchBtn" type="button" data-launch="claude" data-root="${esc(root)}" title="이 워크트리에서 Claude 새 세션">＋CC</button>
+                <button class="wtLaunchBtn" type="button" data-launch="codex" data-root="${esc(root)}" title="이 워크트리에서 Codex 새 세션">＋CX</button>
+                <span class="wt-group-count">${grouped.length}</span>
+              </span>
+            </summary>${grouped.map(sessionCard).join("")}</details>`;
         }).join("");
         sessionStructureKey = nextStructureKey;
         return;
@@ -2173,25 +2399,65 @@ _MOBILE_HTML = r"""<!doctype html>
       const value = String(id || "detail");
       return `data-timeline-detail="${esc(value)}"${openTimelineDetailIds.has(`${selectedSessionKey}:${value}`) ? " open" : ""}`;
     }
-    function renderActivityGroup(items, stableId="") {
-      if (!items.length) return "";
+    // ACTIVITY_IDENTITY_START
+    // 활동 항목의 **정체성**(누구인가)과 **지문**(내용이 바뀌었나)을 분리한다. 정체성이 같고 지문도
+    // 같으면 그 DOM 을 손대지 않는다 — 읽는 중에 노드가 갈리면 스크롤이 튀기 때문.
+    function activityItemKey(item, index) { return String(item.id || item.label || `activity-${index}`); }
+    function activityItemFingerprint(item) {
+      return JSON.stringify([item.activityType, item.status, item.label, item.name, item.detail, item.result]);
+    }
+    function activityGroupSummary(items) {
       const counts = {};
       items.forEach(item => { const key = item.activityType || "tool"; counts[key] = (counts[key] || 0) + 1; });
       const categories = ["skill", "command", "diff", "file", "agent"].filter(key => counts[key]).map(key => `${activityTypeLabels[key]} ${counts[key]}`);
-      const summary = [`작업 ${items.length}`, ...categories].join(" · ");
-      const rows = items.map(item => {
-        const type = item.activityType || "tool";
-        const status = ["running", "failed"].includes(item.status) ? item.status : "completed";
-        const detail = String(item.detail || "");
-        const result = String(item.result || "");
-        const body = [
-          detail ? `<span class="activityBodyLabel">입력</span><pre class="activityCode">${renderActivityCode(detail, type)}</pre>` : "",
-          result ? `<span class="activityBodyLabel">결과</span><pre class="activityCode">${renderActivityCode(result, type)}</pre>` : "",
-        ].join("");
-        return `<details class="activityItem ${status}" data-activity-detail ${timelineDetailAttrs(`item:${item.id || item.label || "activity"}`)}><summary><span class="activityDot"></span><span class="activityLabel">${esc(item.label || item.name || activityTypeLabels[type] || "작업")}</span><span class="activityType">${esc(activityTypeLabels[type] || "도구")}</span></summary>${body ? `<div class="activityBody">${body}</div>` : ""}</details>`;
-      }).join("");
+      return [`작업 ${items.length}`, ...categories].join(" · ");
+    }
+    // ACTIVITY_IDENTITY_END
+    function renderActivityItem(item, index) {
+      const type = item.activityType || "tool";
+      const status = ["running", "failed"].includes(item.status) ? item.status : "completed";
+      const detail = String(item.detail || "");
+      const result = String(item.result || "");
+      const body = [
+        detail ? `<span class="activityBodyLabel">입력</span><pre class="activityCode">${renderActivityCode(detail, type)}</pre>` : "",
+        result ? `<span class="activityBodyLabel">결과</span><pre class="activityCode">${renderActivityCode(result, type)}</pre>` : "",
+      ].join("");
+      return `<details class="activityItem ${status}" data-activity-detail data-activity-key="${esc(activityItemKey(item, index))}" data-activity-fp="${esc(activityItemFingerprint(item))}" ${timelineDetailAttrs(`item:${item.id || item.label || "activity"}`)}><summary><span class="activityDot"></span><span class="activityLabel">${esc(item.label || item.name || activityTypeLabels[type] || "작업")}</span><span class="activityType">${esc(activityTypeLabels[type] || "도구")}</span></summary>${body ? `<div class="activityBody">${body}</div>` : ""}</details>`;
+    }
+    function renderActivityGroup(items, stableId="") {
+      if (!items.length) return "";
+      const rows = items.map((item, index) => renderActivityItem(item, index)).join("");
       const groupId = stableId ? `group:${stableId}` : `group:${items[0].id || "first"}`;
-      return `<details class="activityGroup" ${timelineDetailAttrs(groupId)}><summary>${esc(summary)}</summary><div class="activityList">${rows}</div></details>`;
+      return `<details class="activityGroup" ${timelineDetailAttrs(groupId)}><summary>${esc(activityGroupSummary(items))}</summary><div class="activityList" data-activity-list>${rows}</div></details>`;
+    }
+    // 활동 목록 제자리 갱신 — 새 작업은 **덧붙이고**, 안 바뀐 항목은 건드리지 않는다.
+    // (exchange 통째 교체를 피하는 이유: 자율 진행 중인 턴은 exchange 가 하나라, 도구 하나 늘 때마다
+    //  읽고 있던 펼친 상세가 파괴되고 스크롤이 튄다.)
+    function reconcileActivityList(listEl, items) {
+      const existing = new Map();
+      [...listEl.children].forEach(node => {
+        const key = node.dataset && node.dataset.activityKey;
+        if (key) existing.set(key, node);
+      });
+      const kept = new Set();
+      let cursor = null;
+      items.forEach((item, index) => {
+        const key = activityItemKey(item, index);
+        const fingerprint = activityItemFingerprint(item);
+        let node = existing.get(key);
+        if (!node || node.dataset.activityFp !== fingerprint) {
+          const holder = document.createElement("div");
+          holder.innerHTML = renderActivityItem(item, index);
+          const fresh = holder.firstElementChild;
+          if (node && node.parentNode === listEl) listEl.replaceChild(fresh, node);
+          node = fresh;
+        }
+        kept.add(node);
+        const expected = cursor ? cursor.nextSibling : listEl.firstChild;
+        if (node !== expected) listEl.insertBefore(node, expected);
+        cursor = node;
+      });
+      [...listEl.children].forEach(node => { if (!kept.has(node)) listEl.removeChild(node); });
     }
     function renderTimelineSequence(items) {
       const html = [];
@@ -2297,6 +2563,35 @@ _MOBILE_HTML = r"""<!doctype html>
         (exchange.items || []).map(it => [it.id || "", it.kind, it.role, it.text, it.activityType, it.label, it.status, it.detail, it.result, it.model, it.effort, pendingKeyPart(it)]),
       ]);
     }
+    function exchangeShellKey(exchange, session, isLatest) {
+      // 활동 목록을 **뺀** 나머지(사용자/어시스턴트 말풍선·큐·질문카드·라이브 상태). 이게 그대로면
+      // 활동만 늘어난 것이므로 exchange 를 새로 만들지 않고 목록만 제자리에서 이어붙인다.
+      const sections = exchangeSections(exchange);
+      const question = pendingQuestionActivity(sections);
+      const message = it => it ? [it.id || "", it.kind, it.role, it.text, it.model, it.effort, pendingKeyPart(it)] : 0;
+      return JSON.stringify([
+        isLatest,
+        isLatest ? [session.status, session.controllable] : 0,
+        message(sections.user),
+        (sections.queued || []).map(message),
+        message(sections.assistant),
+        question ? [question.id || "", question.status, question.detail] : 0,
+        Boolean((sections.activities || []).length),   // 목록의 유무가 바뀌면 골격이 달라진다
+      ]);
+    }
+    function reconcileExchangeActivities(node, exchange) {
+      // 골격이 같을 때만 불린다. 활동 목록만 제자리 갱신하고 요약 문구를 고친다.
+      const listEl = node.querySelector("[data-activity-list]");
+      const activities = exchangeSections(exchange).activities || [];
+      if (!listEl || !activities.length) return false;
+      reconcileActivityList(listEl, activities);
+      const summaryEl = listEl.parentElement && listEl.parentElement.querySelector("summary");
+      if (summaryEl) {
+        const next = activityGroupSummary(activities);
+        if (summaryEl.textContent !== next) summaryEl.textContent = next;
+      }
+      return true;
+    }
     function reconcileAgentExchanges(exchanges, session) {
       // ③ 증분 렌더: exchange(<section data-exchange-id>) 단위로 diff — 변경된 것만 새로 만들어 교체,
       // 나머지 DOM(스크롤 위치·열린 details·로드된 이미지)은 그대로 재사용. 3s 폴마다 전량 재구성하던 것을 대체.
@@ -2311,11 +2606,16 @@ _MOBILE_HTML = r"""<!doctype html>
         const id = String(exchange.id);
         const key = exchangeRenderKey(exchange, session, isLatest);
         let node = existing.get(id);
-        if (!node || node.dataset.exchangeKey !== key) {
+        const shell = exchangeShellKey(exchange, session, isLatest);
+        if (node && node.dataset.exchangeKey !== key && node.dataset.exchangeShell === shell
+            && reconcileExchangeActivities(node, exchange)) {
+          node.dataset.exchangeKey = key;    // 작업만 늘었다 — 읽던 DOM 을 살린 채 목록만 이어붙였다
+        } else if (!node || node.dataset.exchangeKey !== key) {
           const holder = document.createElement("div");
           holder.innerHTML = renderConversationSequence(exchange, session, isLatest);
           const fresh = holder.firstElementChild;
           fresh.dataset.exchangeKey = key;
+          fresh.dataset.exchangeShell = shell;
           if (node && node.parentNode === turnsEl) turnsEl.replaceChild(fresh, node);
           node = fresh;
         }
@@ -3010,10 +3310,36 @@ _MOBILE_HTML = r"""<!doctype html>
       renderSessions();
     };
     sessionList.onclick = event => {
+      const launch = event.target.closest("[data-launch]");
+      if (launch && sessionList.contains(launch)) {
+        event.preventDefault();          // summary 안의 버튼 — 접기 토글로 새지 않게
+        event.stopPropagation();
+        launchAgent(launch.getAttribute("data-root"), launch.getAttribute("data-launch"), launch);
+        return;
+      }
       const btn = event.target.closest("[data-key]");
       if (!btn || !sessionList.contains(btn)) return;
       chooseSession(btn.getAttribute("data-key"));
     };
+    async function launchAgent(root, source, btn) {
+      if (!root || !source || (btn && btn.disabled)) return;
+      if (btn) btn.disabled = true;
+      try {
+        const r = await fetch("/mobile/api/launch", {method: "POST", headers: headers(true),
+                                                     body: JSON.stringify({root, source})});
+        if (!r.ok) throw new Error(await responseError(r));
+        const d = await r.json();
+        showToast(`${source === "codex" ? "Codex" : "Claude"} 새 세션을 띄웠어요`);
+        await load({quiet: true}).catch(() => {});
+        // 새 세션은 아직 트랜스크립트가 없어 터미널로 잡힌다 — 그걸 골라두면 바로 첫 지시를 보낼 수 있고,
+        // 그 지시가 훅을 깨워 세션이 에이전트로 승격된다(입양).
+        if (d.tid) chooseSession(`term:${d.tid}`);
+      } catch (error) {
+        showToast(`세션 시작 실패 · ${String(error)}`);
+      } finally {
+        if (btn) btn.disabled = false;
+      }
+    }
     document.getElementById("refreshBtn").onclick = () => { closeServices(); load().catch(e => statusEl.textContent = String(e)); };
     function leaveChat(updateHistory=true) {
       saveDraft();
@@ -3103,6 +3429,9 @@ _MOBILE_HTML = r"""<!doctype html>
           followLatest = true;
           statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(d.delivery || "started") : `보냄 · ${d.tid}`;
         }
+        // 인수인계: 다른 데 열려 있던(유휴) 세션을 넘겨받았다. 작업 중인 세션은 여기 오지 않는다
+        // — 그건 보류함(delivery: queue)으로 가고 끝난 뒤 자동 전달된다.
+        if (d.takeover) showToast("다른 곳에 열려 있던 세션을 넘겨받았어요");
         setTimeout(() => load({quiet: true}).catch(() => {}), 500);
         setTimeout(() => load({quiet: true}).catch(() => {}), 1500);
       } catch (error) {

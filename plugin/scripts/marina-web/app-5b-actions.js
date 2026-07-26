@@ -114,6 +114,21 @@
         };
         el.appendChild(btn);
       }
+      // 에이전트 직접 launch — 워크트리 만들고 → 셸 열고 → `claude` 치던 3스텝을 한 번으로.
+      // sid 없이 여는 새 세션이라, 그 세션의 정체는 훅 기록을 marina 가 입양할 때 붙는다.
+      for (const agent of [{ source: 'claude', icon: '＋CC', label: 'Claude' },
+                           { source: 'codex', icon: '＋CX', label: 'Codex' }]) {
+        const launch = document.createElement('button');
+        launch.textContent = agent.icon;
+        launch.title = `이 워크트리에서 ${agent.label} 새 세션 시작 (터미널로 이동)`;
+        launch.dataset.act = `launch-${agent.source}`;
+        launch.setAttribute('aria-label', `${agent.label} 새 세션 시작`);
+        launch.onclick = (event) => {
+          event.stopPropagation();
+          if (typeof openAgentTerminal === 'function') openAgentTerminal(session.root, { source: agent.source });
+        };
+        el.appendChild(launch);
+      }
       const menuBtn = document.createElement('button');
       menuBtn.textContent = '⋯'; menuBtn.title = '편집·캐시·삭제';
       menuBtn.dataset.act = 'menu';
