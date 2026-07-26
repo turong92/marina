@@ -1005,9 +1005,13 @@ _MOBILE_HTML = r"""<!doctype html>
     #mobileLogin { min-height: 100vh; display: none; align-items: stretch; justify-content: center; flex-direction: column; padding: 24px; box-sizing: border-box; gap: 14px; }
     #mobileLogin form { display: flex; flex-direction: column; gap: 10px; }
     header { position: relative; z-index: 4; display: grid; gap: 4px; padding: 4px 8px 6px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
-    /* 마지막 칼럼을 auto 로 두면 "서버 12/14" 의 글자수만큼 액션이 넓어지고 그만큼 프로젝트 스트립이
-       좁아진다(스크롤 폭 침범). 액션은 상한을 못박고 스트립이 잔여폭을 전부 갖게 한다. */
-    .shellRow { display: grid; grid-template-columns: 36px minmax(0, 1fr) minmax(0, max-content); gap: 5px; align-items: center; min-height: 38px; }
+    /* grid 였을 때: 자식(backBtn·chatNavTitle)이 뷰에 따라 display:none 이 되면 그리드 흐름에서 빠져
+       **칼럼 배정이 밀린다** — 목록 뷰에서 프로젝트 스트립이 36px 칸에 들어가고 액션이 1fr 을 차지했다
+       (실측 390px 기준 strip 36px / acts 나머지 전부. "서버 버튼이 스크롤 폭을 먹는" 증상의 진짜 원인).
+       flex 는 남은 자식만으로 나누므로 숨김 여부에 흔들리지 않는다. */
+    .shellRow { display: flex; gap: 5px; align-items: center; min-height: 38px; }
+    .shellRow > .backBtn { flex: 0 0 auto; }
+    .shellRow > .project-strip, .shellRow > .chatNavTitle { flex: 1 1 auto; min-width: 0; }
     h2 { margin: 0; font-size: 22px; }
     p { margin: 0; color: #596070; line-height: 1.45; }
     main { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow: hidden; padding: 10px 12px; }
