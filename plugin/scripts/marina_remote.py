@@ -108,11 +108,28 @@ class RemoteController:
         self.clock = clock
         self._cache: dict[str, Any] = {}
 
+    # launchd/systemd 데몬은 최소 PATH(/usr/bin:/bin:/usr/sbin:/sbin)로 뜬다 — homebrew 등이 빠져
+    # shutil.which("tailscale") 가 None 을 돌려주고, 그러면 원격 status=tailscale_not_found·dnsName=None 이
+    # 되어 펀넬 Host 가드가 접속을 403 으로 막는다. 재시작이 이 최소 PATH 를 plist 에 그대로 구워 재현되므로,
+    # PATH 에 의존하지 않게 알려진 설치 위치를 폴백으로 확인한다.
+    _TAILSCALE_FALLBACKS = (
+        "/opt/homebrew/bin/tailscale",                            # Apple Silicon homebrew
+        "/usr/local/bin/tailscale",                               # Intel homebrew / 수동
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",   # Mac 앱 번들 CLI
+        "/usr/bin/tailscale", "/bin/tailscale",                   # Linux
+    )
+
     def _executable(self) -> Union[str, None]:
         if os.path.dirname(self.tailscale_bin):
             path = Path(self.tailscale_bin)
             return str(path) if path.is_file() and os.access(str(path), os.X_OK) else None
-        return shutil.which(self.tailscale_bin)
+        found = shutil.which(self.tailscale_bin)
+        if found:
+            return found
+        for cand in self._TAILSCALE_FALLBACKS:
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+        return None
 
     def _run_json(self, executable: str, *args: str) -> Any:
         completed = subprocess.run(
