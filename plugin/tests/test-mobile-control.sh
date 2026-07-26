@@ -145,7 +145,8 @@ grep -q 'mergeTimelineItems' <<<"$mobile_html" || { echo "FAIL: /mobile history 
 grep -q 'openTimelineDetailIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened timeline details"; exit 1; }
 grep -q 'data-timeline-detail' <<<"$mobile_html" || { echo "FAIL: /mobile timeline details need stable identities"; exit 1; }
 grep -q 'renderActivityGroup(sections.activities, `exchange:${exchange.id}`)' <<<"$mobile_html" || { echo "FAIL: each answer process should keep a stable collapsible work group"; exit 1; }
-grep -q 'class="turnMeta"' <<<"$mobile_html" || { echo "FAIL: each agent exchange should expose its actual model and effort"; exit 1; }
+# 정렬 변형(.turnMeta.right)이 붙어 `class="turnMeta${...}"` 로 렌더된다 — 접두만 본다.
+grep -q 'class="turnMeta' <<<"$mobile_html" || { echo "FAIL: each agent exchange should expose its actual model and effort"; exit 1; }
 grep -q 'class="liveAction"' <<<"$mobile_html" || { echo "FAIL: the latest exchange should expose its current action inline"; exit 1; }
 grep -q 'data-live-action' <<<"$mobile_html" || { echo "FAIL: the inline current action should open its full work history"; exit 1; }
 grep -q 'flex: 0 0 auto' <<<"$mobile_html" || { echo "FAIL: visible conversation sequences should grow the transcript scroll surface"; exit 1; }
@@ -334,6 +335,9 @@ print("ok mobile steering and interrupt")
 PY
 
 PYTHONPATH="$SCR" python3 - "$P" <<'PY'
+# 이중 실행 가드는 **세션(sid) 단위**다. 워크트리에 다른 에이전트가 살아 있다는 사실만으로는
+# 막지 않는다 — 워크트리 하나에 세션이 여럿(터미널·데스크톱 앱·모바일)이기 때문.
+# (02d3707 이 판정을 sid → root 로 넓히면서 데스크톱/코덱스 세션 이어받기까지 차단됐다.)
 from pathlib import Path
 import sys
 import marina_mobile as mm
@@ -341,19 +345,24 @@ import marina_mobile as mm
 root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
-mm._root_has_live_agent = lambda root_arg, live_cwds: True
-mm.term_open = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("duplicate resume opened"))
+mm._root_has_live_agent = lambda root_arg, live_cwds: True    # 워크트리엔 '다른' 에이전트가 살아 있다
+mm.agents_payload = lambda value, refresh=False: [{
+    "source": "claude", "sid": "other-session-0002", "status": "working",
+}, {
+    "source": "codex", "sid": "codex-session-0001", "status": "idle",
+}]
+opens = []
+mm.term_open = lambda *args, **kwargs: opens.append(kwargs) or {"tid": "resumed", "reused": False}
 
-try:
-    mm.mobile_send({
-        "root": str(root),
-        "target": {"type": "agent", "source": "codex", "sid": "codex-session-0001"},
-        "text": "do not overlap",
-    })
-    raise AssertionError("mobile accepted a session already running outside Marina")
-except ValueError as exc:
-    assert "다른 앱" in str(exc), exc
-print("ok mobile blocks external duplicate resume")
+out = mm.mobile_send({
+    "root": str(root),
+    "target": {"type": "agent", "source": "codex", "sid": "codex-session-0001"},
+    "text": "이어서 부탁해",
+})
+assert out == {"ok": True, "tid": "resumed", "opened": True}, out
+assert opens and opens[0].get("agent_sid") == "codex-session-0001", opens
+assert opens[0].get("agent_prompt") == "이어서 부탁해", opens
+print("ok mobile resumes a dormant session even when the worktree has another live agent")
 PY
 
 PYTHONPATH="$SCR" python3 - "$P" <<'PY'

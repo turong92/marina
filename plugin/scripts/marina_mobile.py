@@ -713,7 +713,13 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
                     _clear_pending_session_settings(root, source, sid)
                 delivery = _deliver_agent_input(tid, source, text, str(body.get("delivery") or ""))
                 return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
-            if _root_has_live_agent(root, _live_agent_cwds()) or _native_agent_active(root, source, sid):
+            # 이중 실행 가드는 **세션(sid) 단위**다. 워크트리 단위(_root_has_live_agent)로 판정하면
+            # 같은 워크트리에 다른 세션(터미널·데스크톱 앱)이 하나라도 살아 있다는 이유로 이어받기가
+            # 통째로 막힌다 — "워크트리=세션 1:1" 은 상태 표시엔 맞아도 전송 타게팅엔 성립하지 않는다
+            # (워크트리 하나에 터미널·데스크톱·모바일 세션이 공존한다).
+            # 남은 구멍: marina 밖에서 **유휴로** 살아있는 동일 세션은 트랜스크립트가 working 이 아니라
+            # 여기서 못 걸러진다(이어받으면 이중 실행). 그건 sid↔pid 를 훅으로 등록해야 정확해진다.
+            if _native_agent_active(root, source, sid):
                 raise ValueError("이 세션은 다른 앱이나 터미널에서 실행 중입니다. 완료된 뒤 다시 보내주세요")
             saved = mobile_pending_session_settings(root, source, sid)
             model = str(body.get("model") if "model" in body else saved["model"])
