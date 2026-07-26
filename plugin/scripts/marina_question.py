@@ -8,12 +8,15 @@ Claude Code 는 pending AskUserQuestion 을 답하기 전엔 트랜스크립트�
 
 fail-open: 어떤 예외든 exit 0(에이전트 흐름 방해 금지).
 """
+from __future__ import annotations
+
 import json
 import os
 import re
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 MAX_INPUT = 256 * 1024
 _SID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{2,80}")
@@ -26,6 +29,50 @@ def _questions_dir() -> Path:
 
 def _state_file(sid: str) -> Path:
     return _questions_dir() / f"claude-{sid}.json"
+
+
+def _text_of(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    return ""
+
+
+def _normalize_questions(raw: Any) -> list | None:
+    """Best-effort coercion of ``tool_input.questions`` into a non-empty list.
+
+    질문 형식이 이상해도(리스트가 아니거나, 항목에 header/options 가 없어도) 모바일이 최소한
+    질문 원문 텍스트라도 보여줄 수 있게 정규화한다. 정말 아무것도 없을 때만 None(=skip).
+    """
+    if raw is None:
+        return None
+    items = raw if isinstance(raw, list) else [raw]
+    normalized: list = []
+    for item in items:
+        if isinstance(item, dict):
+            if not item:
+                continue  # 완전히 빈 dict — 뽑아낼 게 없다
+            question_text = _text_of(item.get("question"))
+            if not question_text:
+                for key in ("text", "prompt", "header", "label", "title"):
+                    fallback = _text_of(item.get(key))
+                    if fallback:
+                        item = dict(item)
+                        item["question"] = fallback
+                        break
+            normalized.append(item)
+        elif isinstance(item, str):
+            text = item.strip()
+            if text:
+                normalized.append({"question": text})
+        elif item is not None:
+            try:
+                text = json.dumps(item, ensure_ascii=False)
+            except Exception:
+                text = str(item)
+            text = (text or "").strip()
+            if text and text not in ("null", "{}", "[]", '""'):
+                normalized.append({"question": text})
+    return normalized or None
 
 
 def main() -> int:
@@ -44,9 +91,11 @@ def main() -> int:
         event = str(payload.get("hook_event_name") or "")
         target = _state_file(sid)
         if event == "PreToolUse":
-            tool_input = payload.get("tool_input") or {}
-            questions = tool_input.get("questions")
-            if not isinstance(questions, list) or not questions:
+            tool_input = payload.get("tool_input")
+            if not isinstance(tool_input, dict):
+                tool_input = {}
+            questions = _normalize_questions(tool_input.get("questions"))
+            if not questions:
                 return 0
             directory = _questions_dir()
             directory.mkdir(parents=True, exist_ok=True)

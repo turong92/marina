@@ -87,6 +87,14 @@
       render();
       if (typeof openAgentTerminal === 'function') openAgentTerminal(entry.root, entry);
     }
+    function patchInboxItem(b, item) {
+      const meta = AGENT_STATUS_META[item.status] || AGENT_STATUS_META.idle;
+      const read = agentInboxRead.has(item.eventId);
+      b.className = `agent-inbox-item${read ? ' read' : ' unread'}`;
+      b.innerHTML = `<span class="wt-dot ${meta.dot}" aria-hidden="true"></span>
+        <span class="agent-src ${item.source === 'codex' ? 'codex' : 'claude'}">${item.source === 'codex' ? 'CX' : 'CC'}</span>
+        <span class="agent-inbox-copy"><b>${escapeHtml(item.title || item.sid)}</b><small>${escapeHtml(meta.label)} · ${escapeHtml(relTime(item.statusTs || item.ts))}</small></span>`;
+    }
     function renderAgentInbox() {
       const button = document.getElementById('agentInboxBtn');
       const count = document.getElementById('agentInboxCount');
@@ -101,21 +109,23 @@
       button.setAttribute('aria-expanded', agentInboxOpen ? 'true' : 'false');
       panel.hidden = !agentInboxOpen;
       if (!agentInboxOpen) return;
-      let lastProject = null;
-      panel.innerHTML = entries.length ? entries.map(item => {
-        const project = item.projectLabel || 'Project';
-        const group = project !== lastProject ? `<div class="agent-inbox-group">${escapeHtml(project)}</div>` : '';
-        lastProject = project;
-        const meta = AGENT_STATUS_META[item.status] || AGENT_STATUS_META.idle;
-        const read = agentInboxRead.has(item.eventId);
-        return `${group}<button class="agent-inbox-item${read ? ' read' : ' unread'}" data-agent-inbox-id="${escapeHtml(item.eventId)}">
-          <span class="wt-dot ${meta.dot}" aria-hidden="true"></span>
-          <span class="agent-src ${item.source === 'codex' ? 'codex' : 'claude'}">${item.source === 'codex' ? 'CX' : 'CC'}</span>
-          <span class="agent-inbox-copy"><b>${escapeHtml(item.title || item.sid)}</b><small>${escapeHtml(meta.label)} · ${escapeHtml(relTime(item.statusTs || item.ts))}</small></span>
-        </button>`;
-      }).join('') : '<div class="agent-inbox-empty">확인할 에이전트 작업이 없습니다.</div>';
-      panel.querySelectorAll('[data-agent-inbox-id]').forEach(item => {
-        item.onclick = event => { event.stopPropagation(); openAgentInboxItem(item.dataset.agentInboxId); };
+      if (entries.length === 0) {
+        panel.innerHTML = '<div class="agent-inbox-empty">확인할 에이전트 작업이 없습니다.</div>';
+        return;
+      }
+      // 아이템 = agentInboxEntries(); key = eventId. 그룹 헤더 없이 각 항목을 flat 한
+      // agent-inbox-item 버튼으로 렌더(reconcile 로 노드/포커스/캐럿 보존).
+      reconcile(panel, entries, {
+        key: item => item.eventId,
+        create: item => {
+          const b = document.createElement('button');
+          b.className = 'agent-inbox-item';
+          b.dataset.agentInboxId = item.eventId;
+          b.onclick = event => { event.stopPropagation(); openAgentInboxItem(b.dataset.agentInboxId); };
+          patchInboxItem(b, item);
+          return b;
+        },
+        patch: patchInboxItem,
       });
     }
 

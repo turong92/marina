@@ -220,7 +220,67 @@
       return url ? `<a href="${url}" target="_blank" rel="noopener" title="게이트웨이 — 호스트 브라우저로 열기">${escapeHtml(url.replace(/^https?:\/\//, '').replace(/\/$/, ''))} ↗</a>` : '';
     }
 
-    function updateServiceStates() {   // 부분 패치 경로 — render() 와 같은 DOM 계약(wt-dot·sect-counts·mono-port·hov-acts)
+    // ── 서비스 행/에이전트 행 in-place 패치 — poll 경로(updateServiceStates)와 reconcile 경로(patchCard) 공용 단일 로직.
+    // render() 없이 라이브 값만 덮는다: 노드를 재사용하므로 열린 ⋯메뉴(body 싱글턴)·입력·포커스가 산다.
+    function patchServiceRow(card, session, svc) {   // 한 서비스 행의 상태(dot·port·rss·title·uptime·tail·acts)만 갱신
+      const row = card.querySelector(`[data-service-key="${CSS.escape(`${session.root}::${svc.service}`)}"]`);
+      if (!row) return;
+      if (row.classList.contains('disabled')) return;   // 미attach subrepo 의 서비스 — 라이브 상태로 덮지 않음
+      const st = svcState(svc);
+      const dot = row.querySelector('.wt-dot');
+      if (dot) { dot.className = `wt-dot ${STATE_META[st].dot}`; dot.title = STATE_META[st].title; }
+      const port = row.querySelector('[data-port]');
+      if (port) { port.textContent = portText(svc); port.title = portTitle(svc); }
+      const memory = serviceMemoryMeta(svc);
+      const memoryEl = row.querySelector('[data-rss]');
+      if (memoryEl) { memoryEl.textContent = memory.current; memoryEl.title = memory.title; }
+      const baseTitle = row.classList.contains('svc-opt')
+        ? '옵션 서비스 — 시작 그룹(x-marina.startGroup) 밖. 필요하면 ▶ 로 개별 시작'
+        : '클릭하면 이 서비스의 로그를 우측에 표시';
+      row.title = serviceRowTitle(svc, baseTitle);
+      const up = row.querySelector('[data-uptime]');
+      if (up) up.textContent = svc.running ? relTime(svc.logTs) : '';
+      const tail = row.querySelector('[data-tail]');
+      if (tail) tail.textContent = tailVisible(svc) ? svc.logTail : '';
+      const acts = row.querySelector('[data-svc-acts]');
+      if (acts && !acts.querySelector('button:disabled')) fillSvcActs(acts, session, svc);   // 진행 중(disabled) 버튼은 덮지 않음
+    }
+    // A1 — AGENTS 행 라이브 상태(dot·label·행 상태클래스·relTime·preview·접힘요약). 행 순서는 상위(patchCard/render)가
+    // agents 배열 순서로 그리므로 index 로 신선한 agent 에 매핑해 renderAgentRow 와 동일 계약으로 덮는다.
+    function patchAgentRows(card, agents, isExpanded) {
+      const agentsCounts = card.querySelector('[data-agents-counts]');
+      if (agentsCounts) agentsCounts.innerHTML = isExpanded ? '' : agentsSummary(agents);
+      card.querySelectorAll('[data-agent-row]').forEach((row, i) => {
+        const agent = agents[i];
+        if (!agent) return;
+        const state = agentState(agent);
+        const meta = AGENT_STATUS_META[state] || AGENT_STATUS_META.idle;
+        const ts = agent.statusTs || agent.ts;
+        row.dataset.agentTs = ts || '';
+        row.className = row.className.replace(/\bagent-(working|blocked|waiting|completed|failed|idle)\b/g, `agent-${state}`);
+        const dot = row.querySelector('.wt-dot');
+        if (dot) { dot.className = `wt-dot ${meta.dot}`; dot.title = meta.title; }
+        const labelEl = row.querySelector('.agent-state-label');
+        if (labelEl) labelEl.textContent = meta.label;
+        const relEl = row.querySelector('[data-agent-relts]');
+        if (relEl) relEl.textContent = relTime(ts);
+        const tailEl = row.querySelector('.svc-tail');
+        if (tailEl && agent.preview) { tailEl.textContent = agent.preview; tailEl.title = agent.preview; }
+      });
+    }
+    // 행 클릭 = 터미널 attach(오르카), '대화' = 읽기 전용 뷰어(openAgentTranscript) — agents 재구성 후 재배선.
+    function wireAgentRows(container, session, agents) {
+      container.querySelectorAll('[data-agent-row][data-agent-sid]').forEach((row, i) => {
+        const agent = agents.filter(a => a.sid)[i];
+        row.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTerminal === 'function') openAgentTerminal(session.root, agent); };
+        const peek = row.querySelector('[data-agent-peek]');
+        if (peek) peek.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTranscript === 'function') openAgentTranscript(session, agent); };
+      });
+    }
+
+    // poll passive 경로 — 구조는 불변(app-6 load 가 signature 로 갈라 여기로 옴)이므로 라이브 값만 in-place 로 덮는다.
+    // reconcile 경로(patchCard)와 행/에이전트 패치 로직을 공유한다(단일 소스).
+    function updateServiceStates() {
       for (const session of sessions) {
         const card = document.querySelector(`[data-root="${CSS.escape(session.root)}"]`);
         if (!card) continue;
@@ -233,59 +293,10 @@
         if (whySlot) { whySlot.innerHTML = whyLines(session); wireWhyLinks(whySlot, session); }
         const cardActs = card.querySelector('[data-card-acts]');
         if (cardActs && !cardActs.querySelector('button:disabled')) fillCardActs(cardActs, session, services);
-        for (const svc of session.services) {
-          const row = card.querySelector(`[data-service-key="${CSS.escape(`${session.root}::${svc.service}`)}"]`);
-          if (!row) continue;
-          if (row.classList.contains('disabled')) continue;   // 미attach subrepo 의 서비스 — 라이브 상태로 덮지 않음
-          const st = svcState(svc);
-          const dot = row.querySelector('.wt-dot');
-          if (dot) { dot.className = `wt-dot ${STATE_META[st].dot}`; dot.title = STATE_META[st].title; }
-          const port = row.querySelector('[data-port]');
-          if (port) { port.textContent = portText(svc); port.title = portTitle(svc); }
-          const memory = serviceMemoryMeta(svc);
-          const memoryEl = row.querySelector('[data-rss]');
-          if (memoryEl) { memoryEl.textContent = memory.current; memoryEl.title = memory.title; }
-          const baseTitle = row.classList.contains('svc-opt')
-            ? '옵션 서비스 — 시작 그룹(x-marina.startGroup) 밖. 필요하면 ▶ 로 개별 시작'
-            : '클릭하면 이 서비스의 로그를 우측에 표시';
-          row.title = serviceRowTitle(svc, baseTitle);
-          const up = row.querySelector('[data-uptime]');
-          if (up) up.textContent = svc.running ? relTime(svc.logTs) : '';
-          const tail = row.querySelector('[data-tail]');
-          if (tail) tail.textContent = tailVisible(svc) ? svc.logTail : '';
-          const acts = row.querySelector('[data-svc-acts]');
-          if (acts && !acts.querySelector('button:disabled')) fillSvcActs(acts, session, svc);
-        }
-        // A1 — AGENTS 행은 render() 없이 여기서 신선하게 유지한다. 구조 시그니처가 표시상태 필드(status/statusTs/
-        // preview/ts)를 전부 제외하므로(app-3-util worktreeStructureSig) 이 5s 부분 패치가 그 값들의 유일한 갱신
-        // 경로다 — 상태 변화에 full render 를 돌리지 않아 열린 메뉴·입력·포커스가 보존된다. 행 순서는 render() 가
-        // agents 배열 순서로 그리므로(순서 변화는 시그니처에 잡혀 재구성됨) index 로 신선한 agent 에 매핑해
-        // dot·label·행 상태클래스·relTime·preview 를 renderAgentRow 와 동일 계약으로 덮는다.
+        for (const svc of session.services) patchServiceRow(card, session, svc);
         const wt = worktreeData.find(w => w.root === session.root);
         const agents = wt?.agents || [];
-        if (agents.length) {
-          const agentsCounts = card.querySelector('[data-agents-counts]');
-          if (agentsCounts) agentsCounts.innerHTML = expandedRoots.has(session.root) ? '' : agentsSummary(agents);
-          const rows = card.querySelectorAll('[data-agent-row]');
-          rows.forEach((row, i) => {
-            const agent = agents[i];
-            if (!agent) return;
-            const state = agentState(agent);
-            const meta = AGENT_STATUS_META[state] || AGENT_STATUS_META.idle;
-            const ts = agent.statusTs || agent.ts;
-            row.dataset.agentTs = ts || '';
-            // 행 상태 클래스(agent-working/agent-blocked…) 교체 — renderAgentRow 만 세팅하던 것을 in-place 로.
-            row.className = row.className.replace(/\bagent-(working|blocked|waiting|completed|failed|idle)\b/g, `agent-${state}`);
-            const dot = row.querySelector('.wt-dot');
-            if (dot) { dot.className = `wt-dot ${meta.dot}`; dot.title = meta.title; }
-            const labelEl = row.querySelector('.agent-state-label');
-            if (labelEl) labelEl.textContent = meta.label;
-            const relEl = row.querySelector('[data-agent-relts]');
-            if (relEl) relEl.textContent = relTime(ts);
-            const tailEl = row.querySelector('.svc-tail');
-            if (tailEl && agent.preview) { tailEl.textContent = agent.preview; tailEl.title = agent.preview; }
-          });
-        }
+        if (agents.length) patchAgentRows(card, agents, expandedRoots.has(session.root));
       }
       renderSelection();
     }
@@ -295,13 +306,11 @@
     // A4 — 워크트리 생성 성공 직후 app-5d 가 세팅 → root 로 새 카드(main 아님)를 2s 하이라이트.
     let pendingFlashRoot = null;
 
+    // render() 는 카드 리스트를 공유 reconcile(app-0b)로 넣는다 — 노드를 root-key 로 재사용하고 바뀐 슬롯만 patchCard 가
+    // 갱신하므로, 폴 render 중에도 편집 중인 별칭 input 노드가 파괴되지 않아 포커스·캐럿·미저장 값이 살아있다.
+    // (구 defer 가드·focusout flush·replaceChildren 원자교체를 모두 대체.)
     function render() {
       const sessionsEl = document.getElementById('sessions');
-      // 카드는 detached fragment 에 쌓아 마지막에 replaceChildren 로 원자 교체한다 — innerHTML='' 후 append 하던
-      // 방식은 매 render(토글·구조변화)마다 리스트를 빈 상태로 만들었다 다시 채워 카드가 깜빡이고, 다른 카드의
-      // 열린 드롭다운·포커스가 소실됐다(빈 순간이 없어야 함).
-      const frag = document.createDocumentFragment();
-
       const wtByRoot = new Map(worktreeData.map(w => [w.root, w]));
       // 등록 프로젝트 목록 — 선택 보정(선택이 사라졌으면 첫 프로젝트로 폴백)
       const projectIds = [...new Set(worktreeData.map(w => w.projectId))];
@@ -347,138 +356,24 @@
       const visibleScoped = scopedSessions.filter(s =>
         wtSourceFilter === 'all' || isMainOf(s) || s.source === wtSourceFilter);
       const SRC_LABEL = { claude: 'Claude', codex: 'Codex' };
+      // reconcile 항목 — 소스 그룹 라벨을 pseudo-item({__group})으로 카드 사이에 인터리브한다. reconcile 이 #sessions 의
+      // 자식 전체를 소유하므로, 라벨을 별도 형제로 append 하면 지워진다 → 반드시 items 배열에 key 를 붙여 함께 넣는다.
+      const items = [];
       let prevSrcGroup = null;
       for (const session of visibleScoped) {
         // 전체 뷰 그룹 라벨 — main 이후 소스가 바뀌는 지점마다 (Claude (7) / Codex (2))
         if (bothSources && wtSourceFilter === 'all' && !isMainOf(session)) {
           const g = SRC_LABEL[session.source] ? session.source : 'etc';
-          if (g !== prevSrcGroup) {
-            prevSrcGroup = g;
-            const label = document.createElement('div');
-            label.className = 'src-group-label';
-            label.innerHTML = `<span class="src-chip ${g}">${SRC_LABEL[g] || '기타'}</span><span class="src-cnt">${srcCounts[g] ?? ''}</span>`;
-            frag.appendChild(label);
-          }
+          if (g !== prevSrcGroup) { prevSrcGroup = g; items.push({ __group: g }); }
         }
-        const card = document.createElement('div');
-        const isExpanded = expandedRoots.has(session.root);
-        const wt = wtByRoot.get(session.root);
-        // 위험 신호만 칩으로 — 정보성 깃 지표(✎·+·↑)와 캐시는 깃/변경 탭·⋯ 메뉴로 이동(카드 다이어트, 형 피드백 2026-07-13)
-        const riskPills = [];
-        // 카드 제목 = alias → Claude 세션 타이틀 → 최신 커밋 제목 → 해시. 해시는 제목과 다를 때만 보조줄로.
-        // main 체크아웃은 "작업 세션"이 아니라 통합본 → 커밋제목 폴백 없이 'main'(id) 유지.
-        const isMainCard = session.source === 'main' || wt?.isMain;
-        const displayTitle = session.alias || (isMainCard ? '' : (wt?.sessionTitle || wt?.headSubject)) || session.id;
-        const showSub = displayTitle !== session.id;
-        if (wt && !wt.isMain && wt.verdict === 'stale') {
-          riskPills.push('<span class="pill-stat danger" title="clean · 미머지 0 · 7일↑ 미활동 — 지워도 안전">삭제 권장</span>');
-        }
-        // 브랜치는 카드에서 뺀다(형 확정 2026-07-13) — 깃 탭이 담당(레인 칩·필터). 카드엔 "불일치 경고"만 칩으로,
-        // 클릭하면 깃 탭을 그 워크트리 브랜치로 필터해 연다. (미러 관례상 브랜치명은 id 파생 = 중복 소음이었음)
-        const domBranch = dominantBranch(wt);
-        const offMain = (session.source === 'main') && Object.values(wt?.branches || {}).some(branch => branch !== 'main');
-        // 대표와 다른 레포 목록 — "루트만 다름"(root=claude/<id>, 서브레포=feature/x 관례)은 정상이라 경고 제외
-        const offRepos = Object.entries(wt?.branches || {}).filter(([, b]) => b !== domBranch).map(([r]) => r);
-        const mixed = offRepos.length > 0 && !(offRepos.length === 1 && offRepos[0] === wt?.projectLabel);
-        const fullMap = Object.entries(wt?.branches || {}).map(([repo, branch]) => `${repo}=${branch}`).join(' · ');
-        if (mixed || offMain) {
-          riskPills.push(`<button class="pill-stat danger" data-branch-git title="체크아웃 브랜치 — ${escapeHtml(fullMap)} · 커밋이 의도와 다른 곳으로 갈 수 있음. 클릭=깃 탭">⚠ 브랜치 불일치 ⎇</button>`);
-        }
-        const subBits = showSub ? [escapeHtml(session.id)] : [];
-        if (session.webPortConflictWith?.length) {
-          const conflictText = `⚠ 포트 충돌: ${session.webPortConflictWith.map(escapeHtml).join(', ')}`;
-          riskPills.push(`<span class="pill-stat danger" title="다른 세션과 포트가 겹칩니다">${conflictText}</span>`);
-        }
-        // Orca 문법 카드 (콘솔 스펙 D3) — 상태점+제목+우측메타+hover 클러스터 / SERVICES 접힘 섹션 / 원인줄·URL 상시
-        const services = visibleServices(session);
-        const cst = cardState(services);
-        const agents = wt?.agents || [];   // A1 — 이 워크트리의 Claude/Codex 세션 (백엔드가 최대 3개, ts 내림차순으로 이미 자름)
-        const rightMeta = [attachSummary(session, wt), metaTime(wt)].filter(Boolean).join(' · ');
-        const gwLine = gatewayLine(session);
-        card.className = `session ${isExpanded ? '' : 'collapsed'}${isMainCard ? ' is-main' : ''}`;
-        card.dataset.root = session.root;
-        if (wt) card.dataset.projectId = wt.projectId;
-        card.innerHTML = `
-          <div class="session-head">
-            <div class="session-title">
-              <div class="session-main">
-                <div class="alias-row">
-                  <span class="wt-dot ${STATE_META[cst].dot}"></span>
-                  <span class="alias-display" data-alias-display title="클릭해서 별칭 수정 (세션 타이틀 위에 덮어씀)">${escapeHtml(displayTitle)}</span>
-                  <input class="alias-input" data-alias value="${escapeHtml(session.alias || '')}" placeholder="별칭" aria-label="session alias" title="별칭 — Enter 로 저장" hidden />
-                </div>
-                ${subBits.length ? `<div class="sid-sub">${subBits.join(' <span class="sub-sep">·</span> ')}</div>` : ''}
-              </div>
-              <span class="wt-right">${escapeHtml(rightMeta)}</span>
-              <span class="hov-acts" data-card-acts></span>
-            </div>
-            ${riskPills.length ? `<div class="risk-row">${riskPills.join('')}</div>` : ''}
-          </div>
-          ${services.length ? `<div class="sect-label" data-sect-toggle>${isExpanded ? '▾' : '▸'} SERVICES (${services.length})
-            <span class="sect-counts">${isExpanded ? '' : stateCounts(services)}</span></div>` : ''}
-          <div class="svc-list"></div>
-          ${agents.length ? `<div class="sect-label" data-agents-toggle title="이 워크트리에서 작업한 Claude/Codex 세션(최근 7일) — 라벨 클릭=펼치기(SERVICES 와 동일), 행 클릭=대화 열기">${isExpanded ? '▾' : '▸'} AGENTS (${agents.length})
-            <span class="sect-counts" data-agents-counts>${isExpanded ? '' : agentsSummary(agents)}</span></div>
-          <div class="svc-list agents-list"${isExpanded ? '' : ' hidden'}>${agents.map(renderAgentRow).join('')}</div>` : ''}
-          <div data-why-slot>${whyLines(session)}</div>
-          ${gwLine ? `<div class="card-url">${gwLine}</div>` : ''}
-          <div class="root" title="${escapeHtml(session.root)}">${escapeHtml(tailPath(session.root))}</div>
-        `;
-        card.querySelector('.session-head').onclick = (event) => {
-          if (event.target.closest('button,input,select,summary,details,[data-alias-display]')) return;
-          toggleExpandedRoot(session.root);
-          render();
-        };
-        const aliasInput = card.querySelector('[data-alias]');
-        aliasInput.onkeydown = (event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            aliasInput.blur();
-          }
-        };
-        const aliasDisplay = card.querySelector('[data-alias-display]');
-        aliasDisplay.onclick = () => {
-          aliasDisplay.hidden = true;
-          aliasInput.hidden = false;
-          aliasInput.focus();
-          aliasInput.select();
-        };
-        aliasInput.onblur = () => {
-          if ((session.alias || '') !== aliasInput.value.trim()) {
-            saveAlias(session, aliasInput).catch(alert);
-          } else {
-            aliasInput.hidden = true;
-            aliasDisplay.hidden = false;
-          }
-        };
-        const branchGitBtn = card.querySelector('[data-branch-git]');   // 불일치 칩 → 깃 탭(그 워크트리 브랜치 필터)
-        if (branchGitBtn) branchGitBtn.onclick = (e) => { e.stopPropagation(); openGitTab(session.root, wt?.branches?.[wt?.projectLabel] || domBranch); };   // 깃 탭 기본 레포탭=root — root 레포 브랜치로 필터
-        if (!isMainCard) wireCardDrag(card, session);   // 카드 순서는 D&D 로 내가 정함(main 은 고정)
-        // hover 클러스터(토글+⋯) — 구 상시 스트립/툴바 대체 (콘솔 스펙 D7). link 진입은 ⋯ 메뉴로 이동(카드 다이어트)
-        fillCardActs(card.querySelector('[data-card-acts]'), session, services);
-        wireWhyLinks(card.querySelector('[data-why-slot]'), session);
-        const sectToggle = card.querySelector('[data-sect-toggle]');
-        if (sectToggle) sectToggle.onclick = (e) => {
-          e.stopPropagation();
-          toggleExpandedRoot(session.root);
-          render();
-        };
-        const agentsToggle = card.querySelector('[data-agents-toggle]');   // SERVICES 라벨과 동일 — 카드 펼침 토글(형 통일)
-        if (agentsToggle) agentsToggle.onclick = (e) => {
-          e.stopPropagation();
-          toggleExpandedRoot(session.root);
-          render();
-        };
-        card.querySelectorAll('[data-agent-row][data-agent-sid]').forEach((row, i) => {   // 행 클릭 = 터미널 attach(오르카), '대화' = 읽기 전용 뷰어
-          const agent = agents.filter(a => a.sid)[i];
-          row.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTerminal === 'function') openAgentTerminal(session.root, agent); };
-          const peek = row.querySelector('[data-agent-peek]');
-          if (peek) peek.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTranscript === 'function') openAgentTranscript(session, agent); };
-        });
-        renderServiceTree(card.querySelector('.svc-list'), session, wt);
-        frag.appendChild(card);
+        items.push(session);
       }
-      sessionsEl.replaceChildren(frag);   // 원자 교체 — 빈 순간 없음(깜빡임·드롭다운 소실 방지)
+      const ctx = { wtByRoot, srcCounts };
+      reconcile(sessionsEl, items, {
+        key: item => item.__group ? 'grp:' + item.__group : item.root,
+        create: item => item.__group ? createGroupLabel(item, ctx) : createCard(item, ctx),
+        patch: (el, item) => { if (item.__group) patchGroupLabel(el, item, ctx); else patchCard(el, item, ctx); },
+      });
       const collapseBtn = document.getElementById('collapseAll');
       collapseBtn.textContent = expandedRoots.size ? '⇈' : '⇊';
       collapseBtn.dataset.tip = expandedRoots.size ? '세션 카드 모두 접기' : '세션 카드 모두 펼치기';
@@ -503,6 +398,203 @@
       renderSelection();
     }
 
+    // ── 소스 그룹 라벨(Claude/Codex) — reconcile pseudo-item. ──
+    function createGroupLabel(item, ctx) {
+      const label = document.createElement('div');
+      label.className = 'src-group-label';
+      patchGroupLabel(label, item, ctx);
+      return label;
+    }
+    function patchGroupLabel(el, item, ctx) {
+      const g = item.__group;
+      const SRC_LABEL = { claude: 'Claude', codex: 'Codex' };
+      el.innerHTML = `<span class="src-chip ${g}">${SRC_LABEL[g] || '기타'}</span><span class="src-cnt">${ctx.srcCounts[g] ?? ''}</span>`;
+    }
+
+    // ── 카드 골격 생성 + 안정 이벤트 배선(카드당 1회). 상태의존 내용은 patchCard 가 채운다(초기 paint + 매 render). ──
+    // 안정 핸들러(세션헤드 토글·별칭 편집)는 card._session(patchCard 가 매번 최신으로 세팅)을 읽는다 — 노드가 재사용되므로
+    // create 시점 세션 객체를 클로저에 가두면 폴 이후 stale 이 된다(root 만 쓰는 D&D 는 root 가 불변이라 안전).
+    function createCard(session, ctx) {
+      const card = document.createElement('div');
+      card.className = 'session collapsed';
+      card.innerHTML = `
+        <div class="session-head">
+          <div class="session-title">
+            <div class="session-main">
+              <div class="alias-row">
+                <span class="wt-dot stop"></span>
+                <span class="alias-display" data-alias-display title="클릭해서 별칭 수정 (세션 타이틀 위에 덮어씀)"></span>
+                <input class="alias-input" data-alias placeholder="별칭" aria-label="session alias" title="별칭 — Enter 로 저장" hidden />
+              </div>
+              <div data-sub-slot></div>
+            </div>
+            <span class="wt-right"></span>
+            <span class="hov-acts" data-card-acts></span>
+          </div>
+          <div data-risk-slot></div>
+        </div>
+        <div data-svc-label-slot></div>
+        <div class="svc-list" data-svc-list></div>
+        <div data-agents-slot></div>
+        <div data-why-slot></div>
+        <div data-url-slot></div>
+        <div class="root"></div>`;
+      card.querySelector('.session-head').onclick = (event) => {
+        if (event.target.closest('button,input,select,summary,details,[data-alias-display]')) return;
+        toggleExpandedRoot(card._session.root);
+        render();
+      };
+      const aliasInput = card.querySelector('[data-alias]');
+      const aliasDisplay = card.querySelector('[data-alias-display]');
+      aliasInput.onkeydown = (event) => { if (event.key === 'Enter') { event.preventDefault(); aliasInput.blur(); } };
+      aliasDisplay.onclick = () => { aliasDisplay.hidden = true; aliasInput.hidden = false; aliasInput.focus(); aliasInput.select(); };
+      aliasInput.onblur = () => {
+        const s = card._session;
+        if ((s.alias || '') !== aliasInput.value.trim()) {
+          saveAlias(s, aliasInput).catch(alert);   // 저장 후 load→render→patchCard 가 display 모드로 되돌린다
+        } else {
+          aliasInput.hidden = true;
+          aliasDisplay.hidden = false;
+        }
+      };
+      const wt = ctx.wtByRoot.get(session.root);
+      if (!(session.source === 'main' || wt?.isMain)) wireCardDrag(card, session);   // main 은 고정, 나머지는 D&D
+      patchCard(card, session, ctx);   // 초기 상태 채움
+      return card;
+    }
+
+    // ── 카드 상태의존 갱신(초기 paint + 매 render). 구조가 바뀐 슬롯만 다시 만들고, 라이브 값은 in-place 로 덮는다.
+    // 규율: 포커스된 [data-alias] input 은 노드/값을 건드리지 않는다(편집 중 보존) — 노드 재사용이라 focus·caret·미저장값이 산다.
+    function patchCard(card, session, ctx) {
+      card._session = session;
+      const wt = (ctx && ctx.wtByRoot) ? ctx.wtByRoot.get(session.root) : worktreeData.find(w => w.root === session.root);
+      const isExpanded = expandedRoots.has(session.root);
+      const isMainCard = session.source === 'main' || wt?.isMain;
+      const services = visibleServices(session);
+      const agents = wt?.agents || [];   // A1 — 이 워크트리의 Claude/Codex 세션 (백엔드가 최대 3개, ts 내림차순으로 이미 자름)
+
+      // 카드 className — 임시 상태 클래스(선택·flash·드래그)는 보존(renderSelection 이 이후 selected-card 를 재확정)
+      const keep = ['selected-card', 'flash', 'dragging', 'drop-above', 'drop-below'].filter(c => card.classList.contains(c));
+      card.className = ('session ' + (isExpanded ? '' : 'collapsed ') + (isMainCard ? 'is-main ' : '') + keep.join(' ')).replace(/\s+/g, ' ').trim();
+      card.dataset.root = session.root;
+      if (wt) card.dataset.projectId = wt.projectId;
+
+      // 상태점(카드 종합)
+      const headDot = card.querySelector('.session-head .wt-dot');
+      if (headDot) headDot.className = `wt-dot ${STATE_META[cardState(services)].dot}`;
+
+      // 제목/별칭 — display 는 항상 갱신. 편집 중(input 포커스)이면 input 값·토글을 보존, 아니면 display 모드로 되돌린다.
+      const displayTitle = session.alias || (isMainCard ? '' : (wt?.sessionTitle || wt?.headSubject)) || session.id;
+      const aliasDisplay = card.querySelector('[data-alias-display]');
+      if (aliasDisplay) aliasDisplay.textContent = displayTitle;
+      const aliasInput = card.querySelector('[data-alias]');
+      if (aliasInput && document.activeElement !== aliasInput) {
+        aliasInput.value = session.alias || '';
+        aliasInput.hidden = true;
+        if (aliasDisplay) aliasDisplay.hidden = false;
+      }
+      const subSlot = card.querySelector('[data-sub-slot]');
+      if (subSlot) subSlot.innerHTML = (displayTitle !== session.id) ? `<div class="sid-sub">${escapeHtml(session.id)}</div>` : '';
+
+      // 우측 메타(attach n/m · idleDays)
+      const wtRight = card.querySelector('.wt-right');
+      if (wtRight) wtRight.textContent = [attachSummary(session, wt), metaTime(wt)].filter(Boolean).join(' · ');
+
+      // 카드 액션(토글+⋯) — 진행 중(disabled) 버튼은 덮지 않음
+      const cardActs = card.querySelector('[data-card-acts]');
+      if (cardActs && !cardActs.querySelector('button:disabled')) fillCardActs(cardActs, session, services);
+
+      // 위험 칩(삭제권장·브랜치 불일치·포트 충돌) — 위험 신호만 칩으로(카드 다이어트, 형 피드백 2026-07-13)
+      const riskSlot = card.querySelector('[data-risk-slot]');
+      if (riskSlot) {
+        const riskPills = [];
+        if (wt && !wt.isMain && wt.verdict === 'stale') {
+          riskPills.push('<span class="pill-stat danger" title="clean · 미머지 0 · 7일↑ 미활동 — 지워도 안전">삭제 권장</span>');
+        }
+        const domBranch = dominantBranch(wt);
+        const offMain = (session.source === 'main') && Object.values(wt?.branches || {}).some(branch => branch !== 'main');
+        const offRepos = Object.entries(wt?.branches || {}).filter(([, b]) => b !== domBranch).map(([r]) => r);
+        const mixed = offRepos.length > 0 && !(offRepos.length === 1 && offRepos[0] === wt?.projectLabel);
+        const fullMap = Object.entries(wt?.branches || {}).map(([repo, branch]) => `${repo}=${branch}`).join(' · ');
+        if (mixed || offMain) {
+          riskPills.push(`<button class="pill-stat danger" data-branch-git title="체크아웃 브랜치 — ${escapeHtml(fullMap)} · 커밋이 의도와 다른 곳으로 갈 수 있음. 클릭=깃 탭">⚠ 브랜치 불일치 ⎇</button>`);
+        }
+        if (session.webPortConflictWith?.length) {
+          const conflictText = `⚠ 포트 충돌: ${session.webPortConflictWith.map(escapeHtml).join(', ')}`;
+          riskPills.push(`<span class="pill-stat danger" title="다른 세션과 포트가 겹칩니다">${conflictText}</span>`);
+        }
+        riskSlot.innerHTML = riskPills.length ? `<div class="risk-row">${riskPills.join('')}</div>` : '';
+        const branchGitBtn = riskSlot.querySelector('[data-branch-git]');   // 불일치 칩 → 깃 탭(그 워크트리 브랜치 필터)
+        if (branchGitBtn) branchGitBtn.onclick = (e) => { e.stopPropagation(); openGitTab(session.root, wt?.branches?.[wt?.projectLabel] || domBranch); };
+      }
+
+      // SERVICES 섹션 라벨 — 셰브런·개수·접힘요약은 값싸고 포커스 없음 → 매 patch 재작성
+      const svcLabelSlot = card.querySelector('[data-svc-label-slot]');
+      if (svcLabelSlot) {
+        svcLabelSlot.innerHTML = services.length
+          ? `<div class="sect-label" data-sect-toggle>${isExpanded ? '▾' : '▸'} SERVICES (${services.length})
+            <span class="sect-counts">${isExpanded ? '' : stateCounts(services)}</span></div>`
+          : '';
+        const sectToggle = svcLabelSlot.querySelector('[data-sect-toggle]');
+        if (sectToggle) sectToggle.onclick = (e) => { e.stopPropagation(); toggleExpandedRoot(session.root); render(); };
+      }
+
+      // 서비스 트리 — 구조(서비스 구성·subrepo attach/펼침)가 바뀔 때만 재구성, 아니면 라이브 값만 in-place(진행중 버튼 보존)
+      const svcList = card.querySelector('[data-svc-list]');
+      if (svcList) {
+        const openState = [];
+        for (const [k, v] of subrepoOpen) if (k.indexOf(session.root + '::') === 0) openState.push([k, v]);
+        const svcSig = JSON.stringify({
+          kind: session.kind,
+          uni: wt?.subrepos ?? [],
+          att: wt?.attachedSubrepos ?? (wt?.subrepos ?? []),
+          def: wt?.defaultAttach ?? (wt?.subrepos ?? []),
+          main: !!wt?.isMain,
+          svcs: session.services.filter(s => !isInternalService(s)).map(s => [s.service, s.subrepo || '']),
+          open: openState,
+        });
+        if (card.dataset.svcSig !== svcSig) {
+          renderServiceTree(svcList, session, wt);
+          card.dataset.svcSig = svcSig;
+        } else {
+          for (const svc of session.services) patchServiceRow(card, session, svc);
+        }
+      }
+
+      // AGENTS 섹션 — 구조(sid/순서/제목) 또는 펼침이 바뀔 때만 재구성, 아니면 라이브 값만 in-place
+      const agentsSlot = card.querySelector('[data-agents-slot]');
+      if (agentsSlot) {
+        if (!agents.length) {
+          if (agentsSlot.innerHTML) agentsSlot.innerHTML = '';
+          card.dataset.agentsKey = '';
+        } else {
+          const agentsKey = JSON.stringify([isExpanded, agents.map(a => [a.sid, a.source, a.title])]);
+          if (card.dataset.agentsKey !== agentsKey) {
+            agentsSlot.innerHTML = `<div class="sect-label" data-agents-toggle title="이 워크트리에서 작업한 Claude/Codex 세션(최근 7일) — 라벨 클릭=펼치기(SERVICES 와 동일), 행 클릭=대화 열기">${isExpanded ? '▾' : '▸'} AGENTS (${agents.length})
+            <span class="sect-counts" data-agents-counts>${isExpanded ? '' : agentsSummary(agents)}</span></div>
+          <div class="svc-list agents-list"${isExpanded ? '' : ' hidden'}>${agents.map(renderAgentRow).join('')}</div>`;
+            const agentsToggle = agentsSlot.querySelector('[data-agents-toggle]');   // SERVICES 라벨과 동일 — 카드 펼침 토글(형 통일)
+            if (agentsToggle) agentsToggle.onclick = (e) => { e.stopPropagation(); toggleExpandedRoot(session.root); render(); };
+            wireAgentRows(agentsSlot, session, agents);
+            card.dataset.agentsKey = agentsKey;
+          } else {
+            patchAgentRows(card, agents, isExpanded);
+          }
+        }
+      }
+
+      // 원인 줄(상시)
+      const whySlot = card.querySelector('[data-why-slot]');
+      if (whySlot) { whySlot.innerHTML = whyLines(session); wireWhyLinks(whySlot, session); }
+
+      // 게이트웨이 URL(콘솔 스펙 D3 고정 슬롯)
+      const urlSlot = card.querySelector('[data-url-slot]');
+      if (urlSlot) { const gwLine = gatewayLine(session); urlSlot.innerHTML = gwLine ? `<div class="card-url">${gwLine}</div>` : ''; }
+
+      // root 경로(끝 2세그먼트만, 전체는 툴팁)
+      const rootEl = card.querySelector('.root');
+      if (rootEl) { rootEl.textContent = tailPath(session.root); rootEl.title = session.root; }
+    }
 
     function renderSubrepoHead(name, o) {
       const chev = o.count ? `<span class="chev">${o.open ? '▾' : '▸'}</span>` : '<span class="chev"></span>';

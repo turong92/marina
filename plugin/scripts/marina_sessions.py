@@ -6,7 +6,6 @@ import math
 import mmap
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -28,6 +27,7 @@ from marina_paths import ensure_current_log, log_run_payload, read_config, read_
 from marina_compose_svc import _compose_services, _log_tail_line, compose_service_names, compose_service_subrepos, missing_env_vars
 from marina_memory import enrich_session_memory, memory_snapshot
 from marina_agent_events import BLOCKED_REASONS, latest_agent_event
+from marina_term import term_list
 
 def git_output(args: list[str], cwd: Path) -> str:
     return subprocess.check_output(["git", *args], cwd=str(cwd), text=True, stderr=subprocess.STDOUT)
@@ -833,59 +833,165 @@ def agent_belongs_to_root(root: Path, source: str, sid: str, refresh: bool = Fal
         for entry in sessions.get(root_key, [])
     )
 
-_live_sids_cache: tuple[float, set[tuple[str, str]]] = (0.0, set())
+# ── 세션 liveness (작업중/blocked → idle 강등 판정) ─────────────────────────────────────────
+# 정석 신호는 "프로세스의 cwd". 예전엔 `ps command=` 를 shlex 로 파싱해 `claude --resume <sid>` 에서 sid 를
+# 뽑았는데, Claude Code 는 유저 프롬프트를 argv 로 넘겨(claude --resume <sid> <프롬프트>) ps 줄 끝에 임의의
+# 유저 텍스트가 붙는다 — 따옴표(don't/it's/")만 있어도 파싱이 깨져 sid 를 놓치고 작업중 세션이 유휴로 오탐됐다.
+# → 프롬프트 오염된 텍스트에서 sid 를 긁는 방식을 폐기하고, 인자가 전혀 없는 `ps comm=`(실행파일명)로 claude/codex
+#   프로세스를 식별해 그 cwd(=worktree root, marina 는 워크트리=세션 1:1)를 liveness 로 쓴다. 프롬프트 무관.
+
+def _parse_agent_pids(ps_output: str) -> list[str]:
+    # ps -axo pid=,comm= 출력(= "<pid> <실행파일경로>", 인자 없음) → claude/codex 프로세스 pid 목록.
+    # comm 에는 프롬프트/인자가 절대 안 붙으므로 파싱이 유저 입력에 오염되지 않는다(정석).
+    pids: list[str] = []
+    for line in ps_output.splitlines():
+        head, _, comm = line.strip().partition(" ")
+        if not head.isdigit() or not comm.strip():
+            continue
+        if Path(comm.strip()).name in ("claude", "codex"):
+            pids.append(head)
+    return pids
 
 
-def _live_resume_sids(refresh: bool = False) -> set[tuple[str, str]]:
-    # 살아있는 claude/codex resume 프로세스의 (source, sid) — 5s 캐시(세션마다 ps 호출 방지).
-    global _live_sids_cache
+_live_cwds_cache: tuple[float, set[Path]] = (0.0, set())
+
+
+def _live_agent_cwds(refresh: bool = False) -> set[Path]:
+    # 살아있는 claude/codex 프로세스들의 cwd(=worktree root) 집합 — 세션 liveness. 5s 캐시(세션마다 ps 방지).
+    global _live_cwds_cache
     now = time.time()
-    if not refresh and now - _live_sids_cache[0] < 5.0:
-        return _live_sids_cache[1]
-    sids: set[tuple[str, str]] = set()
+    if not refresh and now - _live_cwds_cache[0] < 5.0:
+        return _live_cwds_cache[1]
     try:
-        result = subprocess.run(["ps", "-axo", "command="], check=False,
+        result = subprocess.run(["ps", "-axo", "pid=,comm="], check=False,
                                 capture_output=True, text=True, timeout=1)
     except (OSError, subprocess.SubprocessError):
-        return _live_sids_cache[1]
-    for line in result.stdout.splitlines():
+        return _live_cwds_cache[1]
+    pids = _parse_agent_pids(result.stdout)
+    cwds: set[Path] = set()
+    if pids:
         try:
-            argv = shlex.split(line)
-        except ValueError:
+            out = subprocess.run(["lsof", "-a", "-d", "cwd", "-p", ",".join(pids), "-Fn"],
+                                 check=False, capture_output=True, text=True, timeout=2)
+            for l in out.stdout.splitlines():
+                if l.startswith("n") and l[1:].strip():
+                    try:
+                        cwds.add(Path(l[1:].strip()).resolve())
+                    except OSError:
+                        pass
+        except (OSError, subprocess.SubprocessError):
+            pass
+    _live_cwds_cache = (now, cwds)
+    return cwds
+
+
+_live_tids_cache: tuple[float, dict[tuple[str, str], str]] = (0.0, {})
+
+
+def _live_agent_tids(refresh: bool = False) -> dict[tuple[str, str], str]:
+    # 마리나가 쥔 살아있는 PTY 맵 — (source, sid)→tid, resolve_session_liveness 의 reachable/tid 신호.
+    # term_list() 는 foreground term 마다 ps 를 띄운다(_fg_command) — agents_payload 가 루트마다
+    # 부르면 폴링 한 사이클에 root 수만큼 fan-out 된다. _live_agent_cwds 와 동일한 5s 캐시로 억제.
+    global _live_tids_cache
+    now = time.time()
+    if not refresh and now - _live_tids_cache[0] < 5.0:
+        return _live_tids_cache[1]
+    out: dict[tuple[str, str], str] = {}
+    for t in term_list().get("sessions", []):
+        agent = t.get("agent") if isinstance(t.get("agent"), dict) else None
+        if not agent:
             continue
-        for index, token in enumerate(argv):
-            name = Path(token).name
-            if name not in ("claude", "codex"):
-                continue
-            tail = argv[index + 1:]
-            if name == "codex" and "resume" in tail:
-                for t in tail[tail.index("resume") + 1:]:
-                    if not t.startswith("-"):
-                        sids.add(("codex", t))
-                        break
-            elif name == "claude":
-                for t in tail:
-                    if t.startswith("--resume="):
-                        sids.add(("claude", t[len("--resume="):]))
-                if "--resume" in tail:
-                    ri = tail.index("--resume")
-                    if ri + 1 < len(tail):
-                        sids.add(("claude", tail[ri + 1]))
-    _live_sids_cache = (now, sids)
-    return sids
+        key = (str(agent.get("source") or ""), str(agent.get("sid") or ""))
+        if all(key):
+            out[key] = str(t.get("tid") or "")
+    _live_tids_cache = (now, out)
+    return out
 
 
-def _downgrade_if_dead(item: dict[str, Any], live_sids: set[tuple[str, str]]) -> dict[str, Any]:
-    # 프로세스가 없으면 작업중일 수 없다 — working/blocked 를 idle 로 강등.
-    if item.get("status") in ("working", "blocked") and \
-            (str(item.get("source") or ""), str(item.get("sid") or "")) not in live_sids:
+def _crosses_nested_worktree(root: Path, cwd: Path) -> bool:
+    # root 아래로 내려가는 경로 도중 `.claude/worktrees/` 경계를 넘는지 — marina 워크트리는
+    # 물리적으로 메인 루트 밑에 중첩(<main>/.claude/worktrees/<wt>)되므로, 그 경계를 넘은 cwd 는
+    # main 이 아니라 그 중첩 워크트리에 속한다(방향: root→cwd 로 내려가며 검사).
+    try:
+        rel_parts = cwd.relative_to(root).parts
+    except ValueError:
+        return False
+    for i in range(len(rel_parts) - 1):
+        if rel_parts[i] == ".claude" and rel_parts[i + 1] == "worktrees":
+            return True
+    return False
+
+
+def _root_has_live_agent(root: Path | None, live_cwds: set[Path]) -> bool:
+    # root 자체가 어떤 살아있는 agent 의 cwd 이거나, 그 cwd 를 품고 있으면(서브폴더에서 실행) live —
+    # 단, 그 cwd 가 root 아래 중첩된 워크트리(.claude/worktrees/...) 안이면 제외한다. 그렇지 않으면
+    # 메인 체크아웃 root 가 그 밑 모든 워크트리의 살아있는 세션에 반응해 항상 live 로 오판된다
+    # (메인 세션이 실제로 종료돼도 idle 강등이 안 되는 원인).
+    if root is None:
+        return False
+    for cwd in live_cwds:
+        if cwd == root:
+            return True
+        if root in cwd.parents and not _crosses_nested_worktree(root, cwd):
+            return True
+    return False
+
+
+def _downgrade_if_dead(item: dict[str, Any], live_cwds: set[Path] | None = None,
+                       root: Path | None = None) -> dict[str, Any]:
+    # 프로세스가 없으면 작업중일 수 없다 — root 에 살아있는 claude/codex 프로세스가 없으면 working/blocked 를 idle 로 강등.
+    if item.get("status") in ("working", "blocked") and not _root_has_live_agent(root, live_cwds or set()):
         item["status"] = "idle"
         item["statusReason"] = "프로세스 없음"
     return item
 
 
+def resolve_session_liveness(
+    source: str,
+    sid: str,
+    root: Path | None,
+    *,
+    native: dict[str, Any],
+    event: dict[str, Any] | None,
+    live_cwds: set[Path],
+    live_tids: dict[tuple[str, str], str],
+) -> dict[str, Any]:
+    """Single canonical liveness resolver — status + reachable + tid, all from given signals.
+
+    여러 호출부가 각자 status(merge_agent_status)·강등(_downgrade_if_dead)·reachable(터미널
+    맵 조회)을 따로 계산하던 걸 하나로 캐논화한다. 신호(native/event/live_cwds/live_tids)는
+    전부 인자로 받는 순수 함수 — 내부에서 ps/lsof/파일을 새로 읽지 않는다(테스트/캐시 용이).
+
+    - status: merge_agent_status(native, event) 로 기본 산출(S4 트랜스크립트 vs S5 훅 이벤트,
+      ts 로 병합, idle_prompt→waiting 포함).
+    - D3: 그 status 가 working/blocked 인데 root 에 살아있는 agent 가 없으면(_root_has_live_agent)
+      idle+"프로세스 없음" 으로 강등 — _downgrade_if_dead 와 동일 판정, 여기로 캐논화.
+    - reachable/tid: (source, sid) 가 live_tids(마리나가 살아있는 PTY 를 쥔 세션 맵)에 있으면
+      reachable=True, tid=그 값; 아니면 False/"".
+    - D4: status 가 completed 인데 reachable(살아있는 PTY 존재)이면 waiting 으로 승격 — 세션은
+      끝났지만 프로세스가 입력을 기다리는 중. merge_agent_status 의 죽은 terminal_active 경로를
+      여기서 대체(캐논 위치는 이 함수).
+    """
+    merged = merge_agent_status(native, event)
+    status = merged.get("status")
+    reason = merged.get("statusReason")
+
+    if status in ("working", "blocked") and not _root_has_live_agent(root, live_cwds):
+        status = "idle"
+        reason = "프로세스 없음"
+
+    reachable = (source, sid) in live_tids
+    tid = live_tids.get((source, sid), "") if reachable else ""
+
+    if status == "completed" and reachable:
+        status = "waiting"
+
+    return {"status": status, "reachable": reachable, "tid": tid, "reason": reason}
+
+
 def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
     # 카드 AGENTS 섹션 — 워크트리당 최대 3개(ts 내림차순), Claude 만 preview(마지막 assistant 텍스트 80자) 부여.
+    # status 는 resolve_session_liveness 로 캐논화(S4 native + S5 event 병합 → D3 강등 → D4 승격 한 경로).
     claude_by_root = claude_agent_sessions(refresh)
     codex_by_root = codex_agent_sessions(refresh)
     key = str(root)
@@ -894,29 +1000,41 @@ def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
     agents: list[dict[str, Any]] = []
     event_home = Path.home()
     canonical_root = root.resolve()
+    live_cwds = _live_agent_cwds(refresh)   # 정석: claude/codex 프로세스 cwd→root 로 liveness(프롬프트 파싱 없음)
+    live_tids = _live_agent_tids(refresh)   # 마리나가 쥔 살아있는 PTY — (source,sid)→tid, 5s 캐시(루트 fan-out 억제)
     for e in entries[:AGENTS_MAX_PER_ROOT]:
         item: dict[str, Any] = {"source": e["source"], "title": e["title"], "ts": int(e["ts"])}
-        cli_sid = e.get("cliSessionId")
-        if e["source"] == "claude" and cli_sid:
-            item["sid"] = cli_sid   # 행 클릭=대화 열기 (agent-transcript) 식별자
-            jpath = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{cli_sid}.jsonl"
-            if jpath.is_file():
-                item.update(agent_status(jpath, "claude", sid=cli_sid, root=canonical_root,
-                                         event_home=event_home))
+        sid = ""
+        jpath: Path | None = None
+        if e["source"] == "claude" and e.get("cliSessionId"):
+            sid = e["cliSessionId"]
+            item["sid"] = sid   # 행 클릭=대화 열기 (agent-transcript) 식별자
+            candidate = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{sid}.jsonl"
+            if candidate.is_file():
+                jpath = candidate
+        elif e["source"] == "codex" and e.get("sid"):
+            sid = e["sid"]
+            item["sid"] = sid
+            jpath = Path(e["path"])
+        if jpath is not None:
+            native = _native_agent_status(jpath, e["source"])
+            event = latest_agent_event(e["source"], sid, canonical_root, home=event_home) if sid else None
+            merged = merge_agent_status(native, event)   # statusTs 는 resolver 가 안 실어 여기서 따로.
+            if merged.get("statusTs") is not None:
+                item["statusTs"] = merged["statusTs"]
+            resolved = resolve_session_liveness(e["source"], sid, canonical_root, native=native,
+                                                event=event, live_cwds=live_cwds, live_tids=live_tids)
+            item["status"] = resolved["status"]
+            if resolved.get("reason"):
+                item["statusReason"] = resolved["reason"]
+            if e["source"] == "claude":
                 preview = _jsonl_last_assistant_preview(jpath)
                 if preview:
                     from marina_logtext import redact_text   # 카드 payload 도 로그와 같은 마스킹(codex P2)
                     item["preview"] = redact_text(preview)
-        elif e["source"] == "codex" and e.get("sid"):
-            item["sid"] = e["sid"]
-            item.update(agent_status(Path(e["path"]), "codex", sid=e["sid"], root=canonical_root,
-                                     event_home=event_home))
         if "status" not in item:
             item.update({"status": "idle", "statusTs": int(e["ts"])})
         agents.append(item)
-    live = _live_resume_sids(refresh)
-    for item in agents:
-        _downgrade_if_dead(item, live)
     return agents
 
 
@@ -1251,7 +1369,10 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                 if obj.get("operation") == "enqueue":
                     qtext = _safe_activity_text(obj.get("content"))
                     key = qtext.strip()
-                    if key and key not in seen_queue:
+                    # 주입 래퍼(<task-notification>·<system-reminder>·[SYSTEM NOTIFICATION])는 작업 중 도착하면
+                    # queue-operation 으로 기록되는데, 이건 사용자가 친 큐 메시지가 아니라 하네스 주입이다. user/assistant
+                    # 경로의 _is_injected_user 필터가 여기엔 안 걸려 그동안 "대기 중" 큐 말풍선으로 새어 문신됐다(형 지적).
+                    if key and key not in seen_queue and not key.lstrip().startswith(_CLAUDE_INJECT_PREFIXES):
                         seen_queue.add(key)
                         timeline.append(with_runtime(
                             {"id": f"{source}:queue:{offset}", "kind": "message", "role": "user", "text": qtext,

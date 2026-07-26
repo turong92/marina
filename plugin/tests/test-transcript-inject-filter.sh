@@ -98,12 +98,14 @@ st2 = native_status(
 assert st2["status"] == "completed", f"interrupt 후 completed 아님: {st2}"
 print("OK interrupt 마커: 렌더 숨김 + 상태 completed")
 
-# --- 죽은 세션(프로세스 없음) working/blocked → idle 강등 ---
-live = {("claude", "alive-1")}
-assert ms._downgrade_if_dead({"source": "claude", "sid": "alive-1", "status": "working"}, live)["status"] == "working", "살아있는 세션 강등됨"
-assert ms._downgrade_if_dead({"source": "claude", "sid": "dead-1", "status": "working"}, live)["status"] == "idle", "죽은 working 강등 안 됨"
-assert ms._downgrade_if_dead({"source": "claude", "sid": "dead-1", "status": "blocked"}, live)["status"] == "idle", "죽은 blocked 강등 안 됨"
-assert ms._downgrade_if_dead({"source": "claude", "sid": "dead-1", "status": "completed"}, live)["status"] == "completed", "completed 는 강등 대상 아님"
+# --- 죽은 세션(프로세스 없음) working/blocked → idle 강등: root 에 살아있는 claude/codex cwd 유무로 판정 ---
+alive_root = ms.Path("/tmp/wt-alive")
+dead_root = ms.Path("/tmp/wt-dead")
+live_cwds = {alive_root}   # alive_root 에서 도는 프로세스가 있음
+assert ms._downgrade_if_dead({"source": "claude", "sid": "a", "status": "working"}, live_cwds, alive_root)["status"] == "working", "살아있는 root 세션 강등됨"
+assert ms._downgrade_if_dead({"source": "claude", "sid": "d", "status": "working"}, live_cwds, dead_root)["status"] == "idle", "죽은 working 강등 안 됨"
+assert ms._downgrade_if_dead({"source": "claude", "sid": "d", "status": "blocked"}, live_cwds, dead_root)["status"] == "idle", "죽은 blocked 강등 안 됨"
+assert ms._downgrade_if_dead({"source": "claude", "sid": "d", "status": "completed"}, live_cwds, dead_root)["status"] == "completed", "completed 는 강등 대상 아님"
 print("OK 죽은 세션 working→idle 강등")
 PY
 echo "PASS test-transcript-inject-filter"

@@ -29,7 +29,7 @@ os.environ["CLAUDE_PROJECTS_DIR"] = proj_dir
 os.environ["CODEX_HOME"] = codex_home
 sys.path.insert(0, scr)
 import marina_sessions as ms
-ms._downgrade_if_dead = lambda item, live_sids: item  # 이 테스트는 프로세스 생존 무관 — 강등 비활성(강등은 test-transcript-inject-filter 유닛)
+ms._root_has_live_agent = lambda *a, **k: True  # 이 테스트는 프로세스 생존 무관 — resolve_session_liveness 의 D3 강등 비활성(강등은 test-transcript-inject-filter 유닛)
 from marina_agent_events import record_hook_event
 from pathlib import Path
 

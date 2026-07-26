@@ -17,6 +17,8 @@
     let termOpening = 0;                        // termNewShell 한복판인 셸 수 — 그 안에선 termPlace 가 어차피 그린다
                                                 // (boolean 이면 먼저 끝난 open 의 finally 가 남의 probe 창을 열어둔 채 푼다)
     let termNewWtSig = null;                    // 마지막으로 그린 새 셸 드롭다운 내용 — 같으면 DOM 을 안 건드린다
+    let termRenderDeferred = false;             // 새 셸 select 가 열려(포커스) 있으면 termRender 를 미룬다 — 네이티브 팝업은
+                                                // 페이지의 어떤 DOM mutation/reflow 에도 닫히므로, 열린 동안엔 아무것도 안 그린다(형: "드랍다운 고르는데 사라짐")
     let termSideSig = null;                      // 마지막으로 그린 사이드바 목록 내용 — 같으면 innerHTML 재구성 안 함(열린 드롭다운 보존)
     const termSideWKey = 'marinaTermSideW';     // 사이드바 폭(px) — 0/없음이면 CSS 기본(200px)
     let termSideW = Number(localStorage.getItem(termSideWKey)) || 0;
@@ -246,10 +248,17 @@
       };
       rail.ondblclick = () => { termSideW = 0; localStorage.removeItem(termSideWKey); sideEl.style.width = ''; };
       if (termSideW) sideEl.style.width = termSideW + 'px';   // 복원
-      pane.querySelector('[data-term-new-wt]').onchange = (e) => {
+      const newWtSel = pane.querySelector('[data-term-new-wt]');
+      newWtSel.onchange = (e) => {
         const root = e.target.value;
         e.target.value = '';
+        e.target.blur();               // 선택 완료 = 팝업 닫힘 → defer 해제되도록 포커스 내림(이후 termNewShell 렌더가 통과)
         if (root) termNewShell(root, null);
+      };
+      // 드롭다운을 닫고(선택/취소) 포커스가 빠지면, 그동안 미뤄둔 termRender 를 한 번 flush 한다.
+      newWtSel.onblur = () => {
+        if (!termRenderDeferred) return;
+        setTimeout(() => { if (termRenderDeferred && document.activeElement !== newWtSel) termRender(); }, 0);
       };
     }
 
@@ -390,6 +399,9 @@
       const opts = (arr) => arr.map(w => `<option value="${escapeHtml(w.root)}">${escapeHtml(disp(w))}</option>`).join('');
       const html = `<option value="">＋ 새 셸…</option>${opts(mine)}${rest.length ? `<optgroup label="다른 프로젝트">${opts(rest)}</optgroup>` : ''}`;
       if (termNewWtSig === html) return;
+      // 열린(포커스) 드롭다운을 innerHTML 로 갈아엎으면 팝업이 닫힌다 — sig 를 올리지 않고 미뤄, 닫힌 뒤 렌더에서 갱신.
+      // (termRender 상단 defer 로도 대부분 걸리지만, activity/open 경로에서 직접 호출될 때를 위한 이중 방어)
+      if (document.activeElement === sel) return;
       termNewWtSig = html;
       sel.innerHTML = html;
       sel.value = '';
@@ -397,7 +409,12 @@
 
     function termRender() {
       if (!termPane) return;
-      termEnsureShell(termPane);
+      termEnsureShell(termPane);   // 골격은 1회만 — 이미 있으면 select 를 안 건드리고 즉시 반환
+      // 새 셸 select 의 네이티브 드롭다운이 열려 있으면(=포커스) 이번 렌더를 통째로 미룬다. 리스트/그리드/옵션 어느
+      // 하나라도 DOM 을 만지면 그 reflow 가 팝업을 닫기 때문(형: "드랍다운 누르고 고르는데 사라짐"). blur 때 flush.
+      const newWtSel = termPane.querySelector('[data-term-new-wt]');
+      if (newWtSel && document.activeElement === newWtSel) { termRenderDeferred = true; return; }
+      termRenderDeferred = false;
       // 지금 어느 분할인지 버튼에 표시 — 없으면 형이 4분할 버튼을 눌렀는지 알 방법이 없다
       termPane.querySelectorAll('[data-term-lay]').forEach(b => b.classList.toggle('on', b.dataset.termLay === termLayout));
       termSweepDead();

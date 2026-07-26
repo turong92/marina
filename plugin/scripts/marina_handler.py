@@ -40,7 +40,7 @@ from marina_update import _serving_sha, update_claude, update_codex, update_stat
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
 from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_interrupt, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
-from marina_sessions import activate_agent_payloads, agent_activity, agent_belongs_to_root, agent_transcript, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_sessions import agent_activity, agent_belongs_to_root, agent_transcript, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
@@ -560,14 +560,6 @@ class Handler(BaseHTTPRequestHandler):
             titles = claude_session_titles(refresh)       # Claude 데스크톱 (20s 캐시)
             codex_titles = codex_session_titles(refresh)  # Codex (60s 캐시)
             roots = [root for root in discover_all_roots(refresh) if self._policy().can_root(principal, root)]
-            live_agents_by_root: dict[str, set[tuple[str, str]]] = {}
-            for term in term_list().get("sessions", []):
-                agent = term.get("agent") if isinstance(term.get("agent"), dict) else None
-                if not agent:
-                    continue
-                key = (str(agent.get("source") or ""), str(agent.get("sid") or ""))
-                if all(key):
-                    live_agents_by_root.setdefault(str(term.get("root") or ""), set()).add(key)
             # 깃 배지 계산은 root 당 ~0.3s(전부 git subprocess 대기)라 직렬로는 root 수에 비례 —
             # root 끼리 독립이니 병렬 프리컴퓨트(실측 14 roots 4.4s→0.8s). 오버레이는 캐시 히트라 직렬 유지.
             with ThreadPoolExecutor(max_workers=8) as pool:
@@ -581,7 +573,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif str(root) in codex_titles:
                     info["sessionTitle"] = codex_titles[str(root)]
                     info["titleSource"] = "codex"
-                agents = activate_agent_payloads(agents_payload(root, refresh), live_agents_by_root.get(str(root), set()))
+                agents = agents_payload(root, refresh)   # status/reachable/승격 다 resolve_session_liveness 경유(activate_agent_payloads 는 이제 이 경로엔 불필요)
                 if principal is not None and principal.user.role != "admin":
                     visible_agents = []
                     for agent in agents:

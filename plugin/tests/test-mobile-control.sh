@@ -341,7 +341,7 @@ import marina_mobile as mm
 root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
-mm._agent_process_active = lambda source, sid: True
+mm._root_has_live_agent = lambda root_arg, live_cwds: True
 mm.term_open = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("duplicate resume opened"))
 
 try:
@@ -364,7 +364,7 @@ import marina_mobile as mm
 root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
-mm._agent_process_active = lambda source, sid: False
+mm._root_has_live_agent = lambda root_arg, live_cwds: False
 mm.agents_payload = lambda value, refresh=False: [{
     "source": "codex", "sid": "codex-session-0001", "status": "working",
 }, {
@@ -706,6 +706,37 @@ assert "catalog" not in agent, agent
 assert "term:shell-term" in keys, keys
 assert "term:agent-term" not in keys, keys
 print("ok mobile hides agent runner terms")
+PY
+
+PYTHONPATH="$SCR" python3 - "$P" <<'PY'
+# detached(재시작 후 디스크에서 복원된) PTY 는 tid 는 있어도 fd 가 없어 term_input 이 400 —
+# controllable 이 True 로 보이면 안 된다(Plan 2 잔여 지적).
+from pathlib import Path
+import sys
+import marina_mobile as mm
+
+root = Path(sys.argv[1]).resolve()
+mm.discover_all_roots = lambda refresh=False: [root]
+mm.worktree_info = lambda root_arg, refresh=False: {"id": "proj", "projectLabel": "proj", "sessionTitle": "title"}
+mm.agents_payload = lambda root_arg, refresh=False: [{
+    "source": "codex",
+    "sid": "sid0001",
+    "title": "Agent",
+    "preview": "agent preview",
+    "ts": 10,
+}]
+mm.agent_transcript = lambda root_arg, source, sid: {"turns": [{"role": "assistant", "text": "agent preview"}]}
+mm.agent_activity = lambda root_arg, source, sid: []
+mm._native_catalog = lambda root_arg, source: {"skills": [], "agents": []}
+mm.term_list = lambda: {"sessions": [
+    {"tid": "adopted-term", "root": str(root), "agent": {"source": "codex", "sid": "sid0001"},
+     "preview": "sent text", "created": 20, "alive": True, "detached": True},
+]}
+state = mm.mobile_state()
+agent = next(s for s in state["sessions"] if s["key"].startswith("agent:codex:"))
+assert agent["tid"] == "adopted-term", agent
+assert agent["controllable"] is False, agent
+print("ok mobile detached term is not controllable")
 PY
 
 activity_url="$(python3 -c 'import sys,urllib.parse; print(sys.argv[1] + "/mobile/api/activity?" + urllib.parse.urlencode({"root":sys.argv[2],"source":"codex","sid":"sid0001"}))' "$b" "$P")"

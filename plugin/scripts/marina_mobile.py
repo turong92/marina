@@ -6,7 +6,6 @@ import json
 import os
 import re
 import secrets
-import shlex
 import subprocess
 import threading
 import time
@@ -15,7 +14,15 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
-from marina_sessions import CLAUDE_MODEL_CATALOG, activate_agent_payloads, agent_runtime_settings, agents_payload, safe_root, worktree_info
+from marina_sessions import (
+    CLAUDE_MODEL_CATALOG,
+    _live_agent_cwds,
+    _root_has_live_agent,
+    agent_runtime_settings,
+    agents_payload,
+    safe_root,
+    worktree_info,
+)
 from marina_state import MARINA_HOME, PORT
 from marina_term import _agent_cli, term_input, term_list, term_open
 
@@ -422,6 +429,7 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
     worktrees: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []
     terms = term_list().get("sessions", [])
+    live_cwds = _live_agent_cwds(refresh)   # S1 — root 별 externalActive 판정(ps command= 파싱 없음)
     for root in discover_all_roots(refresh):
         try:
             info = worktree_info(root, refresh)
@@ -430,11 +438,7 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                 (str(t["agent"].get("source") or ""), str(t["agent"].get("sid") or "")): t
                 for t in root_terms if isinstance(t.get("agent"), dict) and bool(t.get("alive", True))
             }
-            active_agents = {
-                (str(t["agent"].get("source") or ""), str(t["agent"].get("sid") or ""))
-                for t in root_terms if isinstance(t.get("agent"), dict)
-            }
-            agents = activate_agent_payloads(agents_payload(root, refresh), active_agents)
+            agents = agents_payload(root, refresh)   # status/reachable/승격 다 resolve_session_liveness 경유(activate_agent_payloads 는 이제 이 경로엔 불필요)
             title = info.get("sessionTitle") or info.get("headSubject") or ""
             label = " · ".join(str(x) for x in (info.get("alias"), title, info.get("projectLabel"), info.get("id")) if x)
             worktrees.append({
@@ -454,6 +458,11 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                 pending_question = mobile_pending_question(source, sid)
                 # pending 질문 = 에이전트가 '작업 실행 중'이 아니라 '답을 기다리는 중' → blocked(응답 필요)로 표시(형 지적).
                 status = "blocked" if pending_question else (agent.get("status") or "idle")
+                agent_term = agent_terms.get((source, sid)) or {}
+                # detached(재시작 후 디스크에서 복원된) PTY 는 tid 는 있어도 fd 가 없어 term_input 이 400 —
+                # 버튼이 눌리는 것처럼 보이면 안 되니 controllable 은 "살아있는 non-detached tid" 만 True.
+                agent_tid = str(agent_term.get("tid") or "")
+                controllable = bool(agent_tid) and not bool(agent_term.get("detached"))
                 sessions.append({
                     "key": f"agent:{source}:{sid}:{root}",
                     "kind": "agent",
@@ -468,9 +477,9 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                     "status": status,
                     "statusTs": agent.get("statusTs") or agent.get("ts") or 0,
                     "statusReason": "pending_question" if pending_question else (agent.get("statusReason") or ""),
-                    "tid": str((agent_terms.get((source, sid)) or {}).get("tid") or ""),
-                    "controllable": bool((agent_terms.get((source, sid)) or {}).get("tid")),
-                    "externalActive": _agent_process_active(source, sid),
+                    "tid": agent_tid,
+                    "controllable": controllable,
+                    "externalActive": _root_has_live_agent(root, live_cwds),
                     "settings": {
                         "current": agent_runtime_settings(root, source, sid),
                         "pending": mobile_pending_session_settings(root, source, sid),
@@ -543,40 +552,6 @@ def _live_agent_tid(root: Path, source: str, sid: str) -> str:
         ):
             return str(item.get("tid") or "")
     return ""
-
-
-def _agent_process_active(source: str, sid: str) -> bool:
-    """Find a resume process that outlived Marina's in-memory PTY registry."""
-    if source not in ("claude", "codex") or not sid:
-        return False
-    try:
-        result = subprocess.run(
-            ["ps", "-axo", "command="], check=False, capture_output=True,
-            text=True, timeout=1,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    for line in result.stdout.splitlines():
-        try:
-            argv = shlex.split(line)
-        except ValueError:
-            continue
-        for index, token in enumerate(argv):
-            if Path(token).name != source:
-                continue
-            tail = argv[index + 1:]
-            if source == "codex" and "resume" in tail:
-                resume_index = tail.index("resume")
-                if sid in tail[resume_index + 1:]:
-                    return True
-            if source == "claude":
-                if any(token == f"--resume={sid}" for token in tail):
-                    return True
-                if "--resume" in tail:
-                    resume_index = tail.index("--resume")
-                    if resume_index + 1 < len(tail) and tail[resume_index + 1] == sid:
-                        return True
-    return False
 
 
 def _native_agent_active(root: Path, source: str, sid: str) -> bool:
@@ -738,7 +713,7 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
                     _clear_pending_session_settings(root, source, sid)
                 delivery = _deliver_agent_input(tid, source, text, str(body.get("delivery") or ""))
                 return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
-            if _agent_process_active(source, sid) or _native_agent_active(root, source, sid):
+            if _root_has_live_agent(root, _live_agent_cwds()) or _native_agent_active(root, source, sid):
                 raise ValueError("이 세션은 다른 앱이나 터미널에서 실행 중입니다. 완료된 뒤 다시 보내주세요")
             saved = mobile_pending_session_settings(root, source, sid)
             model = str(body.get("model") if "model" in body else saved["model"])
@@ -875,6 +850,7 @@ _MOBILE_HTML = r"""<!doctype html>
     :root { --st-run: #1f9d6b; --st-boot: #c07f14; --st-err: #d13438; --st-stop: #8a8f98; }
     .session-status { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
     .session-status-label { font-size: 10px; font-weight: 850; color: #747d8b; white-space: nowrap; }
+    .session-question-badge { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 999px; background: #fff0e0; color: #a8571a; font-size: 10px; font-weight: 900; white-space: nowrap; }
     .wt-dot { flex: none; width: 13px; height: 13px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; line-height: 1; box-sizing: border-box; }
     .wt-dot.run { border: 1.5px solid var(--st-run); color: var(--st-run); }
     .wt-dot.run::after { content: "✓"; }
@@ -922,8 +898,11 @@ _MOBILE_HTML = r"""<!doctype html>
     .turn.user { align-self: flex-end; background: #dcecff; }
     .turn.output { width: 100%; max-width: none; background: #111827; color: #e5e7eb; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
     .turn.pending { opacity: .82; }
-    .turnState { margin-top: 5px; color: #687083; font-size: 10px; font-weight: 750; }
+    .turnState { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; color: #687083; font-size: 10px; font-weight: 750; }
     .turnState.failed { color: #c43d3d; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+    .pendingActions { display: inline-flex; gap: 5px; }
+    .pendingActionBtn { display: inline-flex; align-items: center; width: auto; min-height: 19px; padding: 1px 7px; border: 1px solid #c8d1dc; border-radius: 999px; background: #fff; color: #526176; font-size: 9px; font-weight: 800; line-height: 1.6; text-decoration: none; cursor: pointer; }
+    .pendingActionBtn[data-pending-cancel] { border-color: #e3b8b8; color: #a22b2b; }
     .queuedTag { display: inline-block; margin-bottom: 4px; padding: 1px 6px; border-radius: 6px; background: rgba(11, 99, 206, .12); color: #0b63ce; font-size: 9px; font-weight: 850; }
     .queuedTag.consumed { background: rgba(107, 114, 128, .14); color: #6b7280; }
     .turnMeta { align-self: flex-start; margin-top: -3px; color: #747d8b; font-size: 9px; font-weight: 800; }
@@ -1049,6 +1028,7 @@ _MOBILE_HTML = r"""<!doctype html>
       .questionText { color: #e8edf4; }
       .questionOpt { background: #1c2431; border-color: #3a4453; }
       .questionOptLabel { color: #e8edf4; }
+      .session-question-badge { background: #3a2712; color: #f3b578; }
       .session-card { border-color: #303846; }
       .session-subtitle, .usageLabel { color: #a5adba; }
       .usagePanel { border-color: #303846; background: #171d27; }
@@ -1062,6 +1042,8 @@ _MOBILE_HTML = r"""<!doctype html>
       .activityGroup[open] > summary, .activityItem { border-color: #303846; }
       .activityItem > summary { color: #e3e7ed; }
       .turnMeta, .liveActionMeta { color: #a5adba; }
+      .pendingActionBtn { background: #1c2431; border-color: #3a4453; color: #c4ccd8; }
+      .pendingActionBtn[data-pending-cancel] { border-color: #5a3535; color: #e39a9a; }
       .liveAction { color: #e3e7ed; }
       .session-preview { color: #d6dbe4; }
       .iconBtn, .servicesBtn { color: #d6dbe4; }
@@ -1333,6 +1315,7 @@ _MOBILE_HTML = r"""<!doctype html>
       inboxRead = new Set(Array.isArray(value) ? value : []);
     } catch (_) { inboxRead = new Set(); }
     const pendingTurns = {};
+    let pendingRecordSeq = 0;   // 대기 레코드 안정 id — 취소/재시도 대상 식별용(pendingTurns 배열 내에서 유일)
     const historyCache = {};
     const activityCache = {};
     const catalogCache = {};
@@ -1444,6 +1427,7 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       showLogin("로그아웃했습니다.");
     }
+    // ESC_HELPERS_START
     function esc(value) {
       return String(value ?? "").replace(/[&<>"']/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[ch]));
     }
@@ -1476,6 +1460,7 @@ _MOBILE_HTML = r"""<!doctype html>
       html += renderInlineMarkdown(text.slice(cursor));
       return html.replace(/\n/g, "<br>");
     }
+    // ESC_HELPERS_END
     function renderActivityCode(value, type) {
       const escaped = esc(String(value ?? ""));
       if (type !== "diff") return escaped;   // diff 활동만 unified-diff 색칠(다른 출력의 +/- 오탐 방지)
@@ -1675,7 +1660,41 @@ _MOBILE_HTML = r"""<!doctype html>
         out.set(text, Math.max(fromTurns.get(text) || 0, fromTimeline.get(text) || 0)));
       return out;
     }
-    function queuePendingTurn(key, text, delivery="pending") {
+    // RECONCILE_PENDING_RECORD_START
+    // 대기열 레코드 하나의 순수 판정(부수효과 없음, 테스트 가능): 제거(null) | 유지(record) | 실패표기.
+    // 우선순위: 소비(isConfirmed) > 유령(ghost, 더 나중 레코드가 확정됨) > tid-liveness(전달받은 PTY 가 죽음).
+    // tid-liveness 는 순수 경과시간 규칙이 아니다 — 살아있는 tid 를 가진 레코드는(긴 턴이라도) 절대 시간만으로 실패 처리하지 않는다.
+    function reconcilePendingRecord(record, {confirmedUsers, latestConfirmedAt, liveTids, now} = {}) {
+      const norm = normUserText(record.text);
+      const confirmedMap = confirmedUsers || new Map();
+      const confirmedKeys = [...confirmedMap.keys()];
+      const containedIn = norm.length >= 6 && confirmedKeys.some(k => k.includes(norm));
+      const confirmedCount = confirmedMap.get(norm) || 0;
+      const isConfirmed = confirmedCount > Number(record.baseline || 0) || containedIn;
+      if (isConfirmed) return null;                                // 정상 소비 → 제거
+      const isGhost = Boolean(latestConfirmedAt && Number(record.createdAt || 0) < Number(latestConfirmedAt || 0));
+      if (isGhost) {
+        const present = confirmedCount > 0 || containedIn;         // 트랜스크립트에 조금이라도 있으면 = 소비됨
+        if (present) return null;                                  // baseline 만 어긋남 → 제거
+        return {...record, failed: true, delivery: "failed"};      // 진짜 미전달 → 실패 표기
+      }
+      const trackedDelivery = record.delivery === "queue" || record.delivery === "steer" || record.delivery === "started";
+      const hasTid = Boolean(record.tid);
+      const tidLive = hasTid && Boolean(liveTids) && liveTids.has(record.tid);
+      const aged = Number(now || 0) - Number(record.createdAt || 0) > 4000;   // send→첫 폴 사이 레이스 방지
+      if (trackedDelivery && hasTid && !tidLive && aged) {
+        return {...record, failed: true, delivery: "failed"};      // 전달 목적지 PTY 가 사라짐(문신) → 자동 실패
+      }
+      return record;                                                // 아직 정상 대기
+    }
+    // state.terms 에서 "입력 가능한" tid 집합만 뽑는다 — detached(재시작 후 디스크에서 복원된 PTY)는
+    // tid 는 살아있어 보여도 fd 가 없어 term_input 이 400 나므로 liveness 판정에서 제외해야
+    // 그쪽으로 큐된 메시지가 tid-liveness 규칙으로 자동 실패(문신 소멸)될 수 있다.
+    function liveTidsFromTerms(terms) {
+      return new Set((terms || []).filter(t => !t.detached).map(t => t.tid).filter(Boolean));
+    }
+    // RECONCILE_PENDING_RECORD_END
+    function queuePendingTurn(key, text, delivery="pending", tid="", target=null, root="") {
       const session = (state.sessions || []).find(item => item.key === key);
       const cached = sessionHistory(session);
       const norm = normUserText(text);
@@ -1683,15 +1702,19 @@ _MOBILE_HTML = r"""<!doctype html>
       const confirmedCount = confirmed.get(norm) || 0;
       const existing = pendingTurns[key] || [];
       const pendingCount = existing.filter(turn => normUserText(turn.text) === norm).length;
-      pendingTurns[key] = existing.concat([{role: "user", text, baseline: confirmedCount + pendingCount, pending: true, delivery, createdAt: Date.now()}]).slice(-12);
+      pendingRecordSeq += 1;
+      pendingTurns[key] = existing.concat([{
+        id: `pend${pendingRecordSeq}`, role: "user", text, baseline: confirmedCount + pendingCount, pending: true,
+        delivery, failed: delivery === "failed", tid: tid || "", createdAt: Date.now(), target: target || null, root: root || "",
+      }]).slice(-12);
     }
-    function selectAgentAfterSend(text, target, delivery="pending") {
+    function selectAgentAfterSend(text, target, delivery="pending", tid="") {
       const root = selectedRoot();
       const current = selectedSession();
       const key = current && sameTarget(current.target, target) ? selectedSessionKey : agentSessionKey(target, root);
       selectedSessionKey = key;
       localStorage.setItem("marinaMobileSession", key);
-      queuePendingTurn(key, text, delivery);
+      queuePendingTurn(key, text, delivery, tid, target, root);
       const value = targetValue(target);
       localStorage.setItem("marinaMobileTarget", value);
       localStorage.setItem(targetKey(root), value);
@@ -1726,12 +1749,12 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function selectReturnedTerm(tid, text, target=null, delivery="pending") {
       if (target && target.type === "agent") {
-        selectAgentAfterSend(text, target, delivery);
+        selectAgentAfterSend(text, target, delivery, tid);
         return;
       }
       const root = selectedRoot();
       const key = ensureLiveTermSession(tid, root, text, target);
-      queuePendingTurn(key, text);
+      queuePendingTurn(key, text, delivery, tid, target || {type: "term", tid}, root);
       const value = targetValue(target || {type: "term", tid});
       localStorage.setItem("marinaMobileTarget", value);
       localStorage.setItem(targetKey(root), value);
@@ -1819,8 +1842,11 @@ _MOBILE_HTML = r"""<!doctype html>
       const meta = sourceMeta[source];
       const sm = session.kind === "agent" ? agentStatusMeta(session.status) : null;
       const statusHtml = sm ? `<span class="session-status" data-session-status><span class="wt-dot ${sm.dot}"></span><span class="session-status-label">${sm.label}</span></span>` : "";
+      // pending AskUserQuestion — 그 세션을 열지 않아도 응답 대기 중임을 리스트에서 바로 알 수 있게.
+      const hasPendingQuestion = Boolean(session.pendingQuestion);
+      const questionBadge = hasPendingQuestion ? `<span class="session-question-badge" data-session-question-badge>&#10067; 질문 대기</span>` : "";
       return `<button class="session-card ${session.key === selectedSessionKey ? "active" : ""}" type="button" data-key="${esc(session.key)}">
-        <span class="session-card-top"><span class="source-badge ${source}">${meta.badge}</span><span class="session-title" data-session-title>${esc(session.title || session.key)}</span>${statusHtml}</span>
+        <span class="session-card-top"><span class="source-badge ${source}">${meta.badge}</span><span class="session-title" data-session-title>${esc(session.title || session.key)}</span>${questionBadge}${statusHtml}</span>
         <span class="session-subtitle" data-session-subtitle>${esc(sessionSubtitle(session))}</span>
         <span class="session-preview" data-session-preview>${esc(session.preview || "(최근 작업 없음)")}</span>
       </button>`;
@@ -2128,7 +2154,10 @@ _MOBILE_HTML = r"""<!doctype html>
       const text = String(item.text || "");
       const role = item.role === "user" ? "user" : item.role === "output" ? "output" : "assistant";
       const {items: attachments, stripped} = extractAttachments(text);
-      const pendingState = item.pending ? `<div class="turnState${item.failed ? " failed" : ""}"${item.failed ? ` data-resend-text="${esc(item.text || "")}"` : ""}>${esc(pendingDeliveryLabel(item.delivery, item.createdAt))}</div>` : "";
+      const pendingActions = item.pending && item.id
+        ? `<span class="pendingActions"><button class="pendingActionBtn" type="button" data-pending-retry="${esc(item.id)}">&#8635; 재시도</button><button class="pendingActionBtn" type="button" data-pending-cancel="${esc(item.id)}">&#10005; 취소</button></span>`
+        : "";
+      const pendingState = item.pending ? `<div class="turnState${item.failed ? " failed" : ""}"${item.failed ? ` data-resend-text="${esc(item.text || "")}"` : ""}><span>${esc(pendingDeliveryLabel(item.delivery, item.createdAt))}</span>${pendingActions}</div>` : "";
       const queuedBadge = item.queued
         ? `<span class="queuedTag${item.queuedConsumed ? " consumed" : ""}">⏱ ${item.queuedConsumed ? "대기열에서 전달됨" : "대기열 · 대기 중"}</span>`
         : "";
@@ -2169,6 +2198,7 @@ _MOBILE_HTML = r"""<!doctype html>
       flush();
       return html.join("");
     }
+    // QUESTION_CARD_START
     function questionsFromActivity(item) {
       if (!item || item.name !== "AskUserQuestion") return null;
       try {
@@ -2181,20 +2211,48 @@ _MOBILE_HTML = r"""<!doctype html>
       return (sections.activities || []).find(item =>
         item.name === "AskUserQuestion" && item.status !== "completed" && questionsFromActivity(item));
     }
+    // 구조화된 카드(헤더/질문문/옵션 버튼)를 만들 재료가 하나도 없을 때, 원문에서 뽑아낼 수 있는
+    // 텍스트(질문/옵션 라벨 등)를 최대한 찾아 평문으로라도 보여주기 위한 헬퍼.
+    function questionFallbackText(raw) {
+      if (raw == null) return "";
+      if (typeof raw === "string") return raw.trim();
+      if (typeof raw === "object") {
+        for (const key of ["question", "text", "prompt", "header", "label", "title"]) {
+          const val = raw[key];
+          if (typeof val === "string" && val.trim()) return val.trim();
+        }
+        if (Array.isArray(raw.options) && raw.options.length) {
+          const labels = raw.options.map(opt => String((opt && (opt.label || opt.value)) || "").trim()).filter(Boolean);
+          if (labels.length) return `선택지: ${labels.join(", ")}`;
+        }
+        try {
+          const text = JSON.stringify(raw);
+          return text && text !== "{}" ? text : "";
+        } catch (e) { return ""; }
+      }
+      return String(raw);
+    }
     function renderQuestionCard(item, interactive) {
       const questions = questionsFromActivity(item);
       if (!questions) return "";
-      const first = questions[0] || {};
-      const options = Array.isArray(first.options) ? first.options : [];
-      const header = first.header ? `<div class="questionHeader">${esc(first.header)}</div>` : "";
-      const q = first.question ? `<div class="questionText">${renderRichText(String(first.question))}</div>` : "";
+      const rawFirst = questions[0];
+      const first = (rawFirst && typeof rawFirst === "object") ? rawFirst : {};
+      const questionText = typeof first.question === "string" && first.question.trim() ? first.question : "";
+      const options = Array.isArray(first.options) ? first.options.filter(opt => opt != null) : [];
+      const header = first.header ? `<div class="questionHeader">${esc(String(first.header))}</div>` : "";
+      const q = questionText ? `<div class="questionText">${renderRichText(String(questionText))}</div>` : "";
       const more = questions.length > 1 ? `<div class="questionMore">외 ${questions.length - 1}개 질문 — 첫 질문에 응답합니다</div>` : "";
       const buttons = options.map((opt, index) => {
-        const label = esc(String(opt.label || opt.value || `옵션 ${index + 1}`));
-        const desc = opt.description ? `<span class="questionOptDesc">${esc(String(opt.description))}</span>` : "";
+        const label = esc(String((opt && (opt.label || opt.value)) || `옵션 ${index + 1}`));
+        const desc = opt && opt.description ? `<span class="questionOptDesc">${esc(String(opt.description))}</span>` : "";
         const attrs = interactive ? `data-answer-option="${index}"` : "disabled";
         return `<button class="questionOpt" type="button" ${attrs}><span class="questionOptLabel">${label}</span>${desc}</button>`;
       }).join("");
+      if (!header && !q && !options.length) {
+        // 구조(헤더/질문문/옵션)를 하나도 못 뽑아낸 경우 — 평문 폴백. 빈 카드는 절대 만들지 않는다.
+        const fallback = questionFallbackText(rawFirst) || "질문을 표시할 수 없습니다(형식 확인 필요)";
+        return `<div class="questionCard"><div class="questionText">${esc(fallback)}</div></div>`;
+      }
       // 기타(직접 입력) — AskUserQuestion 은 항상 자유 입력을 허용한다.
       const other = interactive
         ? `<button class="questionOpt questionOther" type="button" data-answer-other>&#9998; 기타 (직접 입력)</button>`
@@ -2203,6 +2261,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const note = interactive ? "" : `<div class="questionMore">이 세션이 실행 중일 때만 응답할 수 있어요</div>`;
       return `<div class="questionCard">${header}${q}<div class="questionOpts">${buttons}${other}</div>${more}${note}</div>`;
     }
+    // QUESTION_CARD_END
     function renderConversationSequence(exchange, session, isLatest=false) {
       const sections = exchangeSections(exchange);
       const question = pendingQuestionActivity(sections);
@@ -2284,17 +2343,14 @@ _MOBILE_HTML = r"""<!doctype html>
       // 유령 대기열 정리는 오직 확실한 신호일 때만: 더 나중에 큐된 게 이미 확정됐는데 앞선 게 미확정 →
       // 큐 FIFO 상 앞선 건 소비됐거나 드롭됨. (예전 'idle+15s' 규칙은 긴 턴 중 상태가 잠깐 완료로 읽히면
       // 정상 대기 큐를 실패로 오판해서 제거함 — 형 큐테스트가 셋 다 빨갛게 뜬 원인.)
-      const present = t => (confirmedUsers.get(normUserText(t.text)) || 0) > 0 || containedIn(normUserText(t.text));   // 트랜스크립트에 조금이라도 있으면 = 소비됨
       const latestConfirmedAt = Math.max(0, ...rawPending.filter(isConfirmed).map(t => Number(t.createdAt || 0)));
-      const ghost = t => Boolean(latestConfirmedAt && Number(t.createdAt || 0) < latestConfirmedAt);   // 뒤엣것이 소비됨 → 앞선 건 소비/드롭
-      const pending = rawPending.flatMap(t => {
-        if (isConfirmed(t)) return [];                       // 정상 소비 → 제거
-        if (ghost(t)) {
-          if (present(t)) return [];                         // 트랜스크립트에 있음(소비됨, baseline 만 어긋남) → 제거
-          return [{...t, failed: true, delivery: "failed"}]; // 진짜 미전달 → 조용히 드롭 금지, 빨갛게 남겨 형이 알게
-        }
-        return [t];                                          // 아직 정상 대기(working 중 등)
-      });
+      // tid-liveness: 전달받은 PTY(state.terms)가 사라지거나 detached(재시작 후 입력 불가로 복원)면
+      // 문신(영원한 대기열)을 자동 실패로 소멸시킨다.
+      const liveTids = liveTidsFromTerms(state.terms);
+      const now = Date.now();
+      const pending = rawPending
+        .map(t => reconcilePendingRecord(t, {confirmedUsers, latestConfirmedAt, liveTids, now}))
+        .filter(Boolean);
       pendingTurns[selectedSessionKey] = pending;
       const pendingTimeline = pending.map((turn, index) => ({...turn, kind: "message", id: turn.id || `pending:${index}:${turn.text || ""}`}));
       const timeline = history ? serverTimeline.concat(pendingTimeline) : serverTimeline.concat(pendingTimeline).slice(-40);
@@ -2815,6 +2871,11 @@ _MOBILE_HTML = r"""<!doctype html>
       pendingAttachments = pendingAttachments.filter(a => a.id !== del.getAttribute("data-attach-del"));
       renderAttachStrip();
     };
+    async function postSend(root, target, text) {
+      const r = await fetch("/mobile/api/send", {method: "POST", headers: headers(true), body: JSON.stringify({root, target, text})});
+      if (!r.ok) throw new Error(await responseError(r));
+      return r.json();
+    }
     async function send() {
       const text = promptInput.value;
       if (sending) return;
@@ -2842,9 +2903,7 @@ _MOBILE_HTML = r"""<!doctype html>
       sendBtn.disabled = true;
       retryBtn.style.display = "none";
       try {
-        const r = await fetch("/mobile/api/send", {method: "POST", headers: headers(true), body: JSON.stringify({root: requestContext.root, target, text: outgoingText})});
-        if (!r.ok) throw new Error(await responseError(r));
-        const d = await r.json();
+        const d = await postSend(requestContext.root, target, outgoingText);
         localStorage.removeItem(requestContext.draftKey);
         if (requestIsActive()) {
           pendingAttachments = [];
@@ -3013,7 +3072,54 @@ _MOBILE_HTML = r"""<!doctype html>
         showToast(`응답 실패 · ${String(error)}`);
       }
     }
+    // 인라인 대기 레코드 취소·재시도(pendingTurns 안 기록만 대상 — 서버 확정 메시지는 여기 없음).
+    function cancelPendingRecord(id) {
+      const sessionKey = selectedSessionKey;
+      const list = pendingTurns[sessionKey] || [];
+      if (!list.some(t => t.id === id)) return;
+      pendingTurns[sessionKey] = list.filter(t => t.id !== id);
+      render();
+    }
+    async function resendPendingRecord(id) {
+      const sessionKey = selectedSessionKey;
+      const list = pendingTurns[sessionKey] || [];
+      const record = list.find(t => t.id === id);
+      if (!record) return;
+      // 옛 문신 레코드는 즉시 제거 — 재시도가 새 레코드를 큐잉하므로 중복 표시 방지.
+      pendingTurns[sessionKey] = list.filter(t => t.id !== id);
+      render();
+      const target = record.target || {type: "shell"};
+      const root = record.root || selectedRoot();
+      try {
+        const d = await postSend(root, target, record.text);
+        queuePendingTurn(sessionKey, record.text, d.delivery || (target.type === "agent" ? "started" : "sent"), d.tid || "", target, root);
+        if (selectedSessionKey === sessionKey) {
+          followLatest = true;
+          statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(d.delivery || "started") : `보냄 · ${d.tid}`;
+        }
+        setTimeout(() => load({quiet: true}).catch(() => {}), 500);
+        setTimeout(() => load({quiet: true}).catch(() => {}), 1500);
+      } catch (error) {
+        queuePendingTurn(sessionKey, record.text, "failed", record.tid, target, root);
+        if (selectedSessionKey === sessionKey) {
+          statusEl.textContent = `전송 실패 · ${String(error)}`;
+          showToast(`전송 실패 · ${String(error)}`);
+        }
+      } finally {
+        render();
+      }
+    }
     turnsEl.addEventListener("click", event => {
+      const cancelTarget = event.target.closest && event.target.closest("[data-pending-cancel]");
+      if (cancelTarget) {
+        cancelPendingRecord(cancelTarget.getAttribute("data-pending-cancel") || "");
+        return;
+      }
+      const retryTarget = event.target.closest && event.target.closest("[data-pending-retry]");
+      if (retryTarget) {
+        resendPendingRecord(retryTarget.getAttribute("data-pending-retry") || "");
+        return;
+      }
       const resend = event.target.closest && event.target.closest("[data-resend-text]");
       if (resend) {
         promptInput.value = resend.getAttribute("data-resend-text") || "";

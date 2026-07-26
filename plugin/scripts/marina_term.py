@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_logtext import redact_text
+from marina_state import MARINA_HOME
 
 TERM_SCROLLBACK_BYTES = 256 * 1024
 TERM_READ_CHUNK = 8192
@@ -43,10 +44,18 @@ _COND = threading.Condition()
 
 class _Term:
     def __init__(self, tid: str, root: str, fd: int, pid: int,
-                 key: str = "", agent: dict[str, str] | None = None) -> None:
+                 key: str = "", agent: dict[str, str] | None = None,
+                 detached: bool = False, pid_start: str = "") -> None:
         self.tid, self.root, self.fd, self.pid = tid, root, fd, pid
         self.key = key            # 재사용 키 — 에이전트 세션만 가짐(셸은 "")
         self.agent = agent        # {"source","sid"} | None
+        # detached(adopted): marina-control 재시작 후 디스크 메타에서 복원된 term.
+        # 프로세스는 아직 살아있지만 그 PTY master fd 는 옛 프로세스와 함께 죽었다 → fd=-1.
+        # reachability(term_list)·reuse-by-key·waiting 승격엔 유효하되 term_input/resize/stream 은 불가.
+        self.detached = detached
+        # pid 재사용 방어용 프로세스 시작시각 지문(ps -o lstart=). detached term 의 SIGHUP 을
+        # 무관 프로세스에 쏘지 않으려 재구성/kill 시 대조한다. "" = 검증 불가(fail-open, os.kill 만).
+        self.pid_start = pid_start
         self.cond = _COND         # 공유 — `with term.cond:` 사용부는 그대로 동작
         self.history = bytearray()
         self.base = 0             # history[0] 의 절대 오프셋 — 캡 절단만큼 증가
@@ -80,6 +89,137 @@ class _Term:
 _lock = threading.Lock()
 _by_tid: dict[str, _Term] = {}
 _by_key: dict[str, _Term] = {}    # 에이전트 세션만 — 셸은 매번 새로 연다
+
+
+# ── PTY 레지스트리 영속화 ──────────────────────────────────────────────────
+# _by_tid/_by_key 는 프로세스-인메모리라 marina-control 재시작 시 통째로 날아간다. 그러면 아직
+# 도는 에이전트 프로세스가 tid 를 잃어 mobile 이 "도달 불가"로 배달을 거부하고, reuse-by-key 가
+# 빗나가 resume 이 이중 실행되며, completed→waiting 승격이 깨진다. 그래서 최소 메타를 디스크에
+# 남기고 부팅 때 프로세스 생존을 검증해 재구성한다. **모든 IO 는 fail-open** — 영속화가 살아있는
+# 터미널 흐름을 절대 깨서는 안 된다.
+_reconstructed = False
+
+
+def _terms_dir() -> Path:
+    return MARINA_HOME / "terms"
+
+
+def _term_meta_path(tid: str) -> Path:
+    return _terms_dir() / f"{tid}.json"
+
+
+def _persist_term(term: _Term) -> None:
+    """term 메타를 디스크에 원자적으로(tmp+rename) 기록. fail-open."""
+    try:
+        d = _terms_dir()
+        d.mkdir(parents=True, exist_ok=True)
+        agent = term.agent or {}
+        meta = {
+            "tid": term.tid,
+            "cwd": term.root,
+            "pid": term.pid,
+            "pid_start": term.pid_start or _pid_start(term.pid),   # pid 재사용 방어 지문(fail-open="")
+            "source": str(agent.get("source") or ""),
+            "sid": str(agent.get("sid") or ""),
+            "key": term.key or "",
+            "created": term.created,
+        }
+        p = _term_meta_path(term.tid)
+        tmp = p.parent / (p.name + ".tmp")
+        tmp.write_text(json.dumps(meta), encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _delete_term_file(tid: str) -> None:
+    """term 메타 파일 삭제. fail-open(없어도 무방)."""
+    try:
+        _term_meta_path(tid).unlink()
+    except OSError:
+        pass
+
+
+def _pid_alive(pid: int) -> bool:
+    """os.kill(pid,0) 로 생존 확인 — ProcessLookupError=죽음, PermissionError=살아있음(다른 유저)."""
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def _pid_start(pid: int) -> str:
+    """프로세스 시작시각 지문(ps -o lstart=) — pid 재사용 판별용. fail-open 시 ""(검증 불가)."""
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(pid)],
+                             capture_output=True, text=True, timeout=2).stdout.strip()
+        return out.splitlines()[0].strip() if out else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _reconstruct_registry() -> None:
+    """부팅 시 1회 — terms/*.json 을 읽어 생존 프로세스를 fd 없는(detached) term 으로 재등록.
+    첫 term_open/term_list 에서 lazy 하게 한 번만 돈다(import-time 부작용·레이스 회피). fail-open."""
+    global _reconstructed
+    with _lock:
+        if _reconstructed:
+            return
+        _reconstructed = True
+        try:
+            files = list(_terms_dir().glob("*.json"))
+        except OSError:
+            return
+        for f in files:
+            try:
+                meta = json.loads(f.read_text(encoding="utf-8"))
+            except ValueError:            # 파싱 불가 JSON — 영영 복원 못 하니 정리(매 부팅 재읽기 방지)
+                _delete_term_file_by(f)
+                continue
+            except OSError:               # 읽기 자체 실패 — 파일은 두고 다음 기회에(fail-open)
+                continue
+            if not isinstance(meta, dict):
+                _delete_term_file_by(f)
+                continue
+            tid = str(meta.get("tid") or "")
+            cwd = str(meta.get("cwd") or "")
+            pid = meta.get("pid")
+            if not tid or not cwd or not isinstance(pid, int):   # 손상 — 복원 불가
+                _delete_term_file_by(f)
+                continue
+            if tid in _by_tid:                                   # 이미 살아있는 term — 덮지 않는다
+                continue
+            if not _pid_alive(pid):                              # 죽은 프로세스 — 파일 정리
+                _delete_term_file_by(f)
+                continue
+            pid_start = str(meta.get("pid_start") or "")
+            if pid_start and _pid_start(pid) != pid_start:       # pid 재사용 — 무관 프로세스, 복원 금지
+                _delete_term_file_by(f)
+                continue
+            source = str(meta.get("source") or "")
+            sid = str(meta.get("sid") or "")
+            key = str(meta.get("key") or "")
+            agent = {"source": source, "sid": sid} if source else None
+            term = _Term(tid, cwd, -1, pid, key, agent, detached=True, pid_start=pid_start)
+            created = meta.get("created")
+            if isinstance(created, (int, float)):
+                term.created = float(created)
+            term.last = time.time()   # 복원 시점 기준 — 유휴 TTL 로 살아있는 에이전트를 SIGHUP 하지 않게
+            _by_tid[tid] = term
+            if key and key not in _by_key:
+                _by_key[key] = term
+
+
+def _delete_term_file_by(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 def _set_winsize(fd: int, cols: int, rows: int) -> None:
@@ -123,9 +263,16 @@ def _reap_idle() -> None:
     """
     now = time.time()
     with _lock:
-        stale = [t for t in _by_tid.values() if t.alive and now - t.last > TERM_IDLE_TTL]
+        # detached(복원) term 은 reader 스레드가 없어 자연사 통지가 안 온다 — 여기서 pid 를 직접 검증.
+        for t in _by_tid.values():
+            if t.detached and t.alive and not _pid_alive(t.pid):
+                t.mark_dead()
+        # 유휴 정리는 마리나가 쥔 실 PTY 에만 — detached 는 입력이 없으니 TTL 로 SIGHUP 하면 안 된다.
+        stale = [t for t in _by_tid.values()
+                 if t.alive and not t.detached and now - t.last > TERM_IDLE_TTL]
         for t in [t for t in _by_tid.values() if not t.alive]:
             _by_tid.pop(t.tid, None)
+            _delete_term_file(t.tid)
             if t.key and _by_key.get(t.key) is t:
                 _by_key.pop(t.key, None)
     for t in stale:
@@ -189,6 +336,7 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
               agent_effort: str = "") -> dict[str, Any]:
     """root 워크트리에 새 PTY 세션을 연다(셸은 매번 새로 — 같은 워크트리에 여러 개 가능).
     기본은 $SHELL -il, agent_source/sid 를 주면 그 CLI 세션에 resume 으로 붙는다(살아있으면 재사용 — 이중 실행 방지)."""
+    _reconstruct_registry()
     _reap_idle()
     cwd = str(root.resolve())
     if not Path(cwd).is_dir():
@@ -208,7 +356,8 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
         if key:                                  # 에이전트만 재사용 — resume 이중 실행 방지
             existing = _by_key.get(key)
             if existing and existing.alive:
-                _set_winsize(existing.fd, cols, rows)
+                if not existing.detached:   # detached 는 실 fd 가 없다 — reachability 만 재사용, ioctl 생략
+                    _set_winsize(existing.fd, cols, rows)
                 return {"tid": existing.tid, "reused": True}
         pid, fd = pty.fork()
         if pid == 0:  # 자식 — 즉시 exec (스레드 안전을 위해 그 사이 파이썬 코드 최소화)
@@ -230,6 +379,7 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
         _by_tid[term.tid] = term
         if key:
             _by_key[key] = term
+        _persist_term(term)   # 재시작 후 reachability 복원용 — fail-open
         threading.Thread(target=_reader, args=(term,), daemon=True, name=f"term-{term.tid}").start()
         return {"tid": term.tid, "reused": False}
 
@@ -271,6 +421,9 @@ def term_input(tid: str, data: str) -> dict[str, Any]:
     term = _get(tid)
     if not term.alive:
         raise ValueError("세션이 이미 종료됐어요")
+    if term.detached:   # 복원된 term — PTY master fd 가 없다. reuse-by-key 가 계속 이 tid 를 돌려주므로
+        # "새로 열기"는 소용없다(같은 detached tid 재사용) — 에이전트가 끝날 때까지 조작 불가.
+        raise ValueError("이 세션은 marina 재시작으로 조작할 수 없어요 — 작업이 끝난 뒤 다시 시도하세요")
     os.write(term.fd, data.encode("utf-8"))
     _note_typed(term, data)
     term.last = time.time()
@@ -279,7 +432,7 @@ def term_input(tid: str, data: str) -> dict[str, Any]:
 
 def term_resize(tid: str, cols: int, rows: int) -> dict[str, Any]:
     term = _get(tid)
-    if term.alive:
+    if term.alive and not term.detached:   # detached 는 실 fd 가 없어 ioctl 불가 — 무시(fail-graceful)
         _set_winsize(term.fd, cols, rows)
     return {"ok": True}
 
@@ -353,25 +506,31 @@ def term_list() -> dict[str, Any]:
     """살아있는 세션 목록 — 프론트가 새로고침 후 tid 를 되찾는 유일한 길(고아 PTY 방지).
     오프셋은 싣지 않는다: 재개(from)의 기준값은 SSE 이벤트의 off 로 프론트가 누적한다.
     fg/cmd/preview 는 사이드바 라벨용 — 뷰가 이 목록을 주기적으로 다시 받아 이름을 신선하게 유지한다."""
+    _reconstruct_registry()
     _reap_idle()
     with _lock:
         terms = sorted(_by_tid.values(), key=lambda t: t.created)
     return {"sessions": [{"tid": t.tid, "root": t.root, "agent": t.agent,
                           "fg": _fg_command(t), "cmd": t.cmd, "preview": _preview(t),
-                          "created": t.created, "alive": t.alive} for t in terms]}
+                          "created": t.created, "alive": t.alive,
+                          "detached": t.detached} for t in terms]}
 
 
 def term_kill(tid: str) -> dict[str, Any]:
     term = _get(tid)
-    try:
-        os.kill(term.pid, signal.SIGHUP)
-    except OSError:
-        pass
+    # detached(복원) term 은 pid 재사용 위험이 있다 — 시작시각 지문이 어긋나면 그 pid 는 이미 무관
+    # 프로세스라 SIGHUP 을 쏘면 안 된다. 지문이 없으면(검증 불가) 기존 동작 유지(fail-open).
+    if not (term.detached and term.pid_start and _pid_start(term.pid) != term.pid_start):
+        try:
+            os.kill(term.pid, signal.SIGHUP)
+        except OSError:
+            pass
     term.mark_dead()
     with _lock:
         _by_tid.pop(term.tid, None)
         if term.key and _by_key.get(term.key) is term:
             _by_key.pop(term.key, None)
+    _delete_term_file(term.tid)
     return {"ok": True}
 
 
