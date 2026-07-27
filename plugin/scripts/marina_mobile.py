@@ -2416,8 +2416,10 @@ _MOBILE_HTML = r"""<!doctype html>
         ? `<span class="pendingActions"><button class="pendingActionBtn" type="button" data-pending-retry="${esc(item.id)}">&#8635; 재시도</button><button class="pendingActionBtn" type="button" data-pending-cancel="${esc(item.id)}">&#10005; 취소</button></span>`
         : "";
       const pendingState = item.pending ? `<div class="turnState${item.failed ? " failed" : ""}"${item.failed ? ` data-resend-text="${esc(item.text || "")}"` : ""}><span>${esc(pendingDeliveryLabel(item.delivery, item.createdAt))}</span>${pendingActions}</div>` : "";
+      // 전달된 큐는 서버에서 아예 말풍선을 안 만든다(진짜 user 행이 대신한다) — 여기 남는 건
+      // 아직 기다리는 것과 사용자가 취소한 것뿐이다.
       const queuedBadge = item.queued
-        ? `<span class="queuedTag${item.queuedConsumed ? " consumed" : ""}">⏱ ${item.queuedConsumed ? "대기열에서 전달됨" : "대기열 · 대기 중"}</span>`
+        ? `<span class="queuedTag${item.queuedCancelled ? " consumed" : ""}">⏱ ${item.queuedCancelled ? "대기열에서 취소됨" : "대기열 · 대기 중"}</span>`
         : "";
       return `<div class="turn ${role}${item.pending ? " pending" : ""}${item.queued ? " queued" : ""}" data-timeline-message-id="${esc(item.id || "")}">${queuedBadge}<div class="turnBody">${renderRichText(stripped)}</div>${renderTurnAttachments(attachments)}${pendingState}</div>`;
     }

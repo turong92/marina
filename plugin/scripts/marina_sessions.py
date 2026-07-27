@@ -1377,8 +1377,30 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
     calls: dict[str, dict[str, Any]] = {}
     runtime = {"model": "", "effort": ""}
     seen_queue: set[str] = set()   # 큐 메시지 content dedup(시스템이 enqueue→remove 후 재enqueue 하는 아티팩트 방지)
-    # 큐 소비 여부: remove 오퍼레이션이 있는 content = 이미 처리됨(대기 중 아님). 미리 스캔해 배지 구분에 쓴다.
-    removed_queue: set[str] = {
+    # 큐 메시지의 최후: **전달** 아니면 **취소**다. 미리 스캔해 말풍선 처리를 가른다.
+    #
+    # 전달: Claude Code 는 큐를 소비할 때 dequeue 를 남기는데 그 행은 content 가 null 이라 내용으로
+    # 못 맞춘다. 대신 소비된 큐는 **진짜 user 행**으로 다시 기록되므로 그걸 신호로 쓴다. 전달된 큐는
+    # 말풍선을 아예 만들지 않는다 — 안 그러면 같은 말이 두 번 뜨고(queued + user) 배지도 "대기 중"으로
+    # 영원히 남는다(실기기 확인: enqueue 23 / dequeue 22 / remove 1 인데 remove 만 보고 있었다).
+    #
+    # 취소: remove 는 사용자가 큐에서 뺀 것이라 전달이 아니다 — 따로 표시한다.
+    delivered_queue: set[str] = set()
+    for _, o in rows:
+        if o.get("type") != "user":
+            continue
+        message = o.get("message") if isinstance(o.get("message"), dict) else {}
+        content = message.get("content")
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list):
+            text = " ".join(str(c.get("text") or "") for c in content
+                            if isinstance(c, dict) and c.get("type") == "text")
+        else:
+            text = ""
+        if text.strip():
+            delivered_queue.add(text.strip())
+    cancelled_queue: set[str] = {
         _safe_activity_text(o.get("content")).strip()
         for _, o in rows
         if o.get("type") == "queue-operation" and o.get("operation") == "remove"
@@ -1405,11 +1427,13 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                     # 주입 래퍼(<task-notification>·<system-reminder>·[SYSTEM NOTIFICATION])는 작업 중 도착하면
                     # queue-operation 으로 기록되는데, 이건 사용자가 친 큐 메시지가 아니라 하네스 주입이다. user/assistant
                     # 경로의 _is_injected_user 필터가 여기엔 안 걸려 그동안 "대기 중" 큐 말풍선으로 새어 문신됐다(형 지적).
+                    if key in delivered_queue:
+                        continue          # 이미 진짜 user 행으로 들어온다 — 말풍선을 또 만들면 중복이다
                     if key and key not in seen_queue and not key.lstrip().startswith(_CLAUDE_INJECT_PREFIXES):
                         seen_queue.add(key)
                         timeline.append(with_runtime(
                             {"id": f"{source}:queue:{offset}", "kind": "message", "role": "user", "text": qtext,
-                             "queued": True, "queuedConsumed": key in removed_queue},
+                             "queued": True, "queuedCancelled": key in cancelled_queue},
                         ))
                 continue
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}

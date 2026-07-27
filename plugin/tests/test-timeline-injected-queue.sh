@@ -43,4 +43,32 @@ if fails:
     for f in fails: print("  -", f)
     sys.exit(1)
 print("PASS: 주입(task-notification/SYSTEM NOTIFICATION) 큐는 제외, 진짜 사용자 (큐)메시지는 렌더")
+
+# --- 전달된 큐 메시지는 말풍선을 남기지 않는다 ---
+# 큐 메시지가 실제로 처리되면 Claude Code 는 그 내용을 **진짜 user 행**으로 기록한다. 큐 말풍선을
+# 그대로 두면 같은 말이 두 번 뜨고("turn user queued" + "turn user"), 배지도 영원히 "대기 중"으로
+# 남는다(실기기에서 확인). 소비 신호는 remove 가 아니라 dequeue 이고 그 행은 content 가 null 이라
+# 내용으로 못 맞춘다 — 그래서 "진짜 user 행으로 나타났는가"로 판정한다.
+rows2 = [
+    qop("enqueue", "전달된 큐 메시지", 0),
+    qop("dequeue", None, 1),                                                    # 소비 — content 없음
+    (2, {"type": "user", "message": {"role": "user", "content": "전달된 큐 메시지"}}),
+    qop("enqueue", "아직 기다리는 큐 메시지", 3),
+    qop("enqueue", "취소된 큐 메시지", 4),
+    qop("remove", "취소된 큐 메시지", 5),
+]
+tl2 = ms._transcript_timeline(rows2, "claude")
+users2 = [it for it in tl2 if it.get("kind") == "message" and it.get("role") == "user"]
+
+delivered = [it for it in users2 if it.get("text") == "전달된 큐 메시지"]
+assert len(delivered) == 1, f"전달된 큐 메시지가 중복 렌더됨: {[ (i.get('text'), i.get('queued')) for i in users2 ]}"
+assert not delivered[0].get("queued"), f"전달됐는데 큐 말풍선으로 남음(문신): {delivered[0]}"
+
+waiting = [it for it in users2 if it.get("text") == "아직 기다리는 큐 메시지"]
+assert len(waiting) == 1 and waiting[0].get("queued") and not waiting[0].get("queuedCancelled"), waiting
+
+cancelled = [it for it in users2 if it.get("text") == "취소된 큐 메시지"]
+assert len(cancelled) == 1 and cancelled[0].get("queued"), cancelled
+assert cancelled[0].get("queuedCancelled"), f"취소를 '대기 중'으로 두면 안 된다: {cancelled[0]}"
+print("PASS: 전달된 큐는 말풍선을 남기지 않고, 대기/취소는 구분된다")
 PY
