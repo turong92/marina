@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # update_state pure fn + /api/update-status shape
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 

@@ -2,6 +2,7 @@
 # When the attach hook runs from inside an attached subrepo, it must promote
 # DEST_ROOT to the project worktree root before attaching sibling subrepos.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PLUGIN_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"

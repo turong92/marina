@@ -2,6 +2,7 @@
 # build_overlay: ports[] 보유 서비스(고정+auto) 전부 !override 127.0.0.1::<target>, expose/image-only 제외, 범위 거부.
 # + isolation_breakers + parse_ps_ports.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CP="$HERE/../scripts/marina-compose.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -185,15 +186,19 @@ assert mc._auto_service_forward({"services":{"be":{"ports":[{"target":8081,"publ
 assert mc._auto_service_forward({"services":{}})=={}, "포트 서빙 서비스 없으면 빈"
 # 엮기 사이드카 — forward(={port:target}) → 앱(build) 서비스마다 사이드카 1개. host=host.docker.internal. image-only 제외.
 _ovf=mc.build_overlay({"services":{"api":{"build":{"context":"."}}, "cache":{"image":"redis"}}}, connectivity={"forward":{"6379":"host"}})
-assert "api-bind:" in _ovf and "alpine/socat" in _ovf and 'network_mode: "service:api"' in _ovf, _ovf
-assert "TCP-LISTEN:6379" in _ovf and "host.docker.internal" in _ovf, _ovf   # Linux fallback sh wrapper (host.docker.internal or default gateway)
+# netns 주인은 사이드카다(앱이 거기 합류) — 반대면 앱이 먼저 떠 socat 을 못 기다린다. 상세는 test-compose-forward.sh
+assert "api-bind:" in _ovf and "alpine/socat" in _ovf and 'network_mode: "service:api-bind"' in _ovf, _ovf
+assert "TCP4-LISTEN:6379" in _ovf and "host.docker.internal" in _ovf, _ovf   # Linux fallback sh wrapper (host.docker.internal or default gateway)
 assert "cache-bind" not in _ovf, "image-only 서비스는 사이드카 없음"
 # service 타겟 — localhost:8081 → be:8081 (컨테이너 DNS), be 는 8081 self-skip
 _ovs=mc.build_overlay({"services":{"fe":{"build":{"context":"."}}, "be":{"build":{"context":"."},"ports":[{"target":8081,"published":"8081"}]}}}, connectivity={"forward":{"8081":"be"}})
 assert "fe-bind:" in _ovs and "TCP:be:8081" in _ovs and "be-bind:" not in _ovs, _ovs
 # 일원화 — build_overlay 는 forward 만 본다(옛 service-redirect extraHosts/env 주입 제거)
 _ovx=mc.build_overlay({"services":{"api":{"build":{"context":"."}}}}, connectivity={"forward":{"6379":"host"},"extraHosts":["api"],"env":{"api":{"X":"y"}}})
-assert "extra_hosts" not in _ovx and "environment:" not in _ovx, _ovx
+# 레거시 키(extraHosts/env)는 무시한다. 사이드카의 host-gateway extra_hosts 는 host 타겟 전용이라 별개다.
+assert '"api"' not in _ovx.replace('aliases: ["api"]', "") , _ovx      # extraHosts:["api"] 가 반영되면 안 된다
+assert "environment:" not in _ovx and "X:" not in _ovx, _ovx           # env 주입도 없다
+assert _ovx.count("extra_hosts") == 1 and "host-gateway" in _ovx, _ovx  # 있는 건 host 타겟용 한 줄뿐
 # x-marina — xmarina_for_stored: stored compose 의 x-marina 블록을 docker 없이 읽음
 xmf=os.path.join(T,"stored-xm.yml")
 open(xmf,"w").write('services:\n  api:\n    build: .\nx-marina:\n  forward:\n    6379: {target: host}\n  prebuild:\n    be-api: ./gradlew assemble\n  gateway:\n    routes:\n      api: ["/v1.0"]\n')
@@ -203,7 +208,7 @@ assert (xm.get("gateway") or {}).get("routes")=={"api":["/v1.0"]}, xm
 # x-marina.forward → _normalize_forward(같은 경로) → 사이드카 (cmd_up 가 이 merge 를 함)
 assert mc._normalize_forward(xm)=={"6379":"host"}, mc._normalize_forward(xm)
 _ovxm=mc.build_overlay({"services":{"api":{"build":{"context":"."}}}}, connectivity={"forward":mc._normalize_forward(xm)})
-assert "api-bind:" in _ovxm and "TCP-LISTEN:6379" in _ovxm, _ovxm
+assert "api-bind:" in _ovxm and "TCP4-LISTEN:6379" in _ovxm, _ovxm
 assert mc.xmarina_for_stored(os.path.join(T,"nope.yml"))=={}, "없는 stored → {}"
 # compose 커스텀 태그(!reset/!override)는 safe_load 가 ConstructorError → best-effort {} (start 크래시 금지)
 tagf=os.path.join(T,"tag.yml")

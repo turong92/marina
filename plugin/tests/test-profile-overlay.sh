@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # build_overlay 가 profile 후보 build arg 를 런타임 environment 로도 미러링하는지.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 python3 - "$HERE/../scripts" <<'PY'
 import importlib.util, os, sys

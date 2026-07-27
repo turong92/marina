@@ -2,6 +2,7 @@
 # B — 주입 메시지(task-notification·system-reminder·isMeta·AGENTS.md·INSTRUCTIONS·
 # environment_context)는 user turn 에서 빠지고, 진짜 사용자 입력만 남는다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 python3 - "$SCR" <<'PY'

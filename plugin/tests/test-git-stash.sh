@@ -2,6 +2,7 @@
 # /api/git-stash (save/apply/drop) + git-graph stashes 노출 — 깃 탭 STASHES 라운드.
 # 워크트리에서 save(untracked 포함) → 그래프 payload 에 브랜치 파싱된 스태시 → apply 로 복원(스태시 유지) → drop.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 SH="$HERE/../scripts/marina.sh"

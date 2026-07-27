@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 실 docker E2E: up → Docker 할당 포트를 marina ports 로 읽음 → 127.0.0.1 도달 → down. 데몬 없으면 SKIP.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-compose-e2e (docker 데몬 미가용)"; exit 0; }

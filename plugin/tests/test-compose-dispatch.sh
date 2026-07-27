@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # compose-kind 라우팅: no-arg 가드, fast start/explicit rebuild, config env, overlay, 서비스별 stop, live ps 포트.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

@@ -6,6 +6,7 @@
 # PTY tid → term-stream 으로 살아있는 셸 스크롤백까지). POST 는 Origin 을 보내 403 이라 RCE 는
 # 아니지만 유출은 실재한다. Host 를 보면 닫힌다 — 리바인딩은 Host 를 못 위조한다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 

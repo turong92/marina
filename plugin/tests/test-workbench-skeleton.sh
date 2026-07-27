@@ -2,6 +2,7 @@
 # 등록 워크벤치 골격(M2) 불변식: app-2b 존재·openWorkbench 정의·index.html 로드 순서·재료/폼/린트 자리 마커·
 # localStorage 초안 키·openComposeEdit→openWorkbench 연결·전 웹 JS 문법.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 J="$WEB/app-2b-workbench.js"

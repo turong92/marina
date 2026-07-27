@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Metadata-only lifecycle hook journal contract.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$HERE/../scripts"
 TMP="$(mktemp -d)"
@@ -494,6 +495,13 @@ for index in range(MAX_ROWS):
     assert prefill and prefill["ts"] == 2000 + index, prefill
 
 workers = 12
+# 여기서 보는 건 "동시에 써도 서로의 행을 잃거나 뭉개지 않는다"이지 "0.35초 안에 12개가 다
+# 들어간다"가 아니다. 기본 데드라인(LOCK_ACQUIRE_TIMEOUT_SECONDS)은 동기 훅이 턴을 멈추지 않도록
+# **일부러 짧고, 넘기면 fail-open 으로 버린다** — 부하가 걸린 머신에서 12중 경합이면 실제로 버려져
+# 테스트가 들쭉날쭉했다(원본 2/12 실패). 그 fail-open 계약은 바로 아래 lock-bound 블록이 따로
+# 검증하므로, 여기서는 경합이 풀릴 시간을 넉넉히 주고 손실 여부만 본다.
+_real_lock_timeout = events.LOCK_ACQUIRE_TIMEOUT_SECONDS
+events.LOCK_ACQUIRE_TIMEOUT_SECONDS = 30      # fork 로 자식에게 그대로 상속된다
 ready = context.Queue()
 release = context.Event()
 processes = [context.Process(target=_concurrent_write, args=(index, ready, release)) for index in range(workers)]
@@ -502,8 +510,9 @@ for process in processes:
 assert {ready.get(timeout=15) for _ in processes} == set(range(workers))
 release.set()
 for process in processes:
-    process.join(15)
+    process.join(60)
     assert process.exitcode == 0, process.exitcode
+events.LOCK_ACQUIRE_TIMEOUT_SECONDS = _real_lock_timeout   # 아래 fail-open 검증은 짧은 값이 필요하다
 
 concurrent_journal = events_root / "claude" / "concurrent-1.jsonl"
 concurrent_rows = [json.loads(line) for line in concurrent_journal.read_text(encoding="utf-8").splitlines()]
@@ -621,7 +630,9 @@ assert not decode_calls, "oversized input was decoded"
 
 oversized_wrapper_home = tmp / "oversized-wrapper-home"
 oversized_wrapper_home.mkdir()
-started = time.monotonic()
+# 계약은 "래퍼가 턴을 붙잡지 않는다"이고, 그건 아래 timeout= 이 강제한다(넘기면 예외로 실패).
+# 예전엔 여기에 elapsed < 3 이 더 붙어 있었는데, 재는 건 사실상 python3 기동 시간이라 부하가
+# 걸리면 3.5초가 나와 터졌다 — 더 약한 보장을 중복으로, 더 빡빡하게 재던 것이라 걷어냈다.
 oversized = subprocess.run(
     [str(scripts / "marina-agent-event-hook.sh")],
     input=oversized_input,
@@ -630,9 +641,7 @@ oversized = subprocess.run(
     stderr=subprocess.DEVNULL,
     timeout=5,
 )
-elapsed = time.monotonic() - started
 assert oversized.returncode == 0, oversized.returncode
-assert elapsed < 3, elapsed
 assert not (oversized_wrapper_home / ".marina").exists()
 print("ok hook journal")
 PY

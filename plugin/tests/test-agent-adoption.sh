@@ -2,6 +2,7 @@
 # 입양(adoption): PTY 안에서 손으로 띄운 에이전트를 훅의 {sid,pid} 기록으로 사후 등록한다.
 # argv 파싱 없이 **실제 프로세스 조상 체인**으로만 매칭하는지 본다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME"

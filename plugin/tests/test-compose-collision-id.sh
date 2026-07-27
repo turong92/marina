@@ -2,6 +2,7 @@
 # 충돌 안전 id: 폴더명(basename)만 같은 별개 프로젝트 2개를 등록하면 두 번째 id 에 -<해시> 가 붙어 분리된다.
 # 안 그러면 -p <id>-main 과 ~/.marina/<id> 가 겹쳐 docker 컨테이너·보관 compose 가 서로 덮어쓴다. docker 불요.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

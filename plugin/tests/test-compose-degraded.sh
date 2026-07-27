@@ -2,6 +2,7 @@
 # Dockerfile 없는 build 서비스 하나 때문에 전체를 막지 않는다 —
 # 검증은 경고(부분 등록 허용), 기동은 그 서비스만 제외하고 나머지는 띄운다(startable_services).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CC="$HERE/../scripts/marina-compose.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

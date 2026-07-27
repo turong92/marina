@@ -2,6 +2,7 @@
 # 외부 서브레포: project add --external name=path 로 registry 기록 + attach 가 워크트리마다 git worktree+브랜치로
 # .workspace/external/<name> 에 체크아웃 + teardown 정리. git 필요.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 command -v git >/dev/null 2>&1 || { echo "SKIP test-external-subrepo (git 없음)"; exit 0; }

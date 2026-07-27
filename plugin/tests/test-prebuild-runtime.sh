@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Service-scoped prebuild runtime: target selection, startGroup, legacy, events, and fail-fast.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"

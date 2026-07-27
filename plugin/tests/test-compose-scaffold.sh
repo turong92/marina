@@ -2,6 +2,7 @@
 # _detect_subrepos + _compose_scaffold_service: LLM 없이 서브레포를 감지하고 compose 서비스 블록을 스캐폴드한다.
 # (서브레포→서비스 만들기가 LLM 없이도 되게 하는 무-LLM 경로). docker 불요.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

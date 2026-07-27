@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # expose: 도메인 스킴 헬퍼(service_domain) + 토큰 파서(parse_expose_token) 단위테스트.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/../scripts/marina-gateway.py"
 MC="$HERE/../scripts/marina-compose.py"

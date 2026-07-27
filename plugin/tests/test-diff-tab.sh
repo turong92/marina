@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 깃 탭 diff 오버레이 계약 — 변경 탭 철거(2026-07-13): diff·커밋 폼 전부 깃 탭 안에서.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 

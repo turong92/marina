@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # _service_profile — ARG 목록 + (marina overlay, stored) build args → {profileVar, profileValue}.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 python3 - "$HERE/../scripts" <<'PY'
 import importlib.util, os, sys

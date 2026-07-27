@@ -5,6 +5,7 @@
 # ② 폼 UI grep 불변식 — R4 라벨 문자열 존재 · 잠금 문구 · innerHTML 미사용.
 # ③ 전 웹 JS node --check.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 J="$WEB/app-2c-xmarina-form.js"

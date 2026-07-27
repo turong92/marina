@@ -2,6 +2,7 @@
 # 모바일 pending 큐 reconcile 순수 로직 — tid-liveness auto-fail(문신 자동 소멸).
 # marina_mobile.py 에 임베드된 JS 에서 reconcilePendingRecord 헬퍼만 뽑아 node vm 으로 검증한다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 

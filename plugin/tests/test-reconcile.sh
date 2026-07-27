@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # reconcile() 순수 로직 — 노드 재사용/추가/삭제/재정렬. DOM 없는 node vm + 최소 스텁.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SRC="$HERE/../scripts/marina-web/app-0b-reconcile.js"
 

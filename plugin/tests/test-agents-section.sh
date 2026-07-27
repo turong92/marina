@@ -4,6 +4,7 @@
 # 2) 실서버: /api/worktrees payload 에 agents 노출
 # 3) 프론트: AGENTS 라벨·Claude/Codex 칩·별도 접힘 Set·문법
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; TMP="$(cd "$TMP" && pwd -P)"   # macOS /var → /private/var 심링크 정렬(서버가 resolve() 를 쓴다)

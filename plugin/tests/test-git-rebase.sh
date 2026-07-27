@@ -2,6 +2,7 @@
 # /api/git-rebase · /api/git-fetch · /api/git-pull(rebase) — 깃 탭 D&D 리베이스 라운드.
 # 성공(linear 재적용)·충돌 자동 abort(워크트리 원복)·진행 중 가드·fetch 갱신을 실레포로 검증.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 SH="$HERE/../scripts/marina.sh"

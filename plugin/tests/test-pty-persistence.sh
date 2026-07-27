@@ -6,6 +6,7 @@
 # 이 테스트는 (1)살아있는 pid 메타 → term_list/reuse-by-key 에 반영 (2)죽은 pid 메타 → 미등록+파일 삭제
 # (3)detached term 에 대한 term_input 은 트레이스백이 아니라 명확한 에러로 실패함을 못박는다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; TMP="$(cd "$TMP" && pwd -P)"

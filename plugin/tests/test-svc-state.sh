@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 서비스 정규화 state: busyError>busy>degraded>external>health(bad|starting)>running>stopped + reason
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 python3 - "$HERE/../scripts" <<'PY'
 import sys; sys.path.insert(0, sys.argv[1])

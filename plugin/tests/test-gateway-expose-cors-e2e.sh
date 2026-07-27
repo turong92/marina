@@ -2,6 +2,7 @@
 # 실측 e2e: 생성된 Caddyfile 을 진짜 caddy 로 띄워 도메인모드 be 서브도메인 CORS 검증
 # (preflight 204·credentialed·헤더 echo + GET 시 be 의 ACAO 를 header_down 으로 replace). caddy 없으면 SKIP.
 set -uo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/../scripts/marina-gateway.py"
 CADDY="$(command -v caddy 2>/dev/null || true)"

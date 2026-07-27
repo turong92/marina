@@ -5,6 +5,7 @@
 # 세션이 유휴로 오탐. 이 테스트는 (1)인자 없는 comm 으로 pid 를 뽑고 (2)cwd→root 로 liveness 를 세우며 (3)프롬프트
 # 내용과 완전히 무관함을 못박는다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$HERE/../scripts"
 

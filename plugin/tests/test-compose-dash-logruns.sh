@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # _compose_services 가 세션의 run-NNN 로그를 logRuns/log 로 노출한다(네이티브 뷰어 재사용).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT; export MARINA_HOME="$TMP/home"

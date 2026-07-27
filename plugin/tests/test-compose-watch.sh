@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # develop.watch 선언 서비스만 compose watch --no-up 프로세스를 띄우고 lifecycle에 맞춰 정리한다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"

@@ -2,6 +2,7 @@
 # 에이전트 **새 세션** 직접 launch (A) — sid 없는 실행이 resume 과 갈라지는지, 그리고 그 PTY 가
 # 나중에 입양으로 정체를 얻는지. (워크트리 만들고 → 셸 열고 → `claude` 치던 3스텝을 없애는 경로.)
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME"

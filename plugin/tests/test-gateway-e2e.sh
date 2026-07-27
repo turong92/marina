@@ -2,6 +2,7 @@
 # 실 caddy E2E(비권한 포트): 스냅샷→Caddyfile→caddy reload→Host 헤더 라우팅 + 동적(add/remove/restart/port-change).
 # caddy 없으면 SKIP. mock 백엔드=python http.server.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/../scripts/marina-gateway.py"
 command -v caddy >/dev/null 2>&1 || { echo "SKIP test-gateway-e2e (caddy 미설치)"; exit 0; }

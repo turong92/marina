@@ -3,6 +3,7 @@
 # (crabs 등 feature 브랜치 라이프사이클 정합 — "워크트리를 feature/{task} 로 생성 = 작업 시작".)
 # detached/빈 브랜치 폴백(<prefix>/<id>)은 test-attach-clean-codex-worktree 가 커버.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PLUGIN_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"

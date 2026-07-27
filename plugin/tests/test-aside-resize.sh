@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 좌측 패널 IDE 식 리사이즈 — 레일 드래그(--aside-w, localStorage 기억) + 클릭 접기 공존 불변식
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 J="$WEB/app-6-modals.js"

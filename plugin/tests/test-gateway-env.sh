@@ -2,6 +2,7 @@
 # 게이트웨이 env 빈 문자열 방어 — supervised 기동이 MARINA_GATEWAY_PORT='' 를 export 해도
 # 데몬 import 가 int('') 로 크래시하면 안 된다(코덱스 P1: 빈 env → 기본값).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 MARINA_GATEWAY="" MARINA_GATEWAY_PORT="" MARINA_GATEWAY_POLL="" MARINA_HOME="$(mktemp -d)" python3 - "$CTRL" <<'PY'

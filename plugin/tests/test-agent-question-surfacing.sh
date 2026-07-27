@@ -5,6 +5,7 @@
 # Part B: marina_mobile.py's renderQuestionCard never renders an empty .questionCard — it
 #         falls back to plain text when header/question/options can't be built.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"

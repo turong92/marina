@@ -2,6 +2,7 @@
 # 게이트웨이 path 라우팅(limit#1 해소) — 서비스가 routes(경로 prefix) 선언 시 대표 도메인이
 # 그 경로를 해당 서비스로 보냄. fe 가 상대주소로 be 를 부를 때(브라우저) Host 로 워크트리 구분 + path 로 be 도달.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/../scripts/marina-gateway.py"
 

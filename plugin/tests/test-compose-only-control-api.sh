@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # compose-only daemon guard: native lifecycle helpers/API/config defaults stay removed.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

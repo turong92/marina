@@ -2,6 +2,7 @@
 # 비-LLM compose 스캔: POST /api/compose-scan {root} → 서브레포별 Dockerfile(ARG·필수ARG·EXPOSE·아티팩트·설정후보).
 # LLM 안 씀 — 헬퍼(_list_dockerfiles·_dockerfile_expose·_detect_injections) 만으로 스캔.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; SRV=""

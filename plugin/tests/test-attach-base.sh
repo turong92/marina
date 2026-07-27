@@ -6,6 +6,7 @@
 # source 체크아웃이 stale·detached 여도 새 브랜치는 원격 기본 브랜치에서 태어나야 한다
 # (= source 의 우연한 HEAD 를 물려받지 않는다). 기존 브랜치 재사용은 test-attach-branch-mirror 가 커버.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PLUGIN_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"

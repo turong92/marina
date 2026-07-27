@@ -2,6 +2,7 @@
 # opt-in links: x-marina.links {symlink:[...], copy:[...]} 가 있으면 그 명시 리스트만 적용.
 # symlink=공유 심링크, copy=독립 복제(원본과 무관), 목록 외(빌드출력 build/.next/*.jar)=아무것도 안 함.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

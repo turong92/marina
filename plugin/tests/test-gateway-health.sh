@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 게이트웨이 health: 테스트 admin 격리 + PID 생존/리스너 드리프트 감지 + start 자동복구.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/../scripts/marina-gateway.py"; GWC="$HERE/../scripts/marina-gateway-control.sh"
 CADDY="$(command -v caddy 2>/dev/null || true)"

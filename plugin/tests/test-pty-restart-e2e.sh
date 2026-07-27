@@ -3,6 +3,7 @@
 # (인메모리 레지스트리 리셋)한 뒤, 디스크 메타에서 그 세션이 재구성되어 reachable 인지 못박는다.
 # (리뷰어 ⚠️: "실제 에이전트가 재시작을 살아남고 재구성되나" 를 실 프로세스로 검증.)
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$HERE/../scripts"
 TMP="$(mktemp -d)"; TMP="$(cd "$TMP" && pwd -P)"

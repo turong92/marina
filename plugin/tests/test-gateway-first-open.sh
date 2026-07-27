@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Default browser-open paths must prefer the stable gateway origin over Docker's rotating published port.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 

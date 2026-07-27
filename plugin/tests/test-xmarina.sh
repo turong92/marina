@@ -3,6 +3,7 @@
 # dict 로 읽고(parse_xmarina), 다시 compose YAML 로 쓴 뒤(serialize_xmarina) 재파싱하면 동일.
 # docker 비의존(PyYAML 직접) — 팀원 붙여넣기 blob 도 docker 없이 검증 가능해야 함.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CC="$HERE/../scripts/marina-compose.py"
 

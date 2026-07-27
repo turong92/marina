@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Dashboard memory contract: compact Docker/host telemetry and guarded lifecycle retries.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
@@ -13,39 +14,39 @@ CSS="$WEB/styles.css"
 
 # The old derived RSS/system summary is ambiguous. The toolbar exposes paired,
 # independently hideable Docker and host fields instead.
-! rg -q 'dev = marina 추적 서비스' "$HTML" || { echo "FAIL: old ambiguous memory tooltip remains"; exit 1; }
-rg -q 'id="memDocker"' "$HTML" || { echo "FAIL: Docker memory field missing"; exit 1; }
-rg -q 'id="memHost"' "$HTML" || { echo "FAIL: host memory field missing"; exit 1; }
-rg -q 'Docker \$\{formatMemoryPair' "$UTIL" || { echo "FAIL: Docker usage copy missing"; exit 1; }
-rg -q 'Host available \$\{formatMemoryGb' "$UTIL" || { echo "FAIL: host availability copy missing"; exit 1; }
-rg -q 'docker\.usedMb' "$UTIL" || { echo "FAIL: Docker snapshot use missing"; exit 1; }
-rg -q 'host\.availableMb' "$UTIL" || { echo "FAIL: host snapshot use missing"; exit 1; }
-rg -q 'function formatMemoryGb' "$UTIL" || { echo "FAIL: safe GB formatter missing"; exit 1; }
-rg -q 'function formatMemoryPair' "$UTIL" || { echo "FAIL: compact Docker formatter missing"; exit 1; }
-rg -q 'function memoryBlockConfirmation' "$UTIL" || { echo "FAIL: memory block confirmation formatter missing"; exit 1; }
-! rg -q 'toFixed.*undefined|NaN' "$UTIL" || { echo "FAIL: unsafe memory formatting remains"; exit 1; }
+! grep -qE 'dev = marina 추적 서비스' "$HTML" || { echo "FAIL: old ambiguous memory tooltip remains"; exit 1; }
+grep -qE 'id="memDocker"' "$HTML" || { echo "FAIL: Docker memory field missing"; exit 1; }
+grep -qE 'id="memHost"' "$HTML" || { echo "FAIL: host memory field missing"; exit 1; }
+grep -qE 'Docker \$\{formatMemoryPair' "$UTIL" || { echo "FAIL: Docker usage copy missing"; exit 1; }
+grep -qE 'Host available \$\{formatMemoryGb' "$UTIL" || { echo "FAIL: host availability copy missing"; exit 1; }
+grep -qE 'docker\.usedMb' "$UTIL" || { echo "FAIL: Docker snapshot use missing"; exit 1; }
+grep -qE 'host\.availableMb' "$UTIL" || { echo "FAIL: host snapshot use missing"; exit 1; }
+grep -qE 'function formatMemoryGb' "$UTIL" || { echo "FAIL: safe GB formatter missing"; exit 1; }
+grep -qE 'function formatMemoryPair' "$UTIL" || { echo "FAIL: compact Docker formatter missing"; exit 1; }
+grep -qE 'function memoryBlockConfirmation' "$UTIL" || { echo "FAIL: memory block confirmation formatter missing"; exit 1; }
+! grep -qE 'toFixed.*undefined|NaN' "$UTIL" || { echo "FAIL: unsafe memory formatting remains"; exit 1; }
 
 # Both individual and start-all actions must ask before issuing their one forced retry.
-rg -Fq "if (result?.blocked === 'low-memory' && !force)" "$UTIL" || { echo "FAIL: guarded block handling missing"; exit 1; }
-rg -Fq 'confirm(memoryBlockConfirmation(result, type))' "$UTIL" || { echo "FAIL: memory override confirmation missing"; exit 1; }
-rg -Fq 'return action(type, root, service, true)' "$UTIL" || { echo "FAIL: individual force retry missing"; exit 1; }
-rg -Fq 'return sessionAction(type, session, true)' "$UTIL" || { echo "FAIL: start-all force retry missing"; exit 1; }
-rg -Fq 'JSON.stringify({root: session.root, force})' "$UTIL" || { echo "FAIL: start-all force payload missing"; exit 1; }
-rg -q 'projectedFreeMb' "$UTIL" || { echo "FAIL: projected memory confirmation missing"; exit 1; }
-rg -q 'estimatedServices' "$UTIL" || { echo "FAIL: largest estimated services missing"; exit 1; }
-rg -q 'unknownServices' "$UTIL" || { echo "FAIL: unknown services confirmation missing"; exit 1; }
-rg -q 'docker-projected' "$UTIL" || { echo "FAIL: projected-pressure reason copy missing"; exit 1; }
-rg -q 'docker-unknown' "$UTIL" || { echo "FAIL: incomplete-Docker reason copy missing"; exit 1; }
+grep -qF "if (result?.blocked === 'low-memory' && !force)" "$UTIL" || { echo "FAIL: guarded block handling missing"; exit 1; }
+grep -qF 'confirm(memoryBlockConfirmation(result, type))' "$UTIL" || { echo "FAIL: memory override confirmation missing"; exit 1; }
+grep -qF 'return action(type, root, service, true)' "$UTIL" || { echo "FAIL: individual force retry missing"; exit 1; }
+grep -qF 'return sessionAction(type, session, true)' "$UTIL" || { echo "FAIL: start-all force retry missing"; exit 1; }
+grep -qF 'JSON.stringify({root: session.root, force})' "$UTIL" || { echo "FAIL: start-all force payload missing"; exit 1; }
+grep -qE 'projectedFreeMb' "$UTIL" || { echo "FAIL: projected memory confirmation missing"; exit 1; }
+grep -qE 'estimatedServices' "$UTIL" || { echo "FAIL: largest estimated services missing"; exit 1; }
+grep -qE 'unknownServices' "$UTIL" || { echo "FAIL: unknown services confirmation missing"; exit 1; }
+grep -qE 'docker-projected' "$UTIL" || { echo "FAIL: projected-pressure reason copy missing"; exit 1; }
+grep -qE 'docker-unknown' "$UTIL" || { echo "FAIL: incomplete-Docker reason copy missing"; exit 1; }
 
 # Service rows place current use in the existing right metadata slot and retain
 # peak/limit/OOM detail in a title. OOM augments the normalized state reason.
-rg -q 'memoryUsageMb' "$ACTIONS" || { echo "FAIL: service current memory missing"; exit 1; }
-rg -q 'memoryPeakMb' "$ACTIONS" || { echo "FAIL: service peak memory missing"; exit 1; }
-rg -q 'memoryLimitMb' "$ACTIONS" || { echo "FAIL: service memory limit missing"; exit 1; }
-rg -q 'oomKilled' "$ACTIONS" || { echo "FAIL: service OOM state missing"; exit 1; }
-rg -q 'function serviceStateReason' "$ACTIONS" || { echo "FAIL: OOM state reason helper missing"; exit 1; }
-rg -q 'data-rss' "$ACTIONS" || { echo "FAIL: service memory metadata slot missing"; exit 1; }
-rg -q '\.mem-separator' "$CSS" || { echo "FAIL: compact telemetry separator styles missing"; exit 1; }
+grep -qE 'memoryUsageMb' "$ACTIONS" || { echo "FAIL: service current memory missing"; exit 1; }
+grep -qE 'memoryPeakMb' "$ACTIONS" || { echo "FAIL: service peak memory missing"; exit 1; }
+grep -qE 'memoryLimitMb' "$ACTIONS" || { echo "FAIL: service memory limit missing"; exit 1; }
+grep -qE 'oomKilled' "$ACTIONS" || { echo "FAIL: service OOM state missing"; exit 1; }
+grep -qE 'function serviceStateReason' "$ACTIONS" || { echo "FAIL: OOM state reason helper missing"; exit 1; }
+grep -qE 'data-rss' "$ACTIONS" || { echo "FAIL: service memory metadata slot missing"; exit 1; }
+grep -qE '\.mem-separator' "$CSS" || { echo "FAIL: compact telemetry separator styles missing"; exit 1; }
 node - "$UTIL" "$ACTIONS" "$SESSIONS" "$BUILD" <<'JS'
 const fs = require('fs');
 const vm = require('vm');
@@ -178,8 +179,8 @@ vm.runInContext('this.__test = {action, sessionAction, formatMemoryPair, finiteM
 })().catch(error => { console.error(error.stack || error); process.exit(1); });
 JS
 
-rg -Fq '@media (max-width: 640px)' "$CSS" || { echo "FAIL: narrow header media rule missing"; exit 1; }
-rg -q '\.toolbar \.mem-bar' "$CSS" || { echo "FAIL: narrow header gauge rule missing"; exit 1; }
-rg -q 'flex: 1 1 100%' "$CSS" || { echo "FAIL: narrow telemetry wrapping contract missing"; exit 1; }
+grep -qF '@media (max-width: 640px)' "$CSS" || { echo "FAIL: narrow header media rule missing"; exit 1; }
+grep -qE '\.toolbar \.mem-bar' "$CSS" || { echo "FAIL: narrow header gauge rule missing"; exit 1; }
+grep -qE 'flex: 1 1 100%' "$CSS" || { echo "FAIL: narrow telemetry wrapping contract missing"; exit 1; }
 
 echo "PASS test-memory-ui"

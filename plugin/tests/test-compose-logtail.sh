@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # compose start 가 서비스별 docker compose logs -f 를 run-NNN.log 로 캡처하고 logtail.pid 추적, stop 이 tailer 를 죽인다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

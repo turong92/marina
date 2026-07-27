@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # detect_profile_var / is_profile_var — ARG 목록에서 profile 변수 감지(후보 우선순위).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 python3 - "$HERE/../scripts" <<'PY'
 import importlib.util, os, sys

@@ -3,6 +3,7 @@
 # 삽입 블록 출처 주석 · 필수 ARG 빈값(???) 마커 삽입 · 기존 compose 카드(불러오기, okToReplaceYaml 재사용) ·
 # 구 .compose-rail 잔재 부재(HTML) · 전 웹 JS 문법.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 J="$WEB/app-2b-workbench.js"

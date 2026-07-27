@@ -2,6 +2,7 @@
 # worktree_status: git status 실패(깨진/고아 워크트리 — gitfile dangling 등)를 '미커밋 변경분' 이 아니라
 # broken 으로 구분한다. 안 그러면 삭제 시 "미커밋 변경·untracked 영구 폐기" 라고 헛겁을 준다(폐기할 것 없는데).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTL="$HERE/../scripts/marina-control.py"
 python3 - "$CTL" <<'PY'

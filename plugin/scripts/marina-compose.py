@@ -538,9 +538,24 @@ def _bind_script(pairs):
                      "H=$$(ip route 2>/dev/null | awk '/default/{print $$3; exit}')")
     for port, target in pairs:
         dst = '"$$H"' if target == "host" else target
-        lines.append(f'socat TCP-LISTEN:{port},fork,reuseaddr TCP:{dst}:{port} &')
+        lines.append(f'socat TCP4-LISTEN:{port},fork,reuseaddr TCP:{dst}:{port} &')
+        # localhost 를 ::1 로 먼저 푸는 런타임(Node 등)도 닿아야 한다 — IPv4 만 듣던 시절엔
+        # 앱이 localhost:<port> 로 붙으면 Connection refused 였다(Java 는 IPv4 우선이라 안 보였을 뿐).
+        # ipv6only=1 로 소켓을 따로 열어, IPv6 가 꺼진 컨테이너에서도 v4 는 그대로 살게 한다(v6 는 best-effort).
+        lines.append(f'socat TCP6-LISTEN:{port},fork,reuseaddr,ipv6only=1 TCP:{dst}:{port} &')
     lines.append("wait")
     return "\n".join(lines)
+
+
+def _bind_healthcheck(pairs):
+    """[(port, target)] → 엮는 포트가 전부 LISTEN 인지 보는 healthcheck 셸.
+
+    앱은 이게 통과해야 뜬다 — 컨테이너가 '시작됨'이어도 socat 이 아직 안 들으면 앱이 붙자마자
+    Connection refused 로 부팅째 실패하기 때문(실측된 간헐 장애). netstat 은 alpine(busybox)에
+    항상 있고 연결을 열지 않아 타겟(redis 등)에 부담을 주지 않는다.
+    ':<port> ' 로 앞에 콜론·뒤에 공백을 붙여 :18081 같은 부분일치를 막는다. v4/v6 어느 쪽이든
+    잡히면 통과다 — 막으려는 건 '아직 socat 이 안 떴다'이고, 그때는 둘 다 없다."""
+    return " && ".join(f"netstat -ltn | grep -q ':{port} '" for port, _ in pairs)
 
 
 def _auto_service_forward(config: dict) -> dict:
@@ -570,12 +585,30 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
     덮을 게 하나도 없으면 빈 문자열. 포트값·비밀번호는 안 들어감."""
     services = (config or {}).get("services") or {}
     build_args, connectivity, expose_env = build_args or {}, connectivity or {}, expose_env or {}
+    forward = connectivity.get("forward") or {}                  # ⑤ 엮기 — {port: target}. target=host(호스트 redis/db) 또는 같은 compose 서비스명(DNS).
+    bind_pairs = {}                                              # 사이드카를 받을 서비스 → [(port, target)]
+    for fname in sorted(services):                               # 앱(build) 서비스마다 사이드카 1개가 그 컨테이너의 모든 localhost 의존성 포트를 한 번에 받음
+        if not (services[fname] or {}).get("build"):             # image-only(redis 자체 등)는 사이드카 불요 — DNS 로 바로 닿음
+            continue
+        pairs = _forward_for_service(forward, fname, _served_ports(services[fname] or {}))   # self(자기서빙 포트) 제외
+        if pairs:
+            bind_pairs[fname] = pairs
     out, any_ = ["services:"], False
     for name in sorted(services):
         svc = services[name] or {}
         body = []
         specs = _port_targets(svc)
-        if specs:
+        if name in bind_pairs:
+            # 네임스페이스 주인이 사이드카로 넘어간다(아래 ⑤ 참고) — compose 는 network_mode 와
+            # ports/networks 동시 선언을 거부하므로 앱 쪽을 비우고, 그 둘은 사이드카가 물려받는다.
+            body.append(f'    network_mode: "service:{name}-bind"')
+            if specs:
+                body.append("    ports: !reset null")
+            body.append("    networks: !reset null")
+            # 순서만으로는 부족하다 — 컨테이너 '시작됨'과 socat '듣는 중'은 다르다. 사이드카가 안 떠
+            # 있으면 앱은 어차피 못 도니, 조용히 깨진 채 뜨느니 리스닝을 확인하고 나서 띄운다.
+            body += ["    depends_on:", f"      {name}-bind:", "        condition: service_healthy"]
+        elif specs:
             entries = ", ".join(
                 f'"{bind_host}::{t}"' if proto == "tcp" else f'"{bind_host}::{t}/{proto}"'
                 for t, proto in specs
@@ -610,19 +643,44 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
         if body:
             any_ = True
             out += [f"  {name}:", *body]
-    forward = connectivity.get("forward") or {}                  # ⑤ 엮기 — {port: target}. target=host(호스트 redis/db) 또는 같은 compose 서비스명(DNS).
-    for fname in sorted(services):                               # 앱(build) 서비스마다 사이드카 1개가 그 컨테이너의 모든 localhost 의존성 포트를 한 번에 받음
-        if not (services[fname] or {}).get("build"):             # image-only(redis 자체 등)는 사이드카 불요 — DNS 로 바로 닿음
-            continue
-        pairs = _forward_for_service(forward, fname, _served_ports(services[fname] or {}))   # self(자기서빙 포트) 제외
-        if not pairs:
-            continue
-        out += [f"  {fname}-bind:",                              # 앱 0수정·언어무관: 앱이 localhost:port 그대로 쓰고 socat 이 타겟으로 중계
+    for fname in sorted(bind_pairs):
+        svc = services[fname] or {}
+        # 앱 0수정·언어무관: 앱이 localhost:port 그대로 쓰고 socat 이 타겟으로 중계.
+        # **사이드카가 네임스페이스 주인**이고 앱이 거기 합류한다(위 network_mode 참고).
+        # 반대로(사이드카가 앱의 netns 를 빌리면) compose 가 앱을 먼저 띄울 수밖에 없어, socat 이
+        # 듣기 전에 붙은 앱이 Connection refused 로 부팅째 실패했다 — 실측된 간헐 장애의 원인.
+        out += [f"  {fname}-bind:",
                 "    image: alpine/socat",
-                f'    network_mode: "service:{fname}"',          # 그 컨테이너의 localhost 를 가로챔
                 '    entrypoint: ["sh", "-c"]',
-                f"    command: [{json.dumps(_bind_script(pairs))}]",
-                "    restart: unless-stopped"]
+                f"    command: [{json.dumps(_bind_script(bind_pairs[fname]))}]",
+                "    restart: unless-stopped",
+                # 엮는 포트 전부가 실제 LISTEN 인지 확인 — 앱은 이게 통과해야 뜬다(위 depends_on).
+                # netstat 은 alpine(busybox) 에 항상 있고, 연결을 열지 않아 타겟에 부담이 없다.
+                f"    healthcheck: {{test: [\"CMD-SHELL\", {json.dumps(_bind_healthcheck(bind_pairs[fname]))}],"
+                " interval: 1s, timeout: 3s, retries: 60}"]
+        specs = _port_targets(svc)
+        if specs:                                                # 앱이 게시하던 포트를 그대로 물려받는다
+            entries = ", ".join(
+                f'"{bind_host}::{t}"' if proto == "tcp" else f'"{bind_host}::{t}/{proto}"'
+                for t, proto in specs
+            )
+            out.append(f"    ports: !override [{entries}]")
+        if any(t == "host" for _, t in bind_pairs[fname]):
+            # netns 를 빌리던 시절엔 extra_hosts 가 무시돼 런타임 탐색에 의존했다. 이제 평범한
+            # 컨테이너라 명시할 수 있다(리눅스에서 host 타겟 신뢰성↑). 스크립트 폴백은 그대로 둔다.
+            out.append('    extra_hosts: ["host.docker.internal:host-gateway"]')
+        # DNS 이름도 주인을 따라간다 — 다른 서비스가 앱을 서비스명으로 찾으므로 별칭이 필수다.
+        nets = svc.get("networks")
+        nets = nets if isinstance(nets, dict) and nets else {"default": None}
+        out.append("    networks:")
+        for net in sorted(nets):
+            aliases = []
+            cfg = nets.get(net)
+            if isinstance(cfg, dict):
+                aliases = [str(a) for a in (cfg.get("aliases") or [])]
+            if fname not in aliases:
+                aliases.append(fname)
+            out += [f"      {net}:", f"        aliases: [{', '.join(json.dumps(a) for a in aliases)}]"]
         any_ = True
     return ("\n".join(out) + "\n") if any_ else ""
 

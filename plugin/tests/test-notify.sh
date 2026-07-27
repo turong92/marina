@@ -6,6 +6,7 @@
 # ② grep — 옵트인 기본 OFF(버튼 초기 🔕), app-6 훅 1줄, index.html 버튼+로드 순서.
 # ③ 전 웹 JS node --check(회귀).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 J5="$WEB/app-5-sessions.js"

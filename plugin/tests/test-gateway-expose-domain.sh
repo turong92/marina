@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # expose 도메인 모드: cors:true be 서브도메인에 CORS(replace+preflight+credentialed+헤더 echo) 생성.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/../scripts/marina-gateway.py"
 

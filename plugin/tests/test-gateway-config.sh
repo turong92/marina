@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 게이트웨이 config 생성: 스냅샷 → Caddyfile. 서비스별 서브도메인, 대표 web 은 bare, diff.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/../scripts/marina-gateway.py"
 

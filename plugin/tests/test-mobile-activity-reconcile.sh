@@ -2,6 +2,7 @@
 # 모바일 활동(접기) 목록의 증분 갱신 — 자율 진행 중 도구가 하나 늘 때마다 exchange 를 통째로
 # 다시 만들면, 읽고 있던 펼친 상세가 파괴돼 스크롤이 튄다. 정체성/지문 분리가 그 방어선이다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 

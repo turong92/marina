@@ -3,6 +3,7 @@
 # 유효 YAML → ok:true, 무효 YAML(network_mode:host) → ok:false, 워크트리 경로 → 프로젝트 원본으로 승격
 # (compose-register/import 와 동일 가드 — source_root_for). docker 미가동이면 SKIP(compose_validate 자체가 docker 의존).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"; CTRL="$SCR/marina-control.py"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-compose-validate-api (docker 미가동)"; exit 0; }

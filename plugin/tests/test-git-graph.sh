@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # /api/git-graph · /api/git-diff — 레인 그래프 데이터·diff 본문·검증 가드
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 SH="$HERE/../scripts/marina.sh"

@@ -3,6 +3,7 @@
 # cmd_up 과 동일한 병합(legacy hostForward < 자동 서비스타겟 < 명시(backing.json < x-marina))을
 # marina-compose.py 순수 함수 재사용으로 재계산 — docker up/ps 없이 config 해석만(가볍게).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"; CTRL="$HERE/../scripts/marina-control.py"
 command -v docker >/dev/null 2>&1 || { echo "SKIP test-weave-map-api (docker CLI 미설치 — config 해석 불가)"; exit 0; }

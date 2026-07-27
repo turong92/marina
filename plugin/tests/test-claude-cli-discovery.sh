@@ -2,6 +2,7 @@
 # A — Claude Code CLI 트랜스크립트(~/.claude/projects/<slug>/<sid>.jsonl)에서 세션 발견.
 # Desktop local_*.json 없이도, cwd 필드로 worktree 매핑 + 파일 stem = 진짜 sid.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; TMP="$(cd "$TMP" && pwd -P)"

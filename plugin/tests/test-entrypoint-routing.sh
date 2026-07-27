@@ -2,6 +2,7 @@
 # entrypoint(설치 shim 대상)가 marina.sh 그룹 명령을 라우팅하는지 — worktree/gateway/link 누락이
 # "설치 shim 은 이 명령 없음" 증상을 만들었던 회귀(도그푸드 발견). 전역 usage 로 떨어지면 실패.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 EP="$HERE/../scripts/marina-entrypoint.sh"
 

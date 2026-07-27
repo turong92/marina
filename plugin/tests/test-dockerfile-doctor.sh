@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Dockerfile Doctor: cache anti-patterns are diagnosed from Dockerfile text and surfaced in compose config.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd -P)"
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME/proj"
 trap 'rm -rf "$TMP"' EXIT

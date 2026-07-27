@@ -2,6 +2,7 @@
 # 위저드 검토/공유: POST /api/compose-serialize (services YAML + x-marina → 합쳐진 compose) ·
 # GET /api/compose-export?root= (등록 프로젝트 → unified compose). docker 불요(직렬화만).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; SRV=""

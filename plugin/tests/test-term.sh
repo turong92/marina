@@ -2,6 +2,7 @@
 # 터미널 탭 백엔드(marina_term) — PTY 세션 열기(셸은 매번 새로)/에이전트 attach 재사용·청소/
 # 입력→출력 왕복/리사이즈/종료/죽은 세션 수거, 핸들러 게이트웨이 가드(X-Forwarded 거부)·프론트 문법 계약.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; TMP="$(cd "$TMP" && pwd -P)"

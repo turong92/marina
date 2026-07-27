@@ -3,6 +3,7 @@
 # EOF 직후 waitpid(WNOHANG) 을 **한 번만** 부르면 그 순간 자식이 아직 안 끝난 경우 빈손으로
 # 돌아오고, 그 좀비를 다시 거둘 사람이 없어 프로세스 테이블에 영원히 남는다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME"

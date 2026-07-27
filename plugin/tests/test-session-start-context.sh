@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SessionStart 훅이 등록 worktree 에서 규칙 JSON 을 stdout 으로 낸다 (Claude/Codex 분기)
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 HOOK="$HERE/../scripts/marina-session-start-hook.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

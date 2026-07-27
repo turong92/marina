@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # PreToolUse 훅: 등록 프로젝트 안 dev 서버 직접 기동 → deny JSON, 그 외(조회성·탈출구·미등록·깨진 입력)는 전부 무출력(allow)
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 HOOK="$HERE/../scripts/marina-pretooluse-hook.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

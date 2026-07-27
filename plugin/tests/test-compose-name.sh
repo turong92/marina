@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # compose_project_name: <id>-<session> 를 docker 허용 문자(소문자/숫자/_/-)로 정규화.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CP="$HERE/../scripts/marina-compose.py"
 [[ "$(python3 "$CP" name --project-id MyProj --session abc-123)" == "myproj-abc-123" ]] || { echo "FAIL: lower/keep"; exit 1; }

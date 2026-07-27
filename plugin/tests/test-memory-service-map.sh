@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Map one Docker snapshot to its Compose worktree and retain conservative service peaks.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 python3 - "$HERE/../scripts" <<'PY'

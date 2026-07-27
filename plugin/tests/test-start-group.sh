@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # x-marina.startGroup — 시작 그룹: cmd_up 대상 축소(pure fn) · payload 플래그 · 대시보드 집계 제외 · 폼 왕복
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 

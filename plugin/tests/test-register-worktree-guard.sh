@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # compose-register/import 가 워크트리 경로를 받아도 프로젝트 원본으로 승격 — 워크트리가 신규 프로젝트로 등록되던 버그 가드
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export MARINA_HOME="$TMP/home"

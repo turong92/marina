@@ -3,6 +3,7 @@
 # 흔한 설치 위치(/usr/local/bin·/opt/homebrew/bin·~/.local/bin)를 PATH 에 보강한다.
 # → 대시보드 start/stop/remove 의 shell `command -v docker` 가 데몬에서도 동작.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT; export MARINA_HOME="$TMP/home"

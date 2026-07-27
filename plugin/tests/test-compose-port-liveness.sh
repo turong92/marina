@@ -2,6 +2,7 @@
 # 포트 기반 liveness: compose 컨테이너로는 안 도는데 서비스 포트를 누가 listen 중이면
 # external=true 로 점등(예: main 에서 node/gradlew 로 직접 띄운 dev 서버). 포트가 닫히면 다시 꺼짐.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT; export MARINA_HOME="$TMP/home"

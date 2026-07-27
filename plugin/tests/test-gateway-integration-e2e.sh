@@ -3,6 +3,7 @@
 # 호스트에서 <wt>.<proj>.localhost 로 그 서비스 도달. 동적: 서비스 stop → 폴링이 라우트 제거.
 # docker·caddy 둘 다 있어야. 없으면 SKIP.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"; GWC="$HERE/../scripts/marina-gateway-control.sh"; CTRL="$HERE/../scripts/marina-control.py"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-gateway-integration-e2e (docker 미가용)"; exit 0; }

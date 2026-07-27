@@ -2,6 +2,7 @@
 # 실 `docker compose config` (데몬 불요): services=map, ports 객체(published 문자열), ${VAR} 보간, bind 절대경로.
 # 그 결과로 build_overlay 가 !override 127.0.0.1::<target> 를 뽑는지까지.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CP="$HERE/../scripts/marina-compose.py"
 command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 || { echo "SKIP test-compose-config (docker compose 미설치)"; exit 0; }

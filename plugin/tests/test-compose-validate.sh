@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # compose_validate: docker compose config 로 해석 → isolation_breakers. network_mode:host=에러, container_name=warning(overlay 중화), 정상=ok.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-compose-validate (docker 미가동)"; exit 0; }

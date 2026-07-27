@@ -5,6 +5,7 @@
 # ② innerHTML/alert 미사용 · index.html 로드 순서(app-2c < app-2d < app-3) · data-wb-explain-* 마커 존재.
 # ③ 전 웹 JS node --check(회귀).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 J="$WEB/app-2d-explain.js"

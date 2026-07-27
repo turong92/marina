@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # /api/sessions 가 compose 서비스를 native shape 로 돌려주고, /api/start·/api/stop 가 compose 를 구동한다. 데몬 없으면 SKIP.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"; CTRL="$HERE/../scripts/marina-control.py"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-compose-dash-api (docker 데몬 미가용)"; exit 0; }

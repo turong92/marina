@@ -6,6 +6,7 @@
 #   2) 고유 커밋 있음(진짜 작업)     → 손대지 않음 (작업 보존)
 #   3) MARINA_ATTACH_BASE pin        → 사용자 의도 존중, 최신화 건너뜀
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 PLUGIN_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd -P)"

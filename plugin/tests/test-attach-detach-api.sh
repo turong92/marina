@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # /api/attach-subrepo · /api/detach-subrepo · /api/set-default-attach over a real worktree
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 SH="$HERE/../scripts/marina.sh"

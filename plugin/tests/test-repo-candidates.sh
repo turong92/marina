@@ -3,6 +3,7 @@
 # 관례 루트(존재하는 것만) 2단계 스캔 → .git 후보만, hasCompose/registered 뱃지, scanned 에 스캔 루트 노출.
 # 3단계 이상은 후보에서 빠지고(비용 가드), 이미 등록된 프로젝트는 registered:true 로 표시(제외 아님).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"; CTRL="$SCR/marina-control.py"
 

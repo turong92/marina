@@ -2,6 +2,7 @@
 # 마이그레이션: 흩어진 레거시 JSON(build-args/prebuild/links/backing) → x-marina 로 합쳐 노출.
 # 비파괴 — 레거시 파일 보존(롤백 가능). docker 불요(함수 직접).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

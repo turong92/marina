@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # POST /api/set-autoupdate — endpoint 제거됨. 404 반환 확인.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; SRV=""

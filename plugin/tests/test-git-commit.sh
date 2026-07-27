@@ -2,6 +2,7 @@
 # /api/git-commit · /api/git-push — 깃 탭 P2(조작): stage 커밋·푸시 + 안전 가드(경로·빈 메시지) — main 커밋 허용(2026-07-13)
 # + 커밋/푸시 후 git-graph 캐시 무효화.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 SH="$HERE/../scripts/marina.sh"

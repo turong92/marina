@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # x-marina.prebuild planner: service objects, legacy subrepos, dedupe, and cwd isolation.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TMP="$(mktemp -d)"

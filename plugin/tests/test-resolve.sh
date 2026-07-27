@@ -2,6 +2,7 @@
 # test-resolve.sh — resolver picks the install dir that actually has scripts/ (Claude installPath,
 # Codex config.toml source/plugin), follows version bumps, and the emitted shim bakes a fallback.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 source "$HERE/../scripts/marina-resolve.sh"
 

@@ -2,6 +2,7 @@
 # A4 — POST /api/worktree-create: 등록 프로젝트 root 에서 `marina worktree create <branch>` CLI 재사용.
 # 성공 시 .claude/worktrees/ 에 실제로 생기고 /api/worktrees payload 에 등장. 잘못된 입력(브랜치 문자·미등록 root·중복)은 4xx.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"; CTRL="$SCR/marina-control.py"
 TMP="$(mktemp -d)"; TMP="$(cd "$TMP" && pwd -P)"   # macOS /var → /private/var 심링크 정렬(서버는 resolve() 를 쓴다)

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 게이트웨이 대표(primary) 명시 존중 — compose 의 x-marina.gateway.primary 로 대표 도메인 지정(web-name 자동 override).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/../scripts/marina-gateway.py"
 

@@ -2,6 +2,7 @@
 # marina worktree create <branch> — 브랜치명 지정 워크트리 생성(=작업 시작):
 # git worktree add(-b) + 서브레포 attach(브랜치 전체 미러). 워크트리·서브레포가 같은 브랜치로 정렬.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MARINA="$SCRIPT_DIR/../scripts/marina.sh"

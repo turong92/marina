@@ -2,6 +2,7 @@
 # resolve_session_liveness — status(merge_agent_status) + reachable(live_tids) + D3(강등)/D4(승격)
 # 을 하나로 묶은 순수 함수. 여러 호출부가 각자 계산하던 걸 여기 하나로 캐논화한다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$HERE/../scripts"
 

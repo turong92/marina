@@ -3,6 +3,7 @@
 # 빌드출력(build·.next·dist·out·target)은 기본 제외(독립 빌드) — 가져오려면 x-marina.links 에 명시.
 # attach 의 숨은 sync 대체 — 보임(marina config)·override(null)로 끔·marina link 로 수동·source==dest 면 skip.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

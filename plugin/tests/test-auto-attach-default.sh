@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # attach-detached-subrepos.sh auto-attach honors defaultAttach + first-run gate
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ATTACH="$HERE/../scripts/attach-detached-subrepos.sh"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # dev-server 스킬: SKILL.md 존재 + frontmatter(name/description) + 핵심 명령 포함 스모크
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 F="$HERE/../skills/dev-server/SKILL.md"
 [[ -f "$F" ]] || { echo "FAIL: SKILL.md 없음"; exit 1; }

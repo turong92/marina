@@ -2,6 +2,7 @@
 # worktree_info 는 만료돼도 요청을 붙잡지 않는다(stale-while-revalidate).
 # TTL(15s)이 끝나는 순간의 요청이 root 전체 git 서브프로세스를 기다리던 것이 첫 화면 지연의 원인이었다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME"

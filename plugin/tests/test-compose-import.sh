@@ -2,6 +2,7 @@
 # 팀원 공유 블록 가져오기: POST /api/compose-import {root, blob} → 등록 + x-marina 동봉(stored compose).
 # 잘못된 YAML → 4xx. docker 가동 시 happy path(등록 + stored compose 에 x-marina 보존) 검증.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; SRV=""

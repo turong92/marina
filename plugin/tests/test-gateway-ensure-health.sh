@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # ensure_gateway: PID가 살아 있어도 실제 listener가 없으면 control start로 복구하고 강제 apply한다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 

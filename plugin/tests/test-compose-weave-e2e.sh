@@ -5,6 +5,7 @@
 #   ③ host 타겟(선언, redis 호스트공유): localhost:6399 → host redis (socat→host.docker.internal) → PONG
 # docker 데몬 없으면 SKIP. 자체 redis 를 호스트 6399(점유 6379 회피)에 띄워 격리.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-compose-weave-e2e (docker 데몬 미가용)"; exit 0; }

@@ -2,6 +2,7 @@
 # 대시보드 start/restart 비동기 전환 회귀 — 120s 타임아웃으로 빌드를 죽이던 버그의 상태머신 검증.
 # _spawn_lifecycle: 즉시응답·진행중 중복거부·성공 시 마커 해제·실패 시 error 보존, payload 머지 규칙.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 python3 - "$HERE/../scripts" <<'PY'

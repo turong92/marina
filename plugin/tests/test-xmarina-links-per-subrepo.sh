@@ -2,6 +2,7 @@
 # 서브레포별 x-marina.links: {<sub>:{symlink,copy}} → 그 서브레포에만 적용·표시.
 # 예: ai-api 만 .venv(python), be-api(java)엔 .venv 안 잡힘. workspace `marina link` 가 각 서브레포로 재귀 적용.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

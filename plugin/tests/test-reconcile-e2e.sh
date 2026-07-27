@@ -9,6 +9,7 @@
 #   D 구조 변경(서비스 추가) — 같은 카드 노드에 새 svc 행 반영
 #   G 그룹라벨 — claude+codex 혼합 프로젝트에서 grp:* keyed 의사아이템, unkeyed 0
 set -uo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd -- "$HERE/../.." && pwd -P)"
 ASIDE="$HOME/.local/bin/aside"
@@ -17,9 +18,13 @@ PORT=3910
 command -v "$ASIDE" >/dev/null 2>&1 || { echo "SKIP: aside CLI 없음 (실브라우저 e2e 생략)"; exit 0; }
 
 # asdf 워크트리 코드를 실데이터로 별도 포트에 (auth off = fresh MARINA_AUTH_DB)
-TMP="$(mktemp -d)"; trap 'pkill -f "MARINA_CONTROL_PORT=$PORT" 2>/dev/null; rm -rf "$TMP"' EXIT
+# 데몬은 **띄운 pid 로만** 끊는다. pkill -f "MARINA_CONTROL_PORT=$PORT" 는 환경변수라 argv 에
+# 안 나와 매치되지 않았고, 데몬이 실 MARINA_HOME 을 쥔 채 유출됐다.
+TMP="$(mktemp -d)"; DAEMON_PID=""
+trap '[ -n "$DAEMON_PID" ] && kill "$DAEMON_PID" 2>/dev/null; rm -rf "$TMP"' EXIT
 MARINA_CONTROL_PORT=$PORT MARINA_CONTROL_HOST=127.0.0.1 MARINA_HOME="$HOME/.marina" \
   MARINA_AUTH_DB="$TMP/auth.db" nohup python3 "$REPO/plugin/scripts/marina-control.py" >"$TMP/ctrl.log" 2>&1 &
+DAEMON_PID=$!
 sleep 3
 curl -s -o /dev/null -w "" --max-time 5 "http://127.0.0.1:$PORT/" || { echo "FAIL: :$PORT 미기동"; exit 1; }
 

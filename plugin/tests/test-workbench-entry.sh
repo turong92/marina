@@ -2,6 +2,7 @@
 # 등록 워크벤치 진입 개편(M6, R1/R5/R6) 불변식 — grep 전용(서버 불필요):
 # 헤더 상시 [+ 등록] 버튼, entry 문구 개편, 위저드 완전 삭제(코드·DOM·CSS), 등록 경로 alert 부재(토스트 대체).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 H="$WEB/index.html"

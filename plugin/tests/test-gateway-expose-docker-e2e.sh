@@ -2,6 +2,7 @@
 # 실측 e2e: git 워크트리 + 실 docker 로 marina up → 도메인모드 expose 가 소비자 컨테이너 env 에
 # 이 워크트리의 be 게이트웨이 도메인을 주입하는지(docker exec 로 실측). docker 없으면 SKIP.
 set -uo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MC="$HERE/../scripts/marina-compose.py"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-gateway-expose-docker-e2e (docker 미가용)"; exit 0; }

@@ -2,6 +2,7 @@
 # Direct global CLI lifecycle commands must use marina_env, same as dashboard
 # lifecycle calls, so host prebuild gets Dockerfile-derived JAVA_HOME.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 EP="$HERE/../scripts/marina-entrypoint.sh"

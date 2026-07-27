@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 워크스페이스 탭 셸: 로그/깃/연결/터미널(실탭 — 2026-07-13 활성화)·로그 DOM id 보존·setWsTab 존재·JS 문법
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 H="$HERE/../scripts/marina-web/index.html"
 grep -q 'data-ws-tab="logs"' "$H" || { echo "FAIL: 로그 탭 없음"; exit 1; }

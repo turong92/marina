@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Dashboard link/import UI: subrepo chips + multi-pick browser (no per-row button spam), selection persists.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 APP="$HERE/../scripts/marina-web/app-6-modals.js"
 CORE="$HERE/../scripts/marina-web/app-1-core.js"

@@ -4,6 +4,7 @@
 # 그동안 "대기 중" 큐 말풍선으로 새어 문신됐다(형: "서브에이전트 알림이 내 말풍선으로, 대기열 대기중 문신"). 이 테스트는
 # 주입 큐는 렌더에서 빠지고, 진짜 사용자 큐 메시지는 그대로 렌더됨을 못박는다.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCRIPTS="$HERE/../scripts"
 

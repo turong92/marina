@@ -2,6 +2,7 @@
 # stop_external — '외부 :<port>'(IDE/터미널 직접 실행) 프로세스를 대시보드에서 내리는 경로.
 # 일회용 http.server 리스너를 실제로 SIGTERM 하고, 리스너 없음/재호출은 graceful 한지.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 
 python3 - "$HERE/../scripts" <<'PY'

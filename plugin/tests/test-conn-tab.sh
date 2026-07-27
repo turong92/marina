@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 워크스페이스 '연결' 탭(P3) 셸: 탭 버튼·pane·WS_VIEWS.conn 등록·app-9 로드·상태색(--st-*) 재사용·JS 문법.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 WEB="$HERE/../scripts/marina-web"
 H="$WEB/index.html"

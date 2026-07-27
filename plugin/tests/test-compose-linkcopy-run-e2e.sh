@@ -2,6 +2,7 @@
 # 실 docker E2E: deps(vendor)를 한 워크트리는 '링크(symlink)', 다른 워크트리는 '카피(copy)' 로 적용한 뒤
 # 둘 다 marina 로 실제 기동(start) → nginx 컨테이너 떠서 응답 + 마운트된 vendor 내용까지 서빙되는지 확인.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP (docker 미가용)"; exit 0; }

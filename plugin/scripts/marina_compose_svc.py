@@ -194,6 +194,16 @@ def build_compose_services(ps_rows: list) -> list:
             "source": "compose",
             "def": None,
         })
+    # 엮기 사이드카(<svc>-bind)가 네임스페이스 주인이라 **게시 포트가 사이드카 행에 잡힌다** —
+    # 앱이 그 netns 에 합류하므로 앱 행에는 Publishers 가 없다. 사이드카는 UI 에서 숨기니
+    # 접어주지 않으면 앱 카드가 URL 을 잃는다. 앱이 스스로 게시했다면 그 값을 존중한다.
+    by_name = {s["service"]: s for s in out}
+    for s in out:
+        if not s["service"].endswith("-bind") or not s["port"]:
+            continue
+        app = by_name.get(s["service"][:-5])
+        if app is not None and not app["port"]:
+            app["port"] = s["port"]
     out.sort(key=lambda s: s["service"])
     return out
 

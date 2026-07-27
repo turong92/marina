@@ -2,6 +2,7 @@
 # main 기본 링크 disable/enable → 새 워크트리 상속(3개/5개) + 워크트리 override 격리 e2e.
 # (원본 e2e: main 에서 기본 링크 disable/enable → 새 워크트리 생성 → 상속 반영 확인 + 워크트리 override 격리 확인.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

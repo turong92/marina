@@ -2,6 +2,7 @@
 # 중첩 등록: 부모(parent) 아래 자식(parent/sub)도 등록되면, sub 의 root 는 sub 로 귀속돼야 한다
 # (first-match 면 parent 로 잘못 귀속 — startswith 가 parent 에 먼저 걸림).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 SH="$HERE/../scripts/marina.sh"

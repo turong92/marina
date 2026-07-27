@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # expose: build_overlay 가 expose_env 를 서비스 environment 로 주입(도메인=URL, origin=빈값).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 MC="$HERE/../scripts/marina-compose.py"
 

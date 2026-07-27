@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 실 docker: compose start → 컨테이너 로그가 run-NNN.log 로 캡처된다(대시보드 뷰어가 읽는 그 파일). 데몬 없으면 SKIP.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SH="$HERE/../scripts/marina.sh"
 command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 || { echo "SKIP test-compose-dash-logs-e2e (docker 미가용)"; exit 0; }

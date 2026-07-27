@@ -2,6 +2,7 @@
 # build 가상 서비스: lifecycle 출력이 build 로그 run 으로 스트리밍되고, 실패 시 파일 끝이 busyError 로.
 # log_targets_for 에 build 허용 + payload buildLogRuns 노출도 검증.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 export MARINA_HOME="$TMP/home"

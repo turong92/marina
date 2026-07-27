@@ -2,6 +2,7 @@
 # _compose_defined_services: 보관된 compose 의 services 키를 (중지 상태여도) 파싱 → 카드에 행 노출용.
 # docker 불요 — 순수 들여쓰기 파싱. 중지된 compose 도 대시보드에서 ▶ 시작할 수 있게 하는 근거.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT

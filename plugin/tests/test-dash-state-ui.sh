@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 카드 재설계 구조 불변식: state 기반 헬퍼 존재·구 파생 제거·토글 문법·문법 오류 없음
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 J="$HERE/../scripts/marina-web/app-5-sessions.js"
 grep -q "function svcState" "$J" || { echo "FAIL: svcState 없음"; exit 1; }

@@ -2,6 +2,7 @@
 # A2 — env 누락 '시작 전' 감지. ${VAR} 추출 규칙(기본값 제외·:? 포함·중복 dedup) + .env 파싱 + 설정됨 판정
 # 우선순위(env>워크트리.env>프로젝트.env>marina 주입) + 실서버 payload 노출 + 프론트 경고줄 배선.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 

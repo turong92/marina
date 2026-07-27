@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # dashboard card actions: legacy cleanup reset is intentionally not exposed; cache clear owns that space.
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 ROOT="$(cd "$HERE/../.." && pwd -P)"

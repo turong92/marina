@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 대시보드 링크 API: GET /api/links (effective 링크 노출) + POST /api/link-set (disable/clear/set → overrides.json).
 set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 CTRL="$HERE/../scripts/marina-control.py"
 TMP="$(mktemp -d)"; SRV=""
