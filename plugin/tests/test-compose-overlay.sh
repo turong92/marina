@@ -131,6 +131,13 @@ assert bounded_unknown == {"version":1,"status":"unknown"}, bounded_unknown
 assert wait_options and all(option == os.WNOHANG for option in wait_options), wait_options
 ps='[{"Service":"web","Publishers":[{"URL":"127.0.0.1","TargetPort":80,"PublishedPort":55001,"Protocol":"tcp"},{"PublishedPort":0}]},{"Service":"be","Publishers":[{"PublishedPort":55002}]}]'
 assert mc.parse_ps_ports(ps)=={"web":[55001],"be":[55002]}, mc.parse_ps_ports(ps)
+# 엮기 사이드카가 netns 주인이라 게시 포트가 <svc>-bind 행에 잡힌다. 사용자에게 보이는 이름은
+# 앱이어야 한다 — `marina status` 가 user-api-bind=58130 을 찍으면 포트를 찾을 때 헷갈린다.
+_psb='[{"Service":"user-api","Publishers":[]},{"Service":"user-api-bind","Publishers":[{"PublishedPort":58130}]},{"Service":"solo","Publishers":[{"PublishedPort":55003}]}]'
+assert mc.parse_ps_ports(_psb)=={"user-api":[58130],"solo":[55003]}, mc.parse_ps_ports(_psb)
+# 앱이 스스로 게시하면 그 값을 유지하고, 사이드카 몫을 덮어쓰지 않는다
+_psb2='[{"Service":"api","Publishers":[{"PublishedPort":55010}]},{"Service":"api-bind","Publishers":[{"PublishedPort":55011}]}]'
+assert mc.parse_ps_ports(_psb2)=={"api":[55010]}, mc.parse_ps_ports(_psb2)
 assert mc._json_rows('[{"ID":"a"},{"ID":"b"}]') == [{"ID":"a"},{"ID":"b"}]
 assert mc._json_rows('{"ID":"a"}\n{"ID":"b"}\n') == [{"ID":"a"},{"ID":"b"}]
 

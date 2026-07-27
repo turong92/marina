@@ -773,7 +773,15 @@ def parse_ps_ports(ps_text: str):
             except (TypeError, ValueError):
                 continue
             out.setdefault(svc, set()).add(hp)          # 컨테이너 여러 개여도 dedup
-    return {svc: sorted(ports) for svc, ports in out.items()}
+    # 엮기 사이드카가 netns 주인이라 게시 포트는 <svc>-bind 행에 잡힌다. 사용자에게 보이는 이름은
+    # 앱이어야 한다 — `marina status` 가 user-api-bind=58130 을 찍으면 포트를 찾을 때 헷갈린다.
+    # 앱이 스스로 게시했다면 그 값을 존중하고, 사이드카 항목은 구현 디테일이라 지운다.
+    for svc in [s for s in out if s.endswith("-bind")]:
+        app = svc[:-5]
+        if not out.get(app):                            # 앱이 스스로 게시했으면 그 값을 존중
+            out[app] = out[svc]
+        del out[svc]
+    return {svc: sorted(ports) for svc, ports in out.items() if ports}
 
 
 def _json_rows(value: str) -> list[dict]:
