@@ -153,6 +153,35 @@ def _pid_alive(pid: int) -> bool:
         return False
 
 
+_pending_reap: set[int] = set()   # 우리가 fork 한 PTY 자식 — 수거될 때까지 들고 있는다
+
+
+def _reap_children() -> None:
+    """끝난 PTY 자식을 거둔다. 못 거둔 건 다음 스윕에서 다시 시도한다.
+
+    EOF 직후 waitpid(WNOHANG) 를 **한 번만** 부르면, 그 순간 자식이 아직 종료 전이면 빈손으로
+    돌아오고 그 좀비를 다시 거둘 사람이 없어 프로세스 테이블에 영구히 남는다(실측: 세션을 외부에서
+    kill 했더니 <defunct> 잔류). 그래서 등록해두고 폴마다 재시도한다.
+
+    waitpid(-1) 로 싹쓸이하지 않는 이유: marina 는 git/ps 를 subprocess 로 계속 부르는데,
+    그 자식을 가로채면 subprocess 쪽이 ECHILD 로 깨진다. 우리 pid 만 지목해서 거둔다.
+    """
+    for pid in list(_pending_reap):
+        try:
+            done, _ = os.waitpid(pid, os.WNOHANG)
+        except OSError:               # ChildProcessError 포함 — 우리 자식이 아니거나 이미 수거됨
+            _pending_reap.discard(pid)
+            continue
+        if done:
+            _pending_reap.discard(pid)
+
+
+def _register_reap(pid: int) -> None:
+    if pid > 1:
+        _pending_reap.add(pid)
+    _reap_children()
+
+
 def _pid_start(pid: int) -> str:
     """프로세스 시작시각 지문(ps -o lstart=) — pid 재사용 판별용. fail-open 시 ""(검증 불가)."""
     try:
@@ -248,10 +277,7 @@ def _reader(term: _Term) -> None:
         os.close(term.fd)
     except OSError:
         pass
-    try:
-        os.waitpid(term.pid, os.WNOHANG)
-    except OSError:
-        pass
+    _register_reap(term.pid)
 
 
 def _reap_idle() -> None:
@@ -262,6 +288,7 @@ def _reap_idle() -> None:
     이미 붙어있는 SSE 스트림은 term 객체를 직접 참조하니 맵에서 빼도 exit 통지는 정상 동작한다.
     """
     now = time.time()
+    _reap_children()   # 좀비를 먼저 치운다 — 안 그러면 아래 _pid_alive 가 시체를 살아있다고 본다
     with _lock:
         # detached(복원) term 은 reader 스레드가 없어 자연사 통지가 안 온다 — 여기서 pid 를 직접 검증.
         for t in _by_tid.values():
@@ -585,6 +612,7 @@ def term_kill(tid: str) -> dict[str, Any]:
             os.kill(term.pid, signal.SIGHUP)
         except OSError:
             pass
+        _register_reap(term.pid)   # SIGHUP 받고 죽는 건 조금 뒤다 — 등록해두고 폴마다 거둔다
     term.mark_dead()
     with _lock:
         _by_tid.pop(term.tid, None)
