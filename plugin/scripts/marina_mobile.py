@@ -492,7 +492,10 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
             for term in root_terms:
                 tid = str(term.get("tid") or "")
                 agent_target = term.get("agent") if isinstance(term.get("agent"), dict) else None
-                if agent_target:
+                # sid 가 있어야만 대응하는 에이전트 카드가 존재한다 — 그때만 중복이라 뺀다.
+                # 직접 launch 한 PTY 는 훅이 뜨기 전까지 sid 가 없다(입양 전). 그걸 여기서 빼버리면
+                # 어느 카드에도 안 잡혀 방금 띄운 세션을 열 방법이 사라진다.
+                if agent_target and str(agent_target.get("sid") or ""):
                     continue
                 target = {"type": "term", "tid": tid}
                 sessions.append({
@@ -1785,6 +1788,25 @@ _MOBILE_HTML = r"""<!doctype html>
     function targetKey(root=selectedRoot()) { return `marinaMobileTarget:${root}`; }
     function selectedSession() { return (state.sessions || []).find(s => s.key === selectedSessionKey) || null; }
     function termKey(tid) { return `term:${tid}`; }
+    function migrateSelectionOnPromotion() {
+      // 직접 launch 한 PTY 는 첫 지시가 훅을 깨우는 순간 sid 를 얻어(입양) term 카드 → agent 카드로
+      // 바뀐다. 키가 통째로 갈리므로 옮겨주지 않으면 보고 있던 화면이 빈 세션이 된다.
+      if (!selectedSessionKey.startsWith("term:")) return;
+      const list = state.sessions || [];
+      if (list.some(s => s.key === selectedSessionKey)) return;
+      const tid = selectedSessionKey.slice(5);
+      const promoted = list.find(s => s.kind === "agent" && s.tid === tid);
+      if (!promoted) return;
+      delete pendingTurns[selectedSessionKey];   // 승격 뒤엔 에이전트 트랜스크립트가 진실이다
+      selectedSessionKey = promoted.key;
+      turnsStructureKey = "";
+      localStorage.setItem("marinaMobileSession", promoted.key);
+      if (promoted.target) {
+        const value = targetValue(promoted.target);
+        localStorage.setItem("marinaMobileTarget", value);
+        localStorage.setItem(targetKey(promoted.root), value);
+      }
+    }
     function currentTargetValue() {
       const s = selectedSession();
       if (s && s.target) {
@@ -3116,6 +3138,7 @@ _MOBILE_HTML = r"""<!doctype html>
         }
         if (!r.ok) throw new Error(await r.text());
         state = await r.json();
+        migrateSelectionOnPromotion();
         // 데몬 재시작(새 버전) 감지 → full-reload 를 강제하지 않고 배너만 띄운다(형 탭할 때 리로드).
         // 재방문 폴링마다 location.reload() 를 때리면 스크롤·작업중 상태가 다 풀렸음.
         if (state.serverInstance) {
@@ -3337,7 +3360,11 @@ _MOBILE_HTML = r"""<!doctype html>
         await load({quiet: true}).catch(() => {});
         // 새 세션은 아직 트랜스크립트가 없어 터미널로 잡힌다 — 그걸 골라두면 바로 첫 지시를 보낼 수 있고,
         // 그 지시가 훅을 깨워 세션이 에이전트로 승격된다(입양).
-        if (d.tid) chooseSession(`term:${d.tid}`);
+        // 폴 타이밍상 방금 띄운 PTY 가 아직 state 에 없을 수 있어 화면 전환을 폴에 맡기지 않는다.
+        if (d.tid) {
+          if ((state.sessions || []).some(s => s.key === `term:${d.tid}`)) chooseSession(`term:${d.tid}`);
+          else { ensureLiveTermSession(d.tid, root, "", {type: "term", tid: d.tid}); showChat(); render(); }
+        }
       } catch (error) {
         showToast(`세션 시작 실패 · ${String(error)}`);
       } finally {

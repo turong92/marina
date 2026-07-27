@@ -76,6 +76,43 @@ grep -qF "openAgentTerminal(session.root, { source: agent.source })" "$SCR/marin
   || { echo "FAIL: 웹 카드 ＋CC/＋CX 배선 누락"; exit 1; }
 grep -qF '"/mobile/api/launch"' "$SCR/marina_handler.py" || { echo "FAIL: launch 라우트 없음"; exit 1; }
 
+PYTHONPATH="$SCR" python3 - "$TMP" <<'PY'
+# 갓 launch 한 세션은 **아직 sid 가 없다**(훅이 뜨기 전). 그런 PTY 를 "에이전트 카드가 대신
+# 보여주겠지" 하고 목록에서 빼면 카드가 어디에도 안 남아 열 수가 없다 — 실기기에서 잡힌 회귀.
+import sys
+from pathlib import Path
+import marina_mobile as mm
+
+root = Path(sys.argv[1]) / "wt"; root.mkdir(parents=True, exist_ok=True)
+mm.discover_all_roots = lambda refresh=False: [root]
+mm.worktree_info = lambda r, refresh=False: {"id": "wt", "alias": "", "projectLabel": "p"}
+mm._live_agent_cwds = lambda refresh=False: set()
+mm.agents_payload = lambda r, refresh=False: [{"source": "claude", "sid": "sid-known-0001", "status": "idle"}]
+mm.term_list = lambda: {"sessions": [
+    {"tid": "t-fresh", "root": str(root), "agent": {"source": "claude", "sid": ""}, "alive": True},
+    {"tid": "t-known", "root": str(root), "agent": {"source": "claude", "sid": "sid-known-0001"}, "alive": True},
+    {"tid": "t-plain", "root": str(root), "alive": True},
+]}
+
+keys = [s["key"] for s in mm.mobile_state()["sessions"]]
+assert "term:t-fresh" in keys, f"갓 띄운 세션이 목록에서 사라졌다: {keys}"
+assert "term:t-plain" in keys, keys
+# sid 가 붙은 PTY 는 에이전트 카드가 대신하므로 중복 노출하지 않는다
+assert "term:t-known" not in keys, keys
+assert f"agent:claude:sid-known-0001:{root}" in keys, keys
+print("ok a freshly launched (sid-less) session stays visible in the list")
+PY
+
+PYTHONPATH="$SCR" python3 - <<'PY'
+# 입양으로 sid 가 붙으면 term 카드는 사라지고 agent 카드로 승격된다 —
+# 그 순간 열어둔 화면이 빈 세션이 되지 않게 선택을 옮겨줘야 한다.
+from marina_mobile import render_mobile_html
+html = render_mobile_html()
+for needle in ("function migrateSelectionOnPromotion", "migrateSelectionOnPromotion()", "ensureLiveTermSession(d.tid"):
+    assert needle in html, f"승격 인수인계 배선 누락 — {needle}"
+print("ok promotion hands the open screen over to the agent session")
+PY
+
 PYTHONPATH="$SCR" python3 - <<'PY'
 # mobile_launch 는 source 를 검증한다(임의 실행 방지)
 import marina_mobile as mm
