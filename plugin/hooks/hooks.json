@@ -29,6 +29,15 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-question-hook.sh\""
           }
         ]
+      },
+      {
+        "matcher": "Write|Edit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-protected-write-hook.sh\""
+          }
+        ]
       }
     ],
     "PostToolUse": [

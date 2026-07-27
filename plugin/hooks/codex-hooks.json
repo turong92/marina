@@ -20,6 +20,15 @@
             "command": "\"${PLUGIN_ROOT}/scripts/marina-pretooluse-hook.sh\""
           }
         ]
+      },
+      {
+        "matcher": "^(Write|Edit|apply_patch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${PLUGIN_ROOT}/scripts/marina-protected-write-hook.sh\""
+          }
+        ]
       }
     ],
     "UserPromptSubmit": [
