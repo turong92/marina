@@ -141,8 +141,11 @@ _codex_titles_cache: tuple[float, dict[str, str]] = (0.0, {})
 
 # A1 — 카드 AGENTS 섹션(워크트리별 Claude/Codex 세션 목록). titles 캐시와 같은 리듬(20s/60s) — 별개 캐시(원시 목록, root 당 1개로 축약 안 함).
 _claude_agents_cache: tuple[float, dict[str, list[dict[str, Any]]]] = (0.0, {})
+# 전체보기(오래된 세션 포함)는 캐시 칸을 따로 쓴다 — 기본 목록의 3초 폴링 비용을 안 올리려고.
+_claude_agents_all_cache: tuple[float, dict[str, list[dict[str, Any]]]] = (0.0, {})
 
 _codex_agents_cache: tuple[float, dict[str, list[dict[str, Any]]]] = (0.0, {})
+_codex_agents_all_cache: tuple[float, dict[str, list[dict[str, Any]]]] = (0.0, {})
 
 # 서비스 기동/재시작 진행 상태 — "root::svc"(전체는 "root::--all") → 진행중 {"op","ts"} | 최근 실패 {"op","error","endedTs"}.
 # start 는 prebuild(gradle)+이미지 빌드로 몇 분 걸릴 수 있어 백그라운드로 돌리고, 폴링 payload 가

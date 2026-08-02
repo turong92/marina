@@ -114,7 +114,7 @@ d = ap._dir(); d.mkdir(parents=True, exist_ok=True)
 
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}              # 조작 가능한 PTY 없음
-mm.agents_payload = lambda value, refresh=False: []
+mm.agents_payload = lambda value, refresh=False, include_all=False: []
 opens = []
 mm.term_open = lambda *a, **k: opens.append(k) or {"tid": "resumed", "reused": False}
 
@@ -142,7 +142,7 @@ root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
 busy = {"now": True}
-mm.agents_payload = lambda value, refresh=False: [
+mm.agents_payload = lambda value, refresh=False, include_all=False: [
     {"source": "claude", "sid": "sid-desktop-0005", "status": "working" if busy["now"] else "idle"},
 ]
 opens = []
@@ -180,7 +180,7 @@ d = ap._dir(); d.mkdir(parents=True, exist_ok=True)
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
 working = {"now": True}
-mm.agents_payload = lambda value, refresh=False: [
+mm.agents_payload = lambda value, refresh=False, include_all=False: [
     {"source": "claude", "sid": "sid-busy-0006", "status": "working" if working["now"] else "idle"},
 ]
 opens = []

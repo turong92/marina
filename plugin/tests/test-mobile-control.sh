@@ -50,7 +50,9 @@ grep -q 'logoutBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page missing logo
 grep -q 'localStorage.removeItem("marinaMobileToken")' <<<"$mobile_html" || { echo "FAIL: /mobile page missing logout storage clear"; exit 1; }
 grep -q 'autoPollMs' <<<"$mobile_html" || { echo "FAIL: /mobile page missing auto polling"; exit 1; }
 ! grep -q 'notifyBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page should not promise unsupported background notifications"; exit 1; }
-grep -q '"/mobile/api/state"' <<<"$mobile_html" || { echo "FAIL: /mobile page should fetch mobile-scoped state API"; exit 1; }
+# 전체보기 때문에 템플릿 리터럴이 됐다(`?all=1`) — 여전히 모바일 전용 경로를 쓴다는 게 요점.
+grep -q '/mobile/api/state' <<<"$mobile_html" || { echo "FAIL: /mobile page should fetch mobile-scoped state API"; exit 1; }
+grep -q 'showAll ? "?all=1" : ""' <<<"$mobile_html" || { echo "FAIL: 전체보기가 서버에 전달되지 않는다"; exit 1; }
 grep -q '"/mobile/api/send"' <<<"$mobile_html" || { echo "FAIL: /mobile page should post mobile-scoped send API"; exit 1; }
 grep -q 'marinaMobileRoot' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected root"; exit 1; }
 grep -q 'marinaMobileTarget' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected target"; exit 1; }
@@ -78,7 +80,11 @@ grep -q 'marinaMobileProject' <<<"$mobile_html" || { echo "FAIL: /mobile page sh
 grep -q 'marinaMobileSource' <<<"$mobile_html" || { echo "FAIL: /mobile page should remember selected source"; exit 1; }
 grep -q 'session-group' <<<"$mobile_html" || { echo "FAIL: /mobile page should group all sessions by source"; exit 1; }
 grep -q 'source-badge' <<<"$mobile_html" || { echo "FAIL: /mobile session cards should identify their source"; exit 1; }
-grep -q 'sessionStructureKey' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve session card nodes when structure is unchanged"; exit 1; }
+# 폴링이 카드 노드를 보존해야 한다. 예전엔 순서에 둔감한 구조키로 "아예 재정렬하지 않아서" 보존했는데,
+# 그 대가로 최신순이 화면에 반영되지 않았다(형 지적). 이제 keyed reconciler 가 **순서를 반영하면서**
+# 노드를 재사용한다 — 보존의 근거가 더 강해졌다. 자세한 계약은 test-session-panel.
+grep -q 'function reconcileKeyed' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve session card nodes (keyed reconciler)"; exit 1; }
+! grep -q 'sessionStructureKey' <<<"$mobile_html" || { echo "FAIL: 순서에 둔감한 구조키가 되살아나면 정렬이 다시 얼어붙는다"; exit 1; }
 grep -q 'sessionList.onclick' <<<"$mobile_html" || { echo "FAIL: /mobile session clicks should use stable delegated handling"; exit 1; }
 ! grep -q '<label>최근 작업' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not show a separate recent-work panel"; exit 1; }
 ! grep -q 'turn-role' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not label user/assistant roles"; exit 1; }
@@ -91,17 +97,38 @@ grep -q 'autoGrowComposer' <<<"$mobile_html" || { echo "FAIL: /mobile composer s
 grep -q 'promptInput.onkeydown' <<<"$mobile_html" || { echo "FAIL: /mobile composer should support hardware keyboard send"; exit 1; }
 grep -q 'retryBtn' <<<"$mobile_html" || { echo "FAIL: /mobile composer should expose failed-send retry"; exit 1; }
 grep -q 'failedSend.sessionKey !== selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile retry should stay bound to the failed session"; exit 1; }
-grep -q 'const requestContext = {root: selectedRoot(), sessionKey: selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile send should capture its session before the request"; exit 1; }
+# 전송 전에 세션 컨텍스트를 캡처한다(원래 의도). root 는 전역 selectedRoot() 가 아니라 **그 세션의**
+# root 여야 한다 — 전역 값은 워크트리 피커/프로젝트 탭이 움직이면 어긋나 서버가 403 을 낸다.
+# 자세한 계약은 test-mobile-session-root.
+grep -q 'const requestContext = {root: sessionRoot(), sessionKey: selectedSessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile send should capture its session before the request"; exit 1; }
 grep -q 'failedSend = requestContext' <<<"$mobile_html" || { echo "FAIL: /mobile failed send should retry in its original session"; exit 1; }
 grep -q 'async function responseError' <<<"$mobile_html" || { echo "FAIL: /mobile should show the server send failure reason"; exit 1; }
 ! grep -q 'class="usageRail"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should not permanently expose agent context usage"; exit 1; }
+# 데몬이 새 버전으로 뜨면 낡은 페이지는 **스스로** 새로고침한다(안전할 때만).
+# 배너만 띄우면 형이 못 보고 옛 JS 로 계속 써서 "고쳤다는데 그대로"가 반복된다.
+grep -q 'if (!busyTyping && !sending && !answering) { location.reload(); return; }' <<<"$mobile_html" || { echo "FAIL: 새 버전 자동 새로고침 없음"; exit 1; }
+grep -q 'updateBanner.style.display = "block";   // 지금은 위험' <<<"$mobile_html" || { echo "FAIL: 위험할 땐 배너로 물러서야 함"; exit 1; }
 grep -q 'id="usageBtn"' <<<"$mobile_html" || { echo "FAIL: /mobile compact header should expose a usage button"; exit 1; }
 grep -q 'id="usagePanel"' <<<"$mobile_html" || { echo "FAIL: /mobile usage button should open a usage panel"; exit 1; }
 grep -q 'id="chatNavTitle"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should use a compact navigation title"; exit 1; }
 grep -q 'data-view="chat"' <<<"$mobile_html" || { echo "FAIL: /mobile shell should switch to compact chat mode"; exit 1; }
-grep -q '#mobileApp\[data-view="chat"\] #projectTabs' <<<"$mobile_html" || { echo "FAIL: project navigation should hide while chatting"; exit 1; }
-grep -q '#mobileApp\[data-view="chat"\] #sourceTabs' <<<"$mobile_html" || { echo "FAIL: source navigation should hide while chatting"; exit 1; }
-grep -q '#mobileApp\[data-view="chat"\] #servicesBtn' <<<"$mobile_html" || { echo "FAIL: service summary should hide while chatting"; exit 1; }
+# 프로젝트/종류 탭은 채팅 헤더에선 빠지지만 **좌측 패널(#listView) 안**에 살아 있어야 한다.
+# 예전엔 헤더에 두고 채팅 뷰에서 CSS 로 숨겼는데, 그러면 드로어를 열어도 현재 프로젝트 세션만 보여
+# 다른 프로젝트를 고를 방법이 없었다(형 지적). 자세한 계약은 test-mobile-drawer.
+! grep -q '#mobileApp\[data-view="chat"\] #projectTabs' <<<"$mobile_html" || { echo "FAIL: 채팅 뷰에서 프로젝트 탭을 숨기면 드로어에서 프로젝트를 못 바꾼다"; exit 1; }
+mobile_panel="$(sed -n '/<section id="listView"/,/<\/section>/p' <<<"$mobile_html")"
+mobile_header="$(sed -n '/<header>/,/<\/header>/p' <<<"$mobile_html")"
+[[ -n "$mobile_panel" && -n "$mobile_header" ]] || { echo "FAIL: /mobile listView/header 구간을 못 찾음"; exit 1; }
+for needle in 'id="projectTabs"' 'id="sourceTabs"'; do
+  grep -q "$needle" <<<"$mobile_panel" || { echo "FAIL: $needle 가 좌측 패널 안에 없다"; exit 1; }
+done
+! grep -qE 'projectTabs|sourceTabs' <<<"$mobile_header" || { echo "FAIL: 탭이 헤더에 남아 있다"; exit 1; }
+# 서버 버튼도 좌측 패널 안으로 옮겼다 — 드로어가 목록 화면을 대체한 뒤로 채팅 뷰에서 숨기면
+# 볼 방법이 아예 사라진다(형: "모바일에서 서버 상태 보는거 어디갔지?").
+grep -q 'data-wt-more' <<<"$mobile_html" || { echo "FAIL: 워크트리 작업 진입점(⋯)이 없다"; exit 1; }
+grep -q 'body: JSON.stringify({root: servicesRoot || sessionRoot(), service, action})' <<<"$mobile_html" || { echo "FAIL: 서비스 실행이 시트가 보는 워크트리를 안 쓴다"; exit 1; }
+# (프로젝트/종류 탭의 새 계약은 위 좌측 패널 검사에서 함께 못박는다 — 채팅 뷰에서 숨기지 않는다.)
+! grep -q '#mobileApp\[data-view="chat"\] #sourceTabs' <<<"$mobile_html" || { echo "FAIL: 채팅 뷰에서 종류 탭을 숨기면 드로어에서 종류를 못 바꾼다"; exit 1; }
 grep -q 'loadAgentUsage' <<<"$mobile_html" || { echo "FAIL: /mobile should load usage lazily for the selected agent"; exit 1; }
 grep -q '"/mobile/api/usage"' <<<"$mobile_html" || { echo "FAIL: /mobile should use the scoped usage endpoint"; exit 1; }
 grep -q 'accountUsage' <<<"$mobile_html" || { echo "FAIL: /mobile should render provider account usage"; exit 1; }
@@ -124,7 +151,9 @@ grep -q 'renderSubagents' <<<"$mobile_html" || { echo "FAIL: /mobile chat should
 grep -q 'openSubagentIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened subagent details"; exit 1; }
 ! grep -q '<label>워크트리' <<<"$mobile_html" || { echo "FAIL: /mobile page should not expose worktree select"; exit 1; }
 ! grep -q '<label>대상' <<<"$mobile_html" || { echo "FAIL: /mobile page should not expose target select"; exit 1; }
-grep -q 'servicesBtn' <<<"$mobile_html" || { echo "FAIL: /mobile shell should expose service state"; exit 1; }
+# 서비스 상태는 여전히 노출된다 — 다만 전역 버튼이 아니라 **워크트리 그룹 헤더**에서.
+# 서비스 상태는 워크트리 ⋯ 시트에서 연다(헤더는 읽는 것만 남긴다).
+grep -q 'data-wt-act="services"' <<<"$mobile_html" || { echo "FAIL: /mobile shell should expose service state"; exit 1; }
 grep -q 'servicesSheet' <<<"$mobile_html" || { echo "FAIL: /mobile should render service controls in a sheet"; exit 1; }
 grep -q 'settingsBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose model and effort settings"; exit 1; }
 grep -q 'stopBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should expose current-turn interruption"; exit 1; }
@@ -145,7 +174,10 @@ grep -q 'data-activity-detail' <<<"$mobile_html" || { echo "FAIL: /mobile work d
 grep -q 'mergeTimelineItems' <<<"$mobile_html" || { echo "FAIL: /mobile history should merge paged timeline events"; exit 1; }
 grep -q 'openTimelineDetailIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened timeline details"; exit 1; }
 grep -q 'data-timeline-detail' <<<"$mobile_html" || { echo "FAIL: /mobile timeline details need stable identities"; exit 1; }
-grep -q 'renderActivityGroup(sections.activities, `exchange:${exchange.id}`)' <<<"$mobile_html" || { echo "FAIL: each answer process should keep a stable collapsible work group"; exit 1; }
+# 작업 묶음은 여전히 접힌다. 다만 **한 덩어리가 아니라 시간 순서대로 여러 구간**이다 —
+# 어시스턴트 설명이 사이에 들어가야 결과만 덩그러니 남지 않는다(형: "맥락이 해석이 덜 되는 느낌").
+grep -q 'renderActivityGroup(run.items, `exchange:${exchange.id}:${index}`)' <<<"$mobile_html" || { echo "FAIL: 작업 묶음이 순서대로 접히지 않는다"; exit 1; }
+grep -q 'function exchangeRuns(exchange)' <<<"$mobile_html" || { echo "FAIL: exchange 를 시간 순서로 쪼개지 않는다"; exit 1; }
 # 정렬 변형(.turnMeta.right)이 붙어 `class="turnMeta${...}"` 로 렌더된다 — 접두만 본다.
 grep -q 'class="turnMeta' <<<"$mobile_html" || { echo "FAIL: each agent exchange should expose its actual model and effort"; exit 1; }
 grep -q 'class="liveAction"' <<<"$mobile_html" || { echo "FAIL: the latest exchange should expose its current action inline"; exit 1; }
@@ -347,7 +379,7 @@ root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
 mm._root_has_live_agent = lambda root_arg, live_cwds: True    # 워크트리엔 '다른' 에이전트가 살아 있다
-mm.agents_payload = lambda value, refresh=False: [{
+mm.agents_payload = lambda value, refresh=False, include_all=False: [{
     "source": "claude", "sid": "other-session-0002", "status": "working",
 }, {
     "source": "codex", "sid": "codex-session-0001", "status": "idle",
@@ -375,7 +407,7 @@ root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
 mm._root_has_live_agent = lambda root_arg, live_cwds: False
-mm.agents_payload = lambda value, refresh=False: [{
+mm.agents_payload = lambda value, refresh=False, include_all=False: [{
     "source": "codex", "sid": "codex-session-0001", "status": "working",
 }, {
     "source": "claude", "sid": "claude-session-0001", "status": "working",
@@ -577,7 +609,7 @@ child.write_text("\n".join([
     json.dumps({"payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "Review auth"}]}}),
     json.dumps({"payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Looks good"}]}}),
 ]) + "\n", encoding="utf-8")
-ms.codex_agent_sessions = lambda refresh=False: {str(root): [
+ms.codex_agent_sessions = lambda refresh=False, include_all=False: {str(root): [
     {"sid": codex_sid, "path": str(parent)},
 ]}
 ms.CODEX_ROLLOUT_DIRS = (codex_dir,)
@@ -702,7 +734,7 @@ import marina_mobile as mm
 root = Path(sys.argv[1]).resolve()
 mm.discover_all_roots = lambda refresh=False: [root]
 mm.worktree_info = lambda root_arg, refresh=False: {"id": "proj", "projectLabel": "proj", "sessionTitle": "title"}
-mm.agents_payload = lambda root_arg, refresh=False: [{
+mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [{
     "source": "codex",
     "sid": "sid0001",
     "title": "Agent",
@@ -741,7 +773,7 @@ import marina_mobile as mm
 root = Path(sys.argv[1]).resolve()
 mm.discover_all_roots = lambda refresh=False: [root]
 mm.worktree_info = lambda root_arg, refresh=False: {"id": "proj", "projectLabel": "proj", "sessionTitle": "title"}
-mm.agents_payload = lambda root_arg, refresh=False: [{
+mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [{
     "source": "codex",
     "sid": "sid0001",
     "title": "Agent",

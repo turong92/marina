@@ -39,8 +39,8 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
-from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_interrupt, mobile_launch, mobile_request_ok, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
-from marina_sessions import agent_activity, agent_belongs_to_root, agent_transcript, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_interrupt, mobile_launch, mobile_request_ok, mobile_set_hidden, mobile_set_pin, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
+from marina_sessions import agent_activity, agent_belongs_to_root, agent_session_file_bytes, agent_session_files, agent_transcript, agent_transcript_image, agent_transcript_images, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
@@ -207,6 +207,52 @@ class Handler(BaseHTTPRequestHandler):
             auth_enabled=auth_controller().store.auth_enabled(),
         )
 
+    def _worktree_create(self, controller: Any, principal: Any, body: dict[str, Any]) -> None:
+        """워크트리 생성 — 웹(/api/worktree-create)과 모바일(/mobile/api/worktree-create)이 공유한다.
+        모바일이 /api/* 를 직접 못 부르는 이유: do_POST 의 host_guarded 가 /api/ 를 호스트로 막아서
+        펀넬 호스트에서 오면 'forbidden host' 다(그래서 /api/mobile-send 만 예외로 빠져 있다)."""
+        project_id = str(body.get("projectId") or "").strip()
+        if project_id:
+            proj = next((item for item in load_projects() if str(item.get("id")) == project_id), None)
+            if not proj:
+                raise ValueError("등록된 프로젝트를 찾지 못했습니다")
+            target = Path(proj["root"])
+        else:
+            target = Path(str(body.get("projectRoot", "")).strip()).expanduser()
+            if not str(body.get("projectRoot", "")).strip() or not target.is_dir():
+                raise ValueError(f"디렉토리 없음: {body.get('projectRoot', '')}")
+            proj = containing_project_for(target)
+        if not proj or proj["root"].resolve() != target.resolve():
+            raise ValueError("등록된 프로젝트 root 가 아닙니다 — 그 프로젝트의 main 카드에서 시도하세요")
+        if not self._policy().can_project(principal, str(proj.get("id") or "")):
+            self._forbidden()
+            return
+        branch = str(body.get("branch", "")).strip()
+        if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or ".." in branch:
+            raise ValueError("브랜치명은 영문/숫자/./_/-(슬래시 포함)만 가능 — 공백·'..' 금지")
+        try:
+            out = _marina_cli(target, "worktree", "create", branch, timeout=180)
+        except subprocess.CalledProcessError as exc:
+            raise ValueError((exc.output or "").strip() or str(exc))
+        except subprocess.TimeoutExpired:
+            raise ValueError("워크트리 생성 시간 초과(180s) — 서브레포 attach 가 오래 걸릴 수 있습니다. 잠시 후 새로고침해 확인하세요")
+        invalidate_registry_caches()
+        m = re.search(r"✓ 워크트리:\s*(.+)", out)   # worktree_create() 의 성공 출력에서 실경로 추출, 실패 시 관례 경로로 폴백
+        if m:
+            new_root = m.group(1).strip()
+        else:
+            san = re.sub(r"[/:]", "-", branch)
+            new_root = str(target / ".claude" / "worktrees" / san)
+        if principal is not None:
+            owner_root = canonical_root(new_root)
+            controller.store.assign_resource_owner(
+                "worktree", owner_root, principal.user.id, actor_user_id=principal.user.id
+            )
+            controller.store.audit_action(
+                "worktree.create", "ok", principal.user.id, "worktree", owner_root
+            )
+        self.send_json({"ok": True, "root": new_root, "output": out.strip()[-2000:]})
+
     def _require_root_access(self, root: Path) -> bool:
         if self._policy().can_root(getattr(self, "auth_principal", None), root):
             return True
@@ -331,7 +377,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
-            self.send_json(self._filter_mobile(mobile_state(refresh=query.get("refresh", ["0"])[0] == "1")))
+            self.send_json(self._filter_mobile(mobile_state(
+                refresh=query.get("refresh", ["0"])[0] == "1",
+                include_all=query.get("all", ["0"])[0] == "1")))
             return
         if parsed.path == "/mobile/api/catalog":
             if principal is None and not mobile_request_ok(self, parsed):
@@ -405,6 +453,85 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, 400)
                 return
             self.send_json(payload)
+            return
+        if parsed.path in ("/mobile/api/session-files", "/mobile/api/session-file"):
+            # 이 세션이 만든/바꾼 파일 — 목록(/session-files)과 원본(/session-file).
+            # 원본 서빙은 새 노출면이라 좁게 잠근다: 경로가 워크트리 안으로 resolve 돼야 하고(심링크 탈출 차단),
+            # 이미지 화이트리스트 외에는 전부 text/plain + nosniff(대시보드 오리진에서 HTML/JS 실행 방지).
+            if principal is None and not mobile_request_ok(self, parsed):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
+                if parsed.path == "/mobile/api/session-files":
+                    source, sid = query.get("source", [""])[0], query.get("sid", [""])[0]
+                    agent_key = canonical_agent(source, sid)
+                    self._policy().inherit_from_root("agent", agent_key, root)
+                    if not self._policy().can_resource(principal, "agent", agent_key):
+                        self._forbidden()
+                        return
+                    if not agent_belongs_to_root(root, source, sid):
+                        self._forbidden()
+                        return
+                    self.send_json(agent_session_files(root, source, sid))
+                    return
+                data, content_type = agent_session_file_bytes(root, query.get("path", [""])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_response(200)
+            self.send_header("content-type", content_type)
+            self.send_header("x-content-type-options", "nosniff")
+            self.send_header("content-disposition", "inline")
+            self.send_header("cache-control", "private, no-cache")   # 파일은 계속 바뀐다 — 캐시 금지
+            self.send_header("content-length", str(len(data)))
+            auth_controller().add_security_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path in ("/mobile/api/transcript-image", "/mobile/api/images"):
+            # 대화 안 이미지 — 목록(/images)과 원본 바이트(/transcript-image). 트랜스크립트에 base64 로
+            # 박혀 있어서 타임라인엔 ref 만 싣고 여기서 그 줄만 다시 읽어 준다.
+            if principal is None and not mobile_request_ok(self, parsed):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            source = query.get("source", [""])[0]
+            sid = query.get("sid", [""])[0]
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
+                agent_key = canonical_agent(source, sid)
+                self._policy().inherit_from_root("agent", agent_key, root)
+                if not self._policy().can_resource(principal, "agent", agent_key):
+                    self._forbidden()
+                    return
+                if not agent_belongs_to_root(root, source, sid):
+                    self._forbidden()
+                    return
+                if parsed.path == "/mobile/api/images":
+                    raw_limit = query.get("limit", [""])[0]
+                    payload = agent_transcript_images(root, source, sid,
+                                                      int(raw_limit) if raw_limit.isdigit() else 0)
+                    self.send_json(payload)
+                    return
+                data, content_type = agent_transcript_image(root, source, sid,
+                                                            query.get("ref", [""])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_response(200)
+            self.send_header("content-type", content_type)
+            # ref 는 (파일 오프셋, 블록 인덱스)라 내용이 안 바뀐다 — 길게 캐시해 폴링마다 재전송을 막는다.
+            self.send_header("cache-control", "private, max-age=86400, immutable")
+            self.send_header("content-length", str(len(data)))
+            auth_controller().add_security_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
             return
         if parsed.path == "/mobile/api/file":
             if principal is None and not mobile_request_ok(self, parsed):
@@ -1168,6 +1295,29 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return
+            if parsed.path in ("/mobile/api/pins", "/mobile/api/hidden", "/mobile/api/worktree-create"):
+                # 모바일 표면은 /mobile/api/* 에 산다 — /api/* 는 호스트 가드에 막혀 펀넬에서 못 부른다.
+                if principal is None and not mobile_request_ok(self, parsed):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    mobile_body = self.read_json()
+                    if parsed.path == "/mobile/api/pins":
+                        root = safe_root(str(mobile_body.get("root", "")))
+                        if not self._require_root_access(root):
+                            return
+                        self.send_json(mobile_set_pin(mobile_body))
+                        return
+                    if parsed.path == "/mobile/api/hidden":
+                        root = safe_root(str(mobile_body.get("root", "")))
+                        if not self._require_root_access(root):
+                            return
+                        self.send_json(mobile_set_hidden(mobile_body))
+                        return
+                    self._worktree_create(controller, principal, mobile_body)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
             if parsed.path == "/mobile/api/answer":
                 if principal is None and not mobile_request_ok(self, parsed):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
@@ -1462,47 +1612,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if self.path == "/api/worktree-create":   # A4 — 대시보드에서 워크트리 생성 (marina worktree create CLI 재사용)
-                project_id = str(body.get("projectId") or "").strip()
-                if project_id:
-                    proj = next((item for item in load_projects() if str(item.get("id")) == project_id), None)
-                    if not proj:
-                        raise ValueError("등록된 프로젝트를 찾지 못했습니다")
-                    target = Path(proj["root"])
-                else:
-                    target = Path(str(body.get("projectRoot", "")).strip()).expanduser()
-                    if not str(body.get("projectRoot", "")).strip() or not target.is_dir():
-                        raise ValueError(f"디렉토리 없음: {body.get('projectRoot', '')}")
-                    proj = containing_project_for(target)
-                if not proj or proj["root"].resolve() != target.resolve():
-                    raise ValueError("등록된 프로젝트 root 가 아닙니다 — 그 프로젝트의 main 카드에서 시도하세요")
-                if not self._policy().can_project(principal, str(proj.get("id") or "")):
-                    self._forbidden()
-                    return
-                branch = str(body.get("branch", "")).strip()
-                if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or ".." in branch:
-                    raise ValueError("브랜치명은 영문/숫자/./_/-(슬래시 포함)만 가능 — 공백·'..' 금지")
-                try:
-                    out = _marina_cli(target, "worktree", "create", branch, timeout=180)
-                except subprocess.CalledProcessError as exc:
-                    raise ValueError((exc.output or "").strip() or str(exc))
-                except subprocess.TimeoutExpired:
-                    raise ValueError("워크트리 생성 시간 초과(180s) — 서브레포 attach 가 오래 걸릴 수 있습니다. 잠시 후 새로고침해 확인하세요")
-                invalidate_registry_caches()
-                m = re.search(r"✓ 워크트리:\s*(.+)", out)   # worktree_create() 의 성공 출력에서 실경로 추출, 실패 시 관례 경로로 폴백
-                if m:
-                    new_root = m.group(1).strip()
-                else:
-                    san = re.sub(r"[/:]", "-", branch)
-                    new_root = str(target / ".claude" / "worktrees" / san)
-                if principal is not None:
-                    owner_root = canonical_root(new_root)
-                    controller.store.assign_resource_owner(
-                        "worktree", owner_root, principal.user.id, actor_user_id=principal.user.id
-                    )
-                    controller.store.audit_action(
-                        "worktree.create", "ok", principal.user.id, "worktree", owner_root
-                    )
-                self.send_json({"ok": True, "root": new_root, "output": out.strip()[-2000:]})
+                self._worktree_create(controller, principal, body)
                 return
 
             if self.path == "/api/compose-serialize":   # 위저드 검토: services YAML + x-marina dict → 합쳐진 compose 미리보기

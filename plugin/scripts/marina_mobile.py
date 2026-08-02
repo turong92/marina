@@ -411,6 +411,21 @@ AGENT_QUESTIONS_DIR = MARINA_HOME / "agent-questions"
 _QUESTION_STALE_S = 900   # PostToolUse 로 지워지는 게 정상이나, 고아(세션 죽음 등) 방지용 상한
 
 
+def _question_state_token(sid: str) -> str:
+    """pending AskUserQuestion 상태파일의 식별 토큰(없으면 "").
+
+    답이 실제로 먹혔는지 판정하는 유일한 서버측 진실이다 — PostToolUse 훅이 답변 완료 때 파일을
+    지우므로, 토큰이 바뀌거나 사라지면 그 질문은 끝난 것이다. PTY 에 키를 쓰는 건 무조건 성공하니까
+    (200) 이 확인이 없으면 "안 갔는데 갔다고 하는" 상태를 구분할 수가 없다."""
+    if not sid:
+        return ""
+    try:
+        data = json.loads((AGENT_QUESTIONS_DIR / f"claude-{sid}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    return f"{data.get('toolUseId') or ''}:{data.get('ts') or ''}"
+
+
 def mobile_pending_question(source: str, sid: str) -> dict[str, Any] | None:
     # PreToolUse 훅(marina_question.py)이 기록한 pending AskUserQuestion 을 읽는다.
     # 트랜스크립트엔 답 전까지 질문이 없으므로, pending 창 동안 카드를 그리는 유일한 라이브 소스.
@@ -425,10 +440,73 @@ def mobile_pending_question(source: str, sid: str) -> dict[str, Any] | None:
         return None
     if time.time() - float(data.get("ts") or 0) > _QUESTION_STALE_S:
         return None
-    return {"questions": questions, "toolUseId": str(data.get("toolUseId") or "")}
+    return {"questions": questions, "toolUseId": str(data.get("toolUseId") or ""),
+            "token": f"{data.get('toolUseId') or ''}:{data.get('ts') or ''}"}
 
 
-def mobile_state(refresh: bool = False) -> dict[str, Any]:
+PINS_FILE = MARINA_HOME / "pinned-worktrees.json"
+
+
+def mobile_pins() -> list[str]:
+    """고정한 워크트리 목록. **서버 저장** — 폰에서 꽂은 핀이 웹에도 보여야 "다시 찾아가기"가 된다.
+    핀은 워크트리에만 붙인다(세션은 7일 미활동이면 목록에서 사라져 대상이 증발한다)."""
+    try:
+        data = json.loads(PINS_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    roots = data.get("roots") if isinstance(data, dict) else None
+    if not isinstance(roots, list):
+        return []
+    return [str(item) for item in roots if isinstance(item, str) and item.strip()]
+
+
+def mobile_set_pin(body: dict[str, Any]) -> dict[str, Any]:
+    root = safe_root(str(body.get("root", "")))     # 등록된 워크트리만 — 임의 경로 저장 금지
+    pinned = bool(body.get("pinned"))
+    key = str(root.resolve())
+    roots = [item for item in mobile_pins() if item != key and item != str(root)]
+    if pinned:
+        roots.insert(0, key)
+    PINS_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = PINS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"roots": roots}, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, PINS_FILE)
+    return {"ok": True, "roots": roots}
+
+
+HIDDEN_FILE = MARINA_HOME / "hidden-sessions.json"
+
+
+def mobile_hidden() -> list[str]:
+    """숨긴 세션 키 목록("source:sid"). 핀과 같은 이유로 **서버 저장** — 기기마다 다르면 정리가 안 된다."""
+    try:
+        data = json.loads(HIDDEN_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    keys = data.get("keys") if isinstance(data, dict) else None
+    if not isinstance(keys, list):
+        return []
+    return [str(item) for item in keys if isinstance(item, str) and item.strip()]
+
+
+def mobile_set_hidden(body: dict[str, Any]) -> dict[str, Any]:
+    source = str(body.get("source") or "")
+    sid = str(body.get("sid") or "")
+    if source not in ("claude", "codex") or not sid:
+        raise ValueError("source/sid 필요")
+    key = f"{source}:{sid}"
+    hidden = bool(body.get("hidden"))
+    keys = [item for item in mobile_hidden() if item != key]
+    if hidden:
+        keys.insert(0, key)
+    HIDDEN_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = HIDDEN_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps({"keys": keys[:500]}, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, HIDDEN_FILE)
+    return {"ok": True, "keys": keys[:500]}
+
+
+def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, Any]:
     worktrees: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []
     terms = term_list().get("sessions", [])
@@ -441,7 +519,7 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
                 (str(t["agent"].get("source") or ""), str(t["agent"].get("sid") or "")): t
                 for t in root_terms if isinstance(t.get("agent"), dict) and bool(t.get("alive", True))
             }
-            agents = agents_payload(root, refresh)   # status/reachable/승격 다 resolve_session_liveness 경유(activate_agent_payloads 는 이제 이 경로엔 불필요)
+            agents = agents_payload(root, refresh, include_all)   # status/reachable/승격 다 resolve_session_liveness 경유(activate_agent_payloads 는 이제 이 경로엔 불필요)
             title = info.get("sessionTitle") or info.get("headSubject") or ""
             label = " · ".join(str(x) for x in (info.get("alias"), title, info.get("projectLabel"), info.get("id")) if x)
             worktrees.append({
@@ -525,7 +603,14 @@ def mobile_state(refresh: bool = False) -> dict[str, Any]:
         except Exception as exc:
             worktrees.append({"root": str(root), "error": str(exc), "agents": []})
     sessions.sort(key=lambda s: int(float(s.get("ts") or 0)), reverse=True)
-    return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "agentOptions": mobile_agent_options(), "serverInstance": _SERVER_INSTANCE}
+    hidden = mobile_hidden()
+    if not include_all:      # 전체보기가 아니면 숨긴 세션은 목록에서 뺀다
+        hide = set(hidden)
+        sessions = [s for s in sessions
+                    if f"{s.get('source')}:{s.get('sid')}" not in hide or s.get("kind") != "agent"]
+    return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "pins": mobile_pins(),
+            "hidden": hidden, "includeAll": bool(include_all),
+            "agentOptions": mobile_agent_options(), "serverInstance": _SERVER_INSTANCE}
 
 
 def _input_payload(text: str) -> str:
@@ -945,9 +1030,122 @@ def mobile_launch(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "tid": str(result.get("tid") or ""), "source": source}
 
 
+_ANSWER_CONFIRM_TIMEOUT_S = 3.5   # PostToolUse 훅이 상태파일을 지울 때까지 기다리는 상한
+_ANSWER_CONFIRM_POLL_S = 0.15
+
+
+def _await_answer_settled(sid: str, before: str) -> bool:
+    """답이 실제로 셀렉터에 먹혔는지 확인. before 는 주입 직전의 상태파일 토큰.
+
+    토큰이 사라지거나 바뀌면 그 AskUserQuestion 은 끝난 것(= 먹혔다). 상한까지 그대로면 안 먹힌
+    것으로 보고한다 — 호출자(모바일)가 카드를 되살려 형이 다시 누를 수 있게."""
+    if not before:
+        return True     # 애초에 pending 질문이 없었다 — 확인할 근거가 없으니 판정하지 않는다
+    deadline = time.monotonic() + _ANSWER_CONFIRM_TIMEOUT_S
+    while time.monotonic() < deadline:
+        time.sleep(_ANSWER_CONFIRM_POLL_S)
+        if _question_state_token(sid) != before:
+            return True
+    return False
+
+
+def _parse_answers(body: dict[str, Any]) -> list[list[int]]:
+    """질문별 선택지. 질문 하나당 **여러 개**일 수 있다(multiSelect).
+
+    받는 형태 셋 — 새 것부터: answers=[[0,2],[1]] · optionIndexes=[0,1] · optionIndex=0.
+    """
+    raw = body.get("answers")
+    if raw is None:
+        legacy = body.get("optionIndexes")
+        if legacy is None:
+            legacy = [body.get("optionIndex", 0)]
+        raw = [[value] for value in legacy] if isinstance(legacy, list) else None
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("optionIndex 필요")
+    if len(raw) > 20:
+        raise ValueError("질문이 너무 많아요")
+    answers: list[list[int]] = []
+    for entry in raw:
+        values = entry if isinstance(entry, list) else [entry]
+        if not values:
+            raise ValueError("질문마다 최소 하나는 골라야 해요")
+        if len(values) > 50:
+            raise ValueError("선택이 너무 많아요")
+        picked: list[int] = []
+        for value in values:
+            try:
+                index = int(value)
+            except (TypeError, ValueError):
+                raise ValueError("optionIndex 필요")
+            if index < 0 or index > 50:
+                raise ValueError("optionIndex 범위")
+            if index not in picked:
+                picked.append(index)
+        answers.append(sorted(picked))
+    return answers
+
+
+def _drive_selector(tid: str, picks: list[int], multi_select: bool) -> None:
+    """셀렉터 한 개를 구동한다. 커서는 첫 옵션에서 시작한다고 가정.
+
+    단일선택: 아래로 N칸 → Enter.
+    다중선택: 각 항목으로 이동해 **스페이스로 토글** → 마지막에 Enter. TUI 다중선택의 관례고,
+    화살표+Enter 만으로는 애초에 여러 개를 표현할 수가 없다(형: "여러개 선택하는거 선택이 안되는데").
+    """
+    if not multi_select:
+        target = picks[0] if picks else 0
+        if target:
+            term_input(tid, "\x1b[B" * target)
+            _agent_input_pause()
+        term_input(tid, "\r")
+        return
+    cursor = 0
+    for target in picks:
+        if target > cursor:
+            term_input(tid, "\x1b[B" * (target - cursor))
+            _agent_input_pause()
+            cursor = target
+        term_input(tid, " ")          # 토글
+        _agent_input_pause()
+    term_input(tid, "\r")
+
+
+def _answer_as_text(questions: list[Any], answers: list[list[int]]) -> str:
+    """고른 선택지를 **글**로 옮긴다 — 셀렉터가 죽은 세션에 이어받아 전달할 때 쓴다.
+
+    인덱스가 아니라 라벨을 보낸다. 이어받은 세션엔 원래 tool call 이 없으므로 숫자는 의미가 없다."""
+    lines: list[str] = []
+    for position, picks in enumerate(answers):
+        question = questions[position] if position < len(questions) else {}
+        question = question if isinstance(question, dict) else {}
+        options = question.get("options") if isinstance(question.get("options"), list) else []
+        labels: list[str] = []
+        for index in picks:
+            option = options[index] if index < len(options) else None
+            if isinstance(option, dict):
+                labels.append(str(option.get("label") or option.get("value") or f"옵션 {index + 1}"))
+            else:
+                labels.append(f"옵션 {index + 1}")
+        title = str(question.get("header") or question.get("question") or f"질문 {position + 1}").strip()
+        lines.append(f"{title}: {', '.join(labels)}" if labels else title)
+    return "[모바일에서 선택]\n" + "\n".join(lines)
+
+
+def _clear_pending_question(sid: str) -> None:
+    """이어받아 답을 글로 전달했으면 그 질문은 끝난 것이다 — PostToolUse 가 올 수 없으니 직접 지운다."""
+    try:
+        (AGENT_QUESTIONS_DIR / f"claude-{sid}.json").unlink()
+    except (OSError, FileNotFoundError):
+        pass
+
+
 def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
     # ① 질문 선택지 응답: AskUserQuestion 셀렉터(Claude Code 인터랙티브 목록)를 PTY 화살표+Enter 로 구동.
     # _apply_live_codex_settings 와 동일한 방식 — 커서가 첫 옵션에서 시작한다고 가정하고 아래로 N칸 이동 후 확정.
+    #
+    # 질문이 여러 개면 셀렉터도 여러 번 뜬다. 예전엔 첫 질문 하나만 확정하고 200 을 돌려줘서, 폼은
+    # 2번째 질문에서 계속 대기 중인데 모바일은 "보냈다"고 카드를 지웠다 — 형이 겪은 "선택하는데 안
+    # 가는데"의 재현 경로. 이제 전 질문을 순서대로 확정하고, 상태파일이 사라지는지로 결과를 확인한다.
     root = safe_root(str(body.get("root", "")))
     target = body.get("target") if isinstance(body.get("target"), dict) else {}
     if str(target.get("type") or "") != "agent":
@@ -959,24 +1157,39 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
     answer_text = str(body.get("text") or "")
     tid = _live_agent_tid(root, source, sid)
     if not tid:
-        raise ValueError("실행 중인 에이전트가 없어요")
+        # 셀렉터를 쥔 PTY 가 없다 = 그 프로세스는 죽었거나 marina 밖에서 돈다. 예전엔 여기서 막았는데,
+        # 전송은 이미 인수인계(--resume)로 뚫으면서 응답만 막는 건 일관성이 없다(형 지적).
+        # 원래 tool call 은 프로세스와 함께 죽었으니 **고른 내용을 글로** 실어 세션을 이어받는다.
+        # 작업 중이면 mobile_send 가 알아서 보류함에 넣고 유휴가 될 때 전달한다.
+        pending = mobile_pending_question(source, sid) or {}
+        questions = pending.get("questions") or []
+        text = answer_text or _answer_as_text(questions, _parse_answers(body))
+        result = mobile_send({"root": str(root), "target": {"type": "agent", "source": source, "sid": sid},
+                              "text": text})
+        _clear_pending_question(sid)
+        return {**result, "viaResume": True, "settled": True,
+                "delivery": result.get("delivery") or "resume"}
+    before = _question_state_token(sid)
     if answer_text:
         # 기타(직접 입력): 셀렉터에 텍스트를 타이핑 후 확정 — best-effort(실 셀렉터 동작 검증 필요).
         term_input(tid, answer_text[:2000])
         _agent_input_pause()
         term_input(tid, "\r")
-        return {"ok": True, "tid": tid, "text": True}
-    try:
-        option_index = int(body.get("optionIndex", 0))
-    except (TypeError, ValueError):
-        raise ValueError("optionIndex 필요")
-    if option_index < 0 or option_index > 50:
-        raise ValueError("optionIndex 범위")
-    if option_index:
-        term_input(tid, "\x1b[B" * option_index)
-        _agent_input_pause()
-    term_input(tid, "\r")
-    return {"ok": True, "tid": tid, "optionIndex": option_index}
+        settled = _await_answer_settled(sid, before)
+        return {"ok": True, "tid": tid, "text": True, "settled": settled}
+    answers = _parse_answers(body)
+    # multiSelect 는 **훅이 잡아둔 질문 원본**에서 읽는다 — 클라이언트 주장을 믿지 않는다.
+    pending = mobile_pending_question(source, sid) or {}
+    questions = pending.get("questions") or []
+    for position, picks in enumerate(answers):
+        if position:
+            _agent_input_pause()   # 다음 질문의 셀렉터가 그려질 틈을 준다
+        question = questions[position] if position < len(questions) else {}
+        multi_select = bool(isinstance(question, dict) and question.get("multiSelect"))
+        _drive_selector(tid, picks, multi_select)
+    settled = _await_answer_settled(sid, before)
+    return {"ok": True, "tid": tid, "answers": answers,
+            "optionIndex": answers[0][0], "settled": settled}
 
 
 def mobile_interrupt(body: dict[str, Any]) -> dict[str, Any]:
@@ -1041,17 +1254,68 @@ _MOBILE_HTML = r"""<!doctype html>
     .source-tab.active { background: #fff; color: #17191f; box-shadow: 0 1px 3px rgb(23 25 31 / 10%); }
     /* 상한 92px — 세 자릿수(999/999)까지 tabular-nums 로 들어가고, 그 이상은 말줄임으로 흡수해
        스트립을 더 잠식하지 않는다. */
-    .servicesBtn { width: auto; min-width: 54px; max-width: 92px; min-height: 32px; padding: 0 8px; overflow: hidden; color: #303846; font-size: 11px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
     .shellActions { display: flex; flex: none; min-width: 0; align-items: center; gap: 3px; }
     .chatNavTitle { display: none; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 900; text-overflow: ellipsis; white-space: nowrap; }
     .usageBtn { display: none; width: 32px; min-width: 32px; height: 32px; min-height: 32px; padding: 0; border-color: transparent; background: transparent; color: #4d5665; font-size: 18px; }
     #mobileApp[data-view="chat"] header { gap: 0; padding-bottom: 4px; }
     #mobileApp[data-view="chat"] .shellRow { grid-template-columns: 32px minmax(0, 1fr) 32px; min-height: 34px; }
-    #mobileApp[data-view="chat"] #projectTabs, #mobileApp[data-view="chat"] #sourceTabs, #mobileApp[data-view="chat"] #servicesBtn { display: none; }
+    /* projectTabs·sourceTabs 는 #listView(=드로어) 안에 있다 — 채팅 중에도 닿아야 한다.
+       서비스는 워크트리 소속이라 그룹 헤더의 "서버" 칩에서 연다. */
+    /* 목록 뷰에선 헤더 가운데가 비므로 액션을 오른쪽에 붙인다(탭이 헤더에서 빠졌다). */
+    #mobileApp[data-view="list"] .shellActions { margin-left: auto; }
+    /* 드로어는 좁다 — 프로젝트 칩은 가로 스크롤(기본), 종류 탭은 줄바꿈 없이 4칸 유지. */
+    #mobileApp[data-view="chat"] #listView .project-strip { flex: none; }
     #mobileApp[data-view="chat"] .chatNavTitle { display: block; }
     #mobileApp[data-view="chat"] .usageBtn.available { display: inline-flex; align-items: center; justify-content: center; }
     #mobileApp[data-view="chat"] main { padding: 6px 10px; }
     .search-input { min-height: 40px; }
+    /* 좌측 패널 — 목록 뷰에선 전체 화면 그대로, 채팅 뷰에선 오프캔버스 드로어(같은 #listView 재사용). */
+    #mobileApp[data-view="chat"] #listView {
+      position: fixed; z-index: 9; top: 0; bottom: 0; left: 0;
+      width: min(86vw, 340px);
+      margin: 0; padding: max(10px, env(safe-area-inset-top)) 10px calc(10px + env(safe-area-inset-bottom));
+      background: #fff; border-right: 1px solid #d5dbe4; box-shadow: 2px 0 18px rgb(10 14 20 / 20%);
+      transform: translateX(-100%); transition: transform .22s ease;
+      pointer-events: none;
+    }
+    #mobileApp[data-view="chat"][data-drawer="open"] #listView { transform: translateX(0); pointer-events: auto; }
+    .drawerBackdrop { position: fixed; inset: 0; z-index: 8; display: none; background: rgb(10 14 20 / 38%); }
+    #mobileApp[data-view="chat"][data-drawer="open"] .drawerBackdrop { display: block; }
+    @media (prefers-reduced-motion: reduce) { #mobileApp[data-view="chat"] #listView { transition: none; } }
+    .listTools { display: flex; flex: none; gap: 5px; align-items: center; }
+    .listTools .search-input { flex: 1; min-width: 0; }
+    .session-card.hidden-session { opacity: .45; }
+    .session-list:not(.show-all) .session-card.hidden-session { display: none; }
+    .listToolBtn.on { color: #0b63ce; background: #e3efff; }
+    .listToolBtn { width: auto; flex: none; min-width: 40px; min-height: 40px; padding: 0 9px; font-size: 11px; font-weight: 900; white-space: nowrap; }
+    .newWtBtn { color: #0b63ce; }
+    /* 밀도 — 간단(기본)에선 부제/미리보기를 CSS 로만 가린다. 토글이 재렌더를 안 부르니 스크롤이 안 튄다. */
+    .session-list .session-subtitle, .session-list .session-preview { display: none; }
+    .session-list.density-detail .session-subtitle, .session-list.density-detail .session-preview { display: block; }
+    /* 간단 모드의 타입 스케일 — 한 줄 카드인데 본문 폰트를 그대로 쓰면 뭐가 뭔지 안 보인다(형 지적). */
+    .wt-group-body { display: flex; flex-direction: column; gap: 4px; margin-top: 5px; }
+    .session-list { gap: 9px; }
+    .session-list .session-card { min-height: 0; padding: 7px 9px; }
+    .session-list .session-card-top { gap: 6px; }
+    .session-list .session-title { font-size: 12px; font-weight: 800; }
+    .session-list .session-status-label { display: none; }
+    .session-list .session-status.notable .session-status-label { display: inline; color: #4d5665; font-size: 10px; font-weight: 800; }
+    .session-list .source-badge { min-height: 16px; padding: 0 4px; font-size: 8px; }
+    .session-list .session-group-title { font-size: 10px; }
+    .session-list.density-detail .session-card { min-height: 88px; padding: 10px 11px; }
+    .session-list.density-detail .session-title { font-size: 13px; }
+    .session-list.density-detail .session-status-label { display: inline; }
+    .session-list.density-detail .source-badge { min-height: 20px; padding: 0 6px; font-size: 9px; }
+    .session-when { flex: none; margin-left: auto; color: #747d8b; font-size: 10px; font-weight: 800; white-space: nowrap; }
+    .session-when.asking { padding: 1px 6px; border-radius: 999px; background: #fff0e0; color: #a8571a; font-weight: 900; }
+    .wt-pin:empty { display: none; }
+    .wt-pin { flex: none; font-size: 11px; }
+    .wt-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .wt-group-flags { display: inline-flex; gap: 3px; }
+    .wt-flag { padding: 0 5px; border-radius: 999px; font-size: 9px; font-weight: 900; }
+    .wt-flag.asking { background: #e3efff; color: #0b63ce; }
+    .wt-flag.busy { background: #e6efe8; color: #2f6b45; }
+    .session-group.pinned > .wt-group-head { background: rgba(11, 99, 206, .06); border-radius: 7px; }
     .session-list { display: flex; flex-direction: column; gap: 12px; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
     /* 워크트리 = 단위. 헤더에서 바로 새 에이전트를 띄운다(웹 카드의 ＋CC/＋CX 와 같은 멘탈모델). */
@@ -1062,22 +1326,31 @@ _MOBILE_HTML = r"""<!doctype html>
     .wt-group-name { display: inline-flex; min-width: 0; align-items: center; gap: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .wt-group-acts { display: inline-flex; flex: none; align-items: center; gap: 4px; }
     .wt-group-count { min-width: 16px; text-align: right; }
-    .wtLaunchBtn { min-width: 34px; min-height: 26px; padding: 0 5px; border-radius: 7px; font-size: 10px; font-weight: 900; }
+    /* 전역 button 이 width:100% 라 이걸 안 덮으면 좁은 컨테이너(드로어)에서 눌려 ＋CC 가 두 줄로 접힌다. */
+    .wtMoreBtn { color: #4d5665; font-size: 15px; line-height: 1; }
+    .wtActions { flex: 1; min-height: 0; display: flex; flex-direction: column; overflow-y: auto; padding: 6px 12px calc(14px + env(safe-area-inset-bottom)); }
+    .wtAction { display: flex; align-items: center; gap: 10px; width: 100%; min-height: 48px; padding: 0 10px; border: 0; border-radius: 8px; background: none; text-align: left; font-size: 13px; font-weight: 700; color: #17191f; }
+    .wtAction:disabled { opacity: .5; }
+    .wtActionNote { margin-left: auto; color: #63708a; font-size: 11px; font-weight: 700; }
+    .wtLaunchBtn { width: auto; flex: none; min-width: 34px; min-height: 26px; padding: 0 5px; border-radius: 7px; font-size: 10px; font-weight: 900; white-space: nowrap; }
     .session-group-title { display: flex; align-items: center; justify-content: space-between; padding: 0 2px; color: #596070; font-size: 11px; font-weight: 900; text-transform: uppercase; }
     .session-card { display: block; min-height: 88px; height: auto; padding: 10px 11px; text-align: left; color: inherit; border-color: #d8dee7; overflow: hidden; }
     .session-card.active { border-color: #0b63ce; box-shadow: 0 0 0 1px #0b63ce inset; }
     .session-card-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
     .session-title { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 850; line-height: 1.25; }
-    :root { --st-run: #1f9d6b; --st-boot: #c07f14; --st-err: #d13438; --st-stop: #8a8f98; }
+    :root { --st-run: #1f9d6b; --st-boot: #c07f14; --st-err: #d13438; --st-stop: #8a8f98; --st-ask: #0b63ce; }
     .session-status { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
     .session-status-label { font-size: 10px; font-weight: 850; color: #747d8b; white-space: nowrap; }
-    .session-question-badge { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; padding: 1px 6px; border-radius: 999px; background: #fff0e0; color: #a8571a; font-size: 10px; font-weight: 900; white-space: nowrap; }
     .wt-dot { flex: none; width: 13px; height: 13px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; line-height: 1; box-sizing: border-box; }
     .wt-dot.run { border: 1.5px solid var(--st-run); color: var(--st-run); }
     .wt-dot.run::after { content: "✓"; }
     .wt-dot.boot { border: 1.5px solid var(--st-boot); border-left-color: transparent; color: var(--st-boot); animation: liveActionSpin 1.3s linear infinite; }
     .wt-dot.part { border: 1.5px solid var(--st-boot); color: var(--st-boot); }
     .wt-dot.part::after { content: "◐"; font-size: 10px; }
+    /* 응답 필요는 **오류가 아니다** — "형 차례"다. 빨강 ✕(실패)와 색·기호를 둘 다 다르게 둔다.
+       색만 다르면 색각 차이나 작은 화면에서 구분이 안 되니 기호까지 같이 바꾼다. */
+    .wt-dot.ask { border: 1.5px solid var(--st-ask); color: var(--st-ask); }
+    .wt-dot.ask::after { content: "?"; font-weight: 900; }
     .wt-dot.bad { border: 1.5px solid var(--st-err); color: var(--st-err); }
     .wt-dot.bad::after { content: "✕"; }
     .wt-dot.stop { border: 1.5px solid var(--st-stop); color: var(--st-stop); }
@@ -1126,6 +1399,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .pendingActionBtn[data-pending-cancel] { border-color: #e3b8b8; color: #a22b2b; }
     .queuedTag { display: inline-block; margin-bottom: 4px; padding: 1px 6px; border-radius: 6px; background: rgba(11, 99, 206, .12); color: #0b63ce; font-size: 9px; font-weight: 850; }
     .queuedTag.consumed { background: rgba(107, 114, 128, .14); color: #6b7280; }
+    .queuedTag.steered { background: rgba(47, 107, 69, .14); color: #2f6b45; }
     .turnMeta { align-self: flex-start; margin-top: -3px; color: #747d8b; font-size: 9px; font-weight: 800; }
     .turnMeta.right { align-self: flex-end; }
     .liveAction { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 7px; align-items: center; width: 100%; min-height: 34px; padding: 0 8px; border: 0; border-radius: 0; background: transparent; color: #303846; text-align: left; }
@@ -1168,9 +1442,62 @@ _MOBILE_HTML = r"""<!doctype html>
     .attachChip .attachName { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .attachChip.uploading { opacity: .6; }
     .attachChip .attachDel { width: 20px; height: 20px; min-height: 20px; padding: 0; border: 0; border-radius: 5px; background: transparent; color: #a22b2b; font-size: 14px; line-height: 1; }
+    /* 말풍선 안 블록 요소 — 좁은 화면이라 넘치는 것(다이어그램·표)은 제 컨테이너 안에서만 가로 스크롤한다.
+       본문이 통째로 옆으로 밀리면 읽기가 더 나빠지므로 바깥은 절대 안 밀리게. */
+    .turnBody > :first-child { margin-top: 0; }
+    .turnBody > :last-child { margin-bottom: 0; }
+    .mdP { margin: 6px 0; }
+    .mdH { margin: 10px 0 5px; font-weight: 850; line-height: 1.35; }
+    .mdH1 { font-size: 15px; } .mdH2 { font-size: 14px; } .mdH3 { font-size: 13px; }
+    .mdH4, .mdH5, .mdH6 { font-size: 12px; color: #4d5665; }
+    .mdList { margin: 5px 0; padding-left: 19px; }
+    .mdList li { margin: 2px 0; }
+    .mdList .mdList { margin: 2px 0; }
+    .mdHr { margin: 9px 0; border: 0; border-top: 1px solid #d5dbe4; }
+    .mdQuote { margin: 6px 0; padding: 2px 0 2px 9px; border-left: 3px solid #c8d1dc; color: #4d5665; }
+    .mdCode { position: relative; margin: 6px 0; border: 1px solid #d5dbe4; border-radius: 7px; background: #f7f8fa; overflow: hidden; }
+    .mdCode pre { margin: 0; padding: 8px 10px; overflow-x: auto; }
+    .mdCode code { display: block; white-space: pre; font: 11px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; background: none; padding: 0; }
+    .mdCodeLang { display: block; padding: 3px 10px; border-bottom: 1px solid #e3e7ee; color: #63708a; font-size: 9px; font-weight: 800; text-transform: uppercase; letter-spacing: .04em; }
+    .mdTableWrap { margin: 6px 0; overflow-x: auto; border: 1px solid #d5dbe4; border-radius: 7px; }
+    .mdTable { border-collapse: collapse; width: 100%; font-size: 11px; }
+    .mdTable th, .mdTable td { padding: 5px 8px; border-bottom: 1px solid #e3e7ee; border-right: 1px solid #e3e7ee; text-align: left; vertical-align: top; }
+    .mdTable th:last-child, .mdTable td:last-child { border-right: 0; }
+    .mdTable tbody tr:last-child td { border-bottom: 0; }
+    .mdTable th { background: #f2f4f8; font-weight: 800; white-space: nowrap; }
+    .trimNotice { display: none; margin: 0 0 6px; padding: 6px 9px; border-radius: 7px; background: #fff6e5; color: #8a5a12; font-size: 10px; line-height: 1.45; }
     .turnAttachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
     .turnAttachments img { max-width: 180px; max-height: 180px; border-radius: 6px; object-fit: cover; }
     .turnAttachments a { font-size: 11px; }
+    .turnImageBtn { width: auto; min-height: 0; padding: 0; border: 1px solid #d5dbe4; border-radius: 6px; background: none; overflow: hidden; line-height: 0; }
+    .turnImageBtn img { display: block; max-width: 180px; max-height: 180px; object-fit: cover; }
+    .activityImages { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .galleryBody { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px calc(14px + env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; }
+    .galleryStatus { color: #63708a; font-size: 11px; }
+    .galleryGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
+    .galleryCell { width: 100%; min-height: 0; padding: 0; aspect-ratio: 1; border: 1px solid #d5dbe4; border-radius: 7px; background: #f0f2f6; overflow: hidden; line-height: 0; }
+    .galleryCell img { width: 100%; height: 100%; object-fit: cover; }
+    .galleryTabs { display: flex; gap: 4px; padding: 6px 12px 0; }
+    .galleryTab { width: auto; min-height: 32px; padding: 0 11px; border-radius: 7px 7px 0 0; border-bottom-color: transparent; background: none; color: #63708a; font-size: 11px; font-weight: 800; }
+    .galleryTab.active { background: var(--sheet-active, #eef2f8); color: #1f2733; }
+    .fileList { display: flex; flex-direction: column; gap: 5px; }
+    .fileRow { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 42px; padding: 7px 9px; border: 1px solid #d5dbe4; border-radius: 7px; background: #fff; text-align: left; }
+    .fileRow:disabled { opacity: .55; }
+    .fileThumb { flex: none; width: 30px; height: 30px; border-radius: 5px; object-fit: cover; background: #f0f2f6; }
+    .fileIcon { flex: none; width: 30px; height: 30px; border-radius: 5px; background: #f0f2f6; color: #63708a; font-size: 9px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
+    .fileMeta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+    .fileName { font-size: 12px; font-weight: 700; overflow-wrap: anywhere; }
+    .fileSub { color: #63708a; font-size: 10px; overflow-wrap: anywhere; }
+    .fileBadge { flex: none; margin-left: auto; padding: 1px 6px; border-radius: 999px; background: #e6efe8; color: #2f6b45; font-size: 9px; font-weight: 800; }
+    .fileBadge.edited { background: #eef2f8; color: #4d5665; }
+    /* 앱 안 뷰어 — 이미지도 텍스트 파일도 여기서 본다(새 탭을 띄우지 않는다). */
+    .imageViewer { position: fixed; inset: 0; z-index: 30; display: none; flex-direction: column; background: rgb(8 10 14 / 94%); }
+    .imageViewer.open { display: flex; }
+    .viewerBar { display: flex; flex: none; align-items: center; gap: 8px; padding: max(8px, env(safe-area-inset-top)) 10px 8px; }
+    .viewerName { flex: 1; min-width: 0; color: #e8edf4; font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
+    .imageViewer img { flex: 1; min-height: 0; max-width: 100%; margin: 0 auto; padding: 0 12px 12px; object-fit: contain; }
+    .viewerText { flex: 1; min-height: 0; margin: 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: #e8edf4; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+    .imageViewerClose { width: 34px; min-height: 34px; flex: none; padding: 0; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; border-color: transparent; font-size: 19px; }
     .liveQuestion:empty { display: none; }
     .liveQuestion { margin-bottom: 2px; }
     .questionCard { align-self: stretch; display: flex; flex-direction: column; gap: 8px; padding: 11px 12px; border: 1px solid #b9d4f2; border-radius: 10px; background: #f2f8ff; }
@@ -1178,13 +1505,24 @@ _MOBILE_HTML = r"""<!doctype html>
     .questionText { font-size: 13px; font-weight: 650; line-height: 1.45; }
     .questionOpts { display: flex; flex-direction: column; gap: 6px; }
     .questionOpt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; min-height: 40px; padding: 8px 11px; border: 1px solid #b9c6d8; border-radius: 8px; background: #fff; text-align: left; }
-    .questionOpt:disabled { opacity: .55; }
+    .questionOpt:disabled { opacity: .45; background: #f2f4f8; cursor: not-allowed; }
+    #contextBtn[data-level="warn"] { color: #a8571a; }
+    #contextBtn[data-level="critical"] { color: #a02222; font-weight: 900; }
+    .questionBlocked { padding: 7px 9px; border-radius: 7px; background: #f2f4f8; color: #4d5665; font-size: 11px; line-height: 1.45; }
     .questionOptLabel { font-size: 12px; font-weight: 800; color: #1f2733; }
     .questionOptDesc { font-size: 10px; color: #63708a; line-height: 1.4; }
     .questionMore { color: #63708a; font-size: 10px; }
+    .questionBlock { display: flex; flex-direction: column; gap: 8px; }
+    .questionBlock + .questionBlock { padding-top: 9px; border-top: 1px solid #cfe0f3; }
+    .questionStep { color: #63708a; font-size: 9px; font-weight: 800; letter-spacing: .04em; }
+    .questionOpt.chosen { border-color: #0b63ce; background: #e3efff; box-shadow: inset 0 0 0 1px #0b63ce; }
+    .questionSubmitRow { display: flex; }
+    .questionSubmit { width: 100%; min-height: 40px; }
+    .questionFailed { padding: 7px 9px; border-radius: 7px; background: #fdecec; color: #a02222; font-size: 11px; line-height: 1.45; }
     .questionOther { color: #4d5665; font-weight: 700; }
-    .questionOtherRow { display: flex; gap: 6px; margin-top: 2px; }
-    .questionOtherInput { flex: 1; min-height: 38px; max-height: 100px; padding: 8px 10px; resize: none; }
+    /* 기타 입력은 **그 줄에서** 한다 — 아래에 줄을 더 만들지 않는다(형 요청). */
+    .questionOtherRow { display: flex; gap: 6px; align-items: center; }
+    .questionOtherInput { flex: 1; min-width: 0; min-height: 40px; padding: 0 10px; }
     .questionOtherSend { width: auto; min-width: 0; min-height: 38px; padding: 0 14px; }
     .sessionControls { display: flex; min-height: 30px; align-items: center; gap: 5px; }
     .sessionControlBtn { width: auto; min-width: 0; min-height: 28px; padding: 0 8px; border-color: transparent; background: #eef2f7; color: #4d5665; font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1200,9 +1538,12 @@ _MOBILE_HTML = r"""<!doctype html>
     .suggestion-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
     .suggestion-description { overflow: hidden; color: #747d8b; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
     .suggestion-kind { color: #747d8b; font-size: 10px; text-transform: uppercase; }
-    .sheetBackdrop { position: fixed; inset: 0; z-index: 8; display: none; align-items: flex-end; background: rgb(10 14 20 / 38%); }
+    .sheetBackdrop { position: fixed; inset: 0; z-index: 12; display: none; align-items: flex-end; background: rgb(10 14 20 / 38%); }
     .sheetBackdrop.open { display: flex; }
-    .bottomSheet { width: 100%; max-height: 78vh; overflow: hidden; border-radius: 8px 8px 0 0; background: #fff; box-shadow: 0 -12px 34px rgb(0 0 0 / 18%); }
+    /* flex 컬럼이라야 본문이 남는 높이를 먹고 스크롤한다. 예전엔 블록 + overflow:hidden 이라
+       본문에 overflow-y:auto 를 줘도 그냥 잘렸다(형: "모아보기 스크롤 안된다"). */
+    .bottomSheet { display: flex; flex-direction: column; width: 100%; max-height: 78vh; overflow: hidden; border-radius: 8px 8px 0 0; background: #fff; box-shadow: 0 -12px 34px rgb(0 0 0 / 18%); }
+    .bottomSheet > .sheetHeader, .bottomSheet > .galleryTabs { flex: none; }
     .sheetHeader { display: grid; grid-template-columns: 40px minmax(0, 1fr) 40px; align-items: center; min-height: 48px; padding: 0 8px; border-bottom: 1px solid #dde2ea; }
     .sheetHeader strong { grid-column: 2; text-align: center; }
     .sheetClose { grid-column: 3; }
@@ -1249,7 +1590,29 @@ _MOBILE_HTML = r"""<!doctype html>
       .questionText { color: #e8edf4; }
       .questionOpt { background: #1c2431; border-color: #3a4453; }
       .questionOptLabel { color: #e8edf4; }
-      .session-question-badge { background: #3a2712; color: #f3b578; }
+      .questionBlock + .questionBlock { border-color: #2c4a6b; }
+      .questionOpt.chosen { background: #1b3350; border-color: #4b8fe0; box-shadow: inset 0 0 0 1px #4b8fe0; }
+      .questionFailed { background: #3a1c1c; color: #f0a3a3; }
+      .questionBlocked { background: #1c2431; color: #a5adba; }
+      .wt-flag.asking { background: #16233a; color: #7fb0ff; }
+      .questionOpt:disabled { background: #161c26; }
+      .galleryTab.active { background: #1c2431; color: #e8edf4; }
+      .fileRow { background: #171d27; border-color: #303846; }
+      .wtAction { color: #e8edf4; }
+      .fileThumb, .fileIcon { background: #222c3a; }
+      .fileBadge { background: #1e3a2a; color: #7fd6a2; }
+      .fileBadge.edited { background: #222c3a; color: #a5adba; }
+      .trimNotice { background: #3a2f16; color: #e8c78a; }
+      #mobileApp[data-view="chat"] #listView { background: #11151c; border-color: #303846; }
+      .mdCode { background: #141a23; border-color: #303846; }
+      .mdCodeLang { border-color: #262e3a; color: #8b96a8; }
+      .mdTableWrap, .mdHr { border-color: #303846; }
+      .mdTable th, .mdTable td { border-color: #262e3a; }
+      .mdTable th { background: #1c2431; }
+      .mdQuote { border-color: #3a4453; color: #a5adba; }
+      .mdH4, .mdH5, .mdH6 { color: #a5adba; }
+      .turnImageBtn, .galleryCell { border-color: #343f4e; }
+      .galleryCell { background: #1c2431; }
       .session-card { border-color: #303846; }
       .session-subtitle, .usageLabel { color: #a5adba; }
       .usagePanel { border-color: #303846; background: #171d27; }
@@ -1267,7 +1630,7 @@ _MOBILE_HTML = r"""<!doctype html>
       .pendingActionBtn[data-pending-cancel] { border-color: #5a3535; color: #e39a9a; }
       .liveAction { color: #e3e7ed; }
       .session-preview { color: #d6dbe4; }
-      .iconBtn, .servicesBtn { color: #d6dbe4; }
+      .iconBtn { color: #d6dbe4; }
       .project-chip { color: #a5adba; }
       .project-chip.active { background: #f4f6f9; border-color: #f4f6f9; color: #17191f; }
       .source-tabs { background: #0d1117; }
@@ -1301,15 +1664,13 @@ _MOBILE_HTML = r"""<!doctype html>
   <div id="mobileApp">
     <header>
       <div class="shellRow">
-        <button class="iconBtn backBtn" id="backBtn" type="button" title="세션 목록" aria-label="세션 목록으로" style="display:none">&#8592;</button>
-        <div class="project-strip" id="projectTabs" aria-label="프로젝트"></div>
+        <button class="iconBtn backBtn" id="backBtn" type="button" title="세션 목록 열기/닫기" aria-label="세션 목록 열기/닫기" aria-expanded="false" style="display:none">&#9776;</button>
         <div class="chatNavTitle" id="chatNavTitle"></div>
         <div class="shellActions">
+          <button class="usageBtn" id="galleryBtn" type="button" title="이미지 모아보기" aria-label="이미지 모아보기" style="display:none">&#9635;</button>
           <button class="usageBtn" id="usageBtn" type="button" title="토큰 사용량" aria-label="토큰 사용량">&#9684;</button>
-          <button class="servicesBtn" id="servicesBtn" type="button" aria-label="서비스 상태">서버 <span id="servicesCount">-/-</span></button>
         </div>
       </div>
-      <div class="source-tabs" id="sourceTabs" aria-label="세션 종류"></div>
       <div class="usagePanel" id="usagePanel" aria-label="사용량" aria-hidden="true">
         <div class="usageSection">
           <div class="usageSectionTitle">계정 한도</div>
@@ -1326,14 +1687,25 @@ _MOBILE_HTML = r"""<!doctype html>
       </div>
     </header>
     <main>
+      <div class="drawerBackdrop" id="drawerBackdrop"></div>
       <section id="listView">
-        <input class="search-input" id="sessionSearch" aria-label="세션 검색" placeholder="세션 검색" />
+        <!-- 프로젝트/종류 탭은 목록 **안**에 둔다. 헤더에 두면 채팅 뷰에서 숨겨져서, 드로어를 열어도
+             현재 프로젝트 세션만 보이고 다른 프로젝트로 갈 방법이 없었다(형 지적). -->
+        <div class="project-strip" id="projectTabs" aria-label="프로젝트"></div>
+        <div class="source-tabs" id="sourceTabs" aria-label="세션 종류"></div>
+        <div class="listTools">
+          <input class="search-input" id="sessionSearch" aria-label="세션 검색" placeholder="세션 검색" />
+          <button class="iconBtn listToolBtn" id="densityBtn" type="button">&#9776;</button>
+          <button class="iconBtn listToolBtn" id="showAllBtn" type="button" title="전체보기(오래된·숨긴 세션 포함)" aria-label="전체보기">&#8943;</button>
+          <button class="listToolBtn newWtBtn" id="newWorktreeBtn" type="button" title="새 워크트리 만들기" aria-label="새 워크트리 만들기">＋WT</button>
+        </div>
         <div class="session-list" id="sessionList"></div>
       </section>
       <section id="chatView">
         <label class="hiddenSelect">워크트리<select id="rootSelect"></select></label>
         <label class="hiddenSelect">대상<select id="targetSelect"></select></label>
         <div class="historyStatus" id="historyStatus" aria-live="polite"></div>
+        <div class="trimNotice" id="trimNotice"></div>
         <div class="turns" id="turns"></div>
         <button class="newMessagesBtn" id="newMessagesBtn" type="button">새 메시지</button>
     <button class="updateBanner" id="updateBanner" type="button">새 버전 · 탭하여 새로고침</button>
@@ -1343,6 +1715,7 @@ _MOBILE_HTML = r"""<!doctype html>
       <div class="liveQuestion" id="liveQuestion"></div>
       <div class="sessionControls">
         <button class="sessionControlBtn" id="settingsBtn" type="button">모델 · 기본값</button>
+        <button class="sessionControlBtn" id="contextBtn" type="button" style="display:none" title="토큰 사용량 자세히">컨텍스트 -</button>
         <button class="sessionControlBtn" id="subagentSessionBtn" type="button" style="display:none">서브에이전트 <span id="subagentCount">0</span></button>
         <div class="status" id="status" aria-live="polite"></div>
         <button class="stopBtn" id="stopBtn" type="button" title="현재 응답 중단" aria-label="현재 응답 중단">&#9632;</button>
@@ -1386,6 +1759,27 @@ _MOBILE_HTML = r"""<!doctype html>
         </form>
       </section>
     </div>
+    <div class="sheetBackdrop" id="worktreeSheet" aria-hidden="true">
+      <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="worktreeSheetTitle">
+        <div class="sheetHeader"><strong id="worktreeSheetTitle">워크트리</strong><button class="iconBtn sheetClose" id="worktreeCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+        <div class="wtActions" id="worktreeActions"></div>
+      </section>
+    </div>
+    <div class="sheetBackdrop" id="gallerySheet" aria-hidden="true">
+      <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="gallerySheetTitle">
+        <div class="sheetHeader"><strong id="gallerySheetTitle">모아보기</strong><button class="iconBtn sheetClose" id="galleryCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+        <div class="galleryTabs" role="tablist">
+          <button class="galleryTab active" type="button" data-gallery-tab="images" role="tab">대화 이미지</button>
+          <button class="galleryTab" type="button" data-gallery-tab="files" role="tab">만든 파일</button>
+        </div>
+        <div class="galleryBody"><div class="galleryStatus" id="galleryStatus">불러오는 중...</div><div class="galleryGrid" id="galleryGrid"></div><div class="fileList" id="galleryFiles"></div></div>
+      </section>
+    </div>
+    <div class="imageViewer" id="imageViewer" aria-hidden="true">
+      <div class="viewerBar" id="viewerBar"><span class="viewerName" id="viewerName"></span><button class="imageViewerClose" id="imageViewerClose" type="button" aria-label="닫기">&#215;</button></div>
+      <img id="imageViewerImg" alt="" />
+      <pre class="viewerText" id="viewerText"></pre>
+    </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </div>
   <script>
@@ -1424,8 +1818,10 @@ _MOBILE_HTML = r"""<!doctype html>
     const chatView = document.getElementById("chatView");
     const chatComposer = document.getElementById("chatComposer");
     const backBtn = document.getElementById("backBtn");
+    const drawerBackdrop = document.getElementById("drawerBackdrop");
     const chatNavTitle = document.getElementById("chatNavTitle");
     const usageBtn = document.getElementById("usageBtn");
+    const contextBtn = document.getElementById("contextBtn");
     const usagePanel = document.getElementById("usagePanel");
     const usagePercent = document.getElementById("usagePercent");
     const usageUsed = document.getElementById("usageUsed");
@@ -1441,44 +1837,158 @@ _MOBILE_HTML = r"""<!doctype html>
     const sourceTabs = document.getElementById("sourceTabs");
     const turnsEl = document.getElementById("turns");
     const historyStatus = document.getElementById("historyStatus");
+    const trimNotice = document.getElementById("trimNotice");
     const suggestionsEl = document.getElementById("suggestions");
     const newMessagesBtn = document.getElementById("newMessagesBtn");
     const updateBanner = document.getElementById("updateBanner");
     updateBanner.onclick = () => location.reload();
     const liveQuestionEl = document.getElementById("liveQuestion");
-    let questionAnsweredAt = 0;   // 탭 직후 잠깐 카드 숨김(낙관적) — 실제론 PostToolUse 훅이 상태파일 지워 사라짐
+    // 라이브 질문 카드의 로컬 상태. **카드를 낙관적으로 지우지 않는다** — 예전엔 탭하자마자 innerHTML 을
+    // 비우고 4초간 숨겼는데, 응답이 안 먹으면 카드가 그냥 사라져 "눌렀는데 아무 일도 안 남"으로 보였고
+    // 되돌릴 방법도 없었다. 이제 카드는 서버 진실(pendingQuestion 소멸)로만 사라진다.
+    let liveAnswer = {token: "", total: 0, choices: [], sending: false, failed: false,
+                      otherOpen: false, otherText: ""};
+    let liveQuestionPending = "";   // 입력 중이라 미뤄둔 카드 HTML(포커스 빠질 때 반영)
+    // 라이브 카드와 대화 안 폴백 카드가 **같은 상태**를 쓴다. 폴백에 별도 구현을 두면(예전처럼
+    // 탭 즉시 전송) multiSelect 가 깨지고, 막아버리면 라이브 카드가 만료된 뒤 답할 방법이 사라진다.
+    function ensureAnswerState(questions, token) {
+      if (token !== liveAnswer.token) {          // 새 질문 — 이전 선택/입력/실패 표시를 물려주지 않는다
+        liveAnswer = {token, total: questions.length, questions, choices: [],
+                      sending: false, failed: false, otherOpen: false, otherText: ""};
+      }
+      liveAnswer.total = questions.length;
+      liveAnswer.questions = questions;
+      return liveAnswer;
+    }
+    // 카드 어디서 눌렸든 같은 규칙으로 선택을 반영한다.
+    function pickAnswerOption(qi, index) {
+      const question = (liveAnswer.questions || [])[qi] || {};
+      const current = Array.isArray(liveAnswer.choices[qi]) ? liveAnswer.choices[qi] : [];
+      if (question.multiSelect) {
+        liveAnswer.choices[qi] = current.includes(index)
+          ? current.filter(value => value !== index)
+          : [...current, index].sort((a, b) => a - b);
+      } else {
+        liveAnswer.choices[qi] = [index];
+      }
+      liveAnswer.failed = false;
+      // 질문 하나 + 단일선택이면 바로 보낸다. 그 외엔 다 고른 뒤 "보내기".
+      return liveAnswer.total <= 1 && !(liveAnswer.questions || []).some(q => q && q.multiSelect);
+    }
     // pending AskUserQuestion(훅이 잡은 라이브 소스)을 입력창 위에 카드로. 트랜스크립트엔 답 전까지 없으므로 이게 유일한 라이브 표시.
     function renderLiveQuestion(session) {
       const pq = session && session.pendingQuestion;
-      const suppress = Date.now() - questionAnsweredAt < 4000;   // 방금 답함 — 상태파일 정리될 시간 줌
-      if (!pq || !Array.isArray(pq.questions) || !pq.questions.length || suppress) {
+      if (!pq || !Array.isArray(pq.questions) || !pq.questions.length) {
         if (liveQuestionEl.innerHTML) liveQuestionEl.innerHTML = "";
+        liveAnswer = {token: "", total: 0, choices: [], sending: false, failed: false};
         return;
       }
-      const canAnswer = session.kind === "agent" && session.controllable && sessionSource(session) === "claude";
+      ensureAnswerState(pq.questions, String(pq.token || pq.toolUseId || ""));
+      // PTY 를 쥐고 있지 않아도 고를 수 있다 — 서버가 세션을 이어받아(--resume) 고른 내용을 글로 전달한다.
+      // 전송은 원래 그렇게 뚫고 있었는데 응답만 막아둘 이유가 없다(형 지적).
+      const canAnswer = session.kind === "agent" && sessionSource(session) === "claude";
+      liveAnswer.reason = canAnswer ? ""
+        : sessionSource(session) !== "claude" ? "Claude 세션만 여기서 답할 수 있어요"
+        : "에이전트 세션이 아니에요";
+      // 셀렉터가 살아 있지 않으면 선택이 '키 입력'이 아니라 '이어받아 글로 전달'이 된다 — 미리 알린다.
+      liveAnswer.viaResume = canAnswer && !session.controllable;
       const item = {name: "AskUserQuestion", detail: JSON.stringify({questions: pq.questions})};
-      const html = renderQuestionCard(item, canAnswer);
+      const html = renderQuestionCard(item, canAnswer, liveAnswer);
+      // 형이 **입력창에 타이핑 중**일 때만 DOM 교체를 미룬다(캐럿/값 보호). 버튼 포커스까지 막으면
+      // 옵션을 눌러도 화면이 안 갈려 선택이 0/1 로 남는다 — 데스크톱은 클릭한 버튼이 activeElement 다.
+      const active = document.activeElement;
+      const typing = active && liveQuestionEl.contains(active)
+        && (active.tagName === "INPUT" || active.tagName === "TEXTAREA");
+      if (typing) {
+        liveQuestionPending = html;
+        return;
+      }
+      liveQuestionPending = "";
       if (liveQuestionEl.innerHTML !== html) liveQuestionEl.innerHTML = html;
+    }
+    function repaintLiveQuestion() { renderLiveQuestion(selectedSession()); }
+    // 폴백 카드는 대화 안에 있어 turns 를 다시 그려야 반영된다(렌더키가 liveAnswer 를 모르므로 강제).
+    function repaintTurns() { turnsStructureKey = ""; renderTurns(selectedSession()); }
+    async function submitLiveAnswer(payload) {
+      if (liveAnswer.sending) return;
+      liveAnswer.sending = true;
+      liveAnswer.failed = false;
+      repaintLiveQuestion();
+      const body = payload || {answers: Array.from({length: liveAnswer.total}, (_, i) => liveAnswer.choices[i] || [])};
+      const result = await answerQuestion(body);
+      liveAnswer.sending = false;
+      // settled === false → 상태파일이 그대로다 = 셀렉터가 안 움직였다. 카드를 되살려 다시 누르게 한다.
+      liveAnswer.failed = !result || result.settled === false;
+      repaintLiveQuestion();
+      load({quiet: true}).catch(() => {});
     }
     liveQuestionEl.addEventListener("click", event => {
       const opt = event.target.closest && event.target.closest("[data-answer-option]");
       if (opt) {
         const index = parseInt(opt.getAttribute("data-answer-option"), 10);
-        if (!Number.isNaN(index)) { questionAnsweredAt = Date.now(); liveQuestionEl.innerHTML = ""; answerQuestion({optionIndex: index}); }
+        if (Number.isNaN(index)) return;
+        const rawQ = parseInt(opt.getAttribute("data-answer-q") || "0", 10);
+        if (pickAnswerOption(Number.isNaN(rawQ) ? 0 : rawQ, index)) submitLiveAnswer({answers: [[index]]});
+        else repaintLiveQuestion();     // 다 고른 뒤 "보내기"로 한 번에
+        return;
+      }
+      if (event.target.closest && event.target.closest("[data-answer-submit]")) {
+        const chosen = Array.from({length: liveAnswer.total}, (_, i) => liveAnswer.choices[i] || []);
+        if (chosen.every(list => list.length)) submitLiveAnswer();
         return;
       }
       if (event.target.closest && event.target.closest("[data-answer-other]")) {
-        const row = liveQuestionEl.querySelector("[data-question-other-row]");
-        if (row) { row.style.display = "flex"; const ta = row.querySelector("textarea"); if (ta) ta.focus(); }
+        liveAnswer.otherOpen = true;              // 상태로 열어서 템플릿이 그린다(imperative style 금지)
+        repaintLiveQuestion();
+        const input = liveQuestionEl.querySelector("[data-answer-other-input]");
+        if (input) input.focus();
         return;
       }
       if (event.target.closest && event.target.closest("[data-answer-other-send]")) {
-        const ta = liveQuestionEl.querySelector(".questionOtherInput");
-        const text = ta ? ta.value.trim() : "";
-        if (text) { questionAnsweredAt = Date.now(); liveQuestionEl.innerHTML = ""; answerQuestion({text}); }
+        sendLiveOther();
         return;
       }
     });
+    function sendLiveOther() {
+      const input = liveQuestionEl.querySelector("[data-answer-other-input]");
+      const text = (input ? input.value : liveAnswer.otherText || "").trim();
+      if (!text) { if (input) input.focus(); return; }
+      liveAnswer.otherText = text;
+      submitLiveAnswer({text});
+    }
+    // 입력값을 state 에 계속 보관 — 재렌더가 일어나도 값이 살아남는다.
+    liveQuestionEl.addEventListener("input", event => {
+      const input = event.target.closest && event.target.closest("[data-answer-other-input]");
+      if (input) liveAnswer.otherText = input.value;
+    });
+    liveQuestionEl.addEventListener("keydown", event => {
+      const input = event.target.closest && event.target.closest("[data-answer-other-input]");
+      if (!input || event.isComposing) return;
+      if (event.key === "Enter") { event.preventDefault(); sendLiveOther(); }
+      else if (event.key === "Escape") { liveAnswer.otherOpen = false; input.blur(); repaintLiveQuestion(); }
+    });
+    // 포커스가 카드에서 빠지면 미뤄둔 갱신을 반영한다.
+    liveQuestionEl.addEventListener("focusout", () => {
+      setTimeout(() => {
+        if (liveQuestionEl.contains(document.activeElement)) return;   // 카드 안에서 이동한 것
+        if (liveQuestionPending) repaintLiveQuestion();
+      }, 0);
+    });
+    const galleryBtn = document.getElementById("galleryBtn");
+    const densityBtn = document.getElementById("densityBtn");
+    const newWorktreeBtn = document.getElementById("newWorktreeBtn");
+    const showAllBtn = document.getElementById("showAllBtn");
+    const gallerySheet = document.getElementById("gallerySheet");
+    const galleryGrid = document.getElementById("galleryGrid");
+    const galleryFiles = document.getElementById("galleryFiles");
+    const galleryStatus = document.getElementById("galleryStatus");
+    const galleryCloseBtn = document.getElementById("galleryCloseBtn");
+    const imageViewer = document.getElementById("imageViewer");
+    const imageViewerImg = document.getElementById("imageViewerImg");
+    const viewerText = document.getElementById("viewerText");
+    const viewerName = document.getElementById("viewerName");
+    const viewerBar = document.getElementById("viewerBar");
+    const imageViewerClose = document.getElementById("imageViewerClose");
     const retryBtn = document.getElementById("retryBtn");
     const sendBtn = document.getElementById("sendBtn");
     const subagentSessionBtn = document.getElementById("subagentSessionBtn");
@@ -1490,10 +2000,12 @@ _MOBILE_HTML = r"""<!doctype html>
     const inboxSheet = document.getElementById("inboxSheet");
     const inboxList = document.getElementById("inboxList");
     const statusEl = document.getElementById("status");
-    const servicesBtn = document.getElementById("servicesBtn");
-    const servicesCount = document.getElementById("servicesCount");
     const servicesSheet = document.getElementById("servicesSheet");
     const serviceList = document.getElementById("serviceList");
+    const servicesSheetTitle = document.getElementById("servicesSheetTitle");
+    const worktreeSheet = document.getElementById("worktreeSheet");
+    const worktreeSheetTitle = document.getElementById("worktreeSheetTitle");
+    const worktreeActions = document.getElementById("worktreeActions");
     const settingsBtn = document.getElementById("settingsBtn");
     const settingsSheet = document.getElementById("settingsSheet");
     const settingsForm = document.getElementById("settingsForm");
@@ -1515,7 +2027,11 @@ _MOBILE_HTML = r"""<!doctype html>
     let selectedSessionKey = localStorage.getItem("marinaMobileSession") || "";
     let selectedProjectId = localStorage.getItem("marinaMobileProject") || "";
     let sourceFilter = localStorage.getItem("marinaMobileSource") || "all";
-    let sessionStructureKey = "";
+    let pinnedRoots = new Set();
+    let hiddenSessions = new Set();   // "source:sid" — 서버 저장
+    let showAll = false;
+    let servicesRoot = "";            // 서비스 시트가 지금 보여주는 워크트리(전역 root 가 아니다)              // 전체보기: 7일 넘은 세션 + 숨긴 세션까지   // 서버 저장(핀) — 폰에서 꽂은 게 웹에도 보여야 한다
+    let listDensity = localStorage.getItem("marinaMobileDensity") === "detail" ? "detail" : "simple";
     let turnsStructureKey = "";
     let activeDraftKey = "";
     let failedSend = null;
@@ -1551,7 +2067,7 @@ _MOBILE_HTML = r"""<!doctype html>
     // 웹 대시보드(app-1-core.js AGENT_STATUS_META)와 동일하게 통일 — 같은 상태를 같은 dot/라벨로.
     const AGENT_STATUS_META = {
       working:   {dot: "boot", label: "작업 중"},
-      blocked:   {dot: "bad",  label: "응답 필요"},
+      blocked:   {dot: "ask",  label: "응답 필요"},
       waiting:   {dot: "part", label: "응답 대기"},
       completed: {dot: "run",  label: "완료"},
       failed:    {dot: "bad",  label: "실패"},
@@ -1559,6 +2075,8 @@ _MOBILE_HTML = r"""<!doctype html>
       idle:      {dot: "stop", label: "유휴"},
     };
     function agentStatusMeta(status) { return AGENT_STATUS_META[status] || AGENT_STATUS_META.idle; }
+    // 이 상태들은 압축 모드에서도 **글자로** 보여준다 — 점 색만으론 놓친다.
+    const NOTABLE_STATUS = new Set(["blocked", "working", "failed"]);
     function showLogin(message="") {
       app.style.display = "none";
       login.style.display = "flex";
@@ -1568,23 +2086,58 @@ _MOBILE_HTML = r"""<!doctype html>
       login.style.display = "none";
       app.style.display = "grid";
     }
+    // listView 의 표시는 **CSS 가 data-view 로** 정한다 — 인라인 display 를 쓰면 채팅 뷰에서
+    // 좌측 드로어로 띄우는 규칙을 인라인이 이겨버려서 패널이 영영 안 열린다.
     function showList() {
       app.setAttribute("data-view", "list");
-      listView.style.display = "flex";
+      closeDrawer();
       chatView.style.display = "none";
       chatComposer.style.display = "none";
       backBtn.style.display = "none";
+      galleryBtn.style.display = "none";
       closeUsagePanel();
       closeSubagents();
       closeInbox();
+      closeGallery();
     }
     function showChat() {
       app.setAttribute("data-view", "chat");
-      listView.style.display = "none";
       chatView.style.display = "grid";
       chatComposer.style.display = "flex";
       backBtn.style.display = "inline-block";
+      // 이미지 모아보기는 에이전트 대화에만 의미가 있다(터미널 세션엔 트랜스크립트가 없음).
+      galleryBtn.style.display = currentTargetValue().startsWith("agent:") ? "inline-block" : "none";
     }
+    // DRAWER_START
+    // 좌측 패널(세션 목록) — 채팅에서 목록 화면으로 나가지 않고 세션을 바로 갈아탄다.
+    // 같은 #listView 를 재사용한다(렌더 경로 하나 유지): 목록 뷰에선 전체 화면, 채팅 뷰에선 오프캔버스 드로어.
+    function drawerOpen() { return app.getAttribute("data-drawer") === "open"; }
+    function openDrawer() {
+      if (app.getAttribute("data-view") !== "chat") return;   // 목록 뷰는 이미 전체 화면이다
+      app.setAttribute("data-drawer", "open");
+      listView.removeAttribute("aria-hidden");
+      backBtn.setAttribute("aria-expanded", "true");
+    }
+    function closeDrawer() {
+      app.setAttribute("data-drawer", "closed");
+      if (app.getAttribute("data-view") === "chat") listView.setAttribute("aria-hidden", "true");
+      else listView.removeAttribute("aria-hidden");
+      backBtn.setAttribute("aria-expanded", "false");
+    }
+    function toggleDrawer() { drawerOpen() ? closeDrawer() : openDrawer(); }
+    // 엣지 스와이프 판정 — 순수 함수라 테스트가 쉽다. 왼쪽 가장자리에서 오른쪽으로 끌면 열고,
+    // 열린 상태에서 왼쪽으로 끌면 닫는다. 세로 스크롤과 싸우지 않게 가로 이동이 세로보다 커야 한다.
+    const DRAWER_EDGE_PX = 28;
+    const DRAWER_TRIGGER_PX = 44;
+    function drawerSwipeIntent(start, current, isOpen) {
+      const dx = current.x - start.x;
+      const dy = Math.abs(current.y - start.y);
+      if (Math.abs(dx) < DRAWER_TRIGGER_PX || Math.abs(dx) <= dy) return null;
+      if (!isOpen && start.x <= DRAWER_EDGE_PX && dx > 0) return "open";
+      if (isOpen && dx < 0) return "close";
+      return null;
+    }
+    // DRAWER_END
     function closeUsagePanel() {
       usagePanel.classList.remove("open");
       usagePanel.setAttribute("aria-hidden", "true");
@@ -1606,6 +2159,155 @@ _MOBILE_HTML = r"""<!doctype html>
     function closeSettings() {
       settingsSheet.classList.remove("open");
       settingsSheet.setAttribute("aria-hidden", "true");
+    }
+    // 워크트리 작업 시트 — 헤더에 버튼을 늘어놓으면 340px 드로어가 답답하고 터치 목표도 작아진다(형 지적).
+    // 시트로 접으면 라벨을 제대로 쓸 수 있어 "＋CC 가 워크트리 만들기인 줄" 같은 오해도 사라진다.
+    function closeWorktreeSheet() {
+      worktreeSheet.classList.remove("open");
+      worktreeSheet.setAttribute("aria-hidden", "true");
+    }
+    function openWorktreeSheet(root) {
+      if (!root) return;
+      // 어떤 CLI 가 "쓸 수 있는지"를 알 방법이 없다. 이미 쓰는 쪽을 앞에 두는 것도 고려했지만,
+      // 세션이 하나도 없는 워크트리에서 **처음 띄우는 경우**가 그 논리에 걸린다(형 지적).
+      // 그래서 추측하지 않고 둘 다 고정 순서로 둔다.
+      const sources = [{id: "claude", label: "Claude 대화 추가"}, {id: "codex", label: "Codex 대화 추가"}];
+      const pinned = pinnedRoots.has(root);
+      worktreeSheetTitle.textContent = wtName(root);
+      worktreeActions.innerHTML = [
+        `<button class="wtAction" type="button" data-wt-act="services">서버<span class="wtActionNote">보기 · 실행</span></button>`,
+        ...sources.map(item => `<button class="wtAction" type="button" data-wt-act="launch:${item.id}">${esc(item.label)}</button>`),
+        `<button class="wtAction" type="button" data-wt-act="pin">${pinned ? "고정 해제" : "맨 위에 고정"}</button>`,
+      ].join("");
+      worktreeActions.dataset.root = root;
+      closeDrawer();
+      worktreeSheet.classList.add("open");
+      worktreeSheet.setAttribute("aria-hidden", "false");
+    }
+    function closeGallery() {
+      gallerySheet.classList.remove("open");
+      gallerySheet.setAttribute("aria-hidden", "true");
+    }
+    // VIEWER_START
+    // 앱 안 뷰어 — 이미지든 텍스트 파일이든 여기서 본다. 예전엔 이미지 아닌 파일을 window.open 으로
+    // 새 탭에 띄웠는데, 모아보기 흐름이 끊기고 폰에선 탭이 쌓인다(형 지적).
+    const VIEWER_TEXT_MAX = 200000;   // 뷰어가 멈추지 않게 표시 상한(서버는 8MB 까지 준다)
+    function viewerOpen() { return imageViewer.classList.contains("open"); }
+    function closeImageViewer() {
+      imageViewer.classList.remove("open");
+      imageViewer.setAttribute("aria-hidden", "true");
+      imageViewerImg.removeAttribute("src");   // 큰 이미지를 붙잡고 있지 않게
+      imageViewerImg.style.display = "none";
+      viewerText.style.display = "none";
+      viewerText.textContent = "";
+      viewerName.textContent = "";
+    }
+    function showViewer(name) {
+      viewerName.textContent = name || "";
+      imageViewer.classList.add("open");
+      imageViewer.setAttribute("aria-hidden", "false");
+    }
+    function openImageViewer(url, name) {
+      if (!url) return;
+      viewerText.style.display = "none";
+      imageViewerImg.style.display = "block";
+      imageViewerImg.src = url;
+      showViewer(name);
+    }
+    async function openTextViewer(url, name) {
+      if (!url) return;
+      imageViewerImg.style.display = "none";
+      imageViewerImg.removeAttribute("src");
+      viewerText.style.display = "block";
+      viewerText.textContent = "불러오는 중...";
+      showViewer(name);
+      try {
+        const r = await fetch(url, {headers: headers()});
+        if (!r.ok) throw new Error(await responseError(r));
+        const body = await r.text();
+        viewerText.textContent = body.length > VIEWER_TEXT_MAX
+          ? `${body.slice(0, VIEWER_TEXT_MAX)}\n\n… 이하 생략 (${body.length.toLocaleString()}자 중 앞 ${VIEWER_TEXT_MAX.toLocaleString()}자)`
+          : (body || "(빈 파일)");
+      } catch (error) {
+        viewerText.textContent = `열기 실패 · ${String(error)}`;
+      }
+    }
+    // VIEWER_END
+    // 모아보기 두 축.
+    //  ① 대화 이미지 — 트랜스크립트에 base64 로 박힌 그림(붙여넣기·Read 한 png·캡처).
+    //  ② 만든 파일 — 에이전트가 Write/Edit 한 파일. 만들기만 한 파일은 내용이 트랜스크립트에 안 남아
+    //     ①로는 절대 안 잡힌다(실측: 이 세션 Write2+Edit44 인데 대화 이미지는 0장). 근거는 도구 호출의 file_path.
+    let galleryTab = "images";
+    function fileSizeLabel(bytes) {
+      const n = Number(bytes) || 0;
+      if (n < 1024) return `${n}B`;
+      if (n < 1024 * 1024) return `${(n / 1024).toFixed(n < 10240 ? 1 : 0)}KB`;
+      return `${(n / 1048576).toFixed(1)}MB`;
+    }
+    function sessionFileUrl(path) {
+      const params = new URLSearchParams({root: sessionRoot(), path});
+      if (!cookieAuth && token()) params.set("token", token());
+      return `/mobile/api/session-file?${params}`;
+    }
+    function openGallery(tab) {
+      const value = currentTargetValue();
+      if (!selectedSession() || !value.startsWith("agent:")) { showToast("에이전트 세션에서만 볼 수 있어요"); return; }
+      galleryTab = tab || galleryTab;
+      gallerySheet.classList.add("open");
+      gallerySheet.setAttribute("aria-hidden", "false");
+      [...gallerySheet.querySelectorAll("[data-gallery-tab]")].forEach(btn =>
+        btn.classList.toggle("active", btn.getAttribute("data-gallery-tab") === galleryTab));
+      galleryGrid.innerHTML = "";
+      galleryFiles.innerHTML = "";
+      galleryStatus.textContent = "불러오는 중...";
+      return galleryTab === "files" ? loadGalleryFiles(value) : loadGalleryImages(value);
+    }
+    async function loadGalleryImages(value) {
+      const [, source, sid] = value.split(":");
+      try {
+        const params = new URLSearchParams({root: sessionRoot(), source, sid});
+        const r = await fetch(`/mobile/api/images?${params}`, {headers: headers()});
+        if (!r.ok) throw new Error(await responseError(r));
+        const data = await r.json();
+        const images = Array.isArray(data.images) ? data.images : [];
+        if (!images.length) {
+          galleryStatus.textContent = "이 대화엔 이미지가 없어요. 내가 만든 파일은 '만든 파일' 탭에 있어요.";
+          return;
+        }
+        galleryStatus.textContent = images.length < (data.total || images.length)
+          ? `이미지 ${images.length}장 (전체 ${data.total}장 중 최신순)` : `이미지 ${images.length}장`;
+        galleryGrid.innerHTML = images.map(img => {
+          const url = transcriptImageUrl(img.ref, value);
+          return url ? `<button class="galleryCell" type="button" data-image-ref="${esc(img.ref)}"><img src="${esc(url)}" alt="" loading="lazy" /></button>` : "";
+        }).join("");
+      } catch (error) {
+        galleryStatus.textContent = `불러오기 실패 · ${String(error)}`;
+      }
+    }
+    async function loadGalleryFiles(value) {
+      const [, source, sid] = value.split(":");
+      try {
+        const params = new URLSearchParams({root: sessionRoot(), source, sid});
+        const r = await fetch(`/mobile/api/session-files?${params}`, {headers: headers()});
+        if (!r.ok) throw new Error(await responseError(r));
+        const data = await r.json();
+        const files = Array.isArray(data.files) ? data.files : [];
+        if (!files.length) { galleryStatus.textContent = "이 세션이 만든/바꾼 파일이 없어요."; return; }
+        galleryStatus.textContent = `파일 ${files.length}개 · 최근에 손댄 것부터`;
+        galleryFiles.innerHTML = files.map(file => {
+          const badge = file.action === "created" ? "새로 만듦" : "수정";
+          const thumb = file.isImage && file.servable
+            ? `<img class="fileThumb" src="${esc(sessionFileUrl(file.path))}" alt="" loading="lazy" />`
+            : `<span class="fileIcon">${esc((file.name.split(".").pop() || "?").slice(0, 4).toUpperCase())}</span>`;
+          const sub = file.exists
+            ? `${fileSizeLabel(file.size)} · ${file.touches}번 손댐`
+            : "지금은 없는 파일 (지워졌거나 옮겨졌어요)";
+          const attrs = file.servable ? `data-file-path="${esc(file.path)}" data-file-name="${esc(file.relPath)}" data-file-image="${file.isImage ? "1" : ""}"` : "disabled";
+          return `<button class="fileRow" type="button" ${attrs}>${thumb}<span class="fileMeta"><span class="fileName">${esc(file.relPath)}</span><span class="fileSub">${esc(sub)}</span></span><span class="fileBadge${file.action === "created" ? "" : " edited"}">${badge}</span></button>`;
+        }).join("");
+      } catch (error) {
+        galleryStatus.textContent = `불러오기 실패 · ${String(error)}`;
+      }
     }
     function showToast(message) {
       clearTimeout(toastTimer);
@@ -1633,7 +2335,6 @@ _MOBILE_HTML = r"""<!doctype html>
       targetSelect.innerHTML = "";
       promptInput.value = "";
       sessionList.innerHTML = "";
-      sessionStructureKey = "";
       turnsStructureKey = "";
       turnsEl.innerHTML = "";
       Object.keys(historyCache).forEach(key => delete historyCache[key]);
@@ -1682,6 +2383,132 @@ _MOBILE_HTML = r"""<!doctype html>
       return html.replace(/\n/g, "<br>");
     }
     // ESC_HELPERS_END
+    // MARKDOWN_BLOCKS_START
+    // 말풍선 본문은 인라인 렌더만으론 부족하다. 형 기록을 세보면 assistant 텍스트의 24% 가 코드펜스 안
+    // 박스 다이어그램, 23% 가 목록, 13% 가 제목, 9% 가 표다. 인라인만 돌리면 파이프(|)·백틱·#가 날것으로
+    // 나오고, 다이어그램은 비례폰트 + 공백 접힘 + <br> 조합으로 뭉개져 아예 못 읽는다(형: "시각화 위젯을
+    // 볼 수가 없어"). 블록으로 먼저 자른 뒤 각 블록 안에서 기존 인라인 렌더를 쓴다.
+    function mdTableCells(line) {
+      let body = line.trim();
+      if (body.startsWith("|")) body = body.slice(1);
+      if (body.endsWith("|") && !body.endsWith("\\|")) body = body.slice(0, -1);
+      return body.split(/(?<!\\)\|/).map(cell => cell.replace(/\\\|/g, "|").trim());
+    }
+    function mdIsTableRow(line) { return /\|/.test(line || "") && /\S/.test(line || ""); }
+    function mdIsTableDivider(line) { return /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(line || "") && /\|/.test(line || "") && /-/.test(line || ""); }
+    function mdListMarker(line) {
+      const bullet = (line || "").match(/^(\s*)([-*+])\s+(.*)$/);
+      if (bullet) return {indent: bullet[1].length, ordered: false, text: bullet[3]};
+      const ordered = (line || "").match(/^(\s*)(\d{1,9})[.)]\s+(.*)$/);
+      if (ordered) return {indent: ordered[1].length, ordered: true, text: ordered[3]};
+      return null;
+    }
+    function renderMarkdownBlocks(value) {
+      const lines = String(value ?? "").split("\n");
+      const out = [];
+      let i = 0;
+      while (i < lines.length) {
+        const line = lines[i];
+        // ① 코드펜스 — 공백과 정렬을 글자 그대로 보존해야 다이어그램이 산다(가로 스크롤로 잘림 방지).
+        const fence = line.match(/^\s{0,3}(`{3,}|~{3,})(.*)$/);
+        if (fence) {
+          const marker = fence[1][0], width = fence[1].length;
+          const lang = (fence[2] || "").trim().split(/\s+/)[0];
+          const body = [];
+          i += 1;
+          while (i < lines.length) {
+            const close = lines[i].match(/^\s{0,3}(`{3,}|~{3,})\s*$/);
+            if (close && close[1][0] === marker && close[1].length >= width) { i += 1; break; }
+            body.push(lines[i]); i += 1;
+          }
+          const label = lang ? `<span class="mdCodeLang">${esc(lang)}</span>` : "";
+          out.push(`<div class="mdCode">${label}<pre><code>${esc(body.join("\n"))}</code></pre></div>`);
+          continue;
+        }
+        // ② 표 — 헤더 다음 줄이 구분선일 때만. 좁은 화면이라 가로 스크롤 컨테이너에 넣는다.
+        if (mdIsTableRow(line) && mdIsTableDivider(lines[i + 1])) {
+          const header = mdTableCells(line);
+          const aligns = mdTableCells(lines[i + 1]).map(spec => {
+            const left = spec.startsWith(":"), right = spec.endsWith(":");
+            return right && left ? "center" : right ? "right" : left ? "left" : "";
+          });
+          i += 2;
+          const rows = [];
+          while (i < lines.length && mdIsTableRow(lines[i]) && !mdIsTableDivider(lines[i])) {
+            rows.push(mdTableCells(lines[i])); i += 1;
+          }
+          const cell = (text, tag, index) => {
+            const align = aligns[index] ? ` style="text-align:${aligns[index]}"` : "";
+            return `<${tag}${align}>${renderRichText(text)}</${tag}>`;
+          };
+          const head = `<tr>${header.map((text, index) => cell(text, "th", index)).join("")}</tr>`;
+          const body = rows.map(row => `<tr>${header.map((_, index) => cell(row[index] ?? "", "td", index)).join("")}</tr>`).join("");
+          out.push(`<div class="mdTableWrap"><table class="mdTable"><thead>${head}</thead><tbody>${body}</tbody></table></div>`);
+          continue;
+        }
+        // ③ 제목
+        const heading = line.match(/^\s{0,3}(#{1,6})\s+(.*)$/);
+        if (heading) {
+          out.push(`<div class="mdH mdH${heading[1].length}">${renderRichText(heading[2].replace(/\s+#+\s*$/, ""))}</div>`);
+          i += 1; continue;
+        }
+        // ④ 구분선
+        if (/^\s{0,3}([-*_])\s*(\1\s*){2,}$/.test(line)) { out.push('<hr class="mdHr">'); i += 1; continue; }
+        // ⑤ 인용
+        if (/^\s{0,3}>\s?/.test(line)) {
+          const body = [];
+          while (i < lines.length && /^\s{0,3}>\s?/.test(lines[i])) { body.push(lines[i].replace(/^\s{0,3}>\s?/, "")); i += 1; }
+          out.push(`<blockquote class="mdQuote">${renderMarkdownBlocks(body.join("\n"))}</blockquote>`);
+          continue;
+        }
+        // ⑥ 목록 — 들여쓰기 2칸마다 한 단계. 항목 하나가 여러 줄이면 이어 붙인다.
+        if (mdListMarker(line)) {
+          const items = [];
+          while (i < lines.length) {
+            const marker = mdListMarker(lines[i]);
+            if (marker) { items.push({...marker, lines: [marker.text]}); i += 1; continue; }
+            if (!lines[i].trim()) break;
+            if (!items.length || mdIsTableRow(lines[i]) || /^\s{0,3}(#{1,6}\s|`{3,}|~{3,}|>)/.test(lines[i])) break;
+            items[items.length - 1].lines.push(lines[i].trim()); i += 1;   // 계속 줄
+          }
+          out.push(mdRenderList(items, 0));
+          continue;
+        }
+        // ⑦ 빈 줄
+        if (!line.trim()) { i += 1; continue; }
+        // ⑧ 문단 — 다음 블록 시작 전까지 모은다.
+        const paragraph = [];
+        while (i < lines.length && lines[i].trim()
+               && !mdListMarker(lines[i])
+               && !/^\s{0,3}(#{1,6}\s|`{3,}|~{3,}|>)/.test(lines[i])
+               && !/^\s{0,3}([-*_])\s*(\1\s*){2,}$/.test(lines[i])
+               && !(mdIsTableRow(lines[i]) && mdIsTableDivider(lines[i + 1]))) {
+          paragraph.push(lines[i]); i += 1;
+        }
+        if (paragraph.length) out.push(`<p class="mdP">${renderRichText(paragraph.join("\n"))}</p>`);
+        else i += 1;   // 어떤 규칙에도 안 걸린 줄 — 무한루프 방지
+      }
+      return out.join("");
+    }
+    function mdRenderList(items, depth) {
+      let html = "";
+      let index = 0;
+      while (index < items.length) {
+        const item = items[index];
+        const tag = item.ordered ? "ol" : "ul";
+        const group = [];
+        while (index < items.length && items[index].indent <= item.indent && items[index].ordered === item.ordered) {
+          const current = items[index];
+          index += 1;
+          const nested = [];
+          while (index < items.length && items[index].indent > current.indent) { nested.push(items[index]); index += 1; }
+          group.push(`<li>${renderRichText(current.lines.join("\n"))}${nested.length ? mdRenderList(nested, depth + 1) : ""}</li>`);
+        }
+        html += `<${tag} class="mdList">${group.join("")}</${tag}>`;
+      }
+      return html;
+    }
+    // MARKDOWN_BLOCKS_END
     function renderActivityCode(value, type) {
       const escaped = esc(String(value ?? ""));
       if (type !== "diff") return escaped;   // diff 활동만 unified-diff 색칠(다른 출력의 +/- 오탐 방지)
@@ -1787,6 +2614,14 @@ _MOBILE_HTML = r"""<!doctype html>
     function selectedRoot() { return rootSelect.value || (state.worktrees[0] && state.worktrees[0].root) || ""; }
     function targetKey(root=selectedRoot()) { return `marinaMobileTarget:${root}`; }
     function selectedSession() { return (state.sessions || []).find(s => s.key === selectedSessionKey) || null; }
+    // 세션 단위 동작은 **그 세션의 root** 를 쓴다. 전역 selectedRoot() 는 워크트리 피커/프로젝트 탭이
+    // 움직이면 선택된 세션과 어긋나고, 그러면 서버의 agent_belongs_to_root 가 막아 403 이 된다
+    // (형: "이 세션 모바일에서 안되잖아 · do not access this resource"). settings/interrupt 는 원래
+    // session.root 를 써서 멀쩡했다 — 나머지를 그 관례에 맞춘다.
+    function sessionRoot() {
+      const session = selectedSession();
+      return (session && session.root) || selectedRoot();
+    }
     function termKey(tid) { return `term:${tid}`; }
     function migrateSelectionOnPromotion() {
       // 직접 launch 한 PTY 는 첫 지시가 훅을 깨우는 순간 sid 를 얻어(입양) term 카드 → agent 카드로
@@ -1830,6 +2665,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!s) return;
       if (key !== selectedSessionKey) clearFailedSend();
       closeUsagePanel();
+      closeDrawer();          // 좌측 패널에서 골랐으면 바로 그 대화로 — 이게 "바로바로 넘어가기"의 핵심
       selectedSessionKey = key;
       followLatest = true;
       turnsStructureKey = "";
@@ -2081,15 +2917,63 @@ _MOBILE_HTML = r"""<!doctype html>
       const source = sessionSource(session);
       const meta = sourceMeta[source];
       const sm = session.kind === "agent" ? agentStatusMeta(session.status) : null;
-      const statusHtml = sm ? `<span class="session-status" data-session-status><span class="wt-dot ${sm.dot}"></span><span class="session-status-label">${sm.label}</span></span>` : "";
-      // pending AskUserQuestion — 그 세션을 열지 않아도 응답 대기 중임을 리스트에서 바로 알 수 있게.
-      const hasPendingQuestion = Boolean(session.pendingQuestion);
-      const questionBadge = hasPendingQuestion ? `<span class="session-question-badge" data-session-question-badge>&#10067; 질문 대기</span>` : "";
-      return `<button class="session-card ${session.key === selectedSessionKey ? "active" : ""}" type="button" data-key="${esc(session.key)}">
-        <span class="session-card-top"><span class="source-badge ${source}">${meta.badge}</span><span class="session-title" data-session-title>${esc(session.title || session.key)}</span>${questionBadge}${statusHtml}</span>
+      // 질문 대기는 별도 표시가 아니라 **상태값**이다 — 서버가 status="blocked" 로 주고
+      // 상태표에 blocked → "응답 필요"가 이미 있다. 시간 자리는 시간만 맡는다.
+      const when = relTime(session.ts);
+      const notable = NOTABLE_STATUS.has(String(session.status || ""));
+      // 요소는 **항상 만들고** 내용/표시만 patch 가 갱신한다 — 노드를 재사용해야 순서를 옮겨도
+      // 스크롤·포커스가 안 튄다. 간단/자세히 밀도는 CSS 가 가리므로 렌더를 다시 하지 않는다.
+      const statusHtml = `<span class="session-status${notable ? " notable" : ""}" data-session-status><span class="wt-dot ${sm ? sm.dot : "stop"}"></span><span class="session-status-label">${sm ? esc(sm.label) : ""}</span></span>`;
+      const hiddenKey = `${session.source}:${session.sid}`;
+      const isHidden = hiddenSessions.has(hiddenKey);
+      return `<button class="session-card ${session.key === selectedSessionKey ? "active" : ""}${isHidden ? " hidden-session" : ""}" type="button" data-key="${esc(session.key)}" data-hide-key="${esc(hiddenKey)}">
+        <span class="session-card-top"><span class="source-badge ${source}">${meta.badge}</span><span class="session-title" data-session-title>${esc(session.title || session.key)}</span>${statusHtml}<span class="session-when" data-session-when>${esc(when)}</span></span>
         <span class="session-subtitle" data-session-subtitle>${esc(sessionSubtitle(session))}</span>
         <span class="session-preview" data-session-preview>${esc(session.preview || "(최근 작업 없음)")}</span>
       </button>`;
+    }
+    // LIST_RECONCILE_START
+    // key 로 노드를 **재사용하고 위치만 옮긴다**(insertBefore). 새로 만들면 폴링마다 스크롤·펼침이 튄다.
+    // 예전 renderSessions 는 구조키에 .sort() 를 걸어 순서에 둔감했고, 그래서 세션에서 일해 mtime 이
+    // 올라가도 화면에서 위로 올라오지 않았다(형: "작업 완료 최신순도 아니고 정렬이").
+    function reconcileKeyed(container, items, opts) {
+      const existing = new Map();
+      for (const node of [...container.children]) {
+        const k = node.dataset ? node.dataset.rkey : null;
+        if (k == null) container.removeChild(node);          // 잔재(빈 상태 등)
+        else existing.set(k, node);
+      }
+      let cursor = null;
+      for (const item of items) {
+        const k = String(opts.key(item));
+        let node = existing.get(k);
+        if (node) { existing.delete(k); if (opts.patch) opts.patch(node, item); }
+        else { node = opts.create(item); node.dataset.rkey = k; }
+        const expected = cursor ? cursor.nextSibling : container.firstChild;
+        if (node !== expected) container.insertBefore(node, expected);
+        cursor = node;
+      }
+      for (const node of existing.values()) container.removeChild(node);
+    }
+    // 마지막 활동 상대시간 — 한 줄 카드에서 "언제"를 담당한다.
+    function relTime(ts) {
+      const seconds = Math.floor(Date.now() / 1000 - (Number(ts) || 0));
+      if (!ts || seconds < 0) return "";
+      if (seconds < 60) return "방금";
+      if (seconds < 3600) return `${Math.floor(seconds / 60)}분`;
+      if (seconds < 86400) return `${Math.floor(seconds / 3600)}시간`;
+      if (seconds < 172800) return "어제";
+      return `${Math.floor(seconds / 86400)}일`;
+    }
+    // 그룹 배지도 **같은 상태값**에서 센다 — pendingQuestion 을 따로 세면 두 진실이 갈린다.
+    function groupOf(sessions) {
+      const asking = sessions.filter(s => s.status === "blocked").length;
+      const busy = sessions.filter(s => s.status === "working").length;
+      return {asking, busy, dot: asking ? "ask" : (busy ? "boot" : "stop")};
+    }
+    function wtName(root) {
+      const wt = (state.worktrees || []).find(w => w.root === root);
+      return (wt && wt.alias) || root.split("/").filter(Boolean).pop() || root || "워크트리";
     }
     function renderSessions() {
       const q = sessionSearch.value.trim().toLowerCase();
@@ -2098,54 +2982,99 @@ _MOBILE_HTML = r"""<!doctype html>
         return !q || [s.title, s.subtitle, s.preview, s.root].some(v => String(v || "").toLowerCase().includes(q));
       }).slice(0, 40);
       if (!sessions.length) {
-        const emptyKey = `empty|${selectedProjectId}|${sourceFilter}|${q}`;
-        if (sessionStructureKey !== emptyKey) {
-          sessionList.innerHTML = `<div class="empty-state">${q ? "검색 결과가 없습니다." : "이 분류에 열린 세션이 없습니다."}</div>`;
-          sessionStructureKey = emptyKey;
-        }
+        sessionList.innerHTML = `<div class="empty-state">${q ? "검색 결과가 없습니다." : "이 분류에 열린 세션이 없습니다."}</div>`;
         return;
       }
-      const structure = sessions.map(s => `${sessionSource(s)}:${s.key}:${s.status || ""}`).sort().join("|");   // status 포함 → 상태 dot 이 폴마다 갱신
-      const nextStructureKey = `${selectedProjectId}|${sourceFilter}|${q}|${structure}`;
-      if (sessionStructureKey !== nextStructureKey) {
-        // 웹과 같은 멘탈모델로 — **워크트리가 단위**이고 세션은 그 아래 산다. 워크트리 헤더에서
-        // 바로 새 에이전트를 띄울 수 있어 "만들고 → 셸 열고 → claude 치기" 3스텝이 사라진다.
-        const order = [];
-        const byRoot = new Map();
-        sessions.forEach(session => {
-          const root = String(session.root || "");
-          if (!byRoot.has(root)) { byRoot.set(root, []); order.push(root); }
-          byRoot.get(root).push(session);
-        });
-        sessionList.innerHTML = order.map(root => {
-          const grouped = byRoot.get(root);
-          const name = root.split("/").filter(Boolean).pop() || root || "워크트리";
-          const busy = grouped.some(s => s.kind === "agent" && s.status === "working");
-          const asking = grouped.some(s => s.pendingQuestion);
-          const dot = asking ? "boot" : (busy ? "run" : "stop");
-          return `<details class="session-group wt-group" open data-wt-root="${esc(root)}">
-            <summary class="session-group-title wt-group-head">
-              <span class="wt-group-name"><span class="wt-dot ${dot}"></span>${esc(name)}</span>
-              <span class="wt-group-acts">
-                <button class="wtLaunchBtn" type="button" data-launch="claude" data-root="${esc(root)}" title="이 워크트리에서 Claude 새 세션">＋CC</button>
-                <button class="wtLaunchBtn" type="button" data-launch="codex" data-root="${esc(root)}" title="이 워크트리에서 Codex 새 세션">＋CX</button>
-                <span class="wt-group-count">${grouped.length}</span>
-              </span>
-            </summary>${grouped.map(sessionCard).join("")}</details>`;
-        }).join("");
-        sessionStructureKey = nextStructureKey;
-        return;
-      }
-      const cards = new Map([...sessionList.querySelectorAll("[data-key]")].map(card => [card.getAttribute("data-key"), card]));
+      // 서버가 이미 마지막 활동 최신순으로 준다 → 첫 등장 순서가 곧 그룹의 최신순이다.
+      const order = [];
+      const byRoot = new Map();
       sessions.forEach(session => {
-        const card = cards.get(session.key);
-        if (!card) return;
-        card.classList.toggle("active", session.key === selectedSessionKey);
-        card.querySelector("[data-session-title]").textContent = session.title || session.key;
-        card.querySelector("[data-session-subtitle]").textContent = sessionSubtitle(session);
-        card.querySelector("[data-session-preview]").textContent = session.preview || "(최근 작업 없음)";
+        const root = String(session.root || "");
+        if (!byRoot.has(root)) { byRoot.set(root, []); order.push(root); }
+        byRoot.get(root).push(session);
+      });
+      // 핀 먼저. Array#sort 는 안정 정렬이라 각 묶음 안에서는 최신순이 그대로 유지된다.
+      order.sort((a, b) => (pinnedRoots.has(b) ? 1 : 0) - (pinnedRoots.has(a) ? 1 : 0));
+      reconcileKeyed(sessionList, order, {
+        key: root => root,
+        create: root => {
+          const node = document.createElement("details");
+          node.className = "session-group wt-group";
+          node.setAttribute("data-wt-root", root);
+          // 기본 접힘. 지금 보고 있는 세션이 있거나 주의가 필요한 그룹만 펼친다.
+          // patch 에서는 open 을 건드리지 않는다 — 접고 펴는 건 형 소유다.
+          const grouped = byRoot.get(root) || [];
+          const info = groupOf(grouped);
+          node.open = info.asking > 0 || info.busy > 0
+            || grouped.some(s => s.key === selectedSessionKey);
+          node.innerHTML = `<summary class="session-group-title wt-group-head">
+              <span class="wt-group-name"><span class="wt-pin" data-pin-root role="img"></span><span class="wt-dot"></span><span class="wt-label"></span></span>
+              <span class="wt-group-acts">
+                <span class="wt-group-flags"></span>
+                <span class="wt-group-count"></span>
+                <button class="wtLaunchBtn wtMoreBtn" type="button" data-wt-more="${esc(root)}" title="이 워크트리 작업" aria-label="이 워크트리 작업">&#8943;</button>
+              </span>
+            </summary><div class="wt-group-body"></div>`;
+          patchGroup(node, root);
+          return node;
+        },
+        patch: patchGroup,
       });
     }
+    function patchGroup(node, root) {
+      const grouped = byRootSessions(root);
+      const info = groupOf(grouped);
+      const pinned = pinnedRoots.has(root);
+      node.classList.toggle("pinned", pinned);
+      const pin = node.querySelector("[data-pin-root]");
+      pin.textContent = pinned ? "📌" : "";
+      pin.setAttribute("aria-label", pinned ? "고정 해제" : "고정");
+      const dot = node.querySelector(".wt-dot");
+      dot.className = `wt-dot ${info.dot}`;
+      node.querySelector(".wt-label").textContent = wtName(root);
+      node.querySelector(".wt-group-count").textContent = String(grouped.length);
+      // 접혀 있어도 안에서 무슨 일이 나는지는 보여야 한다 — 안 그러면 접기가 정보를 숨긴다.
+      const flags = [];
+      if (info.asking) flags.push(`<span class="wt-flag asking">응답 ${info.asking}</span>`);
+      if (info.busy) flags.push(`<span class="wt-flag busy">작업 ${info.busy}</span>`);
+      const flagsHtml = flags.join("");
+      const flagsEl = node.querySelector(".wt-group-flags");
+      if (flagsEl.innerHTML !== flagsHtml) flagsEl.innerHTML = flagsHtml;
+      reconcileKeyed(node.querySelector(".wt-group-body"), grouped, {
+        key: session => session.key,
+        create: session => {
+          const holder = document.createElement("div");
+          holder.innerHTML = sessionCard(session);
+          return holder.firstElementChild;
+        },
+        patch: patchSessionCard,
+      });
+    }
+    function byRootSessions(root) {
+      const q = sessionSearch.value.trim().toLowerCase();
+      return projectSessions().filter(s => {
+        if (String(s.root || "") !== root) return false;
+        if (sourceFilter !== "all" && sessionSource(s) !== sourceFilter) return false;
+        return !q || [s.title, s.subtitle, s.preview, s.root].some(v => String(v || "").toLowerCase().includes(q));
+      });
+    }
+    function patchSessionCard(card, session) {
+      card.classList.toggle("active", session.key === selectedSessionKey);
+      card.classList.toggle("hidden-session", hiddenSessions.has(`${session.source}:${session.sid}`));
+      const sm = session.kind === "agent" ? agentStatusMeta(session.status) : null;
+      card.querySelector("[data-session-title]").textContent = session.title || session.key;
+      card.querySelector("[data-session-subtitle]").textContent = sessionSubtitle(session);
+      card.querySelector("[data-session-preview]").textContent = session.preview || "(최근 작업 없음)";
+      const when = card.querySelector("[data-session-when]");
+      if (when) when.textContent = relTime(session.ts);
+      const statusEl = card.querySelector("[data-session-status]");
+      if (statusEl) statusEl.classList.toggle("notable", NOTABLE_STATUS.has(String(session.status || "")));
+      const statusDot = card.querySelector("[data-session-status] .wt-dot");
+      if (statusDot) statusDot.className = `wt-dot ${sm ? sm.dot : "stop"}`;
+      const statusLabel = card.querySelector(".session-status-label");
+      if (statusLabel) statusLabel.textContent = sm ? sm.label : "";
+    }
+    // LIST_RECONCILE_END
     function mergeHistoryTurns(existing, incoming) {
       const out = existing.slice();
       const ids = new Set(out.filter(turn => turn.id).map(turn => turn.id));
@@ -2251,6 +3180,17 @@ _MOBILE_HTML = r"""<!doctype html>
       usageFill.style.width = `${percent == null ? 0 : Math.max(0, Math.min(100, percent))}%`;
       usagePanel.dataset.level = percent != null && percent >= 90 ? "critical" : percent != null && percent >= 70 ? "warn" : "normal";
       usagePanel.title = usage && usage.contextWindow ? `컨텍스트 ${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindow)}` : "컨텍스트 한도 정보 없음";
+      // 사용량은 **항상 보이게** 한 줄로도 띄운다 — 작은 아이콘 버튼 뒤에만 두면 있는 줄도 모른다(형 지적).
+      if (percent == null) {
+        contextBtn.style.display = "none";
+      } else {
+        contextBtn.style.display = "inline-block";
+        contextBtn.textContent = `컨텍스트 ${percent.toFixed(0)}%`;
+        contextBtn.dataset.level = percent >= 90 ? "critical" : percent >= 70 ? "warn" : "normal";
+        contextBtn.title = usage && usage.contextWindow
+          ? `${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindow)} · 남음 ${formatTokens(usage.remainingTokens)}`
+          : "토큰 사용량 자세히";
+      }
     }
     async function loadAgentUsage(session) {
       if (!session || session.kind !== "agent") {
@@ -2296,6 +3236,9 @@ _MOBILE_HTML = r"""<!doctype html>
           history.cursor = page.cursor ?? null;
           history.hasMore = Boolean(page.hasMore);
         }
+        // 서버가 상한(120) 때문에 오래된 활동을 버렸으면 그렇다고 말한다 — 조용히 자르면
+        // 화면의 "작업 N"이 실제보다 적어서 형이 세는 것과 안 맞는다.
+        history.trimmedActivities = Number(page.trimmedActivities) || 0;
         history.loaded = true;
         if (selectedSessionKey === session.key) {
           renderTurns(session);
@@ -2335,9 +3278,10 @@ _MOBILE_HTML = r"""<!doctype html>
       const exchanges = [];
       let current = null;
       (items || []).forEach((item, index) => {
-        // 큐 메시지는 진행 중 턴에 끼어든 steering — 새 exchange 를 시작하지 않고 현재 exchange 에 인라인으로 붙는다
-        // (안 그러면 실제 작업/답이 마지막 큐 메시지 exchange 로 쏠려 원 메시지가 답 없이 남음 — 형 지적).
-        const startsExchange = item.kind === "message" && item.role === "user" && !item.queued;
+        // 턴 중간에 끼어든 메시지(큐 대기 중 = queued, 턴이 삼킨 것 = steered)는 **새 exchange 를 시작하지
+        // 않는다**. 시작해 버리면 진행 중이던 어시스턴트 설명(지문)이 이전 exchange 에 남고 그 뒤의
+        // 질문만 새 exchange 로 가서, 답하기 전엔 읽을 게 아무것도 없다(형: "답을 해야 질문 전에 지문이 보여").
+        const startsExchange = item.kind === "message" && item.role === "user" && !item.queued && !item.steered;
         if (startsExchange) {
           if (current && current.items.length) exchanges.push(current);
           current = {id: String(item.id || `user:${index}`), user: item, items: [item]};
@@ -2358,12 +3302,32 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       const isQueuedMsg = it => it.kind === "message" && it.role === "user" && it.queued;
       const queued = items.filter(it => it !== user && isQueuedMsg(it));   // 진행 중 끼어든 큐 메시지 → 인라인 말풍선
-      const activities = items.filter((item, index) => item !== user && index !== assistantIndex && !isQueuedMsg(item)).map((item, index) => {
-        if (item.kind === "activity") return item;
-        return {id: `progress:${item.id || index}`, kind: "activity", activityType: "progress", label: "진행 메모", detail: item.text || "", result: "", status: "completed"};
-      });
+      // 활동은 **진짜 도구 호출만**. 예전엔 마지막 것 말고 모든 어시스턴트 텍스트를 "진행 메모" 활동으로
+      // 바꿔 접힌 목록에 묻었는데, 그러면 결과만 덩그러니 남고 왜 그랬는지가 사라진다(형 지적).
+      const activities = items.filter(item => item.kind === "activity");
       return {user, queued, activities, assistant: assistantIndex >= 0 ? items[assistantIndex] : null};
     }
+    // EXCHANGE_RUNS_START
+    // exchange 를 **시간 순서대로** 조각낸다: 말풍선(어시스턴트 설명 · 끼어든 메시지)과 연속 활동 묶음.
+    // 예전엔 활동을 전부 앞에 몰고 마지막 텍스트만 말풍선으로 그려서, 실제 흐름과 순서가 달랐다.
+    function exchangeRuns(exchange) {
+      const items = (exchange && exchange.items) || [];
+      const user = exchange && exchange.user;
+      const runs = [];
+      let current = null;
+      for (const item of items) {
+        if (item === user) continue;
+        if (item.kind === "activity") {
+          if (!current) { current = {type: "activities", items: []}; runs.push(current); }
+          current.items.push(item);
+          continue;
+        }
+        current = null;                       // 말풍선이 끼면 활동 묶음을 끊는다(순서 보존)
+        runs.push({type: "message", item});
+      }
+      return runs;
+    }
+    // EXCHANGE_RUNS_END
     function exchangeRuntime(exchange, session=null, allowFallback=false) {
       const items = ((exchange && exchange.items) || []).slice().reverse();
       const item = items.find(value => value && (value.model || value.effort));
@@ -2408,6 +3372,26 @@ _MOBILE_HTML = r"""<!doctype html>
         : `<a href="${esc(a.url)}" target="_blank" rel="noopener noreferrer">${esc(a.name)}</a>`).join("");
       return `<div class="turnAttachments">${cells}</div>`;
     }
+    // 대화 안 이미지 — 타임라인엔 ref 만 오고(트랜스크립트의 base64 는 수 MB) 실제 바이트는 이 URL 로.
+    // ref 는 (파일 오프셋, 블록 인덱스)라 불변이라서 브라우저 캐시가 그대로 먹는다.
+    function transcriptImageUrl(ref, target) {
+      const value = target || currentTargetValue();
+      if (!ref || !value.startsWith("agent:")) return "";
+      const [, source, sid] = value.split(":");
+      const params = new URLSearchParams({root: sessionRoot(), source, sid, ref});
+      if (!cookieAuth && token()) params.set("token", token());
+      return `/mobile/api/transcript-image?${params}`;
+    }
+    function renderTimelineImages(item, className) {
+      const images = Array.isArray(item && item.images) ? item.images : [];
+      if (!images.length) return "";
+      const cells = images.map(img => {
+        const url = transcriptImageUrl(img && img.ref);
+        if (!url) return "";
+        return `<button class="turnImageBtn" type="button" data-image-ref="${esc(img.ref)}"><img src="${esc(url)}" alt="대화 이미지" loading="lazy" /></button>`;
+      }).join("");
+      return cells ? `<div class="${className || "turnAttachments"}">${cells}</div>` : "";
+    }
     function renderTimelineMessage(item) {
       const text = String(item.text || "");
       const role = item.role === "user" ? "user" : item.role === "output" ? "output" : "assistant";
@@ -2418,10 +3402,14 @@ _MOBILE_HTML = r"""<!doctype html>
       const pendingState = item.pending ? `<div class="turnState${item.failed ? " failed" : ""}"${item.failed ? ` data-resend-text="${esc(item.text || "")}"` : ""}><span>${esc(pendingDeliveryLabel(item.delivery, item.createdAt))}</span>${pendingActions}</div>` : "";
       // 전달된 큐는 서버에서 아예 말풍선을 안 만든다(진짜 user 행이 대신한다) — 여기 남는 건
       // 아직 기다리는 것과 사용자가 취소한 것뿐이다.
-      const queuedBadge = item.queued
+      // steered = 작업 중에 끼어들어 그 턴이 이미 삼킨 말. 대기도 취소도 아니라서 별도 표시를 쓴다
+      // (예전엔 remove 만 보고 "취소됨"을 붙여, 실제로 소화한 말이 취소된 것처럼 보였다).
+      const queuedBadge = item.steered
+        ? `<span class="queuedTag steered">⤳ 전달됨</span>`
+        : item.queued
         ? `<span class="queuedTag${item.queuedCancelled ? " consumed" : ""}">⏱ ${item.queuedCancelled ? "대기열에서 취소됨" : "대기열 · 대기 중"}</span>`
         : "";
-      return `<div class="turn ${role}${item.pending ? " pending" : ""}${item.queued ? " queued" : ""}" data-timeline-message-id="${esc(item.id || "")}">${queuedBadge}<div class="turnBody">${renderRichText(stripped)}</div>${renderTurnAttachments(attachments)}${pendingState}</div>`;
+      return `<div class="turn ${role}${item.pending ? " pending" : ""}${item.queued ? " queued" : ""}" data-timeline-message-id="${esc(item.id || "")}">${queuedBadge}<div class="turnBody">${renderMarkdownBlocks(stripped)}</div>${renderTurnAttachments(attachments)}${renderTimelineImages(item)}${pendingState}</div>`;
     }
     function timelineDetailAttrs(id) {
       const value = String(id || "detail");
@@ -2432,13 +3420,26 @@ _MOBILE_HTML = r"""<!doctype html>
     // 같으면 그 DOM 을 손대지 않는다 — 읽는 중에 노드가 갈리면 스크롤이 튀기 때문.
     function activityItemKey(item, index) { return String(item.id || item.label || `activity-${index}`); }
     function activityItemFingerprint(item) {
-      return JSON.stringify([item.activityType, item.status, item.label, item.name, item.detail, item.result]);
+      return JSON.stringify([item.activityType, item.status, item.label, item.name, item.detail, item.result,
+                             (item.images || []).map(img => img.ref)]);
     }
+    // 표시 순서만 정해두고, **counts 에 있는 키는 하나도 빠뜨리지 않는다**(모르는 종류는 뒤에 붙인다).
+    // 예전엔 이 목록이 하드코딩(skill·command·diff·file·agent)이라 tool/progress 로 분류되는 것들
+    // (Grep · mcp__* · ToolSearch · AskUserQuestion · Glob …)이 "작업 N" 총계엔 들어가고 항목엔 안 나와
+    // 합이 안 맞았다. 실측: 40세션 활동 1291개 중 165개(13%)가 사라졌고 17세션이 영향받았다.
+    const ACTIVITY_SUMMARY_ORDER = ["skill", "command", "diff", "file", "agent", "progress", "tool"];
     function activityGroupSummary(items) {
+      // 스킬은 **이름까지** 보여준다 — 접힌 상태에서 "Skill 2"만 보면 뭘 읽었는지 알 수가 없다(형 요청).
+      const skills = items.filter(item => (item.activityType || "") === "skill")
+                          .map(item => String(item.label || item.name || "").trim()).filter(Boolean);
       const counts = {};
       items.forEach(item => { const key = item.activityType || "tool"; counts[key] = (counts[key] || 0) + 1; });
-      const categories = ["skill", "command", "diff", "file", "agent"].filter(key => counts[key]).map(key => `${activityTypeLabels[key]} ${counts[key]}`);
-      return [`작업 ${items.length}`, ...categories].join(" · ");
+      const rank = key => { const i = ACTIVITY_SUMMARY_ORDER.indexOf(key); return i < 0 ? ACTIVITY_SUMMARY_ORDER.length : i; };
+      const categories = Object.keys(counts)
+        .sort((a, b) => rank(a) - rank(b) || a.localeCompare(b))
+        .map(key => `${activityTypeLabels[key] || key} ${counts[key]}`);
+      const skillNames = skills.length && skills.length <= 3 ? [`Skill: ${[...new Set(skills)].join(", ")}`] : [];
+      return [`작업 ${items.length}`, ...categories, ...skillNames].join(" · ");
     }
     // ACTIVITY_IDENTITY_END
     function renderActivityItem(item, index) {
@@ -2446,9 +3447,12 @@ _MOBILE_HTML = r"""<!doctype html>
       const status = ["running", "failed"].includes(item.status) ? item.status : "completed";
       const detail = String(item.detail || "");
       const result = String(item.result || "");
+      // 스크린샷·이미지 Read 는 결과가 그림이다 — 텍스트 결과만 보여주면 "아무것도 안 나온" 것처럼 보인다.
+      const images = renderTimelineImages(item, "activityImages");
       const body = [
         detail ? `<span class="activityBodyLabel">입력</span><pre class="activityCode">${renderActivityCode(detail, type)}</pre>` : "",
         result ? `<span class="activityBodyLabel">결과</span><pre class="activityCode">${renderActivityCode(result, type)}</pre>` : "",
+        images ? `<span class="activityBodyLabel">이미지</span>${images}` : "",
       ].join("");
       return `<details class="activityItem ${status}" data-activity-detail data-activity-key="${esc(activityItemKey(item, index))}" data-activity-fp="${esc(activityItemFingerprint(item))}" ${timelineDetailAttrs(`item:${item.id || item.label || "activity"}`)}><summary><span class="activityDot"></span><span class="activityLabel">${esc(item.label || item.name || activityTypeLabels[type] || "작업")}</span><span class="activityType">${esc(activityTypeLabels[type] || "도구")}</span></summary>${body ? `<div class="activityBody">${body}</div>` : ""}</details>`;
     }
@@ -2532,47 +3536,91 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       return String(raw);
     }
-    function renderQuestionCard(item, interactive) {
+    // 질문을 **전부** 그린다. 예전엔 첫 질문만 그리고 "외 N개 — 첫 질문에 응답합니다" 라고 적었는데,
+    // 실제로는 나머지 질문에서 폼이 계속 대기해 아무 일도 안 일어났다(형: "선택하는데 안 가는데").
+    // state = {choices, sending, failed} — 여러 질문일 땐 다 고른 뒤 한 번에 보낸다.
+    function renderQuestionCard(item, interactive, state) {
       const questions = questionsFromActivity(item);
       if (!questions) return "";
-      const rawFirst = questions[0];
-      const first = (rawFirst && typeof rawFirst === "object") ? rawFirst : {};
-      const questionText = typeof first.question === "string" && first.question.trim() ? first.question : "";
-      const options = Array.isArray(first.options) ? first.options.filter(opt => opt != null) : [];
-      const header = first.header ? `<div class="questionHeader">${esc(String(first.header))}</div>` : "";
-      const q = questionText ? `<div class="questionText">${renderRichText(String(questionText))}</div>` : "";
-      const more = questions.length > 1 ? `<div class="questionMore">외 ${questions.length - 1}개 질문 — 첫 질문에 응답합니다</div>` : "";
-      const buttons = options.map((opt, index) => {
-        const label = esc(String((opt && (opt.label || opt.value)) || `옵션 ${index + 1}`));
-        const desc = opt && opt.description ? `<span class="questionOptDesc">${esc(String(opt.description))}</span>` : "";
-        const attrs = interactive ? `data-answer-option="${index}"` : "disabled";
-        return `<button class="questionOpt" type="button" ${attrs}><span class="questionOptLabel">${label}</span>${desc}</button>`;
+      // choices[qi] 는 **배열**이다 — multiSelect 질문은 여러 개를 담아야 한다.
+      // (예전엔 정수 하나라 다중선택이 구조적으로 불가능했다 — 형: "ask 여러개 선택하는거 선택이 안되는데")
+      const choices = (state && state.choices) || [];
+      const picks = qi => Array.isArray(choices[qi]) ? choices[qi] : (Number.isInteger(choices[qi]) ? [choices[qi]] : []);
+      const sending = Boolean(state && state.sending);
+      const multi = questions.length > 1;
+      const blocks = questions.map((rawQ, qi) => {
+        const q = (rawQ && typeof rawQ === "object") ? rawQ : {};
+        const questionText = typeof q.question === "string" && q.question.trim() ? q.question : "";
+        const options = Array.isArray(q.options) ? q.options.filter(opt => opt != null) : [];
+        const header = q.header ? `<div class="questionHeader">${esc(String(q.header))}</div>` : "";
+        const text = questionText ? `<div class="questionText">${renderRichText(String(questionText))}</div>` : "";
+        if (!header && !text && !options.length) {
+          // 구조(헤더/질문문/옵션)를 하나도 못 뽑아낸 경우 — 평문 폴백. 빈 카드는 절대 만들지 않는다.
+          const fallback = questionFallbackText(rawQ) || "질문을 표시할 수 없습니다(형식 확인 필요)";
+          return `<div class="questionBlock"><div class="questionText">${esc(fallback)}</div></div>`;
+        }
+        const stepBits = [];
+        if (multi) stepBits.push(`질문 ${qi + 1} / ${questions.length}`);
+        if (q.multiSelect) stepBits.push("여러 개 고를 수 있어요");
+        const step = stepBits.length ? `<div class="questionStep">${esc(stepBits.join(" · "))}</div>` : "";
+        const buttons = options.map((opt, index) => {
+          const label = esc(String((opt && (opt.label || opt.value)) || `옵션 ${index + 1}`));
+          const desc = opt && opt.description ? `<span class="questionOptDesc">${esc(String(opt.description))}</span>` : "";
+          const chosen = picks(qi).includes(index) ? " chosen" : "";
+          const attrs = interactive && !sending ? `data-answer-q="${qi}" data-answer-option="${index}"` : "disabled";
+          return `<button class="questionOpt${chosen}" type="button" ${attrs}><span class="questionOptLabel">${label}</span>${desc}</button>`;
+        }).join("");
+        // 기타(직접 입력) — 질문이 하나일 때만. 여러 질문은 셀렉터를 순서대로 확정해야 해서 자유입력을 못 섞는다.
+        // 열림 상태와 입력값은 **state 에** 둔다. 예전엔 버튼 아래에 숨은 행을 두고 클릭 때 JS 로
+        // style.display 를 바꿨는데, 그러면 직렬화된 DOM 이 템플릿과 영구히 달라져 폴링마다 innerHTML
+        // 이 재할당되고 입력창이 매번 파괴됐다(형: "깜빡거리면서 자꾸 초기화 → 직접 입력 자체가 불가능").
+        // 그리고 아래에 줄을 더 만들지 않고 **그 줄 자체**를 입력칸으로 바꾼다.
+        const otherOpen = Boolean(state && state.otherOpen);
+        const other = !(interactive && !multi && !sending && !q.multiSelect) ? ""
+          : otherOpen
+          ? `<div class="questionOtherRow" data-question-other-row><input class="questionOtherInput" type="text" data-answer-other-input placeholder="직접 입력..." value="${esc((state && state.otherText) || "")}" enterkeyhint="send" autocomplete="off" /><button class="primary questionOtherSend" type="button" data-answer-other-send>보내기</button></div>`
+          : `<button class="questionOpt questionOther" type="button" data-answer-other>&#9998; 기타 (직접 입력)</button>`;
+        return `<div class="questionBlock">${step}${header}${text}<div class="questionOpts">${buttons}${other}</div></div>`;
       }).join("");
-      if (!header && !q && !options.length) {
-        // 구조(헤더/질문문/옵션)를 하나도 못 뽑아낸 경우 — 평문 폴백. 빈 카드는 절대 만들지 않는다.
-        const fallback = questionFallbackText(rawFirst) || "질문을 표시할 수 없습니다(형식 확인 필요)";
-        return `<div class="questionCard"><div class="questionText">${esc(fallback)}</div></div>`;
-      }
-      // 기타(직접 입력) — AskUserQuestion 은 항상 자유 입력을 허용한다.
-      const other = interactive
-        ? `<button class="questionOpt questionOther" type="button" data-answer-other>&#9998; 기타 (직접 입력)</button>`
-          + `<div class="questionOtherRow" data-question-other-row style="display:none"><textarea class="questionOtherInput" rows="1" placeholder="직접 입력..." enterkeyhint="send"></textarea><button class="primary questionOtherSend" type="button" data-answer-other-send>보내기</button></div>`
+      const answered = questions.reduce((n, _, qi) => n + (picks(qi).length ? 1 : 0), 0);
+      const anyMultiSelect = questions.some(q => q && q.multiSelect);
+      const needsSubmit = multi || anyMultiSelect;   // 다중선택은 탭 즉시 전송하면 안 된다(더 고를 수 있으니)
+      const submit = interactive && needsSubmit
+        ? `<div class="questionSubmitRow"><button class="primary questionSubmit" type="button" data-answer-submit${answered === questions.length && !sending ? "" : " disabled"}>${sending ? "보내는 중..." : `보내기 (${answered}/${questions.length})`}</button></div>`
         : "";
-      const note = interactive ? "" : `<div class="questionMore">이 세션이 실행 중일 때만 응답할 수 있어요</div>`;
-      return `<div class="questionCard">${header}${q}<div class="questionOpts">${buttons}${other}</div>${more}${note}</div>`;
+      const busy = sending && !needsSubmit ? `<div class="questionMore">보내는 중...</div>` : "";
+      const failed = state && state.failed
+        ? `<div class="questionFailed">응답이 안 먹었어요 — 다시 눌러보세요. 계속 이러면 터미널에서 직접 답해야 해요.</div>`
+        : "";
+      const note = interactive
+        ? ((state && state.viaResume)
+            ? `<div class="questionBlocked">이 세션 터미널을 marina 가 쥐고 있지 않아, 고르면 세션을 이어받아 답을 전달해요${"\u0020"}(작업 중이면 끝난 뒤에)</div>`
+            : "")
+        : `<div class="questionBlocked">${esc((state && state.reason) || "여기서는 답할 수 없어요")}</div>`;
+      return `<div class="questionCard">${blocks}${submit}${busy}${failed}${note}</div>`;
     }
     // QUESTION_CARD_END
     function renderConversationSequence(exchange, session, isLatest=false) {
       const sections = exchangeSections(exchange);
       const question = pendingQuestionActivity(sections);
-      const canAnswer = Boolean(isLatest && session && session.kind === "agent" && session.controllable
-        && sessionSource(session) === "claude");
+      // 대화 안 카드는 폴백이다 — 훅이 잡은 라이브 카드가 입력창 위에 뜨면 그쪽이 주인이고 여긴 읽기 전용.
+      // 라이브 카드가 없을 땐(상태파일 만료 등) **여기서 답할 수 있어야 한다** — 안 그러면 형이 보는
+      // 유일한 카드가 죽은 카드가 된다. 상태는 라이브 카드와 공유해 규칙이 갈라지지 않게 한다.
+      const fallbackQuestions = questionsFromActivity(question) || [];
+      const canAnswer = Boolean(isLatest && session && session.kind === "agent"
+        && sessionSource(session) === "claude"
+        && fallbackQuestions.length && !session.pendingQuestion);
+      const fallbackState = canAnswer
+        ? ensureAnswerState(fallbackQuestions, `activity:${(question && question.id) || "q"}`)
+        : null;
+      const runs = exchangeRuns(exchange);
+      const flow = runs.map((run, index) => run.type === "message"
+        ? renderTimelineMessage(run.item)
+        : renderActivityGroup(run.items, `exchange:${exchange.id}:${index}`)).join("");
       const body = [
         sections.user ? renderTimelineMessage(sections.user) : "",
-        (sections.queued || []).map(renderTimelineMessage).join(""),   // 원 메시지 바로 뒤에 큐 메시지들 인라인
-        renderActivityGroup(sections.activities, `exchange:${exchange.id}`),
-        sections.assistant ? renderTimelineMessage(sections.assistant) : "",
-        question ? renderQuestionCard(question, canAnswer) : "",
+        flow,
+        question ? renderQuestionCard(question, canAnswer, fallbackState) : "",
         renderTurnMeta(exchange, session, isLatest, !sections.assistant),
         renderLiveAction(exchange, sections, session, isLatest),
       ].join("");
@@ -2583,12 +3631,25 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!it || !it.pending) return 0;
       return [it.delivery || "", Math.floor((Date.now() - (it.createdAt || 0)) / 4000)];
     }
+    // TIMELINE_KEY_START
+    // 렌더 키에 실을 항목 필드를 **한 곳에서** 정의한다. 두 군데(전체 키/exchange 키)에 따로 적어두면
+    // 어긋나고, 여기서 빠진 필드는 값이 바뀌어도 DOM 이 안 갈려 화면에 문신처럼 남는다.
+    // 실제로 queued/queuedCancelled/steered 가 빠져 있어서 큐 배지가 새로고침 전까지 "대기 중"으로
+    // 굳어 있었고, exchange 키에는 images 도 빠져 있었다.
+    function timelineItemKeyParts(it) {
+      return [it.id || "", it.kind, it.role, it.text, it.activityType, it.label, it.status,
+              it.detail, it.result, it.model, it.effort,
+              (it.images || []).map(img => img.ref),
+              it.queued ? 1 : 0, it.queuedCancelled ? 1 : 0, it.steered ? 1 : 0,
+              pendingKeyPart(it)];
+    }
+    // TIMELINE_KEY_END
     function exchangeRenderKey(exchange, session, isLatest) {
       // 이 exchange 하나의 렌더에 영향을 주는 것만: 항목들 + (최신일 때만) 세션 라이브 상태.
       return JSON.stringify([
         isLatest,
         isLatest ? [session.status, session.controllable] : 0,
-        (exchange.items || []).map(it => [it.id || "", it.kind, it.role, it.text, it.activityType, it.label, it.status, it.detail, it.result, it.model, it.effort, pendingKeyPart(it)]),
+        (exchange.items || []).map(timelineItemKeyParts),
       ]);
     }
     function exchangeShellKey(exchange, session, isLatest) {
@@ -2609,15 +3670,19 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function reconcileExchangeActivities(node, exchange) {
       // 골격이 같을 때만 불린다. 활동 목록만 제자리 갱신하고 요약 문구를 고친다.
-      const listEl = node.querySelector("[data-activity-list]");
-      const activities = exchangeSections(exchange).activities || [];
-      if (!listEl || !activities.length) return false;
-      reconcileActivityList(listEl, activities);
-      const summaryEl = listEl.parentElement && listEl.parentElement.querySelector("summary");
-      if (summaryEl) {
-        const next = activityGroupSummary(activities);
-        if (summaryEl.textContent !== next) summaryEl.textContent = next;
-      }
+      // 구간이 여러 개일 수 있다(설명 → 도구 → 설명 → 도구) — 순서대로 짝지어 갱신한다.
+      const lists = [...node.querySelectorAll("[data-activity-list]")];
+      const runs = exchangeRuns(exchange).filter(run => run.type === "activities");
+      if (!lists.length || lists.length !== runs.length) return false;
+      lists.forEach((listEl, index) => {
+        const activities = runs[index].items;
+        reconcileActivityList(listEl, activities);
+        const summaryEl = listEl.parentElement && listEl.parentElement.querySelector("summary");
+        if (summaryEl) {
+          const next = activityGroupSummary(activities);
+          if (summaryEl.textContent !== next) summaryEl.textContent = next;
+        }
+      });
       return true;
     }
     function reconcileAgentExchanges(exchanges, session) {
@@ -2660,9 +3725,14 @@ _MOBILE_HTML = r"""<!doctype html>
         turnsStructureKey = "";
         newMessagesBtn.style.display = "none";
         historyStatus.style.display = "none";
+        trimNotice.style.display = "none";
         return;
       }
       const history = sessionHistory(session);
+      // 상한에 걸려 버려진 활동이 있으면 눈에 보이게. 조용한 절단이 "갯수가 안 맞는다"의 절반이었다.
+      const trimmed = (history && history.trimmedActivities) || 0;
+      trimNotice.textContent = trimmed ? `이전 작업 ${trimmed}개는 표시 상한(${trimmed + 120}개 중 최근 120개)으로 생략됐어요` : "";
+      trimNotice.style.display = trimmed ? "block" : "none";
       const serverTurns = history ? history.turns : ((session && session.turns) || []);
       const serverTimeline = history && history.timeline.length ? history.timeline : timelineFromTurns(serverTurns);
       // 확정 user 메시지 카운트 — turns 와 timeline 둘 다 보고(모바일은 timeline 렌더라 turns 가 놓칠 수 있음)
@@ -2691,7 +3761,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (session && session.kind === "term" && session.preview) {
         timeline.push({kind: "message", role: "output", text: session.preview, id: "terminal-preview"});
       }
-      const nextKey = JSON.stringify([session.status, timeline.map(item => [item.id || "", item.kind, item.role, item.text, item.activityType, item.label, item.status, item.detail, item.result, item.model, item.effort, pendingKeyPart(item)])]);
+      const nextKey = JSON.stringify([session.status, timeline.map(timelineItemKeyParts)]);
       if (nextKey === turnsStructureKey) return;
       const hadTurns = Boolean(turnsStructureKey);
       const followLatestBefore = followLatest;
@@ -2735,6 +3805,8 @@ _MOBILE_HTML = r"""<!doctype html>
       const subagents = activity ? activity.items : [];
       subagentCount.textContent = activity && activity.loaded ? String(subagents.length) : "";
       subagentSessionBtn.style.display = activity ? "inline-block" : "none";
+      galleryBtn.style.display = app.getAttribute("data-view") === "chat" && currentTargetValue().startsWith("agent:")
+        ? "inline-block" : "none";
       if (!subagents.length) {
         const message = activity && !activity.loaded ? "불러오는 중..." : "이 세션의 작업 에이전트 기록이 없습니다.";
         updateHtmlIfChanged(subagentList, `<div class="empty-state">${message}</div>`);
@@ -2744,7 +3816,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const openSubagentIds = new Set([...subagentList.querySelectorAll("details[open]")].map(item => item.getAttribute("data-subagent-id")));
       const previousScrollTop = subagentList.scrollTop;
       const html = subagents.map(agent => {
-        const turns = (agent.turns || []).map(turn => `<div class="subagent-turn ${turn.role === "user" ? "user" : "assistant"}">${renderRichText(turn.text || "")}</div>`).join("");
+        const turns = (agent.turns || []).map(turn => `<div class="subagent-turn ${turn.role === "user" ? "user" : "assistant"}">${renderMarkdownBlocks(turn.text || "")}</div>`).join("");
         return `<details class="subagentItem" data-subagent-id="${esc(agent.id || agent.title || "")}"><summary><span class="subagentTitle">${esc(agent.title || agent.id || "Subagent")}</span><span class="subagentStatus">${esc(statusLabel[agent.status] || agent.status || "")}</span></summary><div class="subagentPreview">${renderRichText(agent.preview || "")}</div>${turns ? `<div class="subagentTurns">${turns}</div>` : ""}</details>`;
       }).join("");
       if (updateHtmlIfChanged(subagentList, html)) {
@@ -2765,7 +3837,6 @@ _MOBILE_HTML = r"""<!doctype html>
       }
     }
     function renderServiceState() {
-      servicesCount.textContent = `${servicesState.running || 0}/${servicesState.defined || 0}`;
       const labels = {running: "실행 중", starting: "시작 중", stopped: "정지", error: "오류"};
       const html = (servicesState.services || []).map(item => {
         const running = Boolean(item.running);
@@ -2782,7 +3853,7 @@ _MOBILE_HTML = r"""<!doctype html>
       updateHtmlIfChanged(serviceList, html || '<div class="empty-state">이 워크트리에 정의된 서비스가 없습니다.</div>');
     }
     async function loadServices(force=false) {
-      const root = selectedRoot();
+      const root = servicesRoot || sessionRoot();
       if (!root || serviceLoading) return;
       if (!force && servicesState.root === root && Date.now() - serviceLoadedAt < 8000) {
         renderServiceState();
@@ -2797,7 +3868,6 @@ _MOBILE_HTML = r"""<!doctype html>
         serviceLoadedAt = Date.now();
         renderServiceState();
       } catch (error) {
-        servicesCount.textContent = "!";
         if (servicesSheet.classList.contains("open")) {
           serviceList.innerHTML = `<div class="empty-state">서비스 상태를 불러오지 못했습니다.<br>${esc(String(error))}</div>`;
         }
@@ -2811,7 +3881,7 @@ _MOBILE_HTML = r"""<!doctype html>
       try {
         const response = await fetch("/mobile/api/services/action", {
           method: "POST", headers: headers(true),
-          body: JSON.stringify({root: selectedRoot(), service, action}),
+          body: JSON.stringify({root: servicesRoot || sessionRoot(), service, action}),
         });
         if (!response.ok) throw new Error(await response.text());
         showToast(action === "stop" ? `${service} 중지 요청` : action === "restart" ? `${service} 재시작 요청` : `${service} 시작 요청`);
@@ -2823,7 +3893,13 @@ _MOBILE_HTML = r"""<!doctype html>
         if (button) button.disabled = false;
       }
     }
-    function openServices() {
+    // 서비스는 **워크트리 소속**이다. 드로어엔 여러 워크트리 세션이 섞여 있어서 전역 버튼 하나로는
+    // "어느 워크트리 서버인지" 알 수가 없다(형 지적). 그래서 어느 root 를 보는지 명시적으로 받는다.
+    function openServices(root) {
+      servicesRoot = String(root || servicesRoot || sessionRoot() || selectedRoot() || "");
+      servicesSheetTitle.textContent = servicesRoot
+        ? `서비스 · ${wtName(servicesRoot)}` : "서비스";
+      closeDrawer();   // 시트를 열면 드로어는 접는다(오버레이 두 장이 겹쳐 탭이 엉키는 걸 막는다)
       closeInbox();
       closeSettings();
       servicesSheet.classList.add("open");
@@ -3050,7 +4126,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (trigger.trigger === "@" && trigger.query) scheduleFileSuggestions(trigger.query, source);
     }
     function scheduleFileSuggestions(query, source) {
-      const root = selectedRoot();
+      const root = sessionRoot();
       const sessionKey = selectedSessionKey;
       const key = `${root}|${source}|${query}`;
       if (fileSuggestionKey === key) return;
@@ -3068,7 +4144,7 @@ _MOBILE_HTML = r"""<!doctype html>
           fileSuggestions = result.files || [];
           renderSuggestions();
         } catch (_) {
-          if (fileSuggestionKey === key && selectedSessionKey === sessionKey && selectedRoot() === root && sessionSource(selectedSession()) === source) {
+          if (fileSuggestionKey === key && selectedSessionKey === sessionKey && sessionRoot() === root && sessionSource(selectedSession()) === source) {
             fileSuggestions = [];
           }
         }
@@ -3128,7 +4204,7 @@ _MOBILE_HTML = r"""<!doctype html>
       loading = true;
       try {
         if (!options.quiet) statusEl.textContent = "불러오는 중...";
-        const r = await fetch("/mobile/api/state", {headers: headers()});
+        const r = await fetch(`/mobile/api/state${showAll ? "?all=1" : ""}`, {headers: headers()});
         if (r.status === 401) {
           location.replace("/login?next=%2Fmobile");
           return;
@@ -3140,12 +4216,21 @@ _MOBILE_HTML = r"""<!doctype html>
         }
         if (!r.ok) throw new Error(await r.text());
         state = await r.json();
+        pinnedRoots = new Set(state.pins || []);
+        hiddenSessions = new Set(state.hidden || []);
         migrateSelectionOnPromotion();
         // 데몬 재시작(새 버전) 감지 → full-reload 를 강제하지 않고 배너만 띄운다(형 탭할 때 리로드).
         // 재방문 폴링마다 location.reload() 를 때리면 스크롤·작업중 상태가 다 풀렸음.
         if (state.serverInstance) {
-          if (serverInstance && serverInstance !== state.serverInstance) updateBanner.style.display = "block";
-          else if (!serverInstance) serverInstance = state.serverInstance;
+          if (serverInstance && serverInstance !== state.serverInstance) {
+            // 데몬이 새 버전으로 떴다 = 이 페이지의 JS 는 낡았다. 배너만 띄우면 형이 못 보고 계속 쓰다가
+            // "고쳤다는데 왜 그대로냐"가 반복된다(실제로 세 번 겪었다). **안전할 때만** 스스로 새로고침한다:
+            // 입력 중도 아니고, 보내는 중도 아니고, 질문 카드를 고르는 중도 아닐 때.
+            const busyTyping = Boolean(promptInput.value.trim()) || document.activeElement === promptInput;
+            const answering = Boolean(liveAnswer.sending || (liveAnswer.choices || []).some(v => v && v.length));
+            if (!busyTyping && !sending && !answering) { location.reload(); return; }
+            updateBanner.style.display = "block";   // 지금은 위험 — 형이 직접 탭하게 둔다
+          } else if (!serverInstance) serverInstance = state.serverInstance;
         }
         showApp();
         render();
@@ -3174,7 +4259,7 @@ _MOBILE_HTML = r"""<!doctype html>
       }).join("");
     }
     async function uploadFiles(files) {
-      const root = selectedRoot();
+      const root = sessionRoot();
       if (!root) { showToast("워크트리를 먼저 선택하세요"); return; }
       for (const file of files) {
         const id = `att-${Date.now()}-${Math.round(performance.now() * 1000) % 100000}-${pendingAttachments.length}`;
@@ -3198,6 +4283,27 @@ _MOBILE_HTML = r"""<!doctype html>
         renderAttachStrip();
       }
     }
+    // PASTE_START
+    // 클립보드 붙여넣기(Cmd/Ctrl+V) — 스크린샷·파일이 오면 📎 와 같은 업로드 경로를 탄다.
+    // 예전엔 paste 핸들러가 아예 없어서 이미지를 붙여넣으면 조용히 버려졌다(형 지적).
+    // 순수 텍스트는 손대지 않는다(브라우저 기본 삽입이 캐럿/undo 를 제대로 처리한다).
+    function clipboardFiles(clipboard) {
+      if (!clipboard) return [];
+      const direct = clipboard.files ? [...clipboard.files] : [];
+      if (direct.length) return direct;
+      // Safari 등은 files 가 비고 items 에만 실린다.
+      return [...(clipboard.items || [])]
+        .filter(item => item && item.kind === "file")
+        .map(item => item.getAsFile())
+        .filter(Boolean);
+    }
+    promptInput.addEventListener("paste", event => {
+      const files = clipboardFiles(event.clipboardData);
+      if (!files.length) return;
+      event.preventDefault();
+      uploadFiles(files);
+    });
+    // PASTE_END
     attachBtn.onclick = () => fileInput.click();
     fileInput.onchange = () => { if (fileInput.files && fileInput.files.length) uploadFiles([...fileInput.files]); fileInput.value = ""; };
     attachStrip.onclick = event => {
@@ -3231,8 +4337,8 @@ _MOBILE_HTML = r"""<!doctype html>
         const [, source, sid] = value.split(":");
         target = {type: "agent", source, sid};
       }
-      const requestContext = {root: selectedRoot(), sessionKey: selectedSessionKey, text, target, draftKey: activeDraftKey};
-      const requestIsActive = () => selectedSessionKey === requestContext.sessionKey && selectedRoot() === requestContext.root;
+      const requestContext = {root: sessionRoot(), sessionKey: selectedSessionKey, text, target, draftKey: activeDraftKey};
+      const requestIsActive = () => selectedSessionKey === requestContext.sessionKey && sessionRoot() === requestContext.root;
       statusEl.textContent = selectedSession() && selectedSession().controllable ? "지시 추가 중..." : "보내는 중...";
       sending = true;
       sendBtn.disabled = true;
@@ -3274,17 +4380,62 @@ _MOBILE_HTML = r"""<!doctype html>
       fileSuggestionKey = "";
       renderSuggestions();
     };
+    // KEY_SEND_START
+    // 엔터 = 전송, 줄바꿈은 Shift+엔터 / Shift+스페이스.
+    // 단 **물리 키보드일 때만** 갈라 쓴다. 폰 가상 키보드에서 엔터가 전송이면 오발이 잦아서 예전에
+    // "엔터=줄바꿈, ↑로 전송"(옵션 B)으로 정한 것이고, 그 판단은 폰에선 여전히 유효하다. 형이 웹
+    // (데스크톱 브라우저)에서 쓸 때만 채팅앱처럼 엔터로 바로 보낸다.
+    function physicalKeyboard() {
+      return Boolean(window.matchMedia && window.matchMedia("(pointer: fine)").matches);
+    }
+    function insertNewlineAtCaret() {
+      const value = promptInput.value;
+      const start = promptInput.selectionStart == null ? value.length : promptInput.selectionStart;
+      const end = promptInput.selectionEnd == null ? start : promptInput.selectionEnd;
+      promptInput.value = value.slice(0, start) + "\n" + value.slice(end);
+      promptInput.selectionStart = promptInput.selectionEnd = start + 1;
+      autoGrowComposer();
+      saveDraft();
+    }
+    function syncComposerEnterHint() {
+      const send = physicalKeyboard();
+      promptInput.setAttribute("enterkeyhint", send ? "send" : "enter");
+      promptInput.placeholder = send
+        ? "메시지 (엔터=전송, Shift+엔터·Shift+스페이스=줄바꿈)"
+        : "메시지 (엔터=줄바꿈, ↑ 로 전송)";
+    }
+    syncComposerEnterHint();
+    if (window.matchMedia) {
+      const fine = window.matchMedia("(pointer: fine)");
+      if (fine.addEventListener) fine.addEventListener("change", syncComposerEnterHint);
+    }
     promptInput.onkeydown = event => {
       if (event.key === "Escape") {
         closeSuggestions();
         return;
       }
-      // 옵션 B: 엔터=줄바꿈(기본). 전송은 ↑ 버튼으로만. 단, 멘션/스킬 제안이 열려 있으면 엔터로 첫 제안 채택.
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing && suggestionsEl.classList.contains("open")) {
+      // 한글 조립 중 엔터는 **조합 확정**용이다 — 여기서 가로채면 마지막 음절이 깨지거나 삼켜진다.
+      if (event.isComposing) return;
+      // 멘션/스킬 제안이 열려 있으면 엔터는 첫 제안 채택(전송보다 우선).
+      if (event.key === "Enter" && !event.shiftKey && suggestionsEl.classList.contains("open")) {
         const first = suggestionsEl.querySelector("[data-insert]");
-        if (first) { event.preventDefault(); insertSuggestion(first.getAttribute("data-insert") || ""); }
+        if (first) { event.preventDefault(); insertSuggestion(first.getAttribute("data-insert") || ""); return; }
+      }
+      // Shift+스페이스 → 줄바꿈(형 요청). 기본 동작은 공백이라 직접 넣어야 한다.
+      if (event.shiftKey && (event.key === " " || event.code === "Space")) {
+        event.preventDefault();
+        insertNewlineAtCaret();
+        return;
+      }
+      // Shift+엔터 → 줄바꿈. textarea 기본 동작이라 그냥 통과시킨다.
+      if (event.key === "Enter" && event.shiftKey) return;
+      // 엔터 → 전송. 조합키가 섞이면(Alt/Cmd/Ctrl) 손대지 않는다.
+      if (event.key === "Enter" && !event.altKey && !event.metaKey && !event.ctrlKey && physicalKeyboard()) {
+        event.preventDefault();
+        send();
       }
     };
+    // KEY_SEND_END
     promptInput.onfocus = () => {
       syncVisualViewport();
       if (followLatest) {
@@ -3323,7 +4474,9 @@ _MOBILE_HTML = r"""<!doctype html>
         localStorage.setItem("marinaMobileRoot", nextRoot.root);
       }
       servicesState = {root: "", running: 0, defined: 0, services: []};
-      if (selectedSession() && sessionProjectId(selectedSession()) !== selectedProjectId) leaveChat(false);
+      // 드로어에서 프로젝트를 바꾼 경우엔 대화를 떠나지 않는다 — 패널을 열어둔 채 목록만 갈아서
+      // 형이 바로 다른 세션을 고를 수 있게. (selectedSession 은 key 로 찾으니 프로젝트 필터와 무관하다.)
+      if (!drawerOpen() && selectedSession() && sessionProjectId(selectedSession()) !== selectedProjectId) leaveChat(false);
       renderProjectTabs();
       renderSourceTabs();
       renderSessions();
@@ -3334,7 +4487,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!btn || !sourceTabs.contains(btn)) return;
       sourceFilter = btn.getAttribute("data-source") || "all";
       localStorage.setItem("marinaMobileSource", sourceFilter);
-      if (selectedSession() && sourceFilter !== "all" && sessionSource(selectedSession()) !== sourceFilter) leaveChat(false);
+      if (!drawerOpen() && selectedSession() && sourceFilter !== "all" && sessionSource(selectedSession()) !== sourceFilter) leaveChat(false);
       renderSourceTabs();
       renderSessions();
     };
@@ -3364,6 +4517,9 @@ _MOBILE_HTML = r"""<!doctype html>
         // 그 지시가 훅을 깨워 세션이 에이전트로 승격된다(입양).
         // 폴 타이밍상 방금 띄운 PTY 가 아직 state 에 없을 수 있어 화면 전환을 폴에 맡기지 않는다.
         if (d.tid) {
+          // 어느 쪽으로 가든 드로어는 닫는다. chooseSession 은 스스로 닫지만 아래 경로는 안 닫아서,
+          // 폴 타이밍에 따라 +CC 뒤에 패널이 새 대화를 덮은 채 남았다(같은 버튼인데 결과가 달라 보임).
+          closeDrawer();
           if ((state.sessions || []).some(s => s.key === `term:${d.tid}`)) chooseSession(`term:${d.tid}`);
           else { ensureLiveTermSession(d.tid, root, "", {type: "term", tid: d.tid}); showChat(); render(); }
         }
@@ -3388,7 +4544,31 @@ _MOBILE_HTML = r"""<!doctype html>
       if (updateHistory && history.state && history.state.view === "chat") history.back();
       else if (!updateHistory && history.state && history.state.view === "chat") history.replaceState({view: "list"}, "", location.href);
     }
-    backBtn.onclick = () => leaveChat(true);
+    // ☰ = 좌측 패널 토글. 채팅에서 완전히 나가는 건 브라우저/안드로이드 뒤로가기가 계속 담당한다
+    // (history 상태가 leaveChat 에 걸려 있음) — 세션 갈아타기는 패널에서 바로 하는 게 형이 원한 흐름.
+    backBtn.onclick = () => toggleDrawer();
+    drawerBackdrop.onclick = () => closeDrawer();
+    document.addEventListener("keydown", event => {
+      if (event.key !== "Escape") return;
+      if (viewerOpen()) { closeImageViewer(); return; }   // 뷰어가 위에 있다 — 먼저 닫는다
+      if (drawerOpen()) closeDrawer();
+    });
+    // 왼쪽 가장자리에서 오른쪽으로 스와이프 → 열기 / 열린 상태에서 왼쪽으로 → 닫기.
+    let drawerTouch = null;
+    app.addEventListener("touchstart", event => {
+      if (app.getAttribute("data-view") !== "chat" || event.touches.length !== 1) { drawerTouch = null; return; }
+      const touch = event.touches[0];
+      drawerTouch = {x: touch.clientX, y: touch.clientY, wasOpen: drawerOpen()};
+    }, {passive: true});
+    app.addEventListener("touchmove", event => {
+      if (!drawerTouch || event.touches.length !== 1) return;
+      const touch = event.touches[0];
+      const intent = drawerSwipeIntent(drawerTouch, {x: touch.clientX, y: touch.clientY}, drawerTouch.wasOpen);
+      if (intent === "open") { openDrawer(); drawerTouch = null; }
+      else if (intent === "close") { closeDrawer(); drawerTouch = null; }
+    }, {passive: true});
+    app.addEventListener("touchend", () => { drawerTouch = null; }, {passive: true});
+    contextBtn.onclick = () => usageBtn.click();   // 한 줄 표시를 눌러도 상세 패널이 열린다
     usageBtn.onclick = event => {
       event.stopPropagation();
       const opening = !usagePanel.classList.contains("open");
@@ -3403,7 +4583,7 @@ _MOBILE_HTML = r"""<!doctype html>
     document.getElementById("logoutBtn").onclick = () => { closeServices(); logout(); };
     sendBtn.onclick = () => send();
     retryBtn.onclick = () => {
-      if (!failedSend || failedSend.sessionKey !== selectedSessionKey || failedSend.root !== selectedRoot()) { clearFailedSend(); return; }
+      if (!failedSend || failedSend.sessionKey !== selectedSessionKey || failedSend.root !== sessionRoot()) { clearFailedSend(); return; }
       promptInput.value = failedSend.text;
       saveDraft();
       autoGrowComposer();
@@ -3417,24 +4597,32 @@ _MOBILE_HTML = r"""<!doctype html>
       if (detail.open) openTimelineDetailIds.add(key);
       else openTimelineDetailIds.delete(key);
     }, true);
+    // 서버 응답을 그대로 돌려준다 — settled(=상태파일이 사라졌나) 를 호출자가 봐야 카드를 되살릴지 정한다.
     async function answerQuestion(payload) {
       const session = selectedSession();
-      if (!session || session.kind !== "agent") return;
+      if (!session || session.kind !== "agent") return null;
       const value = currentTargetValue();
-      if (!value.startsWith("agent:")) return;
+      if (!value.startsWith("agent:")) return null;
       const [, source, sid] = value.split(":");
       statusEl.textContent = "응답 전송 중...";
       try {
-        const body = {root: selectedRoot(), target: {type: "agent", source, sid}};
+        const body = {root: sessionRoot(), target: {type: "agent", source, sid}};
         if (payload && payload.text != null) body.text = payload.text;
+        else if (Array.isArray(payload && payload.answers)) body.answers = payload.answers;
+        else if (Array.isArray(payload && payload.optionIndexes)) body.optionIndexes = payload.optionIndexes;
         else body.optionIndex = (payload && payload.optionIndex) || 0;
         const r = await fetch("/mobile/api/answer", {method: "POST", headers: headers(true), body: JSON.stringify(body)});
         if (!r.ok) throw new Error(await responseError(r));
+        const result = await r.json();
         followLatest = true;
+        statusEl.textContent = result && result.settled === false ? "응답이 안 먹었어요" : "";
+        if (result && result.settled === false) showToast("응답이 셀렉터에 안 먹었어요 — 다시 눌러보세요");
         setTimeout(() => load({quiet: true}).catch(() => {}), 400);
+        return result;
       } catch (error) {
         statusEl.textContent = `응답 실패 · ${String(error)}`;
         showToast(`응답 실패 · ${String(error)}`);
+        return null;
       }
     }
     // 인라인 대기 레코드 취소·재시도(pendingTurns 안 기록만 대상 — 서버 확정 메시지는 여기 없음).
@@ -3498,7 +4686,16 @@ _MOBILE_HTML = r"""<!doctype html>
       const answer = event.target.closest && event.target.closest("[data-answer-option]");
       if (answer) {
         const index = parseInt(answer.getAttribute("data-answer-option"), 10);
-        if (!Number.isNaN(index)) { answer.disabled = true; answerQuestion({optionIndex: index}); }
+        if (Number.isNaN(index)) return;
+        const rawQ = parseInt(answer.getAttribute("data-answer-q") || "0", 10);
+        // 라이브 카드와 **같은 규칙**. 예전엔 여기서 바로 쏴서 multiSelect 가 한 개만 보내지고 끝났다.
+        if (pickAnswerOption(Number.isNaN(rawQ) ? 0 : rawQ, index)) submitLiveAnswer({answers: [[index]]});
+        else repaintTurns();
+        return;
+      }
+      if (event.target.closest && event.target.closest("[data-answer-submit]")) {
+        const chosen = Array.from({length: liveAnswer.total}, (_, i) => liveAnswer.choices[i] || []);
+        if (chosen.every(list => list.length)) submitLiveAnswer();
         return;
       }
       const action = event.target.closest && event.target.closest("[data-live-action]");
@@ -3521,9 +4718,160 @@ _MOBILE_HTML = r"""<!doctype html>
     subagentSessionBtn.onclick = openSubagents;
     document.getElementById("subagentCloseBtn").onclick = closeSubagents;
     subagentSheet.onclick = event => { if (event.target === subagentSheet) closeSubagents(); };
-    servicesBtn.onclick = openServices;
     document.getElementById("servicesCloseBtn").onclick = closeServices;
     servicesSheet.onclick = event => { if (event.target === servicesSheet) closeServices(); };
+    // 밀도: CSS 로만 가린다 — 토글이 재렌더를 부르지 않아 스크롤/펼침이 안 튄다.
+    function applyDensity() {
+      sessionList.classList.toggle("density-detail", listDensity === "detail");
+      densityBtn.textContent = listDensity === "detail" ? "\u2637" : "\u2630";
+      densityBtn.title = listDensity === "detail" ? "간단히 보기" : "자세히 보기";
+      densityBtn.setAttribute("aria-label", densityBtn.title);
+    }
+    densityBtn.onclick = () => {
+      listDensity = listDensity === "detail" ? "simple" : "detail";
+      localStorage.setItem("marinaMobileDensity", listDensity);
+      applyDensity();
+    };
+    applyDensity();
+    // 핀 — 워크트리에 붙고 서버에 저장된다.
+    sessionList.addEventListener("click", event => {
+      const more = event.target.closest && event.target.closest("[data-wt-more]");
+      if (!more) return;
+      event.preventDefault();
+      event.stopPropagation();          // summary 안이라 접기 토글로 새지 않게
+      openWorktreeSheet(more.getAttribute("data-wt-more") || "");
+    }, true);
+    // 시트 안 동작 — 워크트리 하나에 대해서만 돈다
+    worktreeActions.onclick = async event => {
+      const item = event.target.closest && event.target.closest("[data-wt-act]");
+      if (!item) return;
+      const root = worktreeActions.dataset.root || "";
+      const act = item.getAttribute("data-wt-act") || "";
+      if (act === "services") { closeWorktreeSheet(); openServices(root); return; }
+      if (act.startsWith("launch:")) { closeWorktreeSheet(); launchAgent(root, act.slice(7), item); return; }
+      if (act === "pin") { closeWorktreeSheet(); await toggleWorktreePin(root); }
+    };
+    document.getElementById("worktreeCloseBtn").onclick = closeWorktreeSheet;
+    worktreeSheet.onclick = event => { if (event.target === worktreeSheet) closeWorktreeSheet(); };
+    async function toggleWorktreePin(root) {
+      if (!root) return;
+      const next = !pinnedRoots.has(root);
+      if (next) pinnedRoots.add(root); else pinnedRoots.delete(root);
+      renderSessions();
+      try {
+        const r = await fetch("/mobile/api/pins", {method: "POST", headers: headers(true),
+                                                   body: JSON.stringify({root, pinned: next})});
+        if (!r.ok) throw new Error(await responseError(r));
+        pinnedRoots = new Set((await r.json()).roots || []);
+      } catch (error) {
+        if (next) pinnedRoots.delete(root); else pinnedRoots.add(root);   // 서버가 거절하면 되돌린다
+        showToast(`고정 실패 · ${String(error)}`);
+      }
+      renderSessions();
+    }
+    // 헤더의 핀 아이콘도 같은 함수를 쓴다(규칙이 갈라지지 않게).
+    sessionList.addEventListener("click", event => {
+      const pin = event.target.closest && event.target.closest("[data-pin-root]");
+      if (!pin) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const group = pin.closest("[data-wt-root]");
+      toggleWorktreePin(group && group.getAttribute("data-wt-root"));
+    }, true);
+    // 워크트리 생성 — 프로젝트 단위라 진입점을 그룹 헤더와 층을 나눈다.
+    newWorktreeBtn.onclick = async () => {
+      // 서버가 projectId 로 등록된 프로젝트 root 를 찾는다(워크트리 payload 엔 projectRoot 가 없다).
+      if (!selectedProjectId) { showToast("프로젝트를 먼저 고르세요"); return; }
+      const branch = (prompt("새 워크트리의 브랜치명") || "").trim();
+      if (!branch) return;
+      newWorktreeBtn.disabled = true;
+      const previous = newWorktreeBtn.textContent;
+      newWorktreeBtn.textContent = "만드는 중...";
+      statusEl.textContent = "워크트리 만드는 중 — 서브레포가 있으면 몇 분 걸릴 수 있어요";
+      try {
+        const r = await fetch("/mobile/api/worktree-create", {method: "POST", headers: headers(true),
+                                                              body: JSON.stringify({projectId: selectedProjectId, branch})});
+        if (!r.ok) throw new Error(await responseError(r));
+        const d = await r.json();
+        showToast(`워크트리 만들었어요 · ${String(d.root || branch).split("/").pop()}`);
+        await load({quiet: true}).catch(() => {});
+      } catch (error) {
+        showToast(`워크트리 생성 실패 · ${String(error)}`);
+      } finally {
+        newWorktreeBtn.disabled = false;
+        newWorktreeBtn.textContent = previous;
+        statusEl.textContent = "";
+      }
+    };
+    // 전체보기 — 7일 넘어 목록에서 빠진 세션과 숨긴 세션까지 서버에서 받아온다.
+    function applyShowAll() {
+      showAllBtn.classList.toggle("on", showAll);
+      showAllBtn.title = showAll ? "전체보기 끄기" : "전체보기(오래된·숨긴 세션 포함)";
+      sessionList.classList.toggle("show-all", showAll);
+    }
+    showAllBtn.onclick = () => {
+      showAll = !showAll;
+      applyShowAll();
+      load({quiet: true}).catch(() => {});
+    };
+    applyShowAll();
+    // 세션 숨기기/되살리기 — 길게 누르기(모바일) · 오른쪽 클릭(데스크톱).
+    // "삭제"가 아니다: 기록은 그대로 두고 목록에서만 뺀다(되돌릴 수 있어야 하니까).
+    sessionList.addEventListener("contextmenu", async event => {
+      const card = event.target.closest && event.target.closest("[data-hide-key]");
+      if (!card) return;
+      event.preventDefault();
+      const key = card.getAttribute("data-hide-key") || "";
+      const [source, ...rest] = key.split(":");
+      const sid = rest.join(":");
+      if (!source || !sid) return;
+      const next = !hiddenSessions.has(key);
+      if (next) hiddenSessions.add(key); else hiddenSessions.delete(key);
+      renderSessions();
+      try {
+        const r = await fetch("/mobile/api/hidden", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root: sessionRootForKey(card.getAttribute("data-key")), source, sid, hidden: next})});
+        if (!r.ok) throw new Error(await responseError(r));
+        hiddenSessions = new Set((await r.json()).keys || []);
+        showToast(next ? "목록에서 숨겼어요 (전체보기에서 되살릴 수 있어요)" : "다시 보이게 했어요");
+        if (next && !showAll) load({quiet: true}).catch(() => {});
+      } catch (error) {
+        if (next) hiddenSessions.delete(key); else hiddenSessions.add(key);   // 서버가 거절하면 되돌린다
+        showToast(`숨기기 실패 · ${String(error)}`);
+      }
+      renderSessions();
+    });
+    function sessionRootForKey(key) {
+      const found = (state.sessions || []).find(s => s.key === key);
+      return (found && found.root) || selectedRoot();
+    }
+    galleryBtn.onclick = () => openGallery();
+    galleryCloseBtn.onclick = closeGallery;
+    gallerySheet.onclick = event => { if (event.target === gallerySheet) closeGallery(); };
+    galleryGrid.onclick = event => {
+      const cell = event.target.closest && event.target.closest("[data-image-ref]");
+      if (cell) openImageViewer(transcriptImageUrl(cell.getAttribute("data-image-ref")));
+    };
+    gallerySheet.querySelectorAll("[data-gallery-tab]").forEach(btn => {
+      btn.onclick = () => openGallery(btn.getAttribute("data-gallery-tab"));
+    });
+    galleryFiles.onclick = event => {
+      const row = event.target.closest && event.target.closest("[data-file-path]");
+      if (!row) return;
+      const path = row.getAttribute("data-file-path");
+      const name = row.getAttribute("data-file-name") || path.split("/").pop();
+      // 이미지든 텍스트든 앱 안 뷰어로 — 새 탭을 띄우지 않는다.
+      if (row.getAttribute("data-file-image")) openImageViewer(sessionFileUrl(path), name);
+      else openTextViewer(sessionFileUrl(path), name);
+    };
+    imageViewerClose.onclick = closeImageViewer;
+    // 배경(오버레이 자체)만 닫는다 — 텍스트를 스크롤/선택하려면 본문 클릭이 닫으면 안 된다.
+    imageViewer.onclick = event => { if (event.target === imageViewer || event.target === viewerBar) closeImageViewer(); };
+    // 대화 안 썸네일 탭 → 전체보기. 활동 카드/말풍선 어디서 눌러도 같은 뷰어.
+    turnsEl.addEventListener("click", event => {
+      const thumb = event.target.closest && event.target.closest("[data-image-ref]");
+      if (thumb) openImageViewer(transcriptImageUrl(thumb.getAttribute("data-image-ref")));
+    });
     serviceList.onclick = event => {
       const open = event.target.closest("[data-service-open]");
       if (open) {
@@ -3563,6 +4911,12 @@ _MOBILE_HTML = r"""<!doctype html>
       history.pushState({view: "list"}, "", location.href);
     }
     window.addEventListener("popstate", () => {
+      // 드로어가 열려 있으면 뒤로가기는 **드로어만** 닫는다 — 대화에서 튕겨나가면 안 된다.
+      if (drawerOpen()) {
+        closeDrawer();
+        history.pushState({view: "chat"}, "", location.href);
+        return;
+      }
       if (history.state && history.state.view === "list") {
         if (selectedSessionKey) leaveChat(false);
         return;

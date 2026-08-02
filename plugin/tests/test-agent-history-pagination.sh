@@ -108,7 +108,7 @@ mm.worktree_info = lambda value, refresh=False: {
     "projectLabel": "Project", "source": "registry",
 }
 mm.term_list = lambda: {"sessions": []}
-mm.agents_payload = lambda value, refresh=False: [{
+mm.agents_payload = lambda value, refresh=False, include_all=False: [{
     "source": "codex", "sid": "codex-history-0001", "title": "History",
     "preview": "latest preview", "ts": 1,
 }]

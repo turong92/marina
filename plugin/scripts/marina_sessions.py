@@ -1,5 +1,6 @@
 """marina_sessions.py — marina-control.py 에서 분리(레이어드). 동작 변경 0."""
 from __future__ import annotations
+import base64
 import glob
 import json
 import math
@@ -19,7 +20,7 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import CODEX_HOME, HOST, LIFECYCLE_BUSY, PORT, _claude_agents_cache, _codex_agents_cache, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_du_cache, _worktree_info_cache, busy_key
+from marina_state import CODEX_HOME, HOST, LIFECYCLE_BUSY, PORT, _claude_agents_all_cache, _claude_agents_cache, _codex_agents_all_cache, _codex_agents_cache, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_du_cache, _worktree_info_cache, busy_key
 from marina_logtext import redact_text
 from marina_cache import cache_category_mb, compose_build_image_items, disk_usage_mb, docker_disk_summary
 from marina_registry import default_attach_of, discover_all_roots, discover_roots, is_source_checkout, project_for, project_label, root_source, subrepos_of
@@ -461,7 +462,8 @@ CLAUDE_USAGE_CACHE_MAX_AGE_MS = int(os.environ.get("CLAUDE_USAGE_CACHE_MAX_AGE_M
 
 AGENTS_MAX_PER_ROOT = 3
 
-AGENTS_MAX_AGE = 7 * 86400   # 7일↑ 미활동 세션은 카드에서 제외
+AGENTS_MAX_AGE = 7 * 86400   # 7일↑ 미활동 세션은 기본 목록에서 제외
+AGENTS_MAX_AGE_ALL = 90 * 86400   # '전체보기'가 훑는 범위(형: "7일 이후도 볼 수 있어야지")
 
 AGENT_PREVIEW_TAIL_BYTES = 16 * 1024   # preview 는 파일 끝만 읽는다 — 전체 파싱 금지(폴링 비용 상한)
 
@@ -767,15 +769,16 @@ def _claude_cli_sessions(now: float, cutoff: float) -> dict[str, list[dict[str, 
     return by_root
 
 
-def claude_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
+def claude_agent_sessions(refresh: bool = False, include_all: bool = False) -> dict[str, list[dict[str, Any]]]:
     # worktreePath → [{"source":"claude","title","ts"(파일 mtime),"cliSessionId"}] — claude_session_titles 와 같은 소스·캐시 리듬(20s)
     # 이나, root 당 최신 1개로 축약하지 않고 전부 보존(AGENTS 섹션이 상위 최대 3개를 다시 고른다).
-    global _claude_agents_cache
+    global _claude_agents_cache, _claude_agents_all_cache
     now = time.time()
-    if not refresh and now - _claude_agents_cache[0] < SESSION_TITLES_TTL:
-        return _claude_agents_cache[1]
+    cache = _claude_agents_all_cache if include_all else _claude_agents_cache
+    if not refresh and now - cache[0] < SESSION_TITLES_TTL:
+        return cache[1]
     by_root: dict[str, list[dict[str, Any]]] = {}
-    cutoff = now - AGENTS_MAX_AGE
+    cutoff = now - (AGENTS_MAX_AGE_ALL if include_all else AGENTS_MAX_AGE)
     if CLAUDE_SESSIONS_DIR.is_dir():
         for path in glob.iglob(str(CLAUDE_SESSIONS_DIR / "**" / "local_*.json"), recursive=True):
             try:
@@ -801,13 +804,16 @@ def claude_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any
         for entry in cli_entries:
             if entry["cliSessionId"] not in seen:      # Desktop 이 같은 sid 를 이미 가지면 skip
                 existing.append(entry)
-    _claude_agents_cache = (now, by_root)
+    if include_all:
+        _claude_agents_all_cache = (now, by_root)
+    else:
+        _claude_agents_cache = (now, by_root)
     return by_root
 
-def codex_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]]]:
+def codex_agent_sessions(refresh: bool = False, include_all: bool = False) -> dict[str, list[dict[str, Any]]]:
     # cwd → [{"source":"codex","title","ts"(rollout 파일 mtime)}] — codex_session_titles 와 같은 소스·캐시 리듬(60s),
     # root 당 전부 보존. preview 는 codex rollout 파싱 비용이 커 title+ts 만(스펙 — "가능한 만큼").
-    global _codex_agents_cache
+    global _codex_agents_cache, _codex_agents_all_cache
     now = time.time()
     if not refresh and now - _codex_agents_cache[0] < CODEX_TITLES_TTL:
         return _codex_agents_cache[1]
@@ -825,7 +831,7 @@ def codex_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]
     except Exception:
         pass
     by_root: dict[str, list[dict[str, Any]]] = {}
-    cutoff = now - AGENTS_MAX_AGE
+    cutoff = now - (AGENTS_MAX_AGE_ALL if include_all else AGENTS_MAX_AGE)
     for base in CODEX_ROLLOUT_DIRS:
         if not base.is_dir():
             continue
@@ -847,7 +853,10 @@ def codex_agent_sessions(refresh: bool = False) -> dict[str, list[dict[str, Any]
                 continue
             by_root.setdefault(cwd, []).append({"source": "codex", "title": title, "ts": mtime,
                                                 "sid": sid or "", "path": path})   # path 는 서버 내부용(payload 미노출)
-    _codex_agents_cache = (now, by_root)
+    if include_all:
+        _codex_agents_all_cache = (now, by_root)
+    else:
+        _codex_agents_cache = (now, by_root)
     return by_root
 
 
@@ -858,7 +867,9 @@ def agent_belongs_to_root(root: Path, source: str, sid: str, refresh: bool = Fal
     if source not in ("claude", "codex") or not sid:
         return False
     roots = {str(root), str(root.resolve())}
-    sessions = claude_agent_sessions(refresh) if source == "claude" else codex_agent_sessions(refresh)
+    # 목록 창(7일)과 무관하게 **넓은 색인**으로 확인한다 — 전체보기로 연 오래된 세션에 전송이 막히면 안 된다.
+    sessions = (claude_agent_sessions(refresh, True) if source == "claude"
+                else codex_agent_sessions(refresh, True))
     id_key = "cliSessionId" if source == "claude" else "sid"
     return any(
         str(entry.get(id_key) or "") == sid
@@ -979,6 +990,12 @@ def _downgrade_if_dead(item: dict[str, Any], live_cwds: set[Path] | None = None,
     return item
 
 
+WORKING_STALE_S = 3600   # 이만큼 그 세션 트랜스크립트가 조용하면 "작업 중"이 아니다.
+# 넉넉히 잡는다: 긴 도구 호출(빌드·테스트 스위트)은 시작과 끝 사이에 아무것도 안 쓸 수 있어서,
+# 짧게 잡으면 진짜 작업 중인 세션을 유휴로 오판한다(예전에 그 반대 사고가 있었다).
+# 목표는 "며칠째 작업중" 을 없애는 것이지 분 단위 정확도가 아니다.
+
+
 def resolve_session_liveness(
     source: str,
     sid: str,
@@ -988,6 +1005,7 @@ def resolve_session_liveness(
     event: dict[str, Any] | None,
     live_cwds: set[Path],
     live_tids: dict[tuple[str, str], str],
+    now: float | None = None,
 ) -> dict[str, Any]:
     """Single canonical liveness resolver — status + reachable + tid, all from given signals.
 
@@ -1013,6 +1031,20 @@ def resolve_session_liveness(
         status = "idle"
         reason = "프로세스 없음"
 
+    # D3b: root 에 살아있는 agent 가 있어도 **그게 이 세션이라는 보장은 없다**. 워크트리 하나에 세션이
+    # 여럿이고, 하위 폴더에서 도는 무관한 프로세스도 root live 로 잡힌다(실측: 8일째 떠 있던 claude 하나가
+    # mdc-main 소속 세션을 전부 "작업중"으로 만들었다 — 형: "계속 작업중 상태인거 보기 싫음").
+    # 진짜 작업 중이면 그 세션 트랜스크립트가 초 단위로 쓰인다. 오래 조용하면 작업 중이 아니다.
+    # blocked 는 제외한다 — 답을 기다리는 동안은 원래 아무것도 안 쓴다.
+    if status == "working":
+        try:
+            status_ts = float(merged.get("statusTs") or 0)
+        except (TypeError, ValueError):
+            status_ts = 0
+        if status_ts and (now or time.time()) - status_ts > WORKING_STALE_S:
+            status = "idle"
+            reason = "오래 조용함"
+
     reachable = (source, sid) in live_tids
     tid = live_tids.get((source, sid), "") if reachable else ""
 
@@ -1022,11 +1054,11 @@ def resolve_session_liveness(
     return {"status": status, "reachable": reachable, "tid": tid, "reason": reason}
 
 
-def agents_payload(root: Path, refresh: bool = False) -> list[dict[str, Any]]:
+def agents_payload(root: Path, refresh: bool = False, include_all: bool = False) -> list[dict[str, Any]]:
     # 카드 AGENTS 섹션 — 워크트리당 최대 3개(ts 내림차순), Claude 만 preview(마지막 assistant 텍스트 80자) 부여.
     # status 는 resolve_session_liveness 로 캐논화(S4 native + S5 event 병합 → D3 강등 → D4 승격 한 경로).
-    claude_by_root = claude_agent_sessions(refresh)
-    codex_by_root = codex_agent_sessions(refresh)
+    claude_by_root = claude_agent_sessions(refresh, include_all)
+    codex_by_root = codex_agent_sessions(refresh, include_all)
     key = str(root)
     entries = [*claude_by_root.get(key, []), *codex_by_root.get(key, [])]
     entries.sort(key=lambda e: e["ts"], reverse=True)
@@ -1264,8 +1296,9 @@ def _transcript_page(path: Path, source: str, before: int | None,
                 groups.append(line_turns)
                 count += len(line_turns)
     turns = [turn for group in reversed(groups) for turn in group]
-    timeline = _transcript_timeline(list(reversed(native_rows)), source)
+    timeline, trimmed_activities = _transcript_timeline_bounded(list(reversed(native_rows)), source)
     return {"turns": turns, "timeline": timeline,
+            "trimmedActivities": trimmed_activities,
             "cursor": cursor if cursor > 0 else None,
             "hasMore": cursor > 0, "fileSize": size}
 
@@ -1301,6 +1334,45 @@ def _activity_value_text(value: Any) -> str:
         except (TypeError, ValueError):
             raw = str(value)
     return _safe_activity_text(raw)
+
+
+# 대화 안 이미지(붙여넣은 스크린샷 · Read 한 png · 브라우저 캡처)는 트랜스크립트에 base64 로 통째
+# 박혀 있다 — 한 장에 수 MB 라 타임라인 JSON 에 실으면 3초 폴링이 못 버틴다. 그래서 타임라인엔
+# **참조만** 넣고 바이트는 요청이 올 때 그 줄만 다시 읽어 돌려준다.
+# ref = "<줄 시작 바이트오프셋>-<블록 인덱스>[-<tool_result 안 중첩 인덱스>]".
+_IMAGE_REF_RE = re.compile(r"\d{1,15}(?:-\d{1,4}){1,2}")
+_IMAGE_LINE_MAX = 64 * 1024 * 1024
+_IMAGE_BYTES_MAX = 32 * 1024 * 1024
+
+
+def _image_descriptor(block: Any, offset: int, indexes: tuple[int, ...]) -> dict[str, Any] | None:
+    if not isinstance(block, dict) or block.get("type") != "image":
+        return None
+    src = block.get("source") if isinstance(block.get("source"), dict) else {}
+    data = src.get("data")
+    if src.get("type") != "base64" or not isinstance(data, str) or not data:
+        return None      # url 소스 등 — 우리가 다시 읽어 줄 수 있는 형태가 아니다
+    return {
+        "ref": "-".join(str(part) for part in (offset, *indexes)),
+        "mediaType": str(src.get("media_type") or "image/png"),
+        "bytes": _b64_size(data),
+    }
+
+
+def _b64_size(data: str) -> int:
+    padding = len(data) - len(data.rstrip("="))
+    return max(0, (len(data) * 3) // 4 - padding)
+
+
+def _image_descriptors(content: Any, offset: int, prefix: tuple[int, ...] = ()) -> list[dict[str, Any]]:
+    if not isinstance(content, list):
+        return []
+    found: list[dict[str, Any]] = []
+    for index, block in enumerate(content):
+        item = _image_descriptor(block, offset, (*prefix, index))
+        if item:
+            found.append(item)
+    return found
 
 
 def _activity_type(name: str, detail: str) -> str:
@@ -1373,6 +1445,15 @@ def _new_timeline_activity(source: str, offset: int, index: int, name: str,
 
 
 def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) -> list[dict[str, Any]]:
+    """타임라인만. 기존 계약(리스트 반환)을 그대로 유지한다 — 여러 테스트가 이 helper 를 직접 부른다."""
+    timeline, _ = _transcript_timeline_bounded(rows, source)
+    return timeline
+
+
+def _transcript_timeline_bounded(rows: list[tuple[int, dict[str, Any]]],
+                                 source: str) -> tuple[list[dict[str, Any]], int]:
+    """(타임라인, 상한 때문에 버린 활동 수). 버린 수를 같이 주는 이유는 화면이 조용히 적게
+    세는 걸 막기 위해서다 — 잘렸으면 잘렸다고 말해야 한다."""
     timeline: list[dict[str, Any]] = []
     calls: dict[str, dict[str, Any]] = {}
     runtime = {"model": "", "effort": ""}
@@ -1385,6 +1466,11 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
     # 영원히 남는다(실기기 확인: enqueue 23 / dequeue 22 / remove 1 인데 remove 만 보고 있었다).
     #
     # 취소: remove 는 사용자가 큐에서 뺀 것이라 전달이 아니다 — 따로 표시한다.
+    # 매칭 키는 enqueue 쪽과 **같은 변환**을 거쳐야 한다(_safe_activity_text = 마스킹 + 길이 제한).
+    # 한쪽만 원문이면 긴 메시지나 secret 포함 메시지에서 조용히 안 맞는다.
+    def queue_key(value: Any) -> str:
+        return _safe_activity_text(value).strip()
+
     delivered_queue: set[str] = set()
     for _, o in rows:
         if o.get("type") != "user":
@@ -1399,11 +1485,29 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
         else:
             text = ""
         if text.strip():
-            delivered_queue.add(text.strip())
+            delivered_queue.add(queue_key(text))
+    # **스티어링(작업 중 끼어든 메시지)**: 실행 중인 턴이 삼키면 진짜 user 행이 안 생기고
+    # attachment(type=queued_command, prompt=원문)로만 배달 기록이 남는다. 그리고 큐에서 빠지니
+    # remove 도 같이 남는다. 그래서 remove 만 보고 '취소됨'을 붙이면, 형이 보내고 내가 실제로 소화한
+    # 메시지가 취소됨으로 뒤집힌다(실측: 최근 25세션에 27건 · 이 세션의 "뭐하니"가 그 예).
+    steered_queue: set[str] = set()
+    for _, o in rows:
+        if o.get("type") != "attachment":
+            continue
+        attachment = o.get("attachment") if isinstance(o.get("attachment"), dict) else {}
+        if attachment.get("type") != "queued_command":
+            continue
+        prompt = queue_key(attachment.get("prompt"))
+        if prompt:
+            steered_queue.add(prompt)
+    # 취소는 **배달 흔적이 하나도 없는** remove 뿐이다.
     cancelled_queue: set[str] = {
-        _safe_activity_text(o.get("content")).strip()
-        for _, o in rows
-        if o.get("type") == "queue-operation" and o.get("operation") == "remove"
+        key for key in (
+            queue_key(o.get("content"))
+            for _, o in rows
+            if o.get("type") == "queue-operation" and o.get("operation") == "remove"
+        )
+        if key and key not in delivered_queue and key not in steered_queue
     }
 
     def with_runtime(item: dict[str, Any], model: str = "", effort: str = "") -> dict[str, Any]:
@@ -1431,10 +1535,16 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                         continue          # 이미 진짜 user 행으로 들어온다 — 말풍선을 또 만들면 중복이다
                     if key and key not in seen_queue and not key.lstrip().startswith(_CLAUDE_INJECT_PREFIXES):
                         seen_queue.add(key)
-                        timeline.append(with_runtime(
-                            {"id": f"{source}:queue:{offset}", "kind": "message", "role": "user", "text": qtext,
-                             "queued": True, "queuedCancelled": key in cancelled_queue},
-                        ))
+                        item = {"id": f"{source}:queue:{offset}", "kind": "message",
+                                "role": "user", "text": qtext}
+                        if key in steered_queue:
+                            # 작업 중에 전달돼 이미 소화된 말이다 — 대기도 취소도 아니다. 진짜 user 행이
+                            # 없으니 여기서 말풍선을 만들어야 형이 자기가 한 말을 볼 수 있다.
+                            item["steered"] = True
+                        else:
+                            item["queued"] = True
+                            item["queuedCancelled"] = key in cancelled_queue
+                        timeline.append(with_runtime(item))
                 continue
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
             content = message.get("content")
@@ -1454,6 +1564,8 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                 runtime["model"] = message_model
             if message_effort:
                 runtime["effort"] = message_effort
+            message_images = _image_descriptors(content, offset)
+            first_message_item: dict[str, Any] | None = None
             for index, block in enumerate(content):
                 if not isinstance(block, dict):
                     continue
@@ -1461,10 +1573,13 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                 if block_type == "text":
                     text = _safe_activity_text(block.get("text"))
                     if text.strip():
-                        timeline.append(with_runtime(
+                        item = with_runtime(
                             {"id": f"{source}:message:{offset}:{index}", "kind": "message",
                              "role": role, "text": text}, message_model, message_effort,
-                        ))
+                        )
+                        timeline.append(item)
+                        if first_message_item is None:
+                            first_message_item = item
                 elif block_type == "tool_use":
                     call_id = str(block.get("id") or "")
                     item = _new_timeline_activity(source, offset, index, str(block.get("name") or ""),
@@ -1478,6 +1593,20 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                     if item is not None:
                         item["result"] = _activity_value_text(block.get("content"))
                         item["status"] = "failed" if _activity_failed(block.get("content"), block) else "completed"
+                        # 스크린샷·이미지 Read 의 결과는 tool_result 안에 base64 로 들어온다 — 참조만 붙인다.
+                        result_images = _image_descriptors(block.get("content"), offset, (index,))
+                        if result_images:
+                            item["images"] = result_images
+            if message_images:
+                # 텍스트 없이 이미지만 붙여넣은 턴도 있다 — 그때는 이미지 전용 말풍선을 따로 만든다.
+                if first_message_item is not None:
+                    first_message_item["images"] = message_images
+                else:
+                    timeline.append(with_runtime(
+                        {"id": f"{source}:message:{offset}:img", "kind": "message",
+                         "role": role, "text": "", "images": message_images},
+                        message_model, message_effort,
+                    ))
         else:
             payload = obj.get("payload") or {}
             payload_type = payload.get("type")
@@ -1517,15 +1646,18 @@ def _transcript_timeline(rows: list[tuple[int, dict[str, Any]]], source: str) ->
                     item["status"] = "failed" if _activity_failed(output, payload) else "completed"
     activity_count = sum(1 for item in timeline if item.get("kind") == "activity")
     if activity_count <= AGENT_TIMELINE_MAX_ACTIVITIES:
-        return timeline
-    keep = activity_count - AGENT_TIMELINE_MAX_ACTIVITIES
+        return timeline, 0
+    # 상한을 넘으면 오래된 활동을 버리는데, **몇 개 버렸는지 같이 돌려준다**. 예전엔 조용히 잘라서
+    # 화면의 "작업 N"이 실제보다 적었고, 형이 기억하는 것과 안 맞았다(상한에 딱 걸린 세션이 그 예).
+    dropped = activity_count - AGENT_TIMELINE_MAX_ACTIVITIES
+    keep = dropped
     bounded: list[dict[str, Any]] = []
     for item in timeline:
         if item.get("kind") == "activity" and keep > 0:
             keep -= 1
             continue
         bounded.append(item)
-    return bounded
+    return bounded, dropped
 
 
 def _codex_rollout_path(sid: str, root: Path | None = None) -> Path | None:
@@ -2047,24 +2179,245 @@ def agent_usage(root: Path, source: str, sid: str) -> dict[str, Any]:
     return agent_usage_from_path(path, source)
 
 
-def agent_transcript(root: Path, source: str, sid: str, before: int | None = None,
-                     limit: int = 40) -> dict[str, Any]:
-    # AGENTS 대화 — byte cursor 기준 역방향 페이지. 도구 호출·결과는 생략하고 로그와 같은 마스킹 적용.
-    from marina_logtext import redact_text   # 지역 import — 순환 의존 예방
+def agent_transcript_path(root: Path, source: str, sid: str) -> Path:
+    """세션 트랜스크립트 파일 경로. sid 검증 포함(경로 조작 방지)."""
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}", sid or ""):   # leading dash 금지
         raise ValueError("invalid session id")
     if source == "claude":
         jpath = CLAUDE_PROJECTS_DIR / _claude_project_slug(root) / f"{sid}.jsonl"
         if not jpath.is_file():
             raise ValueError("transcript 파일이 없어요 (세션 만료/이동)")
-    elif source == "codex":
+        return jpath
+    if source == "codex":
         entry = next((e for e in codex_agent_sessions().get(str(root), []) if e.get("sid") == sid), None)
         if not entry or not Path(entry["path"]).is_file():
             raise ValueError("codex rollout 을 못 찾았어요 (세션 만료)")
-        jpath = Path(entry["path"])
-    else:
-        raise ValueError("unknown source")
+        return Path(entry["path"])
+    raise ValueError("unknown source")
+
+
+def agent_transcript(root: Path, source: str, sid: str, before: int | None = None,
+                     limit: int = 40) -> dict[str, Any]:
+    # AGENTS 대화 — byte cursor 기준 역방향 페이지. 도구 호출·결과는 생략하고 로그와 같은 마스킹 적용.
+    from marina_logtext import redact_text   # 지역 import — 순환 의존 예방
+    jpath = agent_transcript_path(root, source, sid)
     return {**_transcript_page(jpath, source, before, limit), "source": source}
+
+
+def _read_transcript_line(path: Path, offset: int) -> dict[str, Any]:
+    size = path.stat().st_size
+    if offset < 0 or offset >= size:
+        raise ValueError("이미지를 못 찾았어요 (트랜스크립트가 바뀌었어요)")
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        raw = handle.readline(_IMAGE_LINE_MAX)
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        raise ValueError("이미지를 못 찾았어요 (줄을 못 읽었어요)")
+    if not isinstance(obj, dict):
+        raise ValueError("이미지를 못 찾았어요")
+    return obj
+
+
+def agent_transcript_image(root: Path, source: str, sid: str, ref: str) -> tuple[bytes, str]:
+    """타임라인 ref 로 이미지 원본 바이트를 돌려준다 — 그 한 줄만 다시 읽는다."""
+    if source != "claude":
+        raise ValueError("이미지는 Claude 세션만 지원해요")
+    if not _IMAGE_REF_RE.fullmatch(ref or ""):
+        raise ValueError("invalid image ref")
+    path = agent_transcript_path(root, source, sid)
+    parts = [int(part) for part in ref.split("-")]
+    obj = _read_transcript_line(path, parts[0])
+    node: Any = (obj.get("message") or {}).get("content")
+    block: Any = None
+    for index in parts[1:]:
+        if not isinstance(node, list) or index >= len(node):
+            raise ValueError("이미지를 못 찾았어요 (내용이 바뀌었어요)")
+        block = node[index]
+        node = block.get("content") if isinstance(block, dict) else None
+    if not isinstance(block, dict) or block.get("type") != "image":
+        raise ValueError("이미지를 못 찾았어요 (내용이 바뀌었어요)")
+    src = block.get("source") if isinstance(block.get("source"), dict) else {}
+    data = src.get("data")
+    if src.get("type") != "base64" or not isinstance(data, str) or not data:
+        raise ValueError("이미지를 못 찾았어요 (형식)")
+    if _b64_size(data) > _IMAGE_BYTES_MAX:
+        raise ValueError("이미지가 너무 커요")
+    media = str(src.get("media_type") or "image/png")
+    if not media.startswith("image/") or len(media) > 60:
+        media = "image/png"
+    try:
+        return base64.b64decode(data, validate=False), media
+    except Exception:
+        raise ValueError("이미지를 못 읽었어요 (디코드 실패)")
+
+
+# 이 세션에서 에이전트가 **만든/바꾼 파일** — 대화에 박힌 이미지(agent_transcript_images)와는 다른 축이다.
+# 만들기만 한 파일은 트랜스크립트에 내용이 안 남고 경로만 남으므로, 도구 호출의 file_path 가 유일한 근거다.
+# (실측: 세션 하나에 Write 2 + Edit 44 인데 트랜스크립트 이미지는 0장 — 갤러리로는 아무것도 안 잡힌다.)
+_WRITE_TOOLS = {"write", "edit", "multiedit", "notebookedit", "apply_patch", "patch"}
+_PATCH_TARGET_RE = re.compile(r"\*\*\*\s+(?:update|add|delete)\s+file:\s*([^\s'\";\\]+)", re.I)
+AGENT_SESSION_FILES_MAX = 300
+_SESSION_FILE_BYTES_MAX = 8 * 1024 * 1024
+_SESSION_FILE_IMAGE_TYPES = {
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".bmp": "image/bmp",
+    # .svg 는 일부러 뺐다 — 스크립트를 품을 수 있어서 그림으로 띄우면 대시보드 오리진에서 실행된다.
+}
+
+
+def _tool_file_targets(name: str, raw_input: Any) -> list[str]:
+    if name.strip().lower() not in _WRITE_TOOLS:
+        return []
+    payload = _json_value(raw_input)
+    direct = payload.get("file_path") or payload.get("path") or payload.get("file")
+    if isinstance(direct, str) and direct.strip():
+        return [direct.strip()]
+    # apply_patch 계열은 경로가 패치 본문 안에 있다.
+    blob = payload.get("input") or payload.get("patch") or ""
+    if not isinstance(blob, str):
+        blob = ""
+    if not blob and isinstance(raw_input, str):
+        blob = raw_input
+    return [m.group(1) for m in _PATCH_TARGET_RE.finditer(blob)]
+
+
+def session_file_in_root(root: Path, raw: str) -> Path | None:
+    """워크트리 **안**으로 resolve 되는 경로만 통과. 심링크 탈출·상대경로 탈출을 여기서 막는다."""
+    try:
+        base = root.resolve()
+        candidate = Path(raw).expanduser()
+        if not candidate.is_absolute():
+            candidate = base / candidate
+        resolved = candidate.resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if resolved == base or base in resolved.parents:
+        return resolved
+    return None
+
+
+def agent_session_files(root: Path, source: str, sid: str,
+                        limit: int = AGENT_SESSION_FILES_MAX) -> dict[str, Any]:
+    """이 세션이 만든/바꾼 파일 목록 — 최근에 손댄 것이 앞. 내용은 안 싣는다(메타만)."""
+    path = agent_transcript_path(root, source, sid)
+    limit = max(1, min(AGENT_SESSION_FILES_MAX, int(limit or AGENT_SESSION_FILES_MAX)))
+    order: list[str] = []
+    seen: dict[str, dict[str, Any]] = {}
+    # 전체 파일을 줄 단위로 흘려 읽는다 — _json_objects 는 끝 256KB 만 읽어서 긴 세션의 Write/Edit 를
+    # 거의 다 놓친다(이 세션만 해도 46건 중 대부분이 그 밖에 있다). 값싼 사전 필터로 대부분의 줄은 건너뛴다.
+    marker = b'"tool_use"' if source == "claude" else b'"function_call"'
+    with path.open("rb") as handle:
+        for raw in handle:
+            if marker not in raw:
+                continue
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            if source == "claude":
+                blocks = (obj.get("message") or {}).get("content")
+                calls = [(str(b.get("name") or ""), b.get("input")) for b in blocks
+                         if isinstance(b, dict) and b.get("type") == "tool_use"] if isinstance(blocks, list) else []
+            else:
+                payload = obj.get("payload") or {}
+                if obj.get("type") != "response_item" or payload.get("type") not in ("function_call", "custom_tool_call"):
+                    continue
+                calls = [(str(payload.get("name") or ""),
+                          payload.get("arguments") if payload.get("type") == "function_call" else payload.get("input"))]
+            for name, raw_input in calls:
+                for target in _tool_file_targets(name, raw_input):
+                    resolved = session_file_in_root(root, target)
+                    if resolved is None:
+                        continue                  # 워크트리 밖은 목록에도 안 넣는다
+                    key = str(resolved)
+                    record = seen.get(key)
+                    if record is None:
+                        record = {"path": key, "name": resolved.name,
+                                  "relPath": str(resolved.relative_to(root.resolve())),
+                                  "action": "created" if name.strip().lower() == "write" else "edited",
+                                  "touches": 0}
+                        seen[key] = record
+                        order.append(key)
+                    record["touches"] += 1
+                    if name.strip().lower() == "write":
+                        record["action"] = "created"
+    files: list[dict[str, Any]] = []
+    for key in reversed(order):                   # 최근에 처음 손댄 것이 앞
+        record = seen[key]
+        target = Path(key)
+        suffix = target.suffix.lower()
+        try:
+            stat = target.stat()
+            record.update({"exists": True, "size": stat.st_size, "mtime": int(stat.st_mtime)})
+        except OSError:
+            record.update({"exists": False, "size": 0, "mtime": 0})
+        record["isImage"] = suffix in _SESSION_FILE_IMAGE_TYPES
+        record["servable"] = bool(record["exists"] and record["size"] <= _SESSION_FILE_BYTES_MAX)
+        files.append(record)
+    return {"files": files[:limit], "total": len(files), "source": source}
+
+
+def agent_session_file_bytes(root: Path, raw_path: str) -> tuple[bytes, str]:
+    """워크트리 안 파일 원본. 이미지 화이트리스트 외에는 전부 text/plain 으로 준다 —
+    대시보드 오리진에서 HTML/JS 를 그대로 서빙하면 저장형 XSS 가 되기 때문."""
+    resolved = session_file_in_root(root, raw_path or "")
+    if resolved is None:
+        raise ValueError("이 워크트리 밖의 경로예요")
+    if not resolved.is_file():
+        raise ValueError("파일이 없어요")
+    size = resolved.stat().st_size
+    if size > _SESSION_FILE_BYTES_MAX:
+        raise ValueError("파일이 너무 커요 (8MB 상한)")
+    data = resolved.read_bytes()
+    media = _SESSION_FILE_IMAGE_TYPES.get(resolved.suffix.lower())
+    return data, media if media else "text/plain; charset=utf-8"
+
+
+AGENT_GALLERY_MAX = 300
+
+
+def agent_transcript_images(root: Path, source: str, sid: str,
+                            limit: int = AGENT_GALLERY_MAX) -> dict[str, Any]:
+    """세션 대화에 등장한 이미지 전부 — '모아보기' 갤러리용. 최신이 앞."""
+    if source != "claude":
+        return {"images": [], "source": source}
+    path = agent_transcript_path(root, source, sid)
+    limit = max(1, min(AGENT_GALLERY_MAX, int(limit or AGENT_GALLERY_MAX)))
+    found: list[dict[str, Any]] = []
+    offset = 0
+    with path.open("rb") as handle:
+        for raw in handle:
+            line_start = offset
+            offset += len(raw)
+            if b'"image"' not in raw:      # 값싼 사전 필터 — 대부분의 줄은 여기서 걸러진다
+                continue
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            if not isinstance(obj, dict):
+                continue
+            message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            ts = str(obj.get("timestamp") or "")
+            for index, block in enumerate(content):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "image":
+                    item = _image_descriptor(block, line_start, (index,))
+                    if item:
+                        found.append({**item, "ts": ts, "origin": "message"})
+                elif block.get("type") == "tool_result":
+                    for item in _image_descriptors(block.get("content"), line_start, (index,)):
+                        found.append({**item, "ts": ts, "origin": "tool"})
+    found.reverse()
+    return {"images": found[:limit], "source": source, "total": len(found)}
 
 
 # 대화 전용 마스킹 — redact_text(키워드 key/value) 로는 안 잡히는 bare 토큰/이메일(codex P2).

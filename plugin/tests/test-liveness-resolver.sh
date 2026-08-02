@@ -25,10 +25,28 @@ if r['status'] != 'idle' or r['reachable']:
 if r.get('reason') != '프로세스 없음':
     fails.append(('D3-reason', r))
 
-# working + cwd 있음 → working 유지
-r = ms.resolve_session_liveness('claude', 's1', R, native=N_work, event=None, live_cwds={R}, live_tids={})
+# working + cwd 있음 + **최근 활동** → working 유지
+import time as _t
+_now = _t.time()
+N_work_fresh = {'status': 'working', 'statusTs': _now - 5}
+r = ms.resolve_session_liveness('claude', 's1', R, native=N_work_fresh, event=None, live_cwds={R},
+                                 live_tids={}, now=_now)
 if r['status'] != 'working':
     fails.append(('working-live', r))
+
+# D3b: cwd 는 살아 있어도 **그 세션이** 오래 조용하면 작업 중이 아니다.
+# (워크트리 하나에 세션이 여럿이고, 무관한 프로세스도 root live 로 잡힌다 — 8일째 떠 있던 claude 하나가
+#  같은 root 세션을 전부 "작업중"으로 만들었다.)
+r = ms.resolve_session_liveness('claude', 's1', R, native={'status': 'working', 'statusTs': _now - 8 * 86400},
+                                 event=None, live_cwds={R}, live_tids={}, now=_now)
+if r['status'] != 'idle' or r.get('reason') != '오래 조용함':
+    fails.append(('D3b-stale-working', r))
+
+# 답을 기다리는 중(blocked)은 원래 조용하다 — 강등하면 안 된다.
+r = ms.resolve_session_liveness('claude', 's1', R, native={'status': 'blocked', 'statusTs': _now - 8 * 86400},
+                                 event=None, live_cwds={R}, live_tids={}, now=_now)
+if r['status'] != 'blocked':
+    fails.append(('D3b-blocked-kept', r))
 
 # D4: completed + reachable PTY → waiting 승격
 N_done = {'status': 'completed', 'statusTs': 100.0}

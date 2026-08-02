@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+# 모바일 페이지를 **실제로 실행**해 본다 — 문자열 검사로는 못 잡는 실행 오류를 잡는 그물.
+#
+# 왜 필요한가: 다른 테스트들은 렌더된 HTML 문자열이나 추출한 함수만 본다. 그래서 `sessionCard` 가
+# `notable` 을 선언보다 먼저 쓰는 TDZ 오류가 있었는데도 130개가 전부 통과했고, 형 화면에서는
+# renderSessions 가 통째로 죽어 **세션 목록도 채팅도 안 나왔다**. 한 번이라도 굴려봤으면 잡혔다.
+#
+# 그래서 최소 DOM 셤 위에서 ① 스크립트 초기화 ② 실제 상태로 renderSessions ③ 실제 타임라인으로
+# 대화 렌더까지 굴린다. 예외가 나면 실패.
+set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SCR="$HERE/../scripts"
+
+PYTHONPATH="$SCR" python3 - <<'PY' | node
+from marina_mobile import render_mobile_html
+import json
+
+html = render_mobile_html()
+start, end = html.find("<script>"), html.rfind("</script>")
+if start < 0 or end < 0:
+    raise SystemExit("script 블록을 못 찾음")
+print("const SRC = " + json.dumps(html[start + 8:end]) + ";")
+print(r'''
+const vm = require("node:vm");
+const assert = require("node:assert/strict");
+
+function mk(tag) {
+  const style = {setProperty() {}, removeProperty() {}};
+  const node = {
+    tag, dataset: {}, style, attrs: {}, children: [], value: "", textContent: "", innerHTML: "",
+    placeholder: "", disabled: false, hidden: false, open: false, tagName: String(tag).toUpperCase(),
+    classList: {_s: new Set(),
+      add(...a) { a.forEach(x => this._s.add(x)); },
+      remove(...a) { a.forEach(x => this._s.delete(x)); },
+      toggle(c, f) { if (f === undefined) { this._s.has(c) ? this._s.delete(c) : this._s.add(c); } else { f ? this._s.add(c) : this._s.delete(c); } },
+      contains(c) { return this._s.has(c); }},
+    setAttribute(k, v) { this.attrs[k] = v; },
+    getAttribute(k) { return k in this.attrs ? this.attrs[k] : null; },
+    removeAttribute(k) { delete this.attrs[k]; },
+    addEventListener() {}, appendChild(x) { this.children.push(x); return x; },
+    insertBefore(x, ref) {
+      const i = this.children.indexOf(x); if (i >= 0) this.children.splice(i, 1);
+      const at = ref ? this.children.indexOf(ref) : this.children.length;
+      this.children.splice(at < 0 ? this.children.length : at, 0, x); return x;
+    },
+    removeChild(x) { const i = this.children.indexOf(x); if (i >= 0) this.children.splice(i, 1); return x; },
+    querySelector() { return mk("div"); }, querySelectorAll() { return []; }, closest() { return null; },
+    focus() {}, blur() {}, click() {}, contains() { return false; }, matches() { return false; },
+    get firstChild() { return this.children[0] || null; },
+    get nextSibling() { return null; }, get parentElement() { return null; },
+    get firstElementChild() { return mk("div"); },
+  };
+  return node;
+}
+const registry = new Map();
+const doc = {
+  getElementById: id => registry.get(id) || (registry.set(id, mk(id)), registry.get(id)),
+  createElement: t => mk(t), querySelector: () => mk("div"), querySelectorAll: () => [],
+  addEventListener() {}, get activeElement() { return null; }, cookie: "", get body() { return mk("body"); },
+};
+const ctx = {
+  document: doc,
+  window: {matchMedia: () => ({matches: false, addEventListener() {}}), addEventListener() {},
+           visualViewport: null, innerHeight: 800, open() {},
+           location: {href: "http://x/mobile", reload() {}, replace() {}}},
+  localStorage: {getItem: () => null, setItem() {}, removeItem() {}},
+  location: {href: "http://x/mobile", search: "", reload() {}, replace() {}},
+  history: {state: null, pushState() {}, replaceState() {}, back() {}},
+  fetch: () => new Promise(() => {}),
+  setTimeout: () => 0, clearTimeout() {}, setInterval: () => 0, clearInterval() {},
+  console, JSON, Math, Date, Object, Array, String, Number, Boolean, Set, Map, URL, URLSearchParams,
+  performance: {now: () => 0}, navigator: {userAgent: "node"}, requestAnimationFrame: () => 0,
+  Promise, isNaN, parseInt, parseFloat, encodeURIComponent, decodeURIComponent, RegExp, Error,
+  prompt: () => "",
+};
+ctx.self = ctx; ctx.globalThis = ctx;
+vm.createContext(ctx);
+
+// ① 초기화가 예외 없이 끝나야 한다
+vm.runInContext(SRC + `
+this.__renderSessions = renderSessions;
+this.__renderConversationSequence = renderConversationSequence;
+this.__sessionCard = sessionCard;
+this.__setState = s => { state = s; };`, ctx, {filename: "marina_mobile.py::page"});
+
+// ② 실제와 같은 모양의 상태로 세션 목록을 그린다 — 상태값을 다양하게 섞는다
+const sessions = [
+  {key: "agent:claude:a1", kind: "agent", source: "claude", sid: "a1", root: "/w/one",
+   title: "첫 세션", subtitle: "/w/one", preview: "작업 내용", status: "blocked", ts: 1785000000, pendingQuestion: {questions: [{question: "고를래?", options: [{label: "A"}]}]}},
+  {key: "agent:codex:b2", kind: "agent", source: "codex", sid: "b2", root: "/w/one",
+   title: "둘째", subtitle: "/w/one", preview: "", status: "working", ts: 1785000100},
+  {key: "agent:claude:c3", kind: "agent", source: "claude", sid: "c3", root: "/w/two",
+   title: "셋째", subtitle: "/w/two", preview: "", status: "idle", ts: 1785000200},
+  {key: "term:t1", kind: "term", root: "/w/two", title: "터미널", subtitle: "", preview: "", tid: "t1", ts: 0},
+];
+ctx.__setState({worktrees: [{root: "/w/one", alias: "one", projectId: "p", agents: []},
+                            {root: "/w/two", alias: "two", projectId: "p", agents: []}],
+                sessions, terms: [], pins: ["/w/two"], agentOptions: {}, serverInstance: "x"});
+ctx.__renderSessions();
+const list = registry.get("sessionList");
+assert.ok(list && list.children.length > 0, "세션 목록이 비었다 — 렌더가 죽었을 수 있다");
+
+// 카드 하나하나도 실제로 만들어 본다(문자열 검사로는 TDZ/undefined 를 못 잡는다)
+for (const session of sessions) {
+  const card = ctx.__sessionCard(session);
+  assert.ok(typeof card === "string" && card.includes("session-card"), `카드 렌더 실패: ${session.key}`);
+}
+
+// ③ 대화 렌더 — 설명 → 도구 → 설명 → 질문 흐름을 실제로 그린다
+const exchange = {id: "u1", user: {kind: "message", role: "user", id: "u1", text: "해줘"}, items: [
+  {kind: "message", role: "user", id: "u1", text: "해줘"},
+  {kind: "message", role: "assistant", id: "s1", text: "먼저 이걸 봅니다"},
+  {kind: "activity", activityType: "command", id: "a1", name: "Bash", label: "ls", status: "completed", detail: "ls"},
+  {kind: "activity", activityType: "skill", id: "a2", name: "Skill", label: "brainstorming", status: "completed", detail: ""},
+  {kind: "message", role: "assistant", id: "s2", text: "정리하면 이렇습니다"},
+  {kind: "message", role: "user", id: "x1", text: "야 근데", steered: true},
+  {kind: "activity", activityType: "tool", id: "q1", name: "AskUserQuestion", status: "running",
+   detail: JSON.stringify({questions: [{question: "고를래?", options: [{label: "A"}, {label: "B"}], multiSelect: true}]})},
+]};
+const seq = ctx.__renderConversationSequence(exchange, sessions[0], true);
+assert.ok(seq.includes("먼저 이걸 봅니다"), "중간 설명이 채팅으로 안 나온다");
+assert.ok(seq.includes("정리하면 이렇습니다"), "두 번째 설명이 안 나온다");
+assert.ok(seq.includes("brainstorming"), "읽은 스킬 이름이 안 보인다");
+assert.ok(seq.includes("questionCard"), "질문 카드가 안 나온다");
+assert.ok((seq.match(/data-activity-list/g) || []).length >= 2, "활동이 순서대로 여러 구간으로 접히지 않는다");
+
+console.log("PASS 부팅+렌더 스모크: 초기화 · 세션목록 · 카드 4종 · 대화 흐름(설명/스킬/질문/구간)");
+''')
+PY
+
+echo "PASS test-mobile-boot-smoke"

@@ -61,6 +61,14 @@
             "timeout": 2
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-question-hook.sh\""
+          }
+        ]
       }
     ],
     "Notification": [
@@ -83,6 +91,14 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-agent-event-hook.sh\"",
             "async": false,
             "timeout": 2
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-question-hook.sh\""
           }
         ]
       }

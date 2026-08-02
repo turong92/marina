@@ -43,9 +43,11 @@ assert.notEqual(activityItemFingerprint(item), activityItemFingerprint(done));
 assert.equal(activityItemKey({label: "Read"}, 3), "Read");
 assert.equal(activityItemKey({}, 3), "activity-3");
 
-// 5) 요약은 개수를 따라간다 — 제자리 갱신 시 summary 만 고쳐 쓰면 된다
-assert.equal(activityGroupSummary([item]), "작업 1");
-assert.equal(activityGroupSummary([item, {activityType: "skill"}]), "작업 2 · 스킬 1");
+// 5) 요약은 개수를 따라간다 — 제자리 갱신 시 summary 만 고쳐 쓰면 된다.
+//    내역은 **총계와 합이 맞아야 한다**: 예전엔 목록이 하드코딩이라 tool 종류가 총계엔 들어가고
+//    내역엔 안 나와 "작업 1"만 떴다(형: "갯수가 안맞는다"). 자세한 계약은 test-activity-counts.
+assert.equal(activityGroupSummary([item]), "작업 1 · 도구 1");
+assert.equal(activityGroupSummary([item, {activityType: "skill"}]), "작업 2 · 스킬 1 · 도구 1");
 console.log("ok activity identity survives polling, fingerprint tracks content");
 ''')
 PY

@@ -83,12 +83,14 @@ def main() -> int:
         payload = json.loads(raw)
         if not isinstance(payload, dict):
             return 0
-        if str(payload.get("tool_name") or "") != "AskUserQuestion":
+        event = str(payload.get("hook_event_name") or "")
+        # PreToolUse/PostToolUse 는 AskUserQuestion 에만 걸리지만, 정리 이벤트(UserPromptSubmit/Stop)는
+        # 도구와 무관하게 온다 — tool_name 검사를 여기서 하면 정리가 통째로 막힌다.
+        if event in ("PreToolUse", "PostToolUse") and str(payload.get("tool_name") or "") != "AskUserQuestion":
             return 0
         sid = str(payload.get("session_id") or "").strip()
         if not _SID_RE.fullmatch(sid):
             return 0
-        event = str(payload.get("hook_event_name") or "")
         target = _state_file(sid)
         if event == "PreToolUse":
             tool_input = payload.get("tool_input")
@@ -117,7 +119,11 @@ def main() -> int:
                 os.chmod(target, 0o600)
             except OSError:
                 pass
-        elif event == "PostToolUse":
+        elif event in ("PostToolUse", "UserPromptSubmit", "Stop"):
+            # PostToolUse = 정상 답변. 나머지 둘은 **중단/거절** 경로다 — 형이 Esc 로 질문을 끄거나
+            # 그냥 글로 답해버리면 PostToolUse 가 영영 안 와서, 죽은 질문 카드가 모바일에 15분(만료
+            # 상한)이나 남고 거기 탭해봐야 아무 일도 안 일어났다. 실제로 형이 겪은 "안 가는데"의
+            # 한 갈래. 새 프롬프트나 턴 종료는 그 질문이 끝났다는 확정 신호라 여기서 지운다.
             try:
                 target.unlink()
             except FileNotFoundError:

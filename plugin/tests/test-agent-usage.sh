@@ -124,7 +124,7 @@ codex_rollout = write("codex-rate-limits.jsonl", [
     }},
 ])
 original_codex_sessions = ms.codex_agent_sessions
-ms.codex_agent_sessions = lambda: {str(tmp): [{"path": str(codex_rollout)}]}
+ms.codex_agent_sessions = lambda *a, **k: {str(tmp): [{"path": str(codex_rollout)}]}
 try:
     discovered_limits = ms._latest_codex_rate_limits(tmp)
 finally:

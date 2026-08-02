@@ -70,7 +70,9 @@ PY
 
 # 배선 확인: 모바일 launch 엔드포인트와 웹 카드 버튼이 실제로 서빙되는지.
 html="$(PYTHONPATH="$SCR" python3 -c 'from marina_mobile import render_mobile_html; print(render_mobile_html())')"
-for needle in '/mobile/api/launch' 'data-launch="claude"' 'data-launch="codex"' 'function launchAgent' 'wt-group-head'; do
+# 진입점이 헤더 버튼(data-launch)에서 워크트리 ⋯ 시트 항목으로 옮겼다. 속성은 템플릿으로 만들어지므로
+# 리터럴이 아니라 **생성 지점**과 **두 출처가 모두 목록에 있는지**를 본다.
+for needle in '/mobile/api/launch' 'data-wt-act="launch:${item.id}"' '{id: "claude", label: "Claude 대화 추가"}' '{id: "codex", label: "Codex 대화 추가"}' 'act.startsWith("launch:")' 'function launchAgent' 'wt-group-head'; do
   grep -qF "$needle" <<<"$html" || { echo "FAIL: 모바일 launch 배선 누락 — $needle"; exit 1; }
 done
 grep -qF "openAgentTerminal(session.root, { source: agent.source })" "$SCR/marina-web/app-5b-actions.js" \
@@ -88,7 +90,7 @@ root = Path(sys.argv[1]) / "wt"; root.mkdir(parents=True, exist_ok=True)
 mm.discover_all_roots = lambda refresh=False: [root]
 mm.worktree_info = lambda r, refresh=False: {"id": "wt", "alias": "", "projectLabel": "p"}
 mm._live_agent_cwds = lambda refresh=False: set()
-mm.agents_payload = lambda r, refresh=False: [{"source": "claude", "sid": "sid-known-0001", "status": "idle"}]
+mm.agents_payload = lambda r, refresh=False, include_all=False: [{"source": "claude", "sid": "sid-known-0001", "status": "idle"}]
 mm.term_list = lambda: {"sessions": [
     {"tid": "t-fresh", "root": str(root), "agent": {"source": "claude", "sid": ""}, "alive": True},
     {"tid": "t-known", "root": str(root), "agent": {"source": "claude", "sid": "sid-known-0001"}, "alive": True},

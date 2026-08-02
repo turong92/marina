@@ -53,7 +53,7 @@ out.queue=await p.evaluate(async()=>{
 });
 out.question=await p.evaluate(()=>{
   const s=(state.sessions||[]).find(x=>(x.sid||'').startsWith('334a1b6b')); if(!s)return{skip:1};
-  const badge=!!document.querySelector('.session-question-badge,[data-session-question-badge]');
+  const badge=!!document.querySelector('.session-status.notable');   // 질문 대기는 별도 표시가 아니라 status=blocked 다
   selectedSessionKey=s.key; if(typeof showChat==='function')showChat(); if(typeof renderLiveQuestion==='function')renderLiveQuestion(s);
   const lq=document.getElementById('liveQuestion'); const card=!!(lq&&/questionCard/.test(lq.innerHTML));
   return {ok: !!(s.pendingQuestion&&badge&&card), pendingQuestion:!!s.pendingQuestion, badge, card};
