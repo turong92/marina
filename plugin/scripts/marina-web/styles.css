@@ -1325,6 +1325,23 @@
     .cv-nav[disabled] { opacity: .25; cursor: default; }
     .chat-gal-btn { padding: 4px 10px; border: 1px solid var(--sys-style-neutral-default); border-radius: 7px; background: var(--sys-bg-surface); font-size: 12px; cursor: pointer; }
     .chat-gal-btn:hover { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
+    /* 계정 한도 칩 — 병목이 되는 창 하나만 세우고, 나머지는 눌러서 본다 */
+    .chat-usage-chip { padding: 4px 10px; border: 1px solid var(--sys-style-neutral-default); border-radius: 999px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); font-size: 11.5px; font-variant-numeric: tabular-nums; cursor: pointer; white-space: nowrap; }
+    .chat-usage-chip:hover { border-color: var(--sys-cont-primary-default); }
+    .chat-usage-chip[data-level="warn"] { border-color: var(--sys-cont-warning-default, var(--sys-style-neutral-default)); color: var(--sys-cont-warning-default, var(--sys-cont-neutral-default)); }
+    .chat-usage-chip[data-level="critical"] { border-color: var(--sys-cont-negative-default, var(--sys-style-neutral-default)); color: var(--sys-cont-negative-default, var(--sys-cont-neutral-default)); }
+    .chat-usage-panel { position: fixed; z-index: 260; min-width: 260px; max-width: 340px; padding: 8px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); box-shadow: 0 8px 24px rgb(0 0 0 / 14%); }
+    .chat-usage-title { padding: 2px 4px 7px; color: var(--sys-cont-neutral-lightest); font-size: 11px; }
+    .chat-usage-row { display: grid; grid-template-columns: auto 1fr; gap: 2px 8px; padding: 6px 4px; font-size: 12px; }
+    .chat-usage-row + .chat-usage-row { border-top: 1px solid var(--sys-style-neutral-light); }
+    .chat-usage-label { font-weight: 600; }
+    .chat-usage-value { text-align: right; font-variant-numeric: tabular-nums; }
+    .chat-usage-reset { grid-column: 1 / -1; color: var(--sys-cont-neutral-lightest); font-size: 10.5px; }
+    .chat-usage-track { grid-column: 1 / -1; height: 4px; margin-top: 3px; border-radius: 999px; background: var(--sys-bg-base); overflow: hidden; }
+    .chat-usage-track i { display: block; height: 100%; background: var(--sys-cont-primary-default); }
+    .chat-usage-row[data-level="warn"] .chat-usage-track i { background: var(--sys-cont-warning-default, var(--sys-cont-primary-default)); }
+    .chat-usage-row[data-level="critical"] .chat-usage-track i { background: var(--sys-cont-negative-default, var(--sys-cont-primary-default)); }
+    .chat-usage-empty { padding: 8px 4px; color: var(--sys-cont-neutral-lightest); font-size: 12px; }
     .chat-gallery { max-width: 720px; }
     .chat-gal-status { margin-bottom: 10px; color: var(--sys-cont-neutral-lightest); font-size: 12px; }
     .chat-gal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }

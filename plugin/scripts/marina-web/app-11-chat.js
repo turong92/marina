@@ -145,6 +145,7 @@
               title="이 세션의 터미널 원본 — 권한 프롬프트·/명령·TUI 조작">원본</button>
           </div>
           <button class="chat-gal-btn" data-chat-gallery title="모아보기 — 이 세션의 이미지·만든 파일 전부">모아보기</button>
+          <button class="chat-usage-chip" data-chat-usage title="계정 사용량 — 눌러서 창별로 보기">한도 …</button>
           <span class="chat-head-root">${escapeHtml(tab.root)}</span>
         </div>
         <div class="chat-body" data-chat-body></div>`;
@@ -167,6 +168,7 @@
       });
       pane.querySelector('[data-chat-add]').onclick = (e) => openChatPicker(e.currentTarget);
       pane.querySelector('[data-chat-gallery]').onclick = () => openChatGallery(tab);
+      paintChatUsage(tab);
       pane.querySelectorAll('[data-chat-view]').forEach(btn => {
         btn.onclick = () => { tab.view = btn.dataset.chatView; saveChatTabs(); renderChatPane(); };
       });
@@ -180,6 +182,82 @@
     }
 
     // ＋ — 지금 선택된 워크트리에서 아직 안 열린 세션을 고르게 한다.
+    // ── 계정 한도 ─────────────────────────────────────────────────────────────
+    // 여태 사용량은 모바일에만 있었다. 터미널을 열지 않고는 남은 한도를 알 수 없었는데, 그게
+    // 웹에서 가장 자주 필요한 순간(긴 작업 걸기 전)이다. 칩에는 가장 급한 창 하나만 —
+    // 나머지(모델별 주간 등)는 눌러서 본다.
+    const chatUsage = {};   // source -> {ts, account}
+    const CHAT_USAGE_TTL = 60000;   // 서버도 60초 캐시다. 탭을 옮길 때마다 치지 않는다.
+
+    function usageLevel(percent) { return percent >= 90 ? 'critical' : percent >= 70 ? 'warn' : 'normal'; }
+
+    function usageResetText(value) {
+      const ts = Number(value);
+      if (!Number.isFinite(ts) || ts <= 0) return '리셋 시각 확인 안 됨';
+      return `리셋 ${new Date(ts * 1000).toLocaleString('ko-KR', {month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'})}`;
+    }
+
+    async function paintChatUsage(tab) {
+      const chip = chatPane().querySelector('[data-chat-usage]');
+      if (!chip || !tab) return;
+      chip.onclick = () => openChatUsagePanel(chip, tab.source);
+      const hit = chatUsage[tab.source];
+      if (hit && Date.now() - hit.ts < CHAT_USAGE_TTL) { fillUsageChip(chip, hit.account); return; }
+      try {
+        const d = await api(`/api/agent/usage?root=${enc(tab.root)}&source=${enc(tab.source)}&sid=${enc(tab.sid)}`);
+        chatUsage[tab.source] = {ts: Date.now(), account: d.accountUsage || null};
+      } catch (e) {
+        chatUsage[tab.source] = {ts: Date.now(), account: null};
+      }
+      // 응답이 오는 사이 탭을 옮겼을 수 있다 — 지금 화면의 칩만 칠한다.
+      const now = activeChatTab();
+      if (now && now.source === tab.source) fillUsageChip(chip, chatUsage[tab.source].account);
+    }
+
+    function fillUsageChip(chip, account) {
+      const windows = (account && Array.isArray(account.windows) ? account.windows : [])
+        .filter(w => Number.isFinite(Number(w.usedPercent)));
+      if (!windows.length) {
+        chip.textContent = '한도 —';
+        chip.dataset.level = 'unknown';
+        chip.title = '계정 사용량을 못 가져왔어요';
+        return;
+      }
+      // 가장 많이 쓴 창이 곧 병목이다 — 그거 하나만 칩에 세운다.
+      const worst = windows.reduce((a, b) => (Number(b.usedPercent) > Number(a.usedPercent) ? b : a));
+      chip.textContent = `${worst.label} ${Number(worst.usedPercent).toFixed(0)}%`;
+      chip.dataset.level = usageLevel(Number(worst.usedPercent));
+      chip.title = windows.map(w => `${w.label} ${Number(w.usedPercent).toFixed(1)}%`).join(' · ');
+    }
+
+    function openChatUsagePanel(anchor, source) {
+      const ex = document.getElementById('chatUsagePanel'); if (ex) ex.remove();
+      const account = (chatUsage[source] || {}).account;
+      const windows = (account && Array.isArray(account.windows) ? account.windows : []);
+      const menu = document.createElement('div');
+      menu.id = 'chatUsagePanel';
+      menu.className = 'chat-usage-panel';
+      menu.innerHTML = `<div class="chat-usage-title">${source === 'codex' ? 'Codex' : 'Claude'} 계정 한도</div>`
+        + (windows.length
+          ? windows.map(w => {
+              const used = Number(w.usedPercent);
+              const pct = Number.isFinite(used) ? Math.max(0, Math.min(100, used)) : 0;
+              return `<div class="chat-usage-row" data-level="${usageLevel(pct)}">
+                <span class="chat-usage-label">${escapeHtml(w.label || w.key || '')}</span>
+                <span class="chat-usage-value">${used.toFixed(1)}% 사용 · ${Number(w.remainingPercent).toFixed(1)}% 남음</span>
+                <span class="chat-usage-reset">${escapeHtml(usageResetText(w.resetsAt))}</span>
+                <span class="chat-usage-track"><i style="width:${pct}%"></i></span></div>`;
+            }).join('')
+          : '<div class="chat-usage-empty">사용량을 못 가져왔어요</div>');
+      document.body.appendChild(menu);
+      const r = anchor.getBoundingClientRect();
+      menu.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - menu.offsetWidth - 8))}px`;
+      menu.style.top = `${Math.min(r.bottom + 4, window.innerHeight - menu.offsetHeight - 8)}px`;
+      const close = () => { menu.remove(); document.removeEventListener('click', onDoc, true); };
+      const onDoc = (e) => { if (!menu.contains(e.target) && e.target !== anchor) close(); };
+      setTimeout(() => document.addEventListener('click', onDoc, true), 0);
+    }
+
     function openChatPicker(anchor) {
       const root = (selected && selected.root) || (sessions[0] && sessions[0].root);
       if (!root) { showToast('워크트리를 먼저 고르세요', 'err'); return; }
