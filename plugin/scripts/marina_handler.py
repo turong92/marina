@@ -179,6 +179,29 @@ class Handler(BaseHTTPRequestHandler):
             start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
 
+    # ── 에이전트 API 이중 프리픽스 ──
+    # 웹은 /mobile/api/* 를 못 부른다: auth 가 꺼진 로컬에서 principal 이 None 이라 모바일 토큰
+    # 검사에 걸려 403 이다. 모바일은 /api/* 를 못 부른다: host_guarded 가 펀넬 호스트를 막는다.
+    # 그래서 라우트를 옮기는 대신 웹 전용 별칭 /api/agent/<op> 를 /mobile/api/<op> 로 정규화해
+    # **같은 라우트 본문**을 공유한다 (기존 /api/mobile-send·/api/mobile-state 별칭의 일반화).
+    _AGENT_API_ALIAS = "/api/agent/"
+
+    def _agent_api_alias(self, parsed: urllib.parse.ParseResult) -> urllib.parse.ParseResult:
+        if not parsed.path.startswith(self._AGENT_API_ALIAS):
+            return parsed
+        self._agent_api_web = True
+        return parsed._replace(path="/mobile/api/" + parsed.path[len(self._AGENT_API_ALIAS):])
+
+    def _agent_api_ok(self, parsed: urllib.parse.ParseResult, principal: Any) -> bool:
+        """에이전트 API 인증. 웹 경로는 이미 host_guarded(POST 는 origin/CSRF 도)를 통과했으므로
+        모바일 토큰을 요구하지 않는다. 자원 권한(_require_root_access·can_resource)은 라우트 본문에서
+        종전대로 검사하므로, 이 술어는 '이 표면에 말을 걸 자격'만 판정한다."""
+        if principal is not None:
+            return True
+        if getattr(self, "_agent_api_web", False):
+            return is_loopback_client(self)   # auth 꺼진 로컬 대시보드
+        return mobile_request_ok(self, parsed)
+
     def _policy(self) -> AccessPolicy:
         return AccessPolicy(auth_controller().store)
 
@@ -328,6 +351,7 @@ class Handler(BaseHTTPRequestHandler):
         if host_guarded and not self._host_allowed():
             self.send_json({"error": "forbidden host"}, 403)
             return
+        parsed = self._agent_api_alias(parsed)   # /api/agent/<op> → /mobile/api/<op> (호스트 가드 '뒤')
         controller = auth_controller()
         if controller.dispatch(self, "GET", parsed):
             return
@@ -373,7 +397,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if parsed.path in ("/mobile/api/state", "/api/mobile-state"):
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -382,7 +406,7 @@ class Handler(BaseHTTPRequestHandler):
                 include_all=query.get("all", ["0"])[0] == "1")))
             return
         if parsed.path == "/mobile/api/catalog":
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -395,7 +419,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, 400)
             return
         if parsed.path == "/mobile/api/services":
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -432,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": str(exc)}, 400)
             return
         if parsed.path == "/mobile/api/transcript":
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -458,7 +482,7 @@ class Handler(BaseHTTPRequestHandler):
             # 이 세션이 만든/바꾼 파일 — 목록(/session-files)과 원본(/session-file).
             # 원본 서빙은 새 노출면이라 좁게 잠근다: 경로가 워크트리 안으로 resolve 돼야 하고(심링크 탈출 차단),
             # 이미지 화이트리스트 외에는 전부 text/plain + nosniff(대시보드 오리진에서 HTML/JS 실행 방지).
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -495,7 +519,7 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path in ("/mobile/api/transcript-image", "/mobile/api/images"):
             # 대화 안 이미지 — 목록(/images)과 원본 바이트(/transcript-image). 트랜스크립트에 base64 로
             # 박혀 있어서 타임라인엔 ref 만 싣고 여기서 그 줄만 다시 읽어 준다.
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -534,7 +558,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if parsed.path == "/mobile/api/file":
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -552,7 +576,7 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(data)
             return
         if parsed.path == "/mobile/api/usage":
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -578,7 +602,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(payload)
             return
         if parsed.path == "/mobile/api/activity":
-            if principal is None and not mobile_request_ok(self, parsed):
+            if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             query = urllib.parse.parse_qs(parsed.query)
@@ -1158,6 +1182,7 @@ class Handler(BaseHTTPRequestHandler):
             if host_guarded and not self._host_allowed():
                 self.send_json({"error": "forbidden host"}, 403)
                 return
+            parsed = self._agent_api_alias(parsed)   # /api/agent/<op> → /mobile/api/<op> (호스트 가드 '뒤')
             controller = auth_controller()
             if controller.dispatch(self, "POST", parsed):
                 return
@@ -1189,7 +1214,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json(payload, getattr(exc, "status", 409))
                 return
             if parsed.path in ("/mobile/api/send", "/api/mobile-send"):
-                if principal is None and not mobile_request_ok(self, parsed):
+                if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 mobile_body = self.read_json()
@@ -1225,7 +1250,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(result)
                 return
             if parsed.path == "/mobile/api/upload":
-                if principal is None and not mobile_request_ok(self, parsed):
+                if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 try:
@@ -1254,7 +1279,7 @@ class Handler(BaseHTTPRequestHandler):
             if parsed.path == "/mobile/api/launch":
                 # 에이전트 새 세션 직접 launch — 워크트리 만들고 셸 열고 `claude` 치던 3스텝을 한 번으로.
                 # sid 가 없는 새 세션이라 agent 자원 권한 검사는 root 권한으로 갈음한다(세션이 아직 없다).
-                if principal is None and not mobile_request_ok(self, parsed):
+                if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 try:
@@ -1273,7 +1298,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(exc)}, 400)
                 return
             if parsed.path == "/mobile/api/interrupt":
-                if principal is None and not mobile_request_ok(self, parsed):
+                if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 try:
@@ -1297,7 +1322,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if parsed.path in ("/mobile/api/pins", "/mobile/api/hidden", "/mobile/api/worktree-create"):
                 # 모바일 표면은 /mobile/api/* 에 산다 — /api/* 는 호스트 가드에 막혀 펀넬에서 못 부른다.
-                if principal is None and not mobile_request_ok(self, parsed):
+                if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 try:
@@ -1319,7 +1344,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(exc)}, 400)
                 return
             if parsed.path == "/mobile/api/answer":
-                if principal is None and not mobile_request_ok(self, parsed):
+                if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 try:
@@ -1347,7 +1372,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(exc)}, 400)
                 return
             if parsed.path == "/mobile/api/services/action":
-                if principal is None and not mobile_request_ok(self, parsed):
+                if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 try:
@@ -1375,7 +1400,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.send_json({"error": str(exc)}, 400)
                 return
             if parsed.path == "/mobile/api/settings":
-                if principal is None and not mobile_request_ok(self, parsed):
+                if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
                     return
                 try:
