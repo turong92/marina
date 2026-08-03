@@ -569,8 +569,12 @@ grep -q "sentCols" "$J" || { echo "FAIL: 마지막 전송 치수를 안 기억�
 ! grep -q "termPlace(termFocus," "$J" || { echo "FAIL: 활성 칸 하드코딩 배치 부활(빈 칸을 무시하고 덮어씀)"; exit 1; }
 # 경계는 fetch 만이 아니다 — api()·EventSource 도 똑같이 뷰가 백엔드를 직접 만지는 것이다
 grep -qE "fetch\(|[^.]\bapi\(|EventSource" "$J" && { echo "FAIL: 뷰가 HTTP 를 직접 부름(fetch·api·EventSource) — io 경계 위반"; exit 1; }
-grep -q "openAgentTerminal" "$SCR/marina-web/app-5-sessions.js" || { echo "FAIL: AGENTS 행 클릭=attach 배선 없음"; exit 1; }
-grep -q "data-agent-peek" "$SCR/marina-web/app-5-sessions.js" || { echo "FAIL: '대화' 읽기 전용 버튼 없음"; exit 1; }
+# 터미널 탭은 **셸 전용**이 됐다 — 에이전트 PTY 는 대화 탭 [원본] 뷰(mountAgentTerm)가 맡는다.
+# 한 세션을 여는 길이 둘이면 어디서 뭘 하는지 알 수 없다(형: 역할 완전분리).
+grep -q "function mountAgentTerm" "$J" || { echo "FAIL: 대화 탭 [원본] 마운트 경로 없음"; exit 1; }
+grep -q "function termShellList" "$J" || { echo "FAIL: 셸 사이드바가 에이전트 PTY 를 거르지 않음"; exit 1; }
+grep -q "data-agent-raw" "$SCR/marina-web/app-5-sessions.js" || { echo "FAIL: AGENTS 행에 원본 터미널 진입 없음"; exit 1; }
+! grep -q "data-agent-peek" "$SCR/marina-web/app-5-sessions.js" || { echo "FAIL: 읽기전용 '대화' 버튼이 남아 있다 — 행 클릭 자체가 대화 탭이다"; exit 1; }
 grep -q "vendor-xterm.js" "$SCR/marina-web/index.html" || { echo "FAIL: xterm vendor 로드 없음"; exit 1; }
 ! grep -q 'data-ws-tab="term" disabled' "$SCR/marina-web/index.html" || { echo "FAIL: 터미널 탭이 여전히 disabled"; exit 1; }
 if command -v node >/dev/null 2>&1; then node --check "$J" || { echo "FAIL: 문법 오류 $J"; exit 1; }; fi

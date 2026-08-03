@@ -189,6 +189,9 @@
       worktreeData = data.worktrees ?? [];
       projectData = data.projects ?? [];
       worktreesLoaded = true;
+      // 대화 탭 훅은 **조기 return 앞에** 둔다 — statusTs 는 아래 시그니처에서 빠져 있어서(휘발성)
+      // 뒤에 두면 '새 턴' 점이 영영 안 뜬다. 비활성 탭을 따로 폴링하지 않는 대가로 이 신호를 쓴다.
+      if (typeof pruneChatTabs === 'function') { pruneChatTabs(); markChatUnread(); }
       // 구조 시그니처(휘발성 에이전트 필드 제외)가 동일하면 전체 render 스킵 — 부분 패치가 라이브 값을 갱신한다.
       const nextSignature = worktreeStructureSig(worktreeData, projectData);
       if (!refresh && nextSignature === worktreeSignature) return;

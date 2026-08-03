@@ -8,7 +8,7 @@
     function visibleServices(session) { return (session.services || []).filter(svc => !isInternalService(svc)); }
 
     // ── AGENTS 섹션 (A1) — 이 워크트리에서 도는 Claude/Codex 세션 가시화. SERVICES 와 완전 동일 문법(형 통일 지시):
-    // 접힘도 카드 펼침(expandedRoots)을 그대로 따르고, 행 클릭 = 대화 내용 뷰어(openAgentTranscript).
+    // 접힘도 카드 펼침(expandedRoots)을 그대로 따르고, 행 클릭 = 대화 탭(openAgentChat).
     function agentActive(ts) {   // 구버전 payload 폴백 — 새 payload 는 native agent.status 사용
       return !!ts && (Date.now() / 1000 - ts) < 120;
     }
@@ -31,7 +31,7 @@
           <span class="agent-src ${isCodex ? 'codex' : 'claude'}">${isCodex ? 'Codex' : 'Claude'}</span>
           <span class="svc-name"><span title="${escapeHtml(agent.title)}">${escapeHtml(agent.title)}</span></span>
           <span class="svc-right">
-            ${openable ? `<span class="hov-acts"><button data-agent-peek title="대화 내용만 읽기(attach 없이)">대화</button></span>` : ''}
+            ${openable ? `<span class="hov-acts"><button data-agent-raw title="원본 터미널로 열기 — 권한 프롬프트·/명령·TUI 조작">&gt;_</button></span>` : ''}
             <span class="agent-state-label">${meta.label}</span>
             <span class="mono-port svc-uptime" data-agent-relts>${escapeHtml(relTime(agent.statusTs || agent.ts))}</span>
           </span>
@@ -268,13 +268,21 @@
         if (tailEl && agent.preview) { tailEl.textContent = agent.preview; tailEl.title = agent.preview; }
       });
     }
-    // 행 클릭 = 터미널 attach(오르카), '대화' = 읽기 전용 뷰어(openAgentTranscript) — agents 재구성 후 재배선.
+    // 행 클릭 = **대화 탭**(에이전트 세션 워크스페이스), '>_' = 그 세션의 원본 터미널.
+    // 예전엔 행 클릭이 터미널 attach 였다 — 터미널이 셸과 에이전트 조종을 겸해 경계가 없었고,
+    // 그래서 detach 된 세션·과거 세션의 이미지를 볼 길이 아예 없었다(형이 겪은 문제).
     function wireAgentRows(container, session, agents) {
       container.querySelectorAll('[data-agent-row][data-agent-sid]').forEach((row, i) => {
         const agent = agents.filter(a => a.sid)[i];
-        row.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTerminal === 'function') openAgentTerminal(session.root, agent); };
-        const peek = row.querySelector('[data-agent-peek]');
-        if (peek) peek.onclick = (e) => { e.stopPropagation(); if (typeof openAgentTranscript === 'function') openAgentTranscript(session, agent); };
+        row.onclick = (e) => { e.stopPropagation(); if (typeof openAgentChat === 'function') openAgentChat(session.root, agent); };
+        const raw = row.querySelector('[data-agent-raw]');
+        if (raw) raw.onclick = (e) => {
+          e.stopPropagation();
+          if (typeof openAgentChat !== 'function') return;
+          openAgentChat(session.root, agent);            // 탭을 열거나 이미 열린 탭으로 이동
+          const tab = activeChatTab();
+          if (tab) { tab.view = 'raw'; saveChatTabs(); renderChatPane(); }
+        };
       });
     }
 

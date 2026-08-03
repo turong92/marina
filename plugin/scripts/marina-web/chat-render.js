@@ -237,7 +237,6 @@
       const parts = [includeSource, host.displayModel(runtime && runtime.model), runtime && runtime.effort].filter(Boolean);
       return parts.join(" · ");
     }
-    // LIST_RECONCILE_END
     function mergeHistoryTurns(existing, incoming) {
       const out = existing.slice();
       const ids = new Set(out.filter(turn => turn.id).map(turn => turn.id));

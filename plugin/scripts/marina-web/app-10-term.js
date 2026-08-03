@@ -262,9 +262,13 @@
       };
     }
 
+    // 터미널 탭은 **셸 전용**이다. 에이전트 PTY 는 대화 탭 [원본] 뷰가 맡는다 —
+    // 한 세션을 여는 길이 둘이면 어디서 뭘 하는지 알 수 없다(형: 역할 완전분리).
+    function termShellList() { return TermIO.list().filter(s => !s.agent); }
+
     function termRenderSide() {
       const side = termPane.querySelector('[data-term-side-list]');
-      const list = TermIO.list();
+      const list = termShellList();
       const wts = [...new Set(list.map(s => s.root))];
       // 멱등 가드 — 목록 표시에 영향 주는 상태(세션·이름·부제·활동닷·배치칸·포커스)가 그대로면 재구성하지 않는다.
       // 3s 폴이 목록을 매번 innerHTML 로 갈아엎으면 그 reflow 가 바로 위 형제(`새 셸` select)의 열린 네이티브
@@ -282,7 +286,7 @@
       if (newWtSel && document.activeElement === newWtSel) return;
       termSideSig = sig;
       side.innerHTML = wts.map(root => {
-        const rows = TermIO.list().filter(s => s.root === root).sort((a, b) => a.created - b.created).map(s => {
+        const rows = termShellList().filter(s => s.root === root).sort((a, b) => a.created - b.created).map(s => {
           const slot = termSlotOf(s.tid);
           const badge = termVisible(s.tid) ? `<span class="term-slot-badge">${'①②③④'[slot]}</span>` : '';
           const dot = termDirty.has(s.tid) ? '<span class="term-dot"></span>' : '';
@@ -459,7 +463,51 @@
     // 깃 D&D Interactive Rebase → 터미널에서 실행(웹 UI 로는 대화형 편집 불가, PTY 가 에디터를 띄운다).
     // 그 워크트리 셸을 열고 명령을 타이핑까지만(엔터는 사용자 — 안전).
     function openTerminalCmd(root, cmd) { termOpenPending(root, null, cmd); }
-    // AGENTS 행 → 터미널 attach 진입점 (오르카 문법 — 좌측 패널과 연동)
+    // ── 대화 탭 [원본] 뷰 — 그 에이전트 세션의 PTY 를 임의 엘리먼트에 붙인다 ──
+    // 터미널 탭(셸 전용)의 칸/사이드바와는 별개다. 여기 인스턴스는 termInsts 에 같은 규칙으로 등록해
+    // 스크롤백과 io 배선을 공유한다 — 두 벌로 열면 resume 이 두 번 돌고 스크롤백이 갈린다.
+    const chatTermInsts = new Map();   // key = tid, 대화 탭이 마운트한 것만
+    async function mountAgentTerm(paneEl, root, agent) {
+      if (typeof Terminal === 'undefined') {
+        paneEl.innerHTML = '<div class="git-err" style="padding:14px">xterm 로드 실패 — 새로고침 해보세요</div>';
+        return;
+      }
+      paneEl.innerHTML = '<div class="chat-raw" data-chat-raw></div>';
+      const host = paneEl.querySelector('[data-chat-raw]');
+      const probe = termMakeInst();                 // tid 를 알기 전에 치수부터 재야 한다(term-open 인자)
+      host.appendChild(probe.el);
+      probe.term.open(probe.el);
+      probe.opened = true;
+      probe.fit.fit();
+      let tid;
+      try {
+        tid = await TermIO.open(root, {source: agent.source, sid: agent.sid}, probe.term.cols, probe.term.rows);
+      } catch (e) {
+        try { probe.term.dispose(); } catch {}
+        host.innerHTML = `<div class="chat-empty"><div class="chat-empty-title">원본을 열지 못했어요</div>
+          <div class="chat-empty-hint">${escapeHtml(e.message)}</div></div>`;
+        return;
+      }
+      // 백엔드가 살아있는 세션을 재사용한다(resume 이중 실행 방지) — 그 tid 에 인스턴스가 이미 있으면
+      // probe 를 버리고 그걸 쓴다. 덮어쓰면 옛 xterm 이 dispose 없이 새고 스크롤백도 사라진다.
+      let inst = termInsts.get(tid);
+      if (inst) {
+        try { probe.term.dispose(); } catch {}
+        host.innerHTML = '';
+        host.appendChild(inst.el);
+        if (!inst.opened) { inst.term.open(inst.el); inst.opened = true; }
+      } else {
+        probe.sentCols = probe.term.cols;
+        probe.sentRows = probe.term.rows;
+        inst = termAdoptInst(tid, probe);
+      }
+      chatTermInsts.set(tid, inst);
+      try { inst.fit.fit(); } catch {}
+      inst.term.focus();
+    }
+
+    // AGENTS 행 → 터미널 attach 진입점. 대화 탭이 생긴 뒤로 기본 경로는 아니다(app-11-chat 의
+    // openAgentChat 이 기본) — 깃 D&D 등 '터미널에서 해야 하는' 흐름을 위해 남긴다.
     function openAgentTerminal(root, agent) { termOpenPending(root, agent, null); }
 
     async function termActivate(pane) {

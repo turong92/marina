@@ -236,11 +236,16 @@ wait "$SRV" 2>/dev/null || true
 
 # ── 3) 프론트 ──
 J="$SCR/marina-web/app-5-sessions.js"
-# 형 통일 지시(2026-07-13) — AGENTS 접힘은 별도 Set 이 아니라 카드 펼침(expandedRoots)을 그대로 따르고, 행 클릭=대화 뷰어.
+# 형 통일 지시(2026-07-13) — AGENTS 접힘은 별도 Set 이 아니라 카드 펼침(expandedRoots)을 그대로 따른다.
+# 행 클릭은 이제 **대화 탭**(openAgentChat)이다. 예전엔 터미널 attach 였고 '대화' 버튼이 읽기전용
+# 모달을 열었는데, 그 모달은 도구호출·이미지를 다 생략해 형이 이미지를 볼 방법이 없었다.
 ! grep -q "expandedAgentRoots" "$J" || { echo "FAIL: 별도 Set 잔재 — SERVICES 와 통일(expandedRoots) 계약 위반"; exit 1; }
-grep -q "openAgentTranscript" "$J" || { echo "FAIL: 행 클릭=대화 뷰어(openAgentTranscript) 배선 없음"; exit 1; }
+grep -q "openAgentChat" "$J" || { echo "FAIL: 행 클릭=대화 탭(openAgentChat) 배선 없음"; exit 1; }
+grep -q "data-agent-raw" "$J" || { echo "FAIL: 원본 터미널 진입('>_') 없음"; exit 1; }
+! grep -q "openAgentTranscript" "$J" || { echo "FAIL: 읽기전용 모달 배선이 남아 있다(대화 탭이 상위 호환)"; exit 1; }
 grep -q "data-agent-sid" "$J" || { echo "FAIL: 행 sid(식별자) 없음 — 클릭 열람 불가"; exit 1; }
-grep -q "openAgentTranscript" "$SCR/marina-web/app-6-modals.js" || { echo "FAIL: 대화 뷰어 모달 없음"; exit 1; }
+grep -q "WS_VIEWS.chat" "$SCR/marina-web/app-11-chat.js" || { echo "FAIL: 대화 워크스페이스 뷰 등록 없음"; exit 1; }
+! grep -q "openAgentTranscript" "$SCR/marina-web/app-6-modals.js" || { echo "FAIL: 읽기전용 모달이 남아 있다"; exit 1; }
 grep -q "AGENTS (" "$J" || { echo "FAIL: AGENTS 섹션 라벨 없음"; exit 1; }
 grep -q "data-agents-toggle" "$J" || { echo "FAIL: AGENTS 접힘 토글 없음"; exit 1; }
 grep -q "'Codex' : 'Claude'" "$J" || { echo "FAIL: Claude/Codex 텍스트칩 없음(풀네임 — 형 피드백 2026-07-13)"; exit 1; }

@@ -300,10 +300,22 @@
     function renderUpdateBanner(s) {
       if (updateBusy) return;   // 진행 중(버튼이 busy 표시) — 폴링이 DOM 을 갈아엎지 않게
       const el = document.getElementById('updateBanner');
-      const sig = JSON.stringify(s ? [s.state, s.serving, s.installed, s.origin, s.harnessStatus] : null);
+      const sig = JSON.stringify(s ? [s.state, s.serving, s.installed, s.origin, s.harnessStatus, s.cli] : null);
       if (sig === updateBannerSig) return;   // 변화 없으면 재생성 스킵
       updateBannerSig = sig;
-      if (!s || s.state === 'current' || s.state === 'unknown') { el.hidden = true; el.innerHTML = ''; return; }
+      // CLI(claude/codex) 자체 버전도 이 배너가 그린다 — 폴링도 배너도 하나여야 한다.
+      // marina 플러그인이 최신이어도 CLI 가 뒤처졌으면 배너는 떠야 하므로 숨김 조건에 cli 를 넣는다.
+      const cli = (s && s.cli) || {};
+      const cliBehind = Object.keys(cli).filter(h => cli[h] && cli[h].behind);
+      const pluginQuiet = !s || s.state === 'current' || s.state === 'unknown';
+      if (pluginQuiet && !cliBehind.length) { el.hidden = true; el.innerHTML = ''; return; }
+      if (pluginQuiet) {   // CLI 만 뒤처짐 — marina 문구 없이 CLI 칩만
+        el.hidden = false;
+        el.classList.remove('stale');
+        el.innerHTML = `<span class="ub-dot"></span><span class="ub-msg">CLI 새 버전</span>`;
+        appendCliChips(el, cli, cliBehind);
+        return;
+      }
       el.hidden = false;
       el.classList.toggle('stale', s.state === 'stale');
       if (s.state === 'stale') {
@@ -326,10 +338,54 @@
           <span class="ub-sha">${escapeHtml(s.origin || '?')}</span>
           <span class="ub-actions">${chips.join('')}${updateBtn}</span>`;
       }
+      appendCliChips(el, cli, cliBehind);
       const restartBtn = el.querySelector('[data-restart]');
       if (restartBtn) restartBtn.onclick = () => doRestartDashboard(restartBtn);
       const updateNowBtn = el.querySelector('[data-update-now]');
       if (updateNowBtn) updateNowBtn.onclick = () => doUpdateNow(updateNowBtn);
+    }
+
+    // claude/codex CLI 칩 — installed → latest 와 [받기]. 설치 방식별 명령은 title 에 실어 준다
+    // (native 는 `claude update`, brew 는 `brew upgrade codex` — 형이 직접 칠 수도 있어야 하니까).
+    function appendCliChips(el, cli, cliBehind) {
+      if (!cliBehind.length) return;
+      const chips = cliBehind.map(h => {
+        const c = cli[h];
+        const auto = c.autoUpdates === false ? ' · 자동 업데이트 꺼짐' : '';
+        return `<span class="ub-hchip old" title="${escapeHtml(c.cmd || '')}${auto}">
+          <i></i>${escapeHtml(h)} <span class="sha">${escapeHtml(c.installed || '?')} → ${escapeHtml(c.latest || '?')}</span>
+          <button class="ub-btn" data-cli-update="${escapeHtml(h)}">받기</button></span>`;
+      }).join('');
+      el.insertAdjacentHTML('beforeend', `<span class="ub-actions ub-cli">${chips}</span>`);
+      el.querySelectorAll('[data-cli-update]').forEach(btn => {
+        btn.onclick = () => doCliUpdate(btn, btn.dataset.cliUpdate);
+      });
+    }
+
+    async function doCliUpdate(btn, harness) {
+      if (updateBusy) return;
+      if (!confirm(`${harness} CLI 를 최신으로 올릴까요?\n(그 하네스의 세션이 돌고 있으면 거부돼요)`)) return;
+      updateBusy = true;
+      btn.disabled = true; btn.innerHTML = BUSY_DOTS;
+      try {
+        const r = await api('/api/agent/cli-update', {
+          method: 'POST', headers: {'content-type': 'application/json'},
+          body: JSON.stringify({harness}),
+        });
+        showToast(`${harness} ${r.installed || ''} 로 업데이트했어요`, 'ok');
+        updateBannerSig = '';            // 다음 폴링이 새 상태로 다시 그리게
+      } catch (e) {
+        // api() 는 비-2xx 의 본문을 Error.message 에 그대로 싣는다 — 409 면 busy 배열이 들어 있다.
+        let busy = null;
+        try { busy = JSON.parse(e.message).busy; } catch {}
+        showToast(busy && busy.length
+          ? `${harness} 세션 ${busy.length}개 작업 중 — 끝나면 받아요`
+          : `업데이트 실패 · ${e.message}`, 'err');
+      } finally {
+        updateBusy = false;
+        btn.disabled = false; btn.innerHTML = '받기';
+        loadUpdateStatus().catch(console.error);
+      }
     }
 
     // 서버만 재시작하면 브라우저는 옛 INDEX_HTML(HTML/JS/CSS) 그대로라 UI 변경이 안 보임 →
@@ -650,67 +706,6 @@
     });
     document.addEventListener('scroll', hideTip, {capture: true, passive: true});
     document.addEventListener('click', hideTip, true);
-
-    // ── AGENTS 행 클릭 뷰어 — 최신부터 열고 이전 메시지는 byte cursor 로 계속 prepend. ──
-    async function openAgentTranscript(session, agent) {
-      const ex = document.getElementById('agentModalBack'); if (ex) ex.remove();
-      const back = document.createElement('div');
-      back.id = 'agentModalBack'; back.className = 'modal-backdrop'; back.style.zIndex = '250';
-      const isCodex = agent.source === 'codex';
-      back.innerHTML = `<div class="links-modal agent-modal">
-        <div class="links-modal-head"><strong><span class="agent-src ${isCodex ? 'codex' : 'claude'}">${isCodex ? 'Codex' : 'Claude'}</span> ${escapeHtml(agent.title)}</strong>
-          <button class="links-modal-x" title="닫기 (Esc)">✕</button></div>
-        <div class="config-label" style="margin-bottom:8px">대화 기록 — 도구 호출/결과는 생략, 민감정보는 로그처럼 마스킹</div>
-        <button class="agent-older-btn" data-agent-older hidden>이전 메시지</button>
-        <div class="agent-turns" data-agent-turns>불러오는 중…</div>
-      </div>`;
-      document.body.appendChild(back);
-      const close = () => { back.remove(); document.removeEventListener('keydown', onKey); };
-      const onKey = (e) => { if (e.key === 'Escape') close(); };
-      document.addEventListener('keydown', onKey);
-      back.querySelector('.links-modal-x').onclick = close;
-      back.onclick = (e) => { if (e.target === back) close(); };   // 읽기 전용 뷰어 — 바깥 클릭 닫기 허용
-      const body = back.querySelector('[data-agent-turns]');
-      const older = back.querySelector('[data-agent-older]');
-      let cursor = null;
-      let loading = false;
-      const turnsHtml = (turns) => turns.map(t => `
-          <div class="agent-turn ${t.role === 'user' ? 'user' : 'ai'}">
-            <span class="turn-role">${t.role === 'user' ? '나' : (isCodex ? 'Codex' : 'Claude')}</span>
-            <div class="turn-text">${escapeHtml(t.text)}</div>
-          </div>`).join('');
-      async function loadOlderAgentTurns(initial = false) {
-        if (loading) return;
-        loading = true;
-        older.disabled = true;
-        older.textContent = '불러오는 중';
-        try {
-          const before = !initial && cursor != null ? `&before=${enc(cursor)}` : '';
-          const d = await api(`/api/agent-transcript?root=${enc(session.root)}&source=${enc(agent.source)}&sid=${enc(agent.sid)}${before}`);
-          const turns = d.turns || [];
-          if (initial) {
-            body.innerHTML = turns.length ? turnsHtml(turns) : '<div class="config-label">표시할 대화가 없어요 (도구 호출만 있었거나 빈 세션)</div>';
-            body.scrollTop = body.scrollHeight;
-          } else if (turns.length) {
-            const oldHeight = body.scrollHeight;
-            const oldTop = body.scrollTop;
-            body.insertAdjacentHTML('afterbegin', turnsHtml(turns));
-            body.scrollTop = oldTop + body.scrollHeight - oldHeight;
-          }
-          cursor = d.cursor ?? null;
-          older.hidden = !d.hasMore;
-        } catch (e) {
-          if (initial) body.innerHTML = `<div class="git-err">${escapeHtml(e.message)}</div>`;
-          else showToast(`이전 메시지 실패 · ${e.message}`, 'err');
-        } finally {
-          loading = false;
-          older.disabled = false;
-          older.textContent = '이전 메시지';
-        }
-      }
-      older.onclick = () => loadOlderAgentTurns(false);
-      await loadOlderAgentTurns(true);
-    }
 
     let pollTimer = null;
     let pollTick = 0;

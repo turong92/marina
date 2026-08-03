@@ -2907,6 +2907,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const statusLabel = card.querySelector(".session-status-label");
       if (statusLabel) statusLabel.textContent = sm ? sm.label : "";
     }
+    // LIST_RECONCILE_END
     function sessionHistory(session) {
       if (!session || session.kind !== "agent") return null;
       let history = historyCache[session.key];

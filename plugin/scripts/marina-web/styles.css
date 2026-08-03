@@ -1253,3 +1253,59 @@
     .dl.hunk { color: var(--sys-cont-primary-default); }
     .dl.meta { color: var(--sys-cont-neutral-default); }
     .dl.file { color: var(--sys-cont-neutral-default); margin-top: 8px; font-weight: 600; }
+
+    /* ── 대화 워크스페이스 (app-11-chat.js) ── 에이전트 세션 멀티탭.
+       타임라인 마크업은 /web/chat-render.js 가 모바일과 공유하고, 스킨만 여기서 입힌다. */
+    .chat-tabstrip { display: flex; gap: 4px; align-items: center; padding: 6px 8px 0; overflow-x: auto; flex: 0 0 auto; scrollbar-width: thin; }
+    .chat-tab { display: inline-flex; align-items: center; gap: 6px; max-width: 240px; padding: 5px 8px; border: 1px solid var(--sys-style-neutral-light); border-bottom: none; border-radius: 7px 7px 0 0; background: var(--sys-bg-base); color: var(--sys-cont-neutral-light); font-size: 12px; white-space: nowrap; cursor: pointer; }
+    .chat-tab:hover { background: var(--sys-bg-surface-hover); }
+    .chat-tab.active { background: var(--sys-bg-surface); border-color: var(--sys-style-neutral-default); color: var(--sys-cont-neutral-default); font-weight: 600; }
+    .chat-tab-label { overflow: hidden; text-overflow: ellipsis; }
+    .chat-tab-dot { width: 6px; height: 6px; border-radius: 50%; background: transparent; flex: 0 0 auto; }
+    .chat-tab.unread .chat-tab-dot { background: var(--sys-cont-primary-default); }   /* 안 읽은 새 턴 */
+    .chat-tab-x { opacity: .45; font-size: 10px; font-weight: 400; padding: 0 2px; }
+    .chat-tab-x:hover { opacity: 1; color: var(--sys-cont-negative-default); }
+    .chat-tab-add { flex: 0 0 auto; padding: 4px 9px; border: 1px dashed var(--sys-style-neutral-default); border-radius: 7px; background: transparent; color: var(--sys-cont-neutral-lightest); cursor: pointer; }
+    .chat-tab-add:hover { color: var(--sys-cont-primary-default); border-color: var(--sys-cont-primary-default); }
+
+    .chat-head { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-top: 1px solid var(--sys-style-neutral-light); border-bottom: 1px solid var(--sys-style-neutral-light); flex: 0 0 auto; }
+    .chat-head-root { color: var(--sys-cont-neutral-lightest); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .chat-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+    .chat-turns { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px; }
+    .chat-older-btn { flex: 0 0 auto; margin: 8px auto 0; padding: 4px 12px; border: 1px solid var(--sys-style-neutral-default); border-radius: 999px; background: var(--sys-bg-surface); font-size: 12px; cursor: pointer; }
+    .chat-raw { flex: 1 1 auto; min-height: 0; display: flex; }
+    .chat-raw .term-wrap { flex: 1 1 auto; min-width: 0; }
+
+    .chat-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; flex: 1; color: var(--sys-cont-neutral-lightest); }
+    .chat-empty-title { font-size: 14px; font-weight: 600; color: var(--sys-cont-neutral-light); }
+    .chat-empty-hint { font-size: 12px; }
+    .chat-open-btn { margin-top: 4px; padding: 6px 14px; border: 1px solid var(--sys-cont-primary-default); border-radius: 7px; background: transparent; color: var(--sys-cont-primary-default); cursor: pointer; }
+
+    .chat-composer { flex: 0 0 auto; border-top: 1px solid var(--sys-style-neutral-light); padding: 8px 10px; background: var(--sys-bg-surface); }
+    .chat-input-row { display: flex; gap: 6px; align-items: flex-end; }
+    .chat-prompt { flex: 1 1 auto; min-height: 32px; max-height: 160px; padding: 7px 9px; border: 1px solid var(--sys-style-neutral-default); border-radius: 7px; font: inherit; font-size: 13px; resize: vertical; }
+    .chat-send-btn, .chat-stop-btn, .chat-attach-btn { flex: 0 0 auto; padding: 7px 12px; border: 1px solid var(--sys-style-neutral-default); border-radius: 7px; background: var(--sys-bg-surface); cursor: pointer; font-size: 12px; }
+    .chat-send-btn { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); font-weight: 600; }
+    .chat-stop-btn { color: var(--sys-cont-negative-default); }
+    .chat-attach-strip { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+    .chat-attach-chip { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border-radius: 999px; background: var(--sys-bg-base); font-size: 11px; }
+    .chat-attach-chip b { cursor: pointer; opacity: .5; font-weight: 400; }
+    .chat-attach-chip b:hover { opacity: 1; color: var(--sys-cont-negative-default); }
+    .chat-answer-hint { margin: 6px 0 0; padding: 6px 10px; border-radius: 7px; background: var(--sys-bg-base); color: var(--sys-cont-neutral-lightest); font-size: 11px; }
+
+    .chat-picker { position: fixed; z-index: 260; min-width: 200px; max-width: 340px; padding: 4px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); box-shadow: 0 8px 24px rgb(0 0 0 / 14%); }
+    .chat-picker button { display: block; width: 100%; text-align: left; padding: 7px 9px; border: none; border-radius: 6px; background: transparent; font-size: 12px; cursor: pointer; }
+    .chat-picker button:hover { background: var(--sys-bg-surface-hover); }
+    .chat-picker-empty { padding: 8px 9px; color: var(--sys-cont-neutral-lightest); font-size: 12px; }
+
+    /* 공유 렌더러 마크업 스킨 — 클래스명은 chat-render.js 가 정한다(모바일과 동일) */
+    .chat-turns .turn { margin-bottom: 12px; }
+    .chat-turns .turn.user .turnBody { border-left: 2px solid var(--sys-cont-primary-default); padding-left: 9px; }
+    .chat-turns .turnBody { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+    .chat-turns .turnBody pre { margin: 6px 0; padding: 8px 10px; border-radius: 6px; background: var(--sys-code-bg); color: hsl(220, 14%, 88%); overflow-x: auto; }
+    .chat-turns .turnAttachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .chat-turns .turnImageBtn { padding: 0; border: 1px solid var(--sys-style-neutral-light); border-radius: 7px; background: none; cursor: zoom-in; overflow: hidden; }
+    .chat-turns .turnImageBtn img { display: block; max-width: 320px; max-height: 240px; }
+    .chat-turns .activityGroup { margin: 6px 0; font-size: 12px; color: var(--sys-cont-neutral-light); }
+    .chat-turns .mdTableWrap { overflow-x: auto; }
+    .chat-turns .turnMeta { color: var(--sys-cont-neutral-lightest); font-size: 11px; }
