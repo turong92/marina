@@ -149,7 +149,12 @@ grep -q 'async function loadSessionActivity' "$MOBILE" || { echo "FAIL mobile su
 grep -q 'async function loadNativeCatalog' "$MOBILE" || { echo "FAIL mobile native catalog is not lazy"; exit 1; }
 grep -q '"/mobile/api/transcript"' "$HANDLER" || { echo "FAIL token-protected mobile transcript route missing"; exit 1; }
 grep -q '"/mobile/api/activity"' "$HANDLER" || { echo "FAIL token-protected mobile activity route missing"; exit 1; }
-grep -q 'data-agent-older' "$MODALS" || { echo "FAIL desktop transcript older-message control missing"; exit 1; }
-grep -q 'loadOlderAgentTurns' "$MODALS" || { echo "FAIL desktop transcript pagination missing"; exit 1; }
+# 데스크톱 '이전 메시지'는 읽기전용 모달이 아니라 대화 탭(app-11-chat.js)에 있다 — 그 모달은
+# 도구호출·이미지를 다 생략해서 대화 탭이 상위 호환으로 대체했다.
+grep -q 'data-chat-older' "$SCR/marina-web/app-11-chat.js" || { echo "FAIL desktop transcript older-message control missing"; exit 1; }
+grep -q 'loadChatTranscript(false)' "$SCR/marina-web/app-11-chat.js" || { echo "FAIL desktop older-message control is not wired to the cursor"; exit 1; }
+grep -q 'tab.cursor != null ? `&before=' "$SCR/marina-web/app-11-chat.js" || { echo "FAIL desktop transcript pagination missing"; exit 1; }
+# 커서는 **탭마다** 따로여야 한다 — 전역에 두면 탭을 바꿀 때 남의 커서로 페이지를 넘긴다.
+! grep -qE '^\s+let chatCursor' "$SCR/marina-web/app-11-chat.js" || { echo "FAIL desktop cursor is global, not per-tab"; exit 1; }
 
 echo "PASS test-agent-history-pagination"

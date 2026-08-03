@@ -149,18 +149,24 @@ PY
 # 쪼개면 진행 중이던 어시스턴트 설명(지문)이 이전 exchange 에 남고 질문만 새 exchange 로 가서,
 # 답하기 전엔 읽을 게 아무것도 없다(형: "질문을 받는데 답을 해야 질문 전에 지문이 보여").
 # queued 는 원래 예외였는데 steered 를 새로 만들면서 예외에 안 넣어 생긴 회귀다.
-PYTHONPATH="$SCR" python3 - <<'PY' > /tmp/marina-exchange-sim.js
-from marina_mobile import render_mobile_html
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' > /tmp/marina-exchange-sim.js
+# conversationExchanges 는 모바일에, esc 헬퍼와 exchangeSections 는 공유 렌더러에 있다.
+# 각자 자기 파일에서 찾는다.
 import json
+import sys
+from pathlib import Path
+
+from marina_mobile import render_mobile_html
 
 html = render_mobile_html()
-src = html[html.find("// ESC_HELPERS_START"):html.find("// ESC_HELPERS_END")]
-for name in ("function conversationExchanges", "function exchangeSections"):
-    start = html.find(name)
-    end = html.find("\n    function ", start + 10)
+shared = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
+src = shared[shared.find("// ESC_HELPERS_START"):shared.find("// ESC_HELPERS_END")]
+for name, blob in (("function conversationExchanges", html), ("function exchangeSections", shared)):
+    start = blob.find(name)
+    end = blob.find("\n    function ", start + 10)
     if start < 0 or end < 0:
         raise SystemExit(f"{name} 을 못 찾음")
-    src += "\n" + html[start:end]
+    src += "\n" + blob[start:end]
 print("const src = " + json.dumps(src) + ";")
 print(open(__file__.replace(".py", "")) if False else "")
 PY
