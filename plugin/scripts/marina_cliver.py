@@ -31,7 +31,14 @@ _STATUS_CACHE: dict[str, Any] = {}
 _VERSION_RE = re.compile(r"(\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?)")
 
 # 업데이트가 실행 파일을 갈아치우면 돌고 있는 세션이 깨진다 — 이 상태면 막는다.
-_BUSY_STATUSES = ("running", "waiting")
+#
+# 어휘는 resolve_session_liveness 가 캐논화한 것을 그대로 쓴다:
+#   working(작업 중) · blocked(권한 승인 대기) · waiting(응답 마치고 입력 대기) ·
+#   completed · failed · idle
+# working 은 당연히 막고, blocked 도 막는다 — 권한 프롬프트를 띄운 채 바이너리가 갈리면
+# 그 프롬프트가 죽는다. waiting/idle/completed/failed 는 막지 않는다(바쁘지 않다).
+# ('running' 은 에이전트 상태가 아니라 **서비스**의 상태다 — 여기 쓰면 영영 안 걸린다.)
+_BUSY_STATUSES = ("working", "blocked")
 
 
 class BusyError(Exception):
@@ -194,6 +201,13 @@ def cli_update(harness: str) -> dict[str, Any]:
         raise ValueError(f"{harness} 설치 방식을 알 수 없어 자동 업데이트를 못 해요")
     out = _run_update(cmd)
     # 무효화는 완료 "후" — 진행 중(수십 초) 폴링이 옛 버전으로 캐시를 재충전하는 레이스 차단.
+    # **두 계층 다** 지운다: update_status 가 이 페이로드를 통째로 감싸 60초 캐시하므로, 여기만
+    # 지우면 받은 직후에도 배너가 옛 behind=true 로 다시 뜬다.
     _STATUS_CACHE.clear()
+    try:
+        from marina_update import _status_cache
+        _status_cache.clear()
+    except Exception:
+        pass
     return {"ok": True, "harness": harness,
             "installed": _installed_version(harness), "output": (out or "").strip()[-200:]}

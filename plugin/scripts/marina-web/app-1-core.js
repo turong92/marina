@@ -85,7 +85,8 @@
       selectedProjectId = entry.projectId || selectedProjectId;
       if (selectedProjectId) localStorage.setItem('marinaSelectedProject', selectedProjectId);
       render();
-      if (typeof openAgentTerminal === 'function') openAgentTerminal(entry.root, entry);
+      // 알림 클릭 = 대화 탭. 터미널은 셸 전용이 됐으므로 여기로 보내면 경계가 어긋난다.
+      if (typeof openAgentChat === 'function') openAgentChat(entry.root, entry);
     }
     function patchInboxItem(b, item) {
       const meta = AGENT_STATUS_META[item.status] || AGENT_STATUS_META.idle;

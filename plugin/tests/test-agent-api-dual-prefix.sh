@@ -16,15 +16,20 @@ H = mh.Handler
 
 class FakeHandler:
     """Handler 의 메서드만 빌려 쓰는 최소 스텁 — 소켓 없이 술어만 검증한다.
-    is_loopback_client 는 client_address[0] 을, mobile_request_ok 는 headers 만 읽는다."""
+    is_loopback_client 는 client_address[0] 을, mobile_request_ok/_origin_allowed 는 headers 만 읽는다."""
 
-    def __init__(self, loopback=True, token=""):
-        self.headers = {"x-marina-mobile-token": token} if token else {}
+    def __init__(self, loopback=True, token="", origin=None):
+        self.headers = {}
+        if token:
+            self.headers["x-marina-mobile-token"] = token
+        if origin is not None:
+            self.headers["origin"] = origin
         self.client_address = ("127.0.0.1" if loopback else "10.0.0.5", 1234)
 
     _agent_api_ok = H._agent_api_ok
     _agent_api_alias = H._agent_api_alias
     _AGENT_API_ALIAS = H._AGENT_API_ALIAS
+    _origin_allowed = H._origin_allowed
 
 
 def parse(path):
@@ -76,6 +81,24 @@ assert h6b._agent_api_ok(parse("/mobile/api/send"), None) is False
 # 6) principal 이 있으면 경로·루프백과 무관하게 통과
 h7 = FakeHandler(loopback=False)
 assert h7._agent_api_ok(parse("/mobile/api/send"), object()) is True
+
+# 6b) **CSRF** — 이 라우트들은 아래쪽 공통 origin 검사에 닿기 전에 반환하고, auth 가 꺼져 있으면
+#     authorize() 도 CSRF 를 안 본다. 그래서 웹 경로는 Origin 을 스스로 봐야 한다. 안 그러면 임의
+#     웹페이지가 text/plain 로 POST 해(프리플라이트 없이) cli-update·send·launch 를 실행시킨다.
+h_evil = FakeHandler(loopback=True, origin="http://evil.example")
+h_evil._agent_api_alias(parse("/api/agent/cli-update"))
+assert h_evil._agent_api_ok(parse("/mobile/api/cli-update"), None) is False, \
+    "교차 출처 POST 가 통과한다 — CSRF 구멍"
+
+# 대시보드 자신의 오리진은 통과해야 한다(안 그러면 UI 가 통째로 죽는다)
+h_self = FakeHandler(loopback=True, origin=f"http://localhost:{mh.PORT}")
+h_self._agent_api_alias(parse("/api/agent/send"))
+assert h_self._agent_api_ok(parse("/mobile/api/send"), None) is True
+
+# Origin 없음(curl·같은 출처 GET)은 통과 — 기존 계약 유지
+h_curl = FakeHandler(loopback=True)
+h_curl._agent_api_alias(parse("/api/agent/send"))
+assert h_curl._agent_api_ok(parse("/mobile/api/send"), None) is True
 
 # 7) 옛 모바일 인증 검사가 라우트에 남아 있지 않다 — 전부 술어로 교체됐는지
 src = open(mh.__file__, encoding="utf-8").read()

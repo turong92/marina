@@ -38,7 +38,7 @@
       let saved = null;
       try { saved = JSON.parse(localStorage.getItem(CHAT_TABS_KEY) || 'null'); } catch {}
       if (!saved || !Array.isArray(saved.tabs) || !saved.tabs.length) return;
-      chatTabs = saved.tabs.map(t => ({...t, cursor: null, items: [], hasMore: false,
+      chatTabs = saved.tabs.map(t => ({...t, cursor: null, items: [], hasMore: false, paged: false,
                                        attachments: [], scrollTop: 0, seenTs: 0, unread: false}));
       chatActive = Math.min(Math.max(0, saved.active | 0), chatTabs.length - 1);
     }
@@ -83,7 +83,7 @@
       else {
         chatTabs.push({root, source: agent.source, sid: agent.sid,
                        title: agent.title || String(agent.sid).slice(0, 8),
-                       view: 'chat', cursor: null, items: [], hasMore: false, draft: '',
+                       view: 'chat', cursor: null, items: [], hasMore: false, paged: false, draft: '',
                        attachments: [], scrollTop: 0, seenTs: agent.statusTs || agent.ts || 0,
                        unread: false});
         chatActive = chatTabs.length - 1;
@@ -115,6 +115,7 @@
       const pane = chatPane();
       if (!pane) return;
       if (!chatTabs.length) {
+        if (typeof unmountAgentTerms === 'function') unmountAgentTerms();
         pane.innerHTML = `<div class="chat-empty">
           <div class="chat-empty-title">열린 대화가 없어요</div>
           <div class="chat-empty-hint">왼쪽 AGENTS 행을 누르거나 아래에서 세션을 고르세요</div>
@@ -169,6 +170,9 @@
       });
 
       const body = pane.querySelector('[data-chat-body]');
+      // pane 을 갈아엎었으므로 직전 raw xterm 의 등록을 먼저 푼다 — 안 그러면 chatTermInsts 가
+      // 세션을 열 때마다 자라고, 죽은 세션이 영영 dispose 되지 않는다.
+      if (typeof unmountAgentTerms === 'function') unmountAgentTerms();
       if (tab.view === 'raw') mountAgentTerm(body, tab.root, tab);
       else renderChatConversation(body);
     }
@@ -234,20 +238,34 @@
       };
     }
 
+    // 요청 세대 번호 — 같은 탭에서 R1 을 보낸 뒤 R2 를 보내면 R1 이 늦게 도착해 최신을 과거로
+    // 덮을 수 있다. 탭 키 비교만으론 그 역전을 못 막는다(둘 다 같은 탭이니까).
+    let chatReqSeq = 0;
+
     async function loadChatTranscript(initial) {
       const tab = activeChatTab();
       if (!tab) return;
       const key = chatTabKey(tab);
+      const seq = ++chatReqSeq;
       const before = !initial && tab.cursor != null ? `&before=${enc(tab.cursor)}` : '';
       const d = await api(`/api/agent/transcript?root=${enc(tab.root)}&source=${enc(tab.source)}&sid=${enc(tab.sid)}${before}`);
-      // 응답이 오는 사이 형이 탭을 바꿨을 수 있다 — 그러면 이건 남의 응답이다. 섞이면 A 세션 화면에
-      // B 세션 턴이 붙는다.
+      // 응답이 오는 사이 탭을 바꿨거나(남의 응답) 더 새 요청이 떠났으면(역전) 버린다.
       const now = activeChatTab();
-      if (!now || chatTabKey(now) !== key) return;
-      const fresh = MarinaChat.timelineFromTurns(d.turns || []);
-      tab.items = initial ? fresh : MarinaChat.mergeTimelineItems(fresh, tab.items);
-      tab.cursor = d.cursor != null ? d.cursor : null;
-      tab.hasMore = Boolean(d.hasMore);
+      if (!now || chatTabKey(now) !== key || seq !== chatReqSeq) return;
+      // **서버의 timeline 이 진실이다.** turns 는 평문 메시지만이라 도구 활동·diff·이미지 ref·
+      // 질문 활동이 전부 빠진다 — timelineFromTurns 는 timeline 이 없을 때의 폴백일 뿐이다.
+      const fresh = (d.timeline && d.timeline.length)
+        ? d.timeline : MarinaChat.timelineFromTurns(d.turns || []);
+      // 이전 메시지를 펼쳐 본 뒤에는 폴링이 최근 페이지로 갈아엎으면 안 된다 — 읽던 과거가 사라진다.
+      tab.items = (initial && !tab.paged) ? fresh : MarinaChat.mergeTimelineItems(fresh, tab.items);
+      if (!initial) {
+        tab.paged = true;                       // 과거를 한 번이라도 붙였다 → 이후 폴링은 병합
+        tab.cursor = d.cursor != null ? d.cursor : null;
+        tab.hasMore = Boolean(d.hasMore);
+      } else if (!tab.paged) {
+        tab.cursor = d.cursor != null ? d.cursor : null;
+        tab.hasMore = Boolean(d.hasMore);
+      }
       tab.unread = false;
       const body = chatPane().querySelector('[data-chat-body]');
       if (body && tab.view === 'chat') renderChatConversation(body);
@@ -409,7 +427,7 @@
 
     WS_VIEWS.chat = {
       activate() { renderChatPane(); chatStartPoll(); if (activeChatTab()) loadChatTranscript(true).catch(console.error); },
-      deactivate() { chatStopPoll(); },
+      deactivate() { chatStopPoll(); if (typeof unmountAgentTerms === 'function') unmountAgentTerms(); },
     };
 
     loadChatTabs();

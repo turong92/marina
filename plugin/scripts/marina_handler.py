@@ -199,7 +199,14 @@ class Handler(BaseHTTPRequestHandler):
         if principal is not None:
             return True
         if getattr(self, "_agent_api_web", False):
-            return is_loopback_client(self)   # auth 꺼진 로컬 대시보드
+            # auth 꺼진 로컬 대시보드. **Origin 도 본다** — 이 라우트들은 아래쪽 공통 origin 검사에
+            # 닿기 전에 반환하고, auth 가 꺼져 있으면 authorize() 도 CSRF 를 안 본다. 그래서 여기서
+            # 안 막으면 임의 웹페이지가 text/plain 로 POST 해(프리플라이트 없이) cli-update·send·
+            # launch 를 실행시킬 수 있다. origin_allowed 는 Origin 없음(curl)은 통과시키고 교차
+            # 출처 브라우저 요청만 막는다.
+            return is_loopback_client(self) and self._origin_allowed()
+        # 모바일 토큰 경로는 CSRF 대상이 아니다 — 토큰은 쿠키가 아니라 헤더/쿼리라 브라우저가
+        # 자동으로 붙여 주지 않고, 커스텀 헤더는 프리플라이트를 유발한다.
         return mobile_request_ok(self, parsed)
 
     def _git_diff_payload(self, root: Path, query: dict[str, list[str]]) -> dict[str, Any]:
@@ -454,6 +461,9 @@ class Handler(BaseHTTPRequestHandler):
                     "port": item.get("port"),
                     "degraded": bool(item.get("degraded")),
                     "openUrl": open_urls.get(str(item.get("service") or ""), ""),
+                    # 모바일 로그 시트의 run 선택 — 서버는 'current' 또는 'run-NNN.log' 만 받는다.
+                    # 웹은 이 값을 세션 페이로드에서 받아 쓴다(app-4-logs renderRunSelect).
+                    "logRuns": item.get("logRuns") or [],
                 } for item in session.get("services", []) if item.get("service")]
                 self.send_json({
                     "root": str(root), "running": sum(1 for item in services if item["running"]),

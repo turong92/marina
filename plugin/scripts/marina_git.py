@@ -456,6 +456,10 @@ def git_merge(root: Path, repo: str, branch: str) -> dict[str, Any]:
 
 def git_wip_stat(root: Path, repo: str) -> dict[str, Any]:
     """WIP 상세 패널용 — 워크트리(그 root 자체)의 파일별 +/-(numstat, staged+unstaged) + untracked 목록."""
+    # 등록된 repo 만 (git_diff 와 같은 규칙). _checkout_of 는 절대경로·'..' 만 막아서, 워크트리 안의
+    # 심링크로 바깥 저장소를 가리키면 그 파일명·통계가 새어 나간다.
+    if repo not in repo_names_for(source_root_for(root).resolve()):
+        raise ValueError("unknown repo")
     co = _checkout_of(root, repo)
     if not (co / ".git").exists():
         raise ValueError("repo not checked out")
@@ -475,6 +479,8 @@ def git_commit_info(any_root: Path, repo: str, commit: str) -> dict[str, Any]:
     if not re.fullmatch(r"[0-9a-f]{7,40}", commit or ""):
         raise ValueError("bad commit")
     main = source_root_for(any_root).resolve()
+    if repo not in repo_names_for(main):   # git_diff 와 같은 규칙 — 심링크로 바깥 저장소를 못 읽게
+        raise ValueError("unknown repo")
     co = _checkout_of(main, repo)
     meta = _git(["show", "-s", "--format=%H%x1f%an%x1f%ct%x1f%B", commit], co)
     h, author, ct, body = meta.split("\x1f", 3)

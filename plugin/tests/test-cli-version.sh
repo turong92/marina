@@ -8,8 +8,14 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY'
+import re
+import sys
+from pathlib import Path
+
 import marina_cliver as cv
+
+SCR = Path(sys.argv[1])
 
 # ── 버전 파싱 — 두 CLI 의 실제 출력 형식 ──
 assert cv._parse_version("2.1.220 (Claude Code)") == "2.1.220"
@@ -85,8 +91,43 @@ finally:
     cv._fetch_latest, cv._installed_version, cv._claude_config = orig_fetch, orig_ver, orig_cfg
     cv._LATEST_CACHE.clear(); cv._STATUS_CACHE.clear()
 
+# ── busy 상태 어휘가 실제 캐논 어휘와 맞는가 ──
+#    이게 어긋나면 가드가 **조용히 무력화**된다. 실제로 처음엔 ("running","waiting") 이었는데,
+#    running 은 서비스 상태고 waiting 은 "응답 마치고 입력 대기"(=안 바쁨)라 정작 작업 중인
+#    working 세션을 하나도 안 잡았다. 웹의 AGENT_STATUS_META 를 진실로 삼아 잠근다.
+meta_js = (SCR / "marina-web" / "app-1-core.js").read_text(encoding="utf-8")
+block = meta_js[meta_js.index("const AGENT_STATUS_META = {"):]
+canonical = set(re.findall(r"^\s{6}([a-z]+):\s*\{", block[:block.index("};")], re.M))
+assert {"working", "blocked", "waiting", "idle"} <= canonical, canonical
+assert set(cv._BUSY_STATUSES) <= canonical, \
+    f"busy 어휘가 캐논에 없다: {set(cv._BUSY_STATUSES) - canonical}"
+assert "working" in cv._BUSY_STATUSES, "작업 중(working)을 안 막으면 가드가 무의미하다"
+assert "blocked" in cv._BUSY_STATUSES, "권한 프롬프트 대기(blocked)도 막아야 한다"
+assert "waiting" not in cv._BUSY_STATUSES, "waiting 은 입력 대기(=안 바쁨) — 막으면 헛걸린다"
+assert "idle" not in cv._BUSY_STATUSES, "idle 을 막으면 영영 업데이트를 못 한다"
+
 # ── busy 가드: 돌고 있는 세션이 있으면 실행 파일을 갈아치우지 않는다 ──
 assert isinstance(cv.busy_agents("claude"), list)
+
+# busy_agents 가 실제로 그 상태만 골라내는지 (agents_payload 를 대역으로)
+import marina_sessions as _ms
+import marina_registry as _reg
+orig_roots, orig_pay = _reg.discover_all_roots, _ms.agents_payload
+cv_mod = cv
+try:
+    _reg.discover_all_roots = lambda refresh=False: [Path("/tmp/x")]
+    _ms.agents_payload = lambda root, *a, **k: [
+        {"source": "claude", "title": "일하는중", "status": "working"},
+        {"source": "claude", "title": "권한대기", "status": "blocked"},
+        {"source": "claude", "title": "입력대기", "status": "waiting"},
+        {"source": "claude", "title": "유휴", "status": "idle"},
+        {"source": "codex", "title": "남의하네스", "status": "working"},
+    ]
+    got = {b["title"] for b in cv_mod.busy_agents("claude")}
+    assert got == {"일하는중", "권한대기"}, got
+    assert {b["title"] for b in cv_mod.busy_agents("codex")} == {"남의하네스"}
+finally:
+    _reg.discover_all_roots, _ms.agents_payload = orig_roots, orig_pay
 
 orig_busy, orig_run = cv.busy_agents, cv._run_update
 ran = []

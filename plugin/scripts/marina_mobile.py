@@ -3416,6 +3416,16 @@ _MOBILE_HTML = r"""<!doctype html>
     let logsRoot = "";
     let logsTimer = null;
     let logsErr = false;
+    let logsServices = [];
+
+    // run 은 서버가 'current' 또는 'run-NNN.log' 만 받는다(marina_paths.selected_log). 임의 문자열은
+    // 400 이라, 웹과 같은 출처(서비스의 logRuns)로만 채운다.
+    function renderLogRuns() {
+      const svc = logsServices.find(x => String(x.service || "") === logsService.value);
+      const runs = (svc && svc.logRuns) || [];
+      logsRun.innerHTML = '<option value="current">현재 run</option>'
+        + runs.map(r => `<option value="${esc(r.id)}">${esc(r.label || r.id)}</option>`).join("");
+    }
 
     function logsOpen() { return logsSheet.classList.contains("open"); }
     function closeLogs() {
@@ -3441,15 +3451,14 @@ _MOBILE_HTML = r"""<!doctype html>
         const r = await fetch(`/mobile/api/services?root=${encodeURIComponent(logsRoot)}`, {headers: headers()});
         if (!r.ok) throw new Error(await responseError(r));
         const d = await r.json();
-        const names = (d.services || []).map(x => String(x.service || x.name || "")).filter(Boolean);
+        logsServices = d.services || [];
+        const names = logsServices.map(x => String(x.service || "")).filter(Boolean);
         const keep = logsService.value;
         logsService.innerHTML = names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")
           || '<option value="">(서비스 없음)</option>';
         if (names.includes(keep)) logsService.value = keep;
       } catch (error) { logsService.innerHTML = '<option value="">(목록 실패)</option>'; }
-      if (!logsRun.options.length) {
-        logsRun.innerHTML = '<option value="current">현재 run</option><option value="previous">이전 run</option>';
-      }
+      renderLogRuns();
     }
     function logLineHtml(line) {
       const err = /\b(error|fail(ed|ure)?|exception|traceback|fatal)\b/i.test(line);
@@ -3467,13 +3476,20 @@ _MOBILE_HTML = r"""<!doctype html>
           const r = await fetch(`/mobile/api/logs/matches?${base}&q=${encodeURIComponent(q)}&errOnly=${logsErr ? 1 : 0}`, {headers: headers()});
           if (!r.ok) throw new Error(await responseError(r));
           const d = await r.json();
-          lines = (d.matches || []).map(m => String(m.text || m.line || m));
+          lines = (d.matches || []).map(m => String(m.t ?? ""));
           if (!lines.length) lines = ["(일치하는 줄 없음)"];
         } else {
-          const r = await fetch(`/mobile/api/logs/chunk?${base}&before=0`, {headers: headers()});
-          if (!r.ok) throw new Error(await responseError(r));
-          const d = await r.json();
-          lines = String(d.text || "").split("\n");
+          // 두 번 부른다: 먼저 size 를 알아야 tail 을 집을 수 있다(before=0 은 0바이트 청크).
+          const head = await fetch(`/mobile/api/logs/chunk?${base}&after=0`, {headers: headers()});
+          if (!head.ok) throw new Error(await responseError(head));
+          const meta = await head.json();
+          const size = Number(meta.size || 0);
+          let chunk = meta;
+          if (size > Number(meta.end || 0)) {
+            const tail = await fetch(`/mobile/api/logs/chunk?${base}&before=${size}`, {headers: headers()});
+            if (tail.ok) chunk = await tail.json();
+          }
+          lines = (chunk.lines || []).map(item => String(item.t ?? ""));
         }
         logsBody.innerHTML = lines.slice(-800).map(logLineHtml).join("");
         if (atBottom) logsBody.scrollTop = logsBody.scrollHeight;
@@ -3481,7 +3497,7 @@ _MOBILE_HTML = r"""<!doctype html>
         logsBody.textContent = `로그 실패 · ${String(error)}`;
       }
     }
-    logsService.onchange = () => loadLogChunk().catch(() => {});
+    logsService.onchange = () => { renderLogRuns(); loadLogChunk().catch(() => {}); };
     logsRun.onchange = () => loadLogChunk().catch(() => {});
     logsFilter.oninput = () => loadLogChunk().catch(() => {});
     logsErrOnly.onclick = () => {

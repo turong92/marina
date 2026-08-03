@@ -11,6 +11,7 @@
     let termSlots = [null, null, null, null];   // 칸 index → tid | null
     let termFocus = 0;                          // 활성 칸 — 사이드바 클릭이 여기로 간다
     const termInsts = new Map();                // tid → {term, fit, ro, el, opened, head} — 세션 종료 때까지 유지
+    const chatTermInsts = new Map();            // tid → inst — 대화 탭 [원본] 이 지금 띄운 것
     const termDirty = new Set();                // 칸에 안 떠 있는데 출력이 온 tid → 활동 닷
     let termPending = null;                     // openAgentTerminal/openTerminalCmd 가 심는 1회성 컨텍스트
     let termPane = null;
@@ -105,6 +106,7 @@
       try { inst.ro && inst.ro.disconnect(); } catch {}
       try { inst.term.dispose(); } catch {}
       termInsts.delete(tid);
+      chatTermInsts.delete(tid);
     }
     // 인스턴스 수명 한 규칙(D6 + 에러처리): 살아있는 세션의 인스턴스는 칸에서 빠져도 유지한다 —
     // 재진입이 재생 없이 즉시여야 하니까. 반대로 **죽은** 세션의 인스턴스는 칸에 떠 있는 동안만 살려둔다:
@@ -112,7 +114,9 @@
     // (안 그러면 exit 마다 xterm + 스크롤백 5000줄 + ResizeObserver 가 영원히 샌다).
     function termSweepDead() {
       for (const tid of [...termInsts.keys()]) {
-        if (!TermIO.get(tid) && !termVisible(tid)) termDisposeInst(tid);
+        // termVisible 은 터미널 탭 칸만 안다. 대화 탭 [원본] 으로 떠 있는 것도 '보이는 중'이다 —
+        // 빼먹으면 형이 보고 있는 화면을 sweep 이 dispose 한다.
+        if (!TermIO.get(tid) && !termVisible(tid) && !chatTermInsts.has(tid)) termDisposeInst(tid);
       }
       // 세션도 인스턴스도 없는 tid 의 닷은 그릴 자리가 없다 — kill 마다 Set 이 자라지 않게 버린다
       // (tid 는 재사용되지 않으니 정확성 문제는 아니고 순수 누적이다).
@@ -466,7 +470,6 @@
     // ── 대화 탭 [원본] 뷰 — 그 에이전트 세션의 PTY 를 임의 엘리먼트에 붙인다 ──
     // 터미널 탭(셸 전용)의 칸/사이드바와는 별개다. 여기 인스턴스는 termInsts 에 같은 규칙으로 등록해
     // 스크롤백과 io 배선을 공유한다 — 두 벌로 열면 resume 이 두 번 돌고 스크롤백이 갈린다.
-    const chatTermInsts = new Map();   // key = tid, 대화 탭이 마운트한 것만
     async function mountAgentTerm(paneEl, root, agent) {
       if (typeof Terminal === 'undefined') {
         paneEl.innerHTML = '<div class="git-err" style="padding:14px">xterm 로드 실패 — 새로고침 해보세요</div>';
@@ -504,6 +507,15 @@
       chatTermInsts.set(tid, inst);
       try { inst.fit.fit(); } catch {}
       inst.term.focus();
+    }
+
+    // 대화 탭이 [원본] 을 떠날 때(뷰 전환·탭 전환·탭 닫기) 부른다. 등록을 풀고, 그 세션이 죽었으면
+    // 여기서 정리한다 — 터미널 탭을 한 번도 안 열었으면 termSweepDead 가 아예 안 돌기 때문이다.
+    function unmountAgentTerms() {
+      for (const tid of [...chatTermInsts.keys()]) {
+        chatTermInsts.delete(tid);
+        if (!TermIO.get(tid) && !termVisible(tid)) termDisposeInst(tid);
+      }
     }
 
     // AGENTS 행 → 터미널 attach 진입점. 대화 탭이 생긴 뒤로 기본 경로는 아니다(app-11-chat 의
