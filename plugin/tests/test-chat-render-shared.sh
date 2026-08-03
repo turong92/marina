@@ -79,6 +79,44 @@ assert "openTimelineDetailIds" not in html, "펼침 상태가 모바일에 아�
 assert "noteDetailToggle(" in html, "모바일이 펼침 토글을 렌더러에 위임하지 않는다"
 assert "setDetailScope(" in html, "모바일이 세션 스코프를 렌더러에 알려주지 않는다"
 
+# 8b) **반대 방향 매달린 참조** — 모바일이 MarinaChat 의 이름을 쓰면서 구조분해에 안 넣으면
+#     브라우저에서만 ReferenceError 가 난다(실제로 collectViewables 가 이렇게 빠졌다).
+#     6b 는 'chat-render → 모바일' 한 방향만 봤다.
+decl = html[html.index("} = window.MarinaChat;") - 3000: html.index("} = window.MarinaChat;")]
+taken = set(re.findall(r"([A-Za-z_$][\w$]*)\s*,", decl[decl.rindex("const {"):]))
+mob_code = []
+for raw in html.split("\n"):
+    if raw.lstrip().startswith("//"):
+        continue
+    cut = raw.find(" // ")
+    mob_code.append(raw[:cut] if cut >= 0 else raw)
+mob_code = "\n".join(mob_code)
+missing = [n for n in exported
+           if n not in taken
+           and re.search(r"(?<![.\w$])" + re.escape(n) + r"\s*\(", mob_code)
+           and not re.search(r"MarinaChat\." + re.escape(n), mob_code)]
+assert not missing, (
+    f"모바일이 MarinaChat 의 {missing} 를 쓰는데 구조분해에 없다 — 브라우저에서만 터진다")
+
+# 9) 뷰어 목록(A안) 계약 — 채팅에서 열면 그 대화 것만, 순서대로. 중복 파일은 마지막 자리로 접힌다.
+assert "function collectViewables" in js, "뷰어 목록 빌더가 없다"
+assert "collectViewables" in exported, "collectViewables 가 노출되지 않았다"
+
+# 10) 이미지는 접힘 밖으로. <details> 두 겹(그룹→항목) 안에 있으면 대화를 읽어서는 안 보인다.
+grp = js[js.index("function renderActivityGroup"):]
+grp = grp[:grp.index("\n    function ", 10)]
+assert "hoisted" in grp, "활동 그룹이 이미지를 접힘 밖으로 끌어올리지 않는다"
+assert grp.index("renderTimelineImages") > grp.index("<details") or "shots ? `${fold}" in grp, \
+    "이미지가 <details> 안에 남아 있다"
+item = js[js.index("function renderActivityItem"):]
+item = item[:item.index("\n    function ", 10)]
+assert "renderTimelineImages" not in item, \
+    "활동 항목이 이미지를 또 그린다 — 펼치면 같은 그림이 두 번 나온다"
+
+# 11) 파일 활동은 경로를 내보내 채팅에서 바로 열 수 있어야 한다
+assert "data-file-path" in js, "활동 카드가 파일 경로를 안 내보낸다"
+assert "item.path" in js, "백엔드가 준 path 를 안 쓴다(label 파싱은 계약이 아니다)"
+
 print("ok")
 PY
 

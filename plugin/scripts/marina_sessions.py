@@ -1391,6 +1391,17 @@ def _activity_type(name: str, detail: str) -> str:
     return "tool"
 
 
+def _activity_file_path(raw_input: Any, detail: str) -> str:
+    """file/diff 활동이 건드린 파일 경로. 라벨과 payload 두 군데서 쓰므로 규칙은 여기 하나뿐이다."""
+    payload = _json_value(raw_input)
+    target = str(payload.get("file_path") or payload.get("path") or payload.get("file") or "").strip()
+    if not target:
+        # codex diff 는 구조화 payload 가 없고 본문에 "*** Update File: <경로>" 로만 남는다
+        match = re.search(r"\*\*\*\s+(?:update|add|delete)\s+file:\s*([^\s'\";\\]+)", detail, re.I)
+        target = match.group(1) if match else ""
+    return target
+
+
 def _activity_label(name: str, activity_type: str, raw_input: Any, detail: str) -> str:
     payload = _json_value(raw_input)
     if activity_type == "skill":
@@ -1404,10 +1415,7 @@ def _activity_label(name: str, activity_type: str, raw_input: Any, detail: str) 
         fallback = detail.strip().splitlines()[0][:140] if detail.strip() else name
         return (command.splitlines()[0][:140] if command else fallback) or "Command"
     if activity_type in ("diff", "file"):
-        target = str(payload.get("file_path") or payload.get("path") or payload.get("file") or "").strip()
-        if not target and activity_type == "diff":
-            match = re.search(r"\*\*\*\s+(?:update|add|delete)\s+file:\s*([^\s'\";\\]+)", detail, re.I)
-            target = match.group(1) if match else ""
+        target = _activity_file_path(raw_input, detail)
         return target or name or ("Diff" if activity_type == "diff" else "File")
     if activity_type == "agent":
         prompt = str(payload.get("message") or payload.get("prompt") or payload.get("task") or "").strip()
@@ -1437,6 +1445,12 @@ def _new_timeline_activity(source: str, offset: int, index: int, name: str,
         "result": "",
         "status": "running",
     }
+    # 파일/디프 활동은 대상 경로를 **명시 필드**로 싣는다 — 채팅에서 그 파일을 바로 열려면 UI 가
+    # 경로를 알아야 하는데, label 은 표시용이라(잘리고 바뀐다) 계약으로 쓸 수 없다.
+    if activity_type in ("diff", "file"):
+        target = _activity_file_path(raw_input, detail)
+        if target:
+            item["path"] = target
     if model:
         item["model"] = model
     if effort:

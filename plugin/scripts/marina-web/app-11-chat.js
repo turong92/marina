@@ -144,6 +144,7 @@
             <button data-chat-view="raw" class="${tab.view === 'raw' ? 'active' : ''}"
               title="이 세션의 터미널 원본 — 권한 프롬프트·/명령·TUI 조작">원본</button>
           </div>
+          <button class="chat-gal-btn" data-chat-gallery title="모아보기 — 이 세션의 이미지·만든 파일 전부">모아보기</button>
           <span class="chat-head-root">${escapeHtml(tab.root)}</span>
         </div>
         <div class="chat-body" data-chat-body></div>`;
@@ -165,6 +166,7 @@
         x.onclick = (e) => { e.stopPropagation(); closeChatTab(Number(x.dataset.chatTabClose)); };
       });
       pane.querySelector('[data-chat-add]').onclick = (e) => openChatPicker(e.currentTarget);
+      pane.querySelector('[data-chat-gallery]').onclick = () => openChatGallery(tab);
       pane.querySelectorAll('[data-chat-view]').forEach(btn => {
         btn.onclick = () => { tab.view = btn.dataset.chatView; saveChatTabs(); renderChatPane(); };
       });
@@ -304,13 +306,27 @@
       if (first) list.scrollTop = tab.scrollTop || list.scrollHeight;
       else if (atBottom) list.scrollTop = list.scrollHeight;
       list.onscroll = () => { tab.scrollTop = list.scrollTop; };
-      wireChatImages(list, tab);
+      wireChatViewables(list, tab);
     }
 
-    // 이미지 클릭 = 원본 크게 보기. 형이 웹에서 못 보던 게 바로 이것 — 새 탭으로 원본을 연다.
-    function wireChatImages(list, tab) {
+    // 이미지·파일 클릭 = 앱 안 뷰어. **A안** — 넘기면 그 대화에 나온 것만 순서대로 흐른다
+    // (형: "해당 채팅에서는 해당 채팅 내용만"). 새 탭으로 던지면 대화 맥락이 끊긴다.
+    function wireChatViewables(list, tab) {
+      const viewables = MarinaChat.collectViewables(tab.items || []);
       list.querySelectorAll('[data-image-ref]').forEach(el => {
-        el.onclick = () => window.open(chatAdapter(tab).imageUrl(el.getAttribute('data-image-ref')), '_blank', 'noopener');
+        el.onclick = (e) => {
+          e.preventDefault();
+          const ref = el.getAttribute('data-image-ref');
+          openChatViewer(tab, viewables, viewables.findIndex(v => v.ref === ref));
+        };
+      });
+      list.querySelectorAll('[data-file-path]').forEach(el => {
+        el.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();   // <summary> 안이라 안 막으면 접힘이 같이 토글된다
+          const path = el.getAttribute('data-file-path');
+          openChatViewer(tab, viewables, viewables.findIndex(v => v.path === path));
+        };
       });
     }
 
@@ -405,6 +421,136 @@
         showToast('정지를 보냈어요', 'ok');
       } catch (e) {
         showToast(`정지 실패 · ${e.message}`, 'err');
+      }
+    }
+
+    // ── 뷰어 — 모바일과 같은 계약: (목록, 위치). 마크업 클래스명도 모바일과 맞춰 스킨만 다르다. ──
+    let viewerState = null;   // {tab, list, idx, seq}
+
+    function openChatViewer(tab, list, index) {
+      if (!list.length || index < 0) return;
+      viewerState = {tab, list, idx: index, seq: 0};
+      let back = document.getElementById('chatViewer');
+      if (!back) {
+        back = document.createElement('div');
+        back.id = 'chatViewer';
+        back.className = 'chat-viewer';
+        back.innerHTML = `
+          <div class="cv-bar">
+            <span class="cv-name" data-cv-name></span>
+            <span class="cv-count" data-cv-count></span>
+            <button class="cv-x" data-cv-close title="닫기 (Esc)">✕</button>
+          </div>
+          <div class="cv-body" data-cv-body></div>
+          <button class="cv-nav prev" data-cv-step="-1" title="이전 (←)">‹</button>
+          <button class="cv-nav next" data-cv-step="1" title="다음 (→)">›</button>`;
+        document.body.appendChild(back);
+        back.onclick = (e) => { if (e.target === back) closeChatViewer(); };
+        back.querySelector('[data-cv-close]').onclick = closeChatViewer;
+        back.querySelectorAll('[data-cv-step]').forEach(b => {
+          b.onclick = () => stepChatViewer(Number(b.dataset.cvStep));
+        });
+        document.addEventListener('keydown', chatViewerKeys);
+      }
+      back.hidden = false;
+      renderChatViewer();
+    }
+    function chatViewerKeys(e) {
+      if (!viewerState) return;
+      if (e.key === 'Escape') closeChatViewer();
+      else if (e.key === 'ArrowLeft') { e.preventDefault(); stepChatViewer(-1); }
+      else if (e.key === 'ArrowRight') { e.preventDefault(); stepChatViewer(1); }
+    }
+    function closeChatViewer() {
+      const back = document.getElementById('chatViewer');
+      if (back) back.hidden = true;
+      viewerState = null;
+    }
+    function stepChatViewer(delta) {
+      if (!viewerState) return;
+      const at = viewerState.idx + delta;
+      if (at < 0 || at >= viewerState.list.length) return;
+      viewerState.idx = at;
+      renderChatViewer();
+    }
+    async function renderChatViewer() {
+      const st = viewerState;
+      if (!st) return;
+      const back = document.getElementById('chatViewer');
+      const item = st.list[st.idx];
+      const ad = chatAdapter(st.tab);
+      const seq = ++st.seq;
+      back.querySelector('[data-cv-name]').textContent = item.name || '';
+      back.querySelector('[data-cv-count]').textContent =
+        st.list.length > 1 ? `${st.idx + 1} / ${st.list.length}` : '';
+      back.querySelectorAll('[data-cv-step]').forEach(b => {
+        const d = Number(b.dataset.cvStep);
+        b.disabled = d < 0 ? st.idx === 0 : st.idx === st.list.length - 1;
+        b.style.display = st.list.length > 1 ? '' : 'none';
+      });
+      const body = back.querySelector('[data-cv-body]');
+      const url = item.type === 'image' ? ad.imageUrl(item.ref) : ad.fileUrl(item.path);
+      const isImage = item.type === 'image' || MarinaChat.IMAGE_EXT_RE.test(item.path || '');
+      if (isImage) { body.innerHTML = `<img class="cv-img" src="${escapeHtml(url)}" alt="${escapeHtml(item.name || '')}" />`; return; }
+      body.innerHTML = '<pre class="cv-text">불러오는 중…</pre>';
+      try {
+        const res = await fetch(url);
+        const text = res.ok ? await res.text() : `열기 실패 · ${res.status}`;
+        if (seq !== st.seq) return;   // 그 사이 넘어갔다 — 남의 화면을 덮지 않는다
+        const CAP = 200000;
+        body.innerHTML = `<pre class="cv-text">${escapeHtml(
+          text.length > CAP ? `${text.slice(0, CAP)}\n\n… 이하 생략` : (text || '(빈 파일)'))}</pre>`;
+      } catch (e) {
+        if (seq === st.seq) body.innerHTML = `<pre class="cv-text">열기 실패 · ${escapeHtml(e.message)}</pre>`;
+      }
+    }
+
+    // 모아보기 — 이 세션의 이미지·파일 전부. 채팅 목록(A안)과 달리 **세션 전체**가 대상이다.
+    async function openChatGallery(tab) {
+      const ex = document.getElementById('chatGallery'); if (ex) ex.remove();
+      const back = document.createElement('div');
+      back.id = 'chatGallery';
+      back.className = 'modal-backdrop';
+      back.style.zIndex = '255';
+      back.innerHTML = `<div class="links-modal chat-gallery">
+        <div class="links-modal-head"><strong>모아보기 · ${escapeHtml(tab.title)}</strong>
+          <button class="links-modal-x" title="닫기 (Esc)">✕</button></div>
+        <div class="chat-gal-status" data-gal-status>불러오는 중…</div>
+        <div class="chat-gal-grid" data-gal-grid></div>
+        <div class="chat-gal-files" data-gal-files></div>
+      </div>`;
+      document.body.appendChild(back);
+      const close = () => { back.remove(); document.removeEventListener('keydown', onKey); };
+      const onKey = (e) => { if (e.key === 'Escape' && !viewerState) close(); };
+      document.addEventListener('keydown', onKey);
+      back.querySelector('.links-modal-x').onclick = close;
+      back.onclick = (e) => { if (e.target === back) close(); };
+      const q = `root=${enc(tab.root)}&source=${enc(tab.source)}&sid=${enc(tab.sid)}`;
+      const ad = chatAdapter(tab);
+      try {
+        const [imgs, files] = await Promise.all([
+          api(`/api/agent/images?${q}`).catch(() => ({images: []})),
+          api(`/api/agent/session-files?${q}`).catch(() => ({files: []})),
+        ]);
+        const imageList = (imgs.images || []).map(i => ({type: 'image', ref: i.ref, name: i.name || '대화 이미지'}));
+        const fileList = (files.files || []).map(f => ({type: 'file', path: f.path, name: f.relPath,
+                                                        isImage: Boolean(f.isImage), servable: f.servable !== false}));
+        back.querySelector('[data-gal-status]').textContent =
+          `대화 이미지 ${imageList.length}장 · 만든 파일 ${fileList.length}개`;
+        back.querySelector('[data-gal-grid]').innerHTML = imageList.map((v, i) =>
+          `<button class="chat-gal-cell" data-gal-img="${i}"><img src="${escapeHtml(ad.imageUrl(v.ref))}" alt="" loading="lazy" /></button>`).join('');
+        back.querySelector('[data-gal-files]').innerHTML = fileList.map((v, i) =>
+          `<button class="chat-gal-row" data-gal-file="${i}"${v.servable ? '' : ' disabled'}>
+             <span class="nm">${escapeHtml(v.name)}</span>
+             <span class="st">${v.servable ? '열기 ›' : '열 수 없음'}</span></button>`).join('');
+        back.querySelectorAll('[data-gal-img]').forEach(b => {
+          b.onclick = () => openChatViewer(tab, imageList, Number(b.dataset.galImg));
+        });
+        back.querySelectorAll('[data-gal-file]').forEach(b => {
+          b.onclick = () => openChatViewer(tab, fileList, Number(b.dataset.galFile));
+        });
+      } catch (e) {
+        back.querySelector('[data-gal-status]').textContent = `모아보기 실패 · ${e.message}`;
       }
     }
 

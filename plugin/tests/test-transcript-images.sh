@@ -142,6 +142,15 @@ for needle in required:
     assert needle in html, needle
 # 썸네일은 말풍선과 활동 카드 **둘 다**에 붙어야 한다(스크린샷 결과는 활동 카드 안에 있다).
 assert html.count("renderTimelineImages(") >= 3, html.count("renderTimelineImages(")
+# 파일/디프 활동은 대상 경로를 **명시 필드**로 실어야 한다 — 채팅에서 그 파일을 바로 열려면
+# UI 가 경로를 알아야 하고, label 은 표시용(잘림·변경)이라 계약으로 못 쓴다.
+import marina_sessions as _ms
+_item = _ms._activity_item if hasattr(_ms, "_activity_item") else None
+assert hasattr(_ms, "_activity_file_path"), "경로 추출이 공용 헬퍼로 안 모여 있다"
+assert _ms._activity_file_path({"file_path": "/w/a.py"}, "") == "/w/a.py"
+assert _ms._activity_file_path({}, "*** Update File: /w/b.ts") == "/w/b.ts"
+assert _ms._activity_file_path({}, "") == ""
+
 print("PASS part B (mobile render): 썸네일 + 모아보기 + 전체보기 배선")
 PY
 

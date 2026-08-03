@@ -410,20 +410,29 @@
       const status = ["running", "failed"].includes(item.status) ? item.status : "completed";
       const detail = String(item.detail || "");
       const result = String(item.result || "");
-      // 스크린샷·이미지 Read 는 결과가 그림이다 — 텍스트 결과만 보여주면 "아무것도 안 나온" 것처럼 보인다.
-      const images = renderTimelineImages(item, "activityImages");
+      // 이미지는 여기 담지 않는다 — 활동 항목도 그룹도 <details> 라 두 겹 안에 묻혀 안 보였다
+      // (형: "이미지 같은거 있으면 접어놓지말고 보여주고"). renderActivityGroup 이 접힘 **밖으로**
+      // 끌어올려 스트립으로 그린다. 여기 또 그리면 펼쳤을 때 같은 그림이 두 번 나온다.
       const body = [
         detail ? `<span class="activityBodyLabel">입력</span><pre class="activityCode">${renderActivityCode(detail, type)}</pre>` : "",
         result ? `<span class="activityBodyLabel">결과</span><pre class="activityCode">${renderActivityCode(result, type)}</pre>` : "",
-        images ? `<span class="activityBodyLabel">이미지</span>${images}` : "",
       ].join("");
-      return `<details class="activityItem ${status}" data-activity-detail data-activity-key="${esc(activityItemKey(item, index))}" data-activity-fp="${esc(activityItemFingerprint(item))}" ${timelineDetailAttrs(`item:${item.id || item.label || "activity"}`)}><summary><span class="activityDot"></span><span class="activityLabel">${esc(item.label || item.name || activityTypeLabels[type] || "작업")}</span><span class="activityType">${esc(activityTypeLabels[type] || "도구")}</span></summary>${body ? `<div class="activityBody">${body}</div>` : ""}</details>`;
+      // 파일/디프 활동은 그 파일을 대화에서 바로 열 수 있어야 한다. 경로는 백엔드가 item.path 로
+      // 실어 준다(label 은 표시용이라 계약이 아니다). 호스트가 data-file-path 를 보고 뷰어를 연다.
+      const fileAttrs = item.path
+        ? ` data-file-path="${esc(item.path)}" data-file-name="${esc(String(item.path).split("/").pop())}"` : "";
+      return `<details class="activityItem ${status}" data-activity-detail data-activity-key="${esc(activityItemKey(item, index))}" data-activity-fp="${esc(activityItemFingerprint(item))}" ${timelineDetailAttrs(`item:${item.id || item.label || "activity"}`)}><summary><span class="activityDot"></span><span class="activityLabel">${esc(item.label || item.name || activityTypeLabels[type] || "작업")}</span>${item.path ? `<button class="activityOpen" type="button"${fileAttrs}>열기</button>` : ""}<span class="activityType">${esc(activityTypeLabels[type] || "도구")}</span></summary>${body ? `<div class="activityBody">${body}</div>` : ""}</details>`;
     }
     function renderActivityGroup(items, stableId="") {
       if (!items.length) return "";
       const rows = items.map((item, index) => renderActivityItem(item, index)).join("");
       const groupId = stableId ? `group:${stableId}` : `group:${items[0].id || "first"}`;
-      return `<details class="activityGroup" ${timelineDetailAttrs(groupId)}><summary>${esc(activityGroupSummary(items))}</summary><div class="activityList" data-activity-list>${rows}</div></details>`;
+      // 그림은 접지 않는다. 스크린샷·이미지 Read 결과가 <details> 두 겹(그룹→항목) 안에 있으면
+      // 대화를 그냥 읽어서는 절대 안 보인다 — 도구 작업 요약은 접되 결과 그림은 항상 내놓는다.
+      const shots = renderTimelineImages(
+        {images: items.flatMap(item => (item && item.images) || [])}, "activityImages hoisted");
+      const fold = `<details class="activityGroup" ${timelineDetailAttrs(groupId)}><summary>${esc(activityGroupSummary(items))}</summary><div class="activityList" data-activity-list>${rows}</div></details>`;
+      return shots ? `${fold}${shots}` : fold;
     }
     // 활동 목록 제자리 갱신 — 새 작업은 **덧붙이고**, 안 바뀐 항목은 건드리지 않는다.
     // (exchange 통째 교체를 피하는 이유: 자율 진행 중인 턴은 exchange 가 하나라, 도구 하나 늘 때마다
@@ -454,6 +463,33 @@
       });
       [...listEl.children].forEach(node => { if (!kept.has(node)) listEl.removeChild(node); });
     }
+    // VIEWABLES_START
+    // 뷰어가 좌우로 넘길 목록. **A안** — 채팅에서 연 것은 그 대화에 나온 것만 대화 순서대로 흐른다
+    // (형 결정: "해당 채팅에서는 해당 채팅 내용만"). 모아보기에서 연 것은 갤러리가 자기 배열을 준다.
+    //
+    // 같은 파일을 여러 번 고치면 타임라인에 여러 번 나온다 → 경로로 접되 **마지막 등장 자리**를
+    // 남긴다. 최신 내용을 보는 게 맞고, 위치도 "가장 최근에 만진 곳"이 직관적이다.
+    function collectViewables(items) {
+      const out = [];
+      const fileAt = new Map();          // path → out 안 위치
+      for (const item of (items || [])) {
+        if (!item) continue;
+        for (const img of (item.images || [])) {
+          if (img && img.ref) out.push({type: "image", ref: img.ref, name: img.name || "대화 이미지"});
+        }
+        if (item.kind === "activity" && item.path) {
+          const path = String(item.path);
+          const entry = {type: "file", path, name: path.split("/").pop() || path};
+          const prev = fileAt.get(path);
+          if (prev !== undefined) out[prev] = null;   // 앞선 등장은 비우고
+          fileAt.set(path, out.length);               // 마지막 자리에 남긴다
+          out.push(entry);
+        }
+      }
+      return out.filter(Boolean);
+    }
+    // VIEWABLES_END
+
     function renderTimelineSequence(items) {
       const html = [];
       let activities = [];
@@ -617,7 +653,7 @@
     }
 
   window.MarinaChat = {
-    configure, setDetailScope, noteDetailToggle, IMAGE_EXT_RE,
+    configure, setDetailScope, noteDetailToggle, IMAGE_EXT_RE, collectViewables,
     esc, renderInlineMarkdown, renderRichText, mdTableCells, mdIsTableRow, mdIsTableDivider,
     mdListMarker, renderMarkdownBlocks, mdRenderList, renderActivityCode, sessionSource,
     pendingDeliveryLabel, runtimeLabel, mergeHistoryTurns, timelineFromTurns,

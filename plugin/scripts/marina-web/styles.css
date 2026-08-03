@@ -1309,3 +1309,33 @@
     .chat-turns .activityGroup { margin: 6px 0; font-size: 12px; color: var(--sys-cont-neutral-light); }
     .chat-turns .mdTableWrap { overflow-x: auto; }
     .chat-turns .turnMeta { color: var(--sys-cont-neutral-lightest); font-size: 11px; }
+
+    /* ── 대화 뷰어·모아보기 ── 마크업 클래스는 모바일과 맞추고 스킨만 여기서 */
+    .chat-viewer { position: fixed; inset: 0; z-index: 300; display: flex; flex-direction: column; background: rgb(12 14 18 / 92%); }
+    .chat-viewer[hidden] { display: none; }
+    .cv-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid rgb(255 255 255 / 10%); }
+    .cv-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: hsl(220 14% 88%); font: 12px/1.4 ui-monospace, Menlo, monospace; }
+    .cv-count { flex: 0 0 auto; color: rgb(255 255 255 / 60%); font: 11px ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+    .cv-x { flex: 0 0 auto; padding: 4px 9px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 7px; background: transparent; color: #fff; cursor: pointer; }
+    .cv-body { flex: 1 1 auto; min-height: 0; display: grid; place-items: center; padding: 18px; overflow: auto; }
+    .cv-img { max-width: 100%; max-height: 100%; border-radius: 8px; }
+    .cv-text { max-width: 100%; max-height: 100%; margin: 0; overflow: auto; padding: 12px 14px; border-radius: 8px; background: rgb(255 255 255 / 5%); color: hsl(220 14% 86%); font: 12px/1.6 ui-monospace, Menlo, monospace; white-space: pre; }
+    .cv-nav { position: fixed; top: 50%; transform: translateY(-50%); width: 44px; height: 60px; border: 1px solid rgb(255 255 255 / 18%); border-radius: 9px; background: rgb(0 0 0 / 38%); color: #fff; font-size: 22px; cursor: pointer; }
+    .cv-nav.prev { left: 16px; } .cv-nav.next { right: 16px; }
+    .cv-nav[disabled] { opacity: .25; cursor: default; }
+    .chat-gal-btn { padding: 4px 10px; border: 1px solid var(--sys-style-neutral-default); border-radius: 7px; background: var(--sys-bg-surface); font-size: 12px; cursor: pointer; }
+    .chat-gal-btn:hover { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
+    .chat-gallery { max-width: 720px; }
+    .chat-gal-status { margin-bottom: 10px; color: var(--sys-cont-neutral-lightest); font-size: 12px; }
+    .chat-gal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
+    .chat-gal-cell { padding: 0; border: 1px solid var(--sys-style-neutral-light); border-radius: 7px; background: none; cursor: zoom-in; overflow: hidden; aspect-ratio: 4/3; }
+    .chat-gal-cell img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .chat-gal-files { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; }
+    .chat-gal-row { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border: 1px solid var(--sys-style-neutral-light); border-radius: 7px; background: var(--sys-bg-surface); font-size: 12.5px; cursor: pointer; text-align: left; }
+    .chat-gal-row .nm { flex: 1 1 auto; overflow-wrap: anywhere; }
+    .chat-gal-row .st { flex: 0 0 auto; color: var(--sys-cont-neutral-lightest); font-size: 11px; }
+    .chat-gal-row[disabled] { opacity: .5; cursor: default; }
+    /* 활동 카드의 '열기' — 파일을 대화에서 바로 */
+    .chat-turns .activityOpen { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--sys-style-neutral-default); border-radius: 999px; background: transparent; color: var(--sys-cont-neutral-light); font-size: 10.5px; cursor: pointer; }
+    .chat-turns .activityOpen:hover { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
+    .chat-turns .activityImages.hoisted { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px; }

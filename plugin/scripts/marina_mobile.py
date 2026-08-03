@@ -1490,6 +1490,9 @@ _MOBILE_HTML = r"""<!doctype html>
     .turnImageBtn { width: auto; min-height: 0; padding: 0; border: 1px solid #d5dbe4; border-radius: 6px; background: none; overflow: hidden; line-height: 0; }
     .turnImageBtn img { display: block; max-width: 180px; max-height: 180px; object-fit: cover; }
     .activityImages { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    /* 접힘 밖으로 끌어올린 결과 그림 — 대화를 그냥 읽어도 보여야 한다(형 요청) */
+    .activityImages.hoisted { margin: 6px 0 2px; }
+    .activityOpen { flex: none; margin-left: 6px; padding: 1px 7px; border: 1px solid #ccd3dd; border-radius: 999px; background: transparent; color: #5b6678; font-size: 10.5px; }
     .galleryBody { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px calc(14px + env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; }
     .galleryStatus { color: #63708a; font-size: 11px; }
     .galleryGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
@@ -1512,6 +1515,11 @@ _MOBILE_HTML = r"""<!doctype html>
     .imageViewer { position: fixed; inset: 0; z-index: 30; display: none; flex-direction: column; background: rgb(8 10 14 / 94%); }
     .imageViewer.open { display: flex; }
     .viewerBar { display: flex; flex: none; align-items: center; gap: 8px; padding: max(8px, env(safe-area-inset-top)) 10px 8px; }
+    .viewerCount { flex: none; color: #9fb0c6; font: 11px/1 ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
+    .viewerNav { position: absolute; top: 50%; z-index: 2; width: 40px; height: 56px; transform: translateY(-50%); border: 1px solid rgb(255 255 255 / 18%); border-radius: 9px; background: rgb(0 0 0 / 34%); color: #fff; font-size: 20px; line-height: 1; }
+    .viewerNav.prev { left: 10px; } .viewerNav.next { right: 10px; }
+    .viewerNav[disabled] { opacity: .25; }
+    .viewerDead { display: none; padding: 0 24px; color: #e8b96b; font-size: 13px; line-height: 1.6; text-align: center; }
     .viewerName { flex: 1; min-width: 0; color: #e8edf4; font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
     .imageViewer img { flex: 1; min-height: 0; max-width: 100%; margin: 0 auto; padding: 0 12px 12px; object-fit: contain; }
     .viewerText { flex: 1; min-height: 0; margin: 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: #e8edf4; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
@@ -1815,9 +1823,12 @@ _MOBILE_HTML = r"""<!doctype html>
       </section>
     </div>
     <div class="imageViewer" id="imageViewer" aria-hidden="true">
-      <div class="viewerBar" id="viewerBar"><span class="viewerName" id="viewerName"></span><button class="imageViewerClose" id="imageViewerClose" type="button" aria-label="닫기">&#215;</button></div>
+      <div class="viewerBar" id="viewerBar"><span class="viewerName" id="viewerName"></span><span class="viewerCount" id="viewerCount"></span><button class="imageViewerClose" id="imageViewerClose" type="button" aria-label="닫기">&#215;</button></div>
       <img id="imageViewerImg" alt="" />
       <pre class="viewerText" id="viewerText"></pre>
+      <div class="viewerDead" id="viewerDead"></div>
+      <button class="viewerNav prev" id="viewerPrev" type="button" aria-label="이전">&#8249;</button>
+      <button class="viewerNav next" id="viewerNext" type="button" aria-label="다음">&#8250;</button>
     </div>
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
   </div>
@@ -2236,6 +2247,16 @@ _MOBILE_HTML = r"""<!doctype html>
     // 새 탭에 띄웠는데, 모아보기 흐름이 끊기고 폰에선 탭이 쌓인다(형 지적).
     const VIEWER_TEXT_MAX = 200000;   // 뷰어가 멈추지 않게 표시 상한(서버는 8MB 까지 준다)
     function viewerOpen() { return imageViewer.classList.contains("open"); }
+    // 뷰어는 **(목록, 위치)** 를 받는다. URL 하나만 받던 시절엔 앞뒤에 뭐가 있는지 몰라 넘길 수가
+    // 없었다. 목록 출처는 둘: 모아보기(자기 배열) / 채팅(collectViewables — 그 대화 것만, A안).
+    const viewerCount = document.getElementById("viewerCount");
+    const viewerDead = document.getElementById("viewerDead");
+    const viewerPrev = document.getElementById("viewerPrev");
+    const viewerNext = document.getElementById("viewerNext");
+    let viewerList = [];
+    let viewerIdx = 0;
+    let viewerSeq = 0;   // 느린 텍스트 로드가 늦게 도착해 이미 넘어간 화면을 덮지 않게
+
     function closeImageViewer() {
       imageViewer.classList.remove("open");
       imageViewer.setAttribute("aria-hidden", "true");
@@ -2243,37 +2264,88 @@ _MOBILE_HTML = r"""<!doctype html>
       imageViewerImg.style.display = "none";
       viewerText.style.display = "none";
       viewerText.textContent = "";
+      viewerDead.style.display = "none";
       viewerName.textContent = "";
+      viewerCount.textContent = "";
+      viewerList = [];
+      viewerSeq += 1;
     }
     function showViewer(name) {
       viewerName.textContent = name || "";
       imageViewer.classList.add("open");
       imageViewer.setAttribute("aria-hidden", "false");
     }
-    function openImageViewer(url, name) {
-      if (!url) return;
-      viewerText.style.display = "none";
-      imageViewerImg.style.display = "block";
-      imageViewerImg.src = url;
-      showViewer(name);
+    // 항목 → URL. image 는 트랜스크립트 안 그림(ref), file 은 세션이 만든 파일(path).
+    function viewerUrlOf(item) {
+      if (!item) return "";
+      if (item.type === "raw") return item.url || "";
+      return item.type === "image" ? transcriptImageUrl(item.ref) : sessionFileUrl(item.path);
     }
-    async function openTextViewer(url, name) {
-      if (!url) return;
+    function viewerIsImage(item) {
+      return Boolean(item && (item.type === "image" || item.isImage
+        || (item.path && IMAGE_EXT_RE.test(item.path))));
+    }
+    function openViewer(list, index) {
+      viewerList = Array.isArray(list) ? list.filter(Boolean) : [];
+      viewerIdx = Math.max(0, Math.min(Number(index) || 0, viewerList.length - 1));
+      if (!viewerList.length) return;
+      showViewer("");
+      renderViewer();
+    }
+    async function renderViewer() {
+      const item = viewerList[viewerIdx];
+      const seq = ++viewerSeq;
+      viewerName.textContent = item.name || "";
+      viewerCount.textContent = viewerList.length > 1 ? `${viewerIdx + 1} / ${viewerList.length}` : "";
+      viewerPrev.disabled = viewerIdx <= 0;
+      viewerNext.disabled = viewerIdx >= viewerList.length - 1;
+      viewerPrev.style.display = viewerNext.style.display = viewerList.length > 1 ? "block" : "none";
       imageViewerImg.style.display = "none";
       imageViewerImg.removeAttribute("src");
+      viewerText.style.display = "none";
+      viewerDead.style.display = "none";
+
+      const url = viewerUrlOf(item);
+      if (item.servable === false || !url) {
+        // 목록에서 빼지 않는다 — 조용히 건너뛰면 n/N 개수가 어긋나 형이 헷갈린다.
+        viewerDead.style.display = "block";
+        viewerDead.textContent = "이 파일은 열 수 없어요 — 삭제됐거나 너무 큽니다";
+        return;
+      }
+      if (viewerIsImage(item)) {
+        imageViewerImg.style.display = "block";
+        imageViewerImg.src = url;
+        return;
+      }
       viewerText.style.display = "block";
       viewerText.textContent = "불러오는 중...";
-      showViewer(name);
       try {
         const r = await fetch(url, {headers: headers()});
         if (!r.ok) throw new Error(await responseError(r));
         const body = await r.text();
+        if (seq !== viewerSeq) return;   // 그 사이 넘어갔다 — 남의 화면을 덮지 않는다
         viewerText.textContent = body.length > VIEWER_TEXT_MAX
           ? `${body.slice(0, VIEWER_TEXT_MAX)}\n\n… 이하 생략 (${body.length.toLocaleString()}자 중 앞 ${VIEWER_TEXT_MAX.toLocaleString()}자)`
           : (body || "(빈 파일)");
       } catch (error) {
+        if (seq !== viewerSeq) return;
         viewerText.textContent = `열기 실패 · ${String(error)}`;
       }
+    }
+    function stepViewer(delta) {
+      const at = viewerIdx + delta;
+      if (at < 0 || at >= viewerList.length) return;
+      viewerIdx = at;
+      renderViewer();
+    }
+    // 옛 호출부 호환 — 한 장짜리 목록으로 연다(호출처를 다 고치면 규칙이 두 벌이 된다).
+    function openImageViewer(url, name) {
+      if (!url) return;
+      openViewer([{type: "raw", name, url, isImage: true}], 0);
+    }
+    function openTextViewer(url, name) {
+      if (!url) return;
+      openViewer([{type: "raw", name, url, isImage: false}], 0);
     }
     // VIEWER_END
     // 모아보기 두 축.
@@ -2281,6 +2353,8 @@ _MOBILE_HTML = r"""<!doctype html>
     //  ② 만든 파일 — 에이전트가 Write/Edit 한 파일. 만들기만 한 파일은 내용이 트랜스크립트에 안 남아
     //     ①로는 절대 안 잡힌다(실측: 이 세션 Write2+Edit44 인데 대화 이미지는 0장). 근거는 도구 호출의 file_path.
     let galleryTab = "images";
+    let galleryImageList = [];   // 뷰어가 좌우로 넘길 목록 — 모아보기에서 열면 세션 전체다
+    let galleryFileList = [];
     function fileSizeLabel(bytes) {
       const n = Number(bytes) || 0;
       if (n < 1024) return `${n}B`;
@@ -2313,6 +2387,7 @@ _MOBILE_HTML = r"""<!doctype html>
         if (!r.ok) throw new Error(await responseError(r));
         const data = await r.json();
         const images = Array.isArray(data.images) ? data.images : [];
+        galleryImageList = images.map(img => ({type: "image", ref: img.ref, name: img.name || "대화 이미지"}));
         if (!images.length) {
           galleryStatus.textContent = "이 대화엔 이미지가 없어요. 내가 만든 파일은 '만든 파일' 탭에 있어요.";
           return;
@@ -2335,6 +2410,8 @@ _MOBILE_HTML = r"""<!doctype html>
         if (!r.ok) throw new Error(await responseError(r));
         const data = await r.json();
         const files = Array.isArray(data.files) ? data.files : [];
+        galleryFileList = files.map(f => ({type: "file", path: f.path, name: f.relPath,
+                                           isImage: Boolean(f.isImage), servable: f.servable !== false}));
         if (!files.length) { galleryStatus.textContent = "이 세션이 만든/바꾼 파일이 없어요."; return; }
         galleryStatus.textContent = `파일 ${files.length}개 · 최근에 손댄 것부터`;
         galleryFiles.innerHTML = files.map(file => {
@@ -2404,7 +2481,7 @@ _MOBILE_HTML = r"""<!doctype html>
       renderTimelineSequence, questionsFromActivity, pendingQuestionActivity,
       questionFallbackText, renderQuestionCard, renderConversationSequence, pendingKeyPart,
       timelineItemKeyParts, exchangeRenderKey,
-      setDetailScope, noteDetailToggle, IMAGE_EXT_RE,
+      setDetailScope, noteDetailToggle, IMAGE_EXT_RE, collectViewables,
     } = window.MarinaChat;
     // 렌더러가 모르는 것만 넘긴다. URL 세 종류는 인증 방식이 웹과 달라서(토큰 쿼리), 질문 응답
     // 상태는 입력창 위 라이브 카드와 공유해야 해서, 모델 이름은 모바일 카탈로그를 봐야 해서.
@@ -4576,7 +4653,12 @@ _MOBILE_HTML = r"""<!doctype html>
     gallerySheet.onclick = event => { if (event.target === gallerySheet) closeGallery(); };
     galleryGrid.onclick = event => {
       const cell = event.target.closest && event.target.closest("[data-image-ref]");
-      if (cell) openImageViewer(transcriptImageUrl(cell.getAttribute("data-image-ref")));
+      if (cell) {
+        const ref = cell.getAttribute("data-image-ref");
+        const at = galleryImageList.findIndex(v => v.ref === ref);
+        if (at >= 0) openViewer(galleryImageList, at);
+        else openImageViewer(transcriptImageUrl(ref), "대화 이미지");
+      }
     };
     gallerySheet.querySelectorAll("[data-gallery-tab]").forEach(btn => {
       btn.onclick = () => openGallery(btn.getAttribute("data-gallery-tab"));
@@ -4586,17 +4668,60 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!row) return;
       const path = row.getAttribute("data-file-path");
       const name = row.getAttribute("data-file-name") || path.split("/").pop();
-      // 이미지든 텍스트든 앱 안 뷰어로 — 새 탭을 띄우지 않는다.
-      if (row.getAttribute("data-file-image")) openImageViewer(sessionFileUrl(path), name);
+      // 이미지든 텍스트든 앱 안 뷰어로 — 새 탭을 띄우지 않는다. 목록째로 열어 좌우로 넘긴다.
+      const at = galleryFileList.findIndex(v => v.path === path);
+      if (at >= 0) openViewer(galleryFileList, at);
+      else if (row.getAttribute("data-file-image")) openImageViewer(sessionFileUrl(path), name);
       else openTextViewer(sessionFileUrl(path), name);
     };
     imageViewerClose.onclick = closeImageViewer;
     // 배경(오버레이 자체)만 닫는다 — 텍스트를 스크롤/선택하려면 본문 클릭이 닫으면 안 된다.
     imageViewer.onclick = event => { if (event.target === imageViewer || event.target === viewerBar) closeImageViewer(); };
-    // 대화 안 썸네일 탭 → 전체보기. 활동 카드/말풍선 어디서 눌러도 같은 뷰어.
+    viewerPrev.onclick = event => { event.stopPropagation(); stepViewer(-1); };
+    viewerNext.onclick = event => { event.stopPropagation(); stepViewer(1); };
+    // 스와이프 — 폰에서 버튼보다 이게 먼저 손이 간다. 세로 스크롤(긴 텍스트)과 겹치지 않게
+    // 가로 이동이 세로보다 확실히 클 때만 넘긴다.
+    let viewerTouch = null;
+    imageViewer.addEventListener("touchstart", event => {
+      const t = event.changedTouches[0];
+      viewerTouch = t ? {x: t.clientX, y: t.clientY} : null;
+    }, {passive: true});
+    imageViewer.addEventListener("touchend", event => {
+      if (!viewerTouch || viewerList.length < 2) return;
+      const t = event.changedTouches[0];
+      if (!t) return;
+      const dx = t.clientX - viewerTouch.x, dy = t.clientY - viewerTouch.y;
+      viewerTouch = null;
+      if (Math.abs(dx) > 48 && Math.abs(dx) > Math.abs(dy) * 1.6) stepViewer(dx < 0 ? 1 : -1);
+    }, {passive: true});
+    document.addEventListener("keydown", event => {
+      if (!imageViewer.classList.contains("open")) return;
+      if (event.key === "ArrowLeft") { event.preventDefault(); stepViewer(-1); }
+      else if (event.key === "ArrowRight") { event.preventDefault(); stepViewer(1); }
+      else if (event.key === "Escape") closeImageViewer();
+    });
+    // 대화 안 썸네일·파일 탭 → 전체보기. **A안** — 넘기면 그 대화에 나온 것만 순서대로 흐른다
+    // (형: "해당 채팅에서는 해당 채팅 내용만"). 세션 전체를 보려면 모아보기가 따로 있다.
+    function chatViewables() {
+      const session = selectedSession();
+      const history = session ? historyCache[session.key] : null;
+      return collectViewables((history && history.timeline) || []);
+    }
     turnsEl.addEventListener("click", event => {
-      const thumb = event.target.closest && event.target.closest("[data-image-ref]");
-      if (thumb) openImageViewer(transcriptImageUrl(thumb.getAttribute("data-image-ref")));
+      const closest = event.target.closest ? event.target.closest.bind(event.target) : null;
+      if (!closest) return;
+      const thumb = closest("[data-image-ref]");
+      const fileBtn = closest("[data-file-path]");
+      if (!thumb && !fileBtn) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const list = chatViewables();
+      const key = thumb ? thumb.getAttribute("data-image-ref") : fileBtn.getAttribute("data-file-path");
+      const at = list.findIndex(v => (thumb ? v.ref : v.path) === key);
+      if (at >= 0) { openViewer(list, at); return; }
+      // 목록에 없으면(구조가 예상과 다르면) 한 장만이라도 연다 — 눌렀는데 아무 일도 안 나면 안 된다.
+      if (thumb) openImageViewer(transcriptImageUrl(key), "대화 이미지");
+      else openTextViewer(sessionFileUrl(key), String(key).split("/").pop());
     });
     serviceList.onclick = event => {
       const open = event.target.closest("[data-service-open]");
