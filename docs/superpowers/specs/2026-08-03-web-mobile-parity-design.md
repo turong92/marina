@@ -1,8 +1,17 @@
 # web·mobile 정합 — 대화 탭 · CLI 버전 배너 · 모바일 로그/깃
 
 - 날짜: 2026-08-03
-- 상태: 승인됨 (형 "ㄱㄱ", 2026-08-03)
+- 상태: **구현 완료** (2026-08-03, 미push — 형 검토 대기)
 - 브랜치: `asdf`
+- 계획: `docs/superpowers/plans/2026-08-03-web-mobile-parity.md`
+
+## 구현하며 설계와 달라진 점
+
+1. **에이전트 API 공유 방식** — 새 모듈(`marina_agentapi.py`) 대신 경로 별칭 + 인증 술어(`_agent_api_alias`/`_agent_api_ok`)로 했다. 라우트 12개를 옮기는 리팩터는 이 작업의 목표와 무관한 회귀 위험만 더한다. 위 §1 에 반영됨.
+2. **렌더러 어댑터 전달 방식** — 함수마다 `opts` 를 넘기는 대신 `MarinaChat.configure(adapter)` 로 한 번 등록한다. 30개 시그니처를 고치면 순수 이동이 아니게 되고 회귀 위험이 커진다. 어댑터는 5개다: `imageUrl`·`fileUrl`·`uploadUrl`·`displayModel`·`ensureAnswerState`.
+3. **웹 질문 카드는 읽기 전용** — 렌더는 하되 응답은 못 한다. 응답하려면 모바일의 선택 상태 로직(`pickAnswerOption`·`ensureAnswerState`·`submitLiveAnswer`)이 필요한데 웹에 베끼면 또 두 벌이 된다. **정석은 그 로직도 공유 렌더러로 올리는 것**이고 다음 사이클로 미뤘다. 카드 아래에 "모바일이나 [원본] 터미널에서 골라주세요" 안내를 띄운다.
+4. **추출 중 발견한 결함 2건** — (a) 순수해 보이던 렌더 함수들이 모바일에만 있는 상수·함수(`activityTypeLabels`, `IMAGE_EXT_RE`, `displayModel`, `uploadServeUrl`)를 참조해 브라우저에서만 터질 `ReferenceError` 가 됐다. 금지어 목록으로는 못 잡아 `test-chat-render-shared.sh` 에 전수 검사를 넣었다. (b) 주석 흡수 로직이 `// LIST_RECONCILE_END` 마커를 딸려가 쌍이 갈렸다.
+5. **기존 테스트 9개가 "렌더러는 모바일 안에 있다"를 전제** 하고 있었다. 코드가 옮겨갔으니 테스트도 따라갔다 — 마커 기반은 새 파일을, vm 평가는 브라우저와 같은 순서로 공유 렌더러를 먼저 싣고, 배선 검사는 두 파일을 합쳐서 본다(어느 파일인지가 아니라 서빙되는 코드에 배선이 살아 있는지가 계약).
 
 ## 배경
 
@@ -231,6 +240,7 @@ def _agent_api_ok(self, parsed, principal) -> bool:
 
 ## 범위 밖 (다음 사이클 백로그)
 
+- **웹에서 질문 카드 응답** — 선택 상태 로직(`pickAnswerOption`·`ensureAnswerState`·`submitLiveAnswer`)을 공유 렌더러로 올린 뒤 붙인다. 지금은 읽기 전용.
 - 모바일에 터미널·compose 등록 위저드·연결 탭 — 작은 화면 ROI 가 나쁘다.
 - 웹에 갤러리 시트·사용량 패널 — 대화 탭이 자리 잡은 뒤 얹는다.
 - 모바일 깃 쓰기 작업(커밋·푸시·머지).
