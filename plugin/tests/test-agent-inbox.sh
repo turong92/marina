@@ -262,7 +262,10 @@ grep -q 'id="agentInboxBtn"' "$INDEX" || { echo "FAIL desktop inbox button missi
 grep -q 'id="agentInboxPanel"' "$INDEX" || { echo "FAIL desktop inbox panel missing"; exit 1; }
 grep -q 'marinaAgentInboxRead' "$CORE" || { echo "FAIL desktop inbox read-state key missing"; exit 1; }
 grep -q 'function agentInboxEntries' "$CORE" || { echo "FAIL desktop inbox derivation missing"; exit 1; }
-grep -q 'openAgentTerminal' "$CORE" || { echo "FAIL desktop inbox does not reuse agent terminal"; exit 1; }
+# 알림 클릭은 **대화 탭**으로 간다 — 터미널은 셸 전용이 됐으므로 여기로 보내면 경계가 어긋난다
+# (에이전트 PTY 가 터미널 그리드에 꽂히고, 이미지·도구활동은 여전히 못 본다).
+grep -q 'openAgentChat' "$CORE" || { echo "FAIL desktop inbox does not open the chat tab"; exit 1; }
+! grep -q 'openAgentTerminal' "$CORE" || { echo "FAIL desktop inbox still routes to the terminal"; exit 1; }
 grep -q 'agent.status' "$SESSIONS" || { echo "FAIL agent rows do not use normalized status"; exit 1; }
 
 grep -q 'id="inboxMenuBtn"' "$MOBILE" || { echo "FAIL mobile inbox menu entry missing"; exit 1; }
