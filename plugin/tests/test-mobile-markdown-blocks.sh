@@ -9,11 +9,13 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 
-PYTHONPATH="$SCR" python3 - <<'PY' | node
-from marina_mobile import render_mobile_html
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' | node
+# 렌더러는 marina-web/chat-render.js 로 옮겨졌다(웹 대시보드와 공유). 마커도 같이 따라갔다.
 import json
+import sys
+from pathlib import Path
 
-html = render_mobile_html()
+html = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 
 def extract(start, end):
     a, b = html.find(start), html.find(end)
@@ -113,10 +115,15 @@ console.log("PASS renderMarkdownBlocks: 펜스(공백보존·이스케이프) + 
 PY
 
 # 말풍선이 실제로 블록 렌더러를 쓰는지 — 함수만 만들고 안 붙이면 형 화면은 그대로다.
-PYTHONPATH="$SCR" python3 - <<'PY'
+# 말풍선 마크업은 공유 렌더러(chat-render.js)에, 서브에이전트 시트와 CSS 는 모바일에 있다.
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY'
+import sys
+from pathlib import Path
+
 from marina_mobile import render_mobile_html
 html = render_mobile_html()
-assert '<div class="turnBody">${renderMarkdownBlocks(stripped)}</div>' in html, "말풍선 본문이 블록 렌더러를 안 씀"
+shared = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
+assert '<div class="turnBody">${renderMarkdownBlocks(stripped)}</div>' in shared, "말풍선 본문이 블록 렌더러를 안 씀"
 assert 'class="subagent-turn ${turn.role === "user" ? "user" : "assistant"}">${renderMarkdownBlocks(' in html, \
     "서브에이전트 말풍선이 블록 렌더러를 안 씀"
 for needle in (".mdCode pre { margin: 0; padding: 8px 10px; overflow-x: auto; }",

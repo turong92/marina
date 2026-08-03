@@ -12,14 +12,21 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 
-PYTHONPATH="$SCR" python3 - <<'PY' | node
-from marina_mobile import render_mobile_html
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' | node
 import json
+import sys
+from pathlib import Path
+
+from marina_mobile import render_mobile_html
 
 html = render_mobile_html()
 start, end = html.find("<script>"), html.rfind("</script>")
 if start < 0 or end < 0:
     raise SystemExit("script 블록을 못 찾음")
+# 페이지는 /web/chat-render.js 를 먼저 로드한다(타임라인 렌더러, 웹과 공유). 브라우저와 같은
+# 순서로 같은 컨텍스트에 실어야 window.MarinaChat 구조분해가 산다.
+shared = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
+print("const SHARED = " + json.dumps(shared) + ";")
 print("const SRC = " + json.dumps(html[start + 8:end]) + ";")
 print(r'''
 const vm = require("node:vm");
@@ -76,6 +83,10 @@ const ctx = {
 };
 ctx.self = ctx; ctx.globalThis = ctx;
 vm.createContext(ctx);
+
+// ⓪ 공유 렌더러를 먼저 — 브라우저에서도 <script src> 가 인라인 스크립트보다 앞선다
+vm.runInContext(SHARED, ctx, {filename: "marina-web/chat-render.js"});
+assert.ok(ctx.window.MarinaChat, "chat-render.js 가 window.MarinaChat 을 안 만들었다");
 
 // ① 초기화가 예외 없이 끝나야 한다
 vm.runInContext(SRC + `

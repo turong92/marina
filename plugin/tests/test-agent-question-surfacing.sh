@@ -107,11 +107,13 @@ print("PASS part A (marina_question.py capture hardening): well-formed + odd(lis
 PY
 
 # ---------- Part B: renderQuestionCard fallback (node vm) ----------
-PYTHONPATH="$SCR" python3 - <<'PY' | node
-from marina_mobile import render_mobile_html
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' | node
+# 질문 카드 렌더러는 marina-web/chat-render.js 로 옮겨졌다(웹과 공유). 마커도 같이 따라갔다.
 import json
+import sys
+from pathlib import Path
 
-html = render_mobile_html()
+html = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 
 def extract(start_marker, end_marker):
     start = html.find(start_marker)
@@ -402,10 +404,16 @@ PY
 # 형 신고: "깜빡거리면서 자꾸 초기화되잖아 → 직접 입력 자체가 불가능해".
 # 원인은 innerHTML 비교가 **직렬화된 실제 DOM** 과 하는 것이었다: 기타 버튼을 누를 때 JS 가
 # style.display 를 바꿔놓으면 그 뒤로 DOM 이 템플릿과 영구히 달라져, 폴링마다 재할당되며 입력칸이 파괴됐다.
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY'
+import sys
+from pathlib import Path
+
 from marina_mobile import render_mobile_html
 
-html = render_mobile_html()
+# 질문 카드 마크업은 공유 렌더러(chat-render.js)에, 선택/전송 규칙은 모바일에 있다. 둘 다 서빙되니
+# 합쳐서 본다 — 어느 파일에 있는지가 아니라 배선이 살아 있는지가 계약이다.
+html = render_mobile_html() + "\n" + (
+    Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 
 # ① imperative style 조작이 사라졌다(재발 방지 — 이게 루프의 방아쇠였다)
 assert "row.style.display" not in html, "style.display 조작이 남아 있으면 재렌더 루프가 돌아온다"

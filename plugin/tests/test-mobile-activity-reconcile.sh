@@ -6,16 +6,24 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 
-PYTHONPATH="$SCR" python3 - <<'PY' | node
-from marina_mobile import render_mobile_html
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' | node
+# 렌더러는 marina-web/chat-render.js 로 옮겨졌다(웹 대시보드와 공유). 마커도 같이 따라갔다.
 import json
+import sys
+from pathlib import Path
 
-html = render_mobile_html()
+html = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 start = html.find("// ACTIVITY_IDENTITY_START")
 end = html.find("// ACTIVITY_IDENTITY_END")
 if start < 0 or end < 0 or end <= start:
     raise SystemExit("activity identity helper boundaries missing")
-print("const helperSource = " + json.dumps(html[start:end]) + ";")
+c, d = html.find("// RENDER_CONSTS_START"), html.find("// RENDER_CONSTS_END")
+if c < 0 or d < 0:
+    raise SystemExit("RENDER_CONSTS boundaries missing")
+# activityTypeLabels 는 아래 vm 컨텍스트가 스텁으로 넣는다 — 요약이 라벨 맵을 실제로 읽는지
+# 보려는 것이므로 그 스텁이 권위다. 실제 상수를 같이 실으면 const 가 스텁을 가린다.
+consts = "\n".join(l for l in html[c:d].splitlines() if "const activityTypeLabels" not in l)
+print("const helperSource = " + json.dumps(consts + "\n" + html[start:end]) + ";")
 print(r'''
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
@@ -52,8 +60,11 @@ console.log("ok activity identity survives polling, fingerprint tracks content")
 ''')
 PY
 
-# 제자리 갱신 경로가 실제로 배선돼 있는지 — 마커/속성이 서빙되는 HTML 에 있어야 한다.
-html="$(PYTHONPATH="$SCR" python3 -c 'from marina_mobile import render_mobile_html; print(render_mobile_html())')"
+# 제자리 갱신 경로가 실제로 배선돼 있는지 — 마커/속성이 '서빙되는 코드'에 있어야 한다.
+# 렌더 마크업은 공유 렌더러(chat-render.js)에, 교환 골격 비교는 모바일에 있다. 둘 다 서빙되므로
+# 합쳐서 본다 — 어느 파일에 있는지가 아니라 배선이 살아 있는지가 계약이다.
+html="$(PYTHONPATH="$SCR" python3 -c 'from marina_mobile import render_mobile_html; print(render_mobile_html())')
+$(cat "$SCR/marina-web/chat-render.js")"
 for needle in \
   'data-activity-list' \
   'data-activity-key=' \

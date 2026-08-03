@@ -37,6 +37,15 @@ for _ in $(seq 1 100); do
 done
 [[ "$ready" == "1" ]] || { echo "FAIL: mobile test server did not become ready"; exit 1; }
 
+# 타임라인 렌더러는 /web/chat-render.js 에 있다(웹 대시보드와 공유). 페이지가 참조하는 것만으로는
+# 부족하고 **같은 서버에서 실제로 받아져야** 한다 — 모바일은 펀넬 호스트/토큰 경로로 들어오기 때문.
+grep -q '/web/chat-render.js' <<<"$mobile_html" || { echo "FAIL: /mobile should load the shared chat renderer"; exit 1; }
+chat_render="$(curl -sf "$b/web/chat-render.js" || true)"
+grep -q 'window.MarinaChat' <<<"$chat_render" || { echo "FAIL: /web/chat-render.js should be served to mobile clients"; exit 1; }
+# 아래 검사들은 '무엇이 서빙되는가'가 계약이다 — 두 파일 다 서빙되므로 합쳐서 본다.
+mobile_html="$mobile_html
+$chat_render"
+
 code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Host: devbox.example.test' "$b/mobile")"
 [[ "$code" == "200" ]] || { echo "FAIL: /mobile without token should show login page, got $code"; exit 1; }
 login_html="$(curl -sf -H 'Host: devbox.example.test' "$b/mobile")"
@@ -69,6 +78,7 @@ grep -q -- '--app-height' <<<"$mobile_html" || { echo "FAIL: /mobile should size
 grep -q 'hiddenSelect' <<<"$mobile_html" || { echo "FAIL: /mobile page should hide technical selects"; exit 1; }
 grep -q 'pendingTurns' <<<"$mobile_html" || { echo "FAIL: /mobile page should show sent messages immediately"; exit 1; }
 grep -q 'pendingDeliveryLabel' <<<"$mobile_html" || { echo "FAIL: /mobile pending messages should identify steer/queue state"; exit 1; }
+
 grep -q '전달 확인 안 됨' <<<"$mobile_html" || { echo "FAIL: /mobile pending messages should surface unconfirmed delivery"; exit 1; }
 grep -q 'externalActive' <<<"$mobile_html" || { echo "FAIL: /mobile should distinguish external agent activity from controllability"; exit 1; }
 grep -q 'd.delivery' <<<"$mobile_html" || { echo "FAIL: /mobile should render the server-confirmed delivery mode"; exit 1; }
@@ -172,7 +182,8 @@ grep -q 'class="conversationSequence"' <<<"$mobile_html" || { echo "FAIL: /mobil
 grep -q 'class="activityGroup"' <<<"$mobile_html" || { echo "FAIL: /mobile chat should collapse native work events"; exit 1; }
 grep -q 'data-activity-detail' <<<"$mobile_html" || { echo "FAIL: /mobile work details should expand independently"; exit 1; }
 grep -q 'mergeTimelineItems' <<<"$mobile_html" || { echo "FAIL: /mobile history should merge paged timeline events"; exit 1; }
-grep -q 'openTimelineDetailIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened timeline details"; exit 1; }
+grep -q 'noteDetailToggle(' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened timeline details"; exit 1; }
+grep -q 'setDetailScope(' <<<"$mobile_html" || { echo "FAIL: /mobile should scope opened details per session"; exit 1; }
 grep -q 'data-timeline-detail' <<<"$mobile_html" || { echo "FAIL: /mobile timeline details need stable identities"; exit 1; }
 # 작업 묶음은 여전히 접힌다. 다만 **한 덩어리가 아니라 시간 순서대로 여러 구간**이다 —
 # 어시스턴트 설명이 사이에 들어가야 결과만 덩그러니 남지 않는다(형: "맥락이 해석이 덜 되는 느낌").
@@ -198,16 +209,21 @@ from marina_mobile import render_mobile_html
 
 script = render_mobile_html().rsplit("<script>", 1)[1].split("</script>", 1)[0]
 latest_loader = script.split("async function loadSessionMessages", 1)[1].split("async function loadOlderMessages", 1)[0]
-older_loader = script.split("async function loadOlderMessages", 1)[1].split("const activityTypeLabels", 1)[0]
+# 구분자였던 activityTypeLabels 는 공유 렌더러로 옮겨갔다 — 모바일에 남는 다음 선언으로 자른다.
+older_loader = script.split("async function loadOlderMessages", 1)[1].split("function conversationExchanges", 1)[0]
 assert 'turnsStructureKey = ""' not in latest_loader, "polling invalidates the render key and jumps to the bottom"
 assert 'turnsStructureKey = ""' not in older_loader, "history prepend invalidates the render key and loses the scroll anchor"
 print("ok mobile loaders preserve scroll intent")
 PY
 
-PYTHONPATH="$SCR" python3 - <<'PY' | node
-from marina_mobile import render_mobile_html
-script = render_mobile_html().rsplit("<script>", 1)[1].split("</script>", 1)[0]
-print(script[script.index("function esc"):script.index("function draftKey")])
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' | node
+# esc/renderRichText 는 공유 렌더러(chat-render.js)에 산다 — 노출 표면 그대로 굴린다.
+import sys
+from pathlib import Path
+
+print("var window = globalThis;")   # chat-render.js 는 window.MarinaChat 에 붙는다 (node 셤)
+print((Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8"))
+print("const {renderRichText} = window.MarinaChat;")
 print(r'''
 const raw = renderRichText('<img src=x onerror=alert(1)>');
 if (raw.includes('<img') || !raw.includes('&lt;img')) throw new Error(`raw HTML was not escaped: ${raw}`);
@@ -224,10 +240,18 @@ console.log('ok mobile rich text safety');
 ''')
 PY
 
-PYTHONPATH="$SCR" python3 - <<'PY' | node
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' | node
+# conversationExchanges 는 모바일에, exchangeSections 는 공유 렌더러에 있다 — 둘 다 싣는다.
+import sys
+from pathlib import Path
+
 from marina_mobile import render_mobile_html
+
+print("var window = globalThis;")   # chat-render.js 는 window.MarinaChat 에 붙는다 (node 셤)
+print((Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8"))
+print("const {exchangeSections} = window.MarinaChat;")
 script = render_mobile_html().rsplit("<script>", 1)[1].split("</script>", 1)[0]
-print(script[script.index("function conversationExchanges"):script.index("function renderTimelineMessage")])
+print(script[script.index("function conversationExchanges"):script.index("function transcriptImageUrl")])
 print(r'''
 const current = [
   {id:'u1',kind:'message',role:'user',text:'question one'},

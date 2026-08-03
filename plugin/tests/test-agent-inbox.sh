@@ -308,8 +308,11 @@ if (!summary.includes('▤ 1')) throw new Error(`blocked attention count missing
 console.log('ok desktop blocked inbox membership and attention count');
 JS
 
-PYTHONPATH="$SCR" python3 - <<'PY' | node
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' | node
 import json
+import sys
+from pathlib import Path
+
 from marina_mobile import render_mobile_html
 
 html = render_mobile_html()
@@ -317,6 +320,10 @@ start = html.rfind("<script>")
 end = html.rfind("</script>")
 if start < 0 or end < 0 or end <= start:
     raise SystemExit("mobile script boundaries missing")
+# 페이지는 /web/chat-render.js 를 먼저 로드한다(타임라인 렌더러, 웹과 공유). 브라우저와 같은
+# 순서로 같은 컨텍스트에 실어야 window.MarinaChat 구조분해가 산다.
+shared = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
+print("const sharedSource = " + json.dumps(shared) + ";")
 print("const mobileSource = " + json.dumps(html[start + len("<script>"):end]) + ";")
 print(r'''
 const assert = require("node:assert/strict");
@@ -404,6 +411,9 @@ const context = {
   fetch: async () => { throw new Error("unexpected fetch"); },
 };
 vm.createContext(context);
+// 공유 렌더러가 먼저 — 브라우저에서도 <script src> 가 인라인 스크립트보다 앞선다
+vm.runInContext(sharedSource, context, {filename: "marina-web/chat-render.js"});
+assert.ok(window.MarinaChat, "chat-render.js 가 window.MarinaChat 을 안 만들었다");
 vm.runInContext(`${mobileSource}
 let chooseSessionCalls = [];
 chooseSession = key => chooseSessionCalls.push(key);
