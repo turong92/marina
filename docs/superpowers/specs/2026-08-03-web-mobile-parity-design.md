@@ -56,19 +56,34 @@ marina 의 두 프론트엔드가 서로 다른 방향으로 벌어졌다.
 
 **문제.** 웹은 `/mobile/api/*` 를 부를 수 없다: auth 가 꺼진 로컬에서 `authorize()` 가 `principal=None` 을 돌려주고, 모바일 라우트는 `if principal is None and not mobile_request_ok(...)` 로 토큰 검사에 떨어져 403 이 된다. 반대로 모바일은 `/api/*` 를 부를 수 없다: `do_GET`/`do_POST` 의 `host_guarded` 가 `/api/` 를 호스트로 막아 펀넬 호스트에서 오면 `forbidden host` 다 (`marina_handler.py:213` 주석에 이미 명시).
 
-**해법.** 이미 존재하는 `_worktree_create` / `/api/mobile-send` / `/api/mobile-state` 패턴을 정식화한다.
+**해법.** 라우트를 옮기지 않는다. **경로 별칭 + 인증 술어** 두 가지만 더한다. 이미 존재하는 `/api/mobile-send` / `/api/mobile-state` 별칭 패턴을 일반화하는 것이다.
 
 ```
-marina_agentapi.py   ← 에이전트 조작 디스패치 (send·answer·upload·interrupt·usage·
-                        activity·catalog·settings·images·transcript·session-files)
-   ├─ /api/agent/<op>      웹용 — principal 또는 loopback, host_guarded 적용
-   └─ /mobile/api/<op>     모바일용 — principal 또는 mobile token (기존 경로 그대로)
+do_GET / do_POST 진입부:
+    /api/agent/<op>  ──정규화──>  /mobile/api/<op>       (self._agent_api_web = True)
+
+기존 /mobile/api/<op> 라우트 본문은 그대로. 반복되던
+    if principal is None and not mobile_request_ok(self, parsed): 403
+을 다음 한 줄로 교체:
+    if not self._agent_api_ok(parsed, principal): 403
 ```
 
-- 기존 `/mobile/api/*` 라우트는 **경로·동작·응답 불변**. 모바일 회귀 위험 0.
-- 기존 웹 라우트 `/api/agent-transcript` 도 **경로 유지**한다(디스패치를 호출하는 별칭). 새 웹 경로는 `/api/agent/transcript` 이고 둘은 같은 응답을 준다. 웹 대화 탭은 새 경로를 쓰고, 옛 경로는 제거하지 않는다.
-- `marina_mobile.py` 안의 조작 함수(`mobile_send`, `mobile_answer`, `mobile_upload`, `mobile_interrupt`, `mobile_update_session_settings`, `mobile_catalog`)는 그대로 두고, `marina_agentapi.py` 는 이들을 호출하는 얇은 디스패치 + 권한 검사 공통화만 담당한다.
-- 권한 검사(`_require_root_access`, `_policy().can_resource`, `agent_belongs_to_root`)는 지금 라우트마다 복붙돼 있다. 디스패치로 모으면서 한 곳으로 합친다.
+```python
+def _agent_api_ok(self, parsed, principal) -> bool:
+    """에이전트 API 인증 — 웹(/api/agent/*)과 모바일(/mobile/api/*)이 같은 라우트를 공유한다.
+    웹 경로는 이미 host_guarded(+POST 는 origin/CSRF)를 통과했으므로 모바일 토큰을 요구하지 않는다.
+    나머지 자원 권한(_require_root_access · can_resource)은 라우트 본문에서 종전대로 검사한다."""
+    if principal is not None:
+        return True
+    if getattr(self, "_agent_api_web", False):
+        return is_loopback_client(self)      # auth 꺼진 로컬 대시보드
+    return mobile_request_ok(self, parsed)
+```
+
+- 기존 `/mobile/api/*` 는 **경로·동작·응답 불변**. 모바일 회귀 위험 0.
+- 기존 웹 라우트 `/api/agent-transcript` 도 **경로 유지**한다. 웹 대화 탭은 새 경로 `/api/agent/transcript` 를 쓰고, 옛 경로는 제거하지 않는다.
+- `/api/agent/*` 는 `host_guarded` 예외로 빼지 **않는다** — 웹은 대시보드 호스트로만 들어오므로 통과하고, 펀넬 호스트에서 오는 요청은 여기서 막히는 게 옳다(모바일은 `/mobile/api/*` 로 간다).
+- 새 모듈을 만들지 않는 이유: 라우트 배선은 핸들러의 책임이고, 모바일 라우트 12개를 통째로 옮기는 리팩터는 이 작업의 목표(정합)와 무관한 회귀 위험만 더한다. `marina_handler.py` 가 큰 것은 선행 문제이며 범위 밖이다.
 
 ### 2. 프론트 — 타임라인 렌더러 공유
 
@@ -94,19 +109,30 @@ marina_agentapi.py   ← 에이전트 조작 디스패치 (send·answer·upload�
 
 탭 내부 구성 (위→아래):
 
-1. **세션 셀렉터** — 선택된 워크트리의 `agents` 목록(claude/codex, 최대 3, ts 내림차순). 상태 점 + 제목. 세션이 없으면 "이 워크트리에 에이전트 세션이 없어요" + `세션 시작` 버튼(`/mobile/api/launch` 재사용).
-2. **`[대화 | 원본]` 세그먼트**.
+1. **세션 탭 스트립 (브라우저식 멀티탭)** — 열어 둔 에이전트 세션이 각각 탭 하나다.
+   - **워크트리를 넘나든다.** 다른 워크트리의 세션을 열면 교체가 아니라 탭이 추가된다 — 브라우저 탭과 같은 감각이고, 여러 워크트리를 동시에 돌릴 때 왔다 갔다 하지 않아도 된다.
+   - 탭 라벨 = `상태점 · 하네스 · 세션 제목`. 워크트리가 둘 이상 열려 있을 때만 워크트리명을 앞에 붙인다(같은 워크트리끼리는 군더더기).
+   - `✕` 로 닫고 가운데 클릭으로도 닫는다. `+` 는 현재 선택된 워크트리의 아직 안 열린 세션 목록을 드롭다운으로 띄우고, 세션이 없으면 `세션 시작`(`/mobile/api/launch` 재사용)을 제공한다.
+   - 열린 탭 목록은 `localStorage` 에 남긴다(`{root, source, sid}` 배열 + 활성 인덱스). 새로고침·재시작해도 복원되고, 사라진 세션은 복원 때 조용히 걷어낸다.
+   - 탭이 많으면 스트립이 가로 스크롤된다. 상한은 두지 않는다 — 브라우저도 안 둔다.
+   - **탭마다 상태가 독립이다**: 트랜스크립트 커서·스크롤 위치·`[대화|원본]` 선택·입력 중인 초안. 탭을 바꿔도 치던 글이 날아가지 않는다.
+   - 안 읽은 변화 표시: 비활성 탭의 세션에 새 턴이 붙으면 라벨에 점을 찍는다.
+2. **`[대화 | 원본]` 세그먼트** — 활성 탭에만 적용된다.
 3. `대화` — `chat-render.js` 타임라인. 이전 메시지 페이지네이션(`before` 커서), 이미지 인라인, 도구활동 그룹, 질문 카드, 새 메시지 버튼.
 4. `원본` — 그 세션의 PTY 를 이 pane 에 xterm 으로 마운트. `app-10-term.js` 의 attach 로직을 `mountAgentTerm(paneEl, root, agent)` 로 추출해 재사용. kill 버튼 포함.
 5. **컴포저** — 첨부(이미지 업로드)·슬래시 제안·전송·정지·모델/effort. `대화` 뷰에서만 표시(`원본` 은 PTY 가 직접 입력을 받음).
 
 진입점 변경:
 
-- `wireAgentRows` 의 행 클릭: `openAgentTerminal` → `openAgentChat`(대화 탭 활성화 + 그 세션 선택).
+- `wireAgentRows` 의 행 클릭: `openAgentTerminal` → `openAgentChat`(대화 탭 활성화 + 그 세션 탭을 열거나, 이미 열려 있으면 그 탭으로 이동).
 - 행의 `대화` peek 버튼은 제거하고(중복), 대신 `>_` 아이콘으로 "원본으로 열기"를 제공한다.
 - 기존 읽기전용 모달 `openAgentTranscript`(`app-6-modals.js:655`)는 **삭제**한다 — 대화 탭이 상위 호환.
 
-폴링: 대화 탭이 활성일 때만 트랜스크립트를 폴링한다(기본 3초). 기존 `render()` 전체 재렌더와 충돌하지 않게 `reconcileActivityList` 계약을 그대로 쓰고, 입력 중·전송 중·질문 응답 중에는 재렌더를 미룬다 (모바일의 defer-guard 와 동일 규칙).
+폴링:
+
+- **활성 탭** — 3초마다 트랜스크립트를 폴링한다. 기존 `render()` 전체 재렌더와 충돌하지 않게 `reconcileActivityList` 계약을 그대로 쓰고, 입력 중·전송 중·질문 응답 중에는 재렌더를 미룬다 (모바일의 defer-guard 와 동일 규칙).
+- **비활성 탭** — 트랜스크립트를 받아오지 않는다. 대신 이미 5초마다 도는 `loadWorktrees()` 의 `agents[].statusTs` 로 "새 턴이 붙었나"만 판정해 점을 찍는다. 탭 N개를 각각 폴링하면 N배 부하가 되므로 안 한다.
+- 대화 워크스페이스 탭이 비활성이거나 브라우저 탭이 숨겨져 있으면 전부 멈춘다.
 
 ### 4. CLI 버전 배너
 
@@ -160,8 +186,8 @@ marina_agentapi.py   ← 에이전트 조작 디스패치 (send·answer·upload�
 ## 데이터 흐름
 
 ```
-[웹 대화 탭]  ──> /api/agent/<op>   ──┐
-                                      ├──> marina_agentapi.py ──> marina_mobile.py 함수
+[웹 대화 탭]  ──> /api/agent/<op>   ──┐  (경로 별칭으로 정규화)
+                                      ├──> 같은 /mobile/api 라우트 본문 ──> marina_mobile.py
 [모바일 채팅] ──> /mobile/api/<op> ──┘                          ──> marina_sessions.py
 
 [웹 배너]     ──> /api/update-status        ──┐
@@ -197,7 +223,7 @@ marina_agentapi.py   ← 에이전트 조작 디스패치 (send·answer·upload�
 
 각 단계가 독립적으로 검증 가능하도록 나눈다.
 
-1. **백엔드 이중 프리픽스** — `marina_agentapi.py` + `/api/agent/*` 라우트. 기존 모바일 무회귀가 통과 기준.
+1. **백엔드 이중 프리픽스** — `/api/agent/*` 경로 별칭 + `_agent_api_ok`. 기존 모바일 무회귀가 통과 기준.
 2. **`chat-render.js` 추출** — 모바일이 그것을 쓰게 전환. **모바일 동작 불변 확인이 게이트** (기존 모바일 테스트 전량 + Aside 실측).
 3. **웹 대화 탭 + 터미널 역할 분리** — `app-11-chat.js`, `index.html`, `app-5-sessions.js` 진입점, `app-10-term.js` 에이전트 PTY 제외, `openAgentTranscript` 삭제.
 4. **`marina_cliver.py` + 배너** — web·mobile 양쪽.
