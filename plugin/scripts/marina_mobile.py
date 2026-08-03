@@ -589,13 +589,18 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                     "ts": term.get("created") or 0,
                 })
             if not agents and not root_terms:
+                # 세션이 하나도 없는 워크트리의 **자리표시자**. 예전엔 title 이 label 이라
+                # "alias · 커밋제목 · 프로젝트 · id" 가 통째로 찍혀, 방금 만든 워크트리가 마치 그
+                # 커밋 작업을 하던 세션처럼 보였다(형 지적). alias 는 그룹 헤더에, 프로젝트는 탭에
+                # 이미 있으니 제목은 이 카드가 실제로 뭔지만 말한다. 커밋 제목은 브랜치 맥락이라
+                # 부제로 남긴다 — 있으면 유용하고, 없어도 그만이다.
                 sessions.append({
                     "key": f"shell:{root}",
                     "kind": "shell",
                     "root": str(root),
-                    "title": label or root.name,
-                    "subtitle": "새 셸",
-                    "preview": str(root),
+                    "title": "새 셸 열기",
+                    "subtitle": title or root.name,
+                    "preview": "",
                     "target": {"type": "shell"},
                     "turns": [],
                     "ts": 0,
@@ -2826,10 +2831,17 @@ _MOBILE_HTML = r"""<!doctype html>
     function projectSessions() {
       return (state.sessions || []).filter(s => !selectedProjectId || sessionProjectId(s) === selectedProjectId);
     }
+    // 자리표시자(kind=shell)는 아직 아무것도 안 도는 워크트리의 "셸 열래?" 카드다. 공유
+    // sessionSource 는 claude/codex 가 아니면 전부 terminal 로 떨어뜨리는데, 그러면 돌고 있는
+    // PTY 가 하나도 없어도 "터미널 N" 으로 세어진다. 필터·카운트는 이 술어를 쓴다.
+    function sessionFilterSource(session) {
+      if (session && session.kind === "shell") return "none";
+      return sessionSource(session);
+    }
     function renderSourceTabs() {
       const sessions = projectSessions();
-      const counts = {all: sessions.length, codex: 0, claude: 0, terminal: 0};
-      sessions.forEach(s => counts[sessionSource(s)] += 1);
+      const counts = {all: sessions.length, codex: 0, claude: 0, terminal: 0, none: 0};
+      sessions.forEach(s => { counts[sessionFilterSource(s)] += 1; });
       if (!["all", "codex", "claude", "terminal"].includes(sourceFilter)) sourceFilter = "all";
       const tabs = [
         {id: "all", label: "전체"},
@@ -2866,7 +2878,8 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function sessionCard(session) {
       const source = sessionSource(session);
-      const meta = sourceMeta[source];
+      // 자리표시자를 TERM 으로 배지하면 안 도는 걸 도는 것처럼 말하는 셈이다.
+      const meta = session.kind === "shell" ? {label: "새 셸", badge: "새 셸"} : sourceMeta[source];
       const sm = session.kind === "agent" ? agentStatusMeta(session.status) : null;
       // 질문 대기는 별도 표시가 아니라 **상태값**이다 — 서버가 status="blocked" 로 주고
       // 상태표에 blocked → "응답 필요"가 이미 있다. 시간 자리는 시간만 맡는다.
@@ -2929,7 +2942,7 @@ _MOBILE_HTML = r"""<!doctype html>
     function renderSessions() {
       const q = sessionSearch.value.trim().toLowerCase();
       const sessions = projectSessions().filter(s => {
-        if (sourceFilter !== "all" && sessionSource(s) !== sourceFilter) return false;
+        if (sourceFilter !== "all" && sessionFilterSource(s) !== sourceFilter) return false;
         return !q || [s.title, s.subtitle, s.preview, s.root].some(v => String(v || "").toLowerCase().includes(q));
       }).slice(0, 40);
       if (!sessions.length) {
@@ -3005,7 +3018,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const q = sessionSearch.value.trim().toLowerCase();
       return projectSessions().filter(s => {
         if (String(s.root || "") !== root) return false;
-        if (sourceFilter !== "all" && sessionSource(s) !== sourceFilter) return false;
+        if (sourceFilter !== "all" && sessionFilterSource(s) !== sourceFilter) return false;
         return !q || [s.title, s.subtitle, s.preview, s.root].some(v => String(v || "").toLowerCase().includes(q));
       });
     }
@@ -4289,7 +4302,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!btn || !sourceTabs.contains(btn)) return;
       sourceFilter = btn.getAttribute("data-source") || "all";
       localStorage.setItem("marinaMobileSource", sourceFilter);
-      if (!drawerOpen() && selectedSession() && sourceFilter !== "all" && sessionSource(selectedSession()) !== sourceFilter) leaveChat(false);
+      if (!drawerOpen() && selectedSession() && sourceFilter !== "all" && sessionFilterSource(selectedSession()) !== sourceFilter) leaveChat(false);
       renderSourceTabs();
       renderSessions();
     };
