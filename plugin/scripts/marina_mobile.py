@@ -1429,6 +1429,24 @@ _MOBILE_HTML = r"""<!doctype html>
     .activityCode .diffDel { display: inline-block; width: 100%; color: #fca5a5; background: rgba(239, 68, 68, .14); }
     .activityCode .diffHunk { display: inline-block; width: 100%; color: #a5b4fc; }
     .newMessagesBtn { position: absolute; left: 50%; bottom: 8px; z-index: 3; display: none; width: auto; min-height: 34px; padding: 0 12px; transform: translateX(-50%); border-color: #b9c6d8; background: #fff; box-shadow: 0 4px 14px rgb(23 25 31 / 14%); font-size: 12px; }
+    /* CLI(claude/codex) 자체 버전 배너 — 위 updateBanner(데몬 재시작 감지)와는 다른 것이다. */
+    .cliUpdateBanner { position: fixed; left: 50%; top: 8px; z-index: 19; width: auto; min-height: 30px; padding: 0 12px; transform: translateX(-50%); border: 1px solid #d9c48a; border-radius: 8px; background: #8a6d1f; color: #fff; box-shadow: 0 4px 14px rgb(23 25 31 / 20%); font-size: 12px; font-weight: 700; }
+    .cliUpdateBanner[hidden] { display: none; }
+    /* 로그·깃 시트 (읽기 전용) */
+    .sheetTools { display: flex; gap: 6px; padding: 8px 12px; border-bottom: 1px solid #e3e7ee; }
+    .sheetTools select, .sheetTools input { flex: 1 1 auto; min-width: 0; padding: 6px 8px; border: 1px solid #ccd3dd; border-radius: 7px; font-size: 12px; }
+    .sheetTools button { flex: 0 0 auto; padding: 6px 10px; border: 1px solid #ccd3dd; border-radius: 7px; background: #fff; font-size: 12px; }
+    .sheetTools button.on { border-color: #b03030; color: #b03030; }
+    .logsBody { max-height: 62vh; overflow: auto; padding: 8px 12px; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .logsBody .lgErr { color: #c03434; }
+    .gitStatus { padding: 8px 12px; border-bottom: 1px solid #e3e7ee; font-size: 12px; color: #495468; }
+    .gitBody { max-height: 62vh; overflow: auto; padding: 8px 12px; font-size: 12px; }
+    .gitRow { display: flex; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid #eef1f5; }
+    .gitRow .nm { flex: 1 1 auto; overflow-wrap: anywhere; }
+    .gitRow .st { flex: 0 0 auto; color: #7a8496; font: 11px ui-monospace, Menlo, monospace; }
+    .gitSect { margin-top: 10px; color: #7a8496; font-size: 11px; font-weight: 700; }
+    .gitDiff { margin: 4px 0 8px; padding: 6px 8px; border-radius: 6px; background: #12151c; color: #cbd3e1; font: 11px/1.45 ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; }
+    .gitDiff .add { color: #7ee2a8; } .gitDiff .del { color: #f6a6a6; } .gitDiff .hunk { color: #a5b4fc; }
     .updateBanner { position: fixed; left: 50%; top: 8px; z-index: 20; display: none; width: auto; min-height: 32px; padding: 0 14px; transform: translateX(-50%); border: 1px solid #b9d4f2; border-radius: 8px; background: #0b63ce; color: #fff; box-shadow: 0 4px 14px rgb(23 25 31 / 20%); font-size: 12px; font-weight: 800; }
     .chatComposer { z-index: 3; display: flex; min-width: 0; flex-direction: column; gap: 6px; padding: 7px 10px max(8px, env(safe-area-inset-bottom)); background: #fff; border-top: 1px solid #dde2ea; box-sizing: border-box; }
     .composerRow { display: grid; grid-template-columns: 44px minmax(0, 1fr) 44px; gap: 7px; align-items: end; }
@@ -1709,6 +1727,7 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="turns" id="turns"></div>
         <button class="newMessagesBtn" id="newMessagesBtn" type="button">새 메시지</button>
     <button class="updateBanner" id="updateBanner" type="button">새 버전 · 탭하여 새로고침</button>
+    <button class="cliUpdateBanner" id="cliUpdateBanner" type="button" hidden></button>
       </section>
     </main>
     <div class="chatComposer" id="chatComposer" style="display:none">
@@ -1746,6 +1765,26 @@ _MOBILE_HTML = r"""<!doctype html>
       <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="servicesSheetTitle">
         <div class="sheetHeader"><strong id="servicesSheetTitle">서비스</strong><button class="iconBtn sheetClose" id="servicesCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
         <div class="serviceList"><div id="serviceList"></div><div class="serviceUtilities"><button id="inboxMenuBtn" type="button">받은 작업 <span id="inboxCount">0</span></button><button id="refreshBtn" type="button">새로고침</button><button id="logoutBtn" type="button">로그아웃</button></div></div>
+      </section>
+    </div>
+    <!-- 로그·깃 (읽기 전용) — 밖에서 "빌드 깨졌나"를 확인하는 용도. 쓰기는 일부러 없다. -->
+    <div class="sheetBackdrop" id="logsSheet" aria-hidden="true">
+      <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="logsSheetTitle">
+        <div class="sheetHeader"><strong id="logsSheetTitle">로그</strong><button class="iconBtn sheetClose" id="logsCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+        <div class="sheetTools">
+          <select id="logsService" aria-label="서비스"></select>
+          <select id="logsRun" aria-label="run"></select>
+          <input id="logsFilter" type="search" placeholder="필터" enterkeyhint="search" autocomplete="off" />
+          <button id="logsErrOnly" type="button">에러만</button>
+        </div>
+        <div class="logsBody" id="logsBody"></div>
+      </section>
+    </div>
+    <div class="sheetBackdrop" id="gitSheet" aria-hidden="true">
+      <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="gitSheetTitle">
+        <div class="sheetHeader"><strong id="gitSheetTitle">깃</strong><button class="iconBtn sheetClose" id="gitCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+        <div class="gitStatus" id="gitStatus"></div>
+        <div class="gitBody" id="gitBody"></div>
       </section>
     </div>
     <div class="sheetBackdrop" id="settingsSheet" aria-hidden="true">
@@ -2178,6 +2217,8 @@ _MOBILE_HTML = r"""<!doctype html>
       worktreeSheetTitle.textContent = wtName(root);
       worktreeActions.innerHTML = [
         `<button class="wtAction" type="button" data-wt-act="services">서버<span class="wtActionNote">보기 · 실행</span></button>`,
+        `<button class="wtAction" type="button" data-wt-act="logs">로그<span class="wtActionNote">tail · 필터 · 에러만</span></button>`,
+        `<button class="wtAction" type="button" data-wt-act="git">깃<span class="wtActionNote">변경 · diff · 커밋 목록</span></button>`,
         ...sources.map(item => `<button class="wtAction" type="button" data-wt-act="launch:${item.id}">${esc(item.label)}</button>`),
         `<button class="wtAction" type="button" data-wt-act="pin">${pinned ? "고정 해제" : "맨 위에 고정"}</button>`,
       ].join("");
@@ -3360,6 +3401,221 @@ _MOBILE_HTML = r"""<!doctype html>
       servicesSheet.setAttribute("aria-hidden", "false");
       loadServices(true);
     }
+    // ── 로그·깃 시트 (읽기 전용) ──
+    // 모바일엔 둘 다 없어서 밖에서 "빌드 깨졌나"를 확인할 방법이 없었다. 서버는 웹과 같은 함수를
+    // 쓰고(/mobile/api/logs/*, /mobile/api/git-*), 여기는 표시만 한다. 쓰기(커밋·푸시·머지)는 없다.
+    const logsSheet = document.getElementById("logsSheet");
+    const logsBody = document.getElementById("logsBody");
+    const logsService = document.getElementById("logsService");
+    const logsRun = document.getElementById("logsRun");
+    const logsFilter = document.getElementById("logsFilter");
+    const logsErrOnly = document.getElementById("logsErrOnly");
+    const gitSheet = document.getElementById("gitSheet");
+    const gitStatusEl = document.getElementById("gitStatus");
+    const gitBody = document.getElementById("gitBody");
+    let logsRoot = "";
+    let logsTimer = null;
+    let logsErr = false;
+
+    function logsOpen() { return logsSheet.classList.contains("open"); }
+    function closeLogs() {
+      logsSheet.classList.remove("open");
+      logsSheet.setAttribute("aria-hidden", "true");
+      clearInterval(logsTimer); logsTimer = null;
+    }
+    async function openLogs(root) {
+      logsRoot = String(root || logsRoot || sessionRoot() || selectedRoot() || "");
+      document.getElementById("logsSheetTitle").textContent = `로그 · ${wtName(logsRoot)}`;
+      closeDrawer(); closeInbox(); closeSettings();
+      logsSheet.classList.add("open");
+      logsSheet.setAttribute("aria-hidden", "false");
+      logsBody.textContent = "불러오는 중…";
+      await loadLogServices();
+      await loadLogChunk();
+      clearInterval(logsTimer);
+      // 시트가 열려 있을 때만 3초 폴 — 닫으면 멈춘다(배터리·데이터).
+      logsTimer = setInterval(() => { if (logsOpen()) loadLogChunk().catch(() => {}); }, 3000);
+    }
+    async function loadLogServices() {
+      try {
+        const r = await fetch(`/mobile/api/services?root=${encodeURIComponent(logsRoot)}`, {headers: headers()});
+        if (!r.ok) throw new Error(await responseError(r));
+        const d = await r.json();
+        const names = (d.services || []).map(x => String(x.service || x.name || "")).filter(Boolean);
+        const keep = logsService.value;
+        logsService.innerHTML = names.map(n => `<option value="${esc(n)}">${esc(n)}</option>`).join("")
+          || '<option value="">(서비스 없음)</option>';
+        if (names.includes(keep)) logsService.value = keep;
+      } catch (error) { logsService.innerHTML = '<option value="">(목록 실패)</option>'; }
+      if (!logsRun.options.length) {
+        logsRun.innerHTML = '<option value="current">현재 run</option><option value="previous">이전 run</option>';
+      }
+    }
+    function logLineHtml(line) {
+      const err = /\b(error|fail(ed|ure)?|exception|traceback|fatal)\b/i.test(line);
+      return `<div class="${err ? "lgErr" : ""}">${esc(line)}</div>`;
+    }
+    async function loadLogChunk() {
+      const service = logsService.value;
+      if (!service) { logsBody.textContent = "서비스를 고르세요"; return; }
+      const q = logsFilter.value.trim();
+      const base = `root=${encodeURIComponent(logsRoot)}&service=${encodeURIComponent(service)}&run=${encodeURIComponent(logsRun.value || "current")}`;
+      const atBottom = logsBody.scrollHeight - logsBody.scrollTop - logsBody.clientHeight < 40;
+      try {
+        let lines;
+        if (q || logsErr) {
+          const r = await fetch(`/mobile/api/logs/matches?${base}&q=${encodeURIComponent(q)}&errOnly=${logsErr ? 1 : 0}`, {headers: headers()});
+          if (!r.ok) throw new Error(await responseError(r));
+          const d = await r.json();
+          lines = (d.matches || []).map(m => String(m.text || m.line || m));
+          if (!lines.length) lines = ["(일치하는 줄 없음)"];
+        } else {
+          const r = await fetch(`/mobile/api/logs/chunk?${base}&before=0`, {headers: headers()});
+          if (!r.ok) throw new Error(await responseError(r));
+          const d = await r.json();
+          lines = String(d.text || "").split("\n");
+        }
+        logsBody.innerHTML = lines.slice(-800).map(logLineHtml).join("");
+        if (atBottom) logsBody.scrollTop = logsBody.scrollHeight;
+      } catch (error) {
+        logsBody.textContent = `로그 실패 · ${String(error)}`;
+      }
+    }
+    logsService.onchange = () => loadLogChunk().catch(() => {});
+    logsRun.onchange = () => loadLogChunk().catch(() => {});
+    logsFilter.oninput = () => loadLogChunk().catch(() => {});
+    logsErrOnly.onclick = () => {
+      logsErr = !logsErr;
+      logsErrOnly.classList.toggle("on", logsErr);
+      loadLogChunk().catch(() => {});
+    };
+    document.getElementById("logsCloseBtn").onclick = closeLogs;
+    logsSheet.onclick = event => { if (event.target === logsSheet) closeLogs(); };
+
+    function closeGit() {
+      gitSheet.classList.remove("open");
+      gitSheet.setAttribute("aria-hidden", "true");
+    }
+    function diffHtml(text) {
+      return String(text || "").split("\n").map(line => {
+        const cls = line.startsWith("+") ? "add" : line.startsWith("-") ? "del"
+          : line.startsWith("@@") ? "hunk" : "";
+        return `<span class="${cls}">${esc(line)}</span>`;
+      }).join("\n");
+    }
+    async function openGit(root) {
+      const target = String(root || sessionRoot() || selectedRoot() || "");
+      gitSheet.dataset.root = target;
+      document.getElementById("gitSheetTitle").textContent = `깃 · ${wtName(target)}`;
+      closeDrawer(); closeInbox(); closeSettings();
+      gitSheet.classList.add("open");
+      gitSheet.setAttribute("aria-hidden", "false");
+      gitStatusEl.textContent = "불러오는 중…";
+      gitBody.innerHTML = "";
+      const q = `root=${encodeURIComponent(target)}`;
+      try {
+        const [wipRes, graphRes] = await Promise.all([
+          fetch(`/mobile/api/git-wip-stat?${q}`, {headers: headers()}),
+          fetch(`/mobile/api/git-graph?${q}`, {headers: headers()}),
+        ]);
+        if (!wipRes.ok) throw new Error(await responseError(wipRes));
+        const wip = await wipRes.json();
+        const graph = graphRes.ok ? await graphRes.json() : {};
+        // 실제 스키마: wip.files = [{name, add, del, untracked}], graph.commits = [{hash, subject, ts, author}],
+        // graph.branches = [{branch, head, root, ...}]. 이 워크트리의 브랜치는 root 로 찾는다.
+        const files = wip.files || [];
+        const mine = (graph.branches || []).find(b => b.root === target) || {};
+        gitStatusEl.textContent = [
+          mine.branch ? `브랜치 ${mine.branch}` : "",
+          files.length ? `변경 ${files.length}개` : "변경 없음",
+          Number(mine.ahead) ? `↑${mine.ahead}` : "", Number(mine.behind) ? `↓${mine.behind}` : "",
+        ].filter(Boolean).join(" · ");
+        const rows = files.map(f => {
+          const path = String(f.name || "");
+          const stat = [Number(f.add) ? `+${f.add}` : "", Number(f.del) ? `-${f.del}` : "",
+                        f.untracked ? "new" : ""].filter(Boolean).join(" ");
+          return `<div class="gitRow" data-git-file="${esc(path)}"><span class="nm">${esc(path)}</span><span class="st">${esc(stat)}</span></div>`;
+        }).join("");
+        const commits = (graph.commits || []).slice(0, 30).map(c =>
+          `<div class="gitRow" data-git-commit="${esc(c.hash || "")}"><span class="nm">${esc(c.subject || "")}</span><span class="st">${esc(String(c.hash || "").slice(0, 7))}</span></div>`).join("");
+        gitBody.innerHTML = (rows ? `<div class="gitSect">변경 파일</div>${rows}` : "")
+          + (commits ? `<div class="gitSect">최근 커밋</div>${commits}` : "");
+      } catch (error) {
+        gitStatusEl.textContent = `깃 실패 · ${String(error)}`;
+      }
+    }
+    // 파일 = diff 펼치기, 커밋 = 파일 목록 펼치기. 둘 다 읽기 전용이다.
+    gitBody.onclick = async event => {
+      const row = event.target.closest && event.target.closest("[data-git-file], [data-git-commit]");
+      if (!row) return;
+      const open = row.nextElementSibling && row.nextElementSibling.classList.contains("gitDiff");
+      if (open) { row.nextElementSibling.remove(); return; }
+      const target = gitSheet.dataset.root || "";
+      const holder = document.createElement("div");
+      holder.className = "gitDiff";
+      holder.textContent = "불러오는 중…";
+      row.insertAdjacentElement("afterend", holder);
+      try {
+        const file = row.getAttribute("data-git-file");
+        const url = file
+          ? `/mobile/api/git-diff?root=${encodeURIComponent(target)}&file=${encodeURIComponent(file)}`
+          : `/mobile/api/git-commit-info?root=${encodeURIComponent(target)}&commit=${encodeURIComponent(row.getAttribute("data-git-commit") || "")}`;
+        const r = await fetch(url, {headers: headers()});
+        if (!r.ok) throw new Error(await responseError(r));
+        const d = await r.json();
+        holder.innerHTML = file
+          ? diffHtml(d.diff || d.text || "(내용 없음)")
+          : esc((d.files || []).map(f => `${f.name}  +${f.add} -${f.del}`).join("\n") || "(파일 없음)");
+      } catch (error) { holder.textContent = `실패 · ${String(error)}`; }
+    };
+    document.getElementById("gitCloseBtn").onclick = closeGit;
+    gitSheet.onclick = event => { if (event.target === gitSheet) closeGit(); };
+
+    // ── CLI(claude/codex) 버전 배너 ──
+    // 새 버전은 터미널에서 CLI 를 띄울 때만 보였다 — 모바일엔 터미널이 아예 없다.
+    const cliUpdateBanner = document.getElementById("cliUpdateBanner");
+    let cliUpdateBusy = false;
+    async function loadCliUpdate() {
+      if (cliUpdateBusy) return;
+      try {
+        const r = await fetch("/mobile/api/update-status", {headers: headers()});
+        if (!r.ok) return;
+        const cli = (await r.json()).cli || {};
+        const behind = Object.keys(cli).filter(h => cli[h] && cli[h].behind);
+        if (!behind.length) { cliUpdateBanner.hidden = true; return; }
+        const h = behind[0];
+        cliUpdateBanner.hidden = false;
+        cliUpdateBanner.textContent = `${h} ${cli[h].installed} → ${cli[h].latest} · 탭하여 받기`;
+        cliUpdateBanner.dataset.harness = h;
+      } catch (error) { /* 조용히 — 배너가 없는 게 오탐보다 낫다 */ }
+    }
+    cliUpdateBanner.onclick = async () => {
+      const harness = cliUpdateBanner.dataset.harness || "";
+      if (!harness || cliUpdateBusy) return;
+      cliUpdateBusy = true;
+      const before = cliUpdateBanner.textContent;
+      cliUpdateBanner.textContent = `${harness} 받는 중…`;
+      try {
+        const r = await fetch("/mobile/api/cli-update", {method: "POST", headers: headers(true),
+                                                         body: JSON.stringify({harness})});
+        if (r.status === 409) {
+          const d = await r.json().catch(() => ({}));
+          showToast(`${harness} 세션 ${(d.busy || []).length}개 작업 중 — 끝나면 받아요`);
+          cliUpdateBanner.textContent = before;
+          return;
+        }
+        if (!r.ok) throw new Error(await responseError(r));
+        const d = await r.json();
+        showToast(`${harness} ${d.installed || ""} 로 업데이트했어요`);
+        cliUpdateBanner.hidden = true;
+      } catch (error) {
+        showToast(`업데이트 실패 · ${String(error)}`);
+        cliUpdateBanner.textContent = before;
+      } finally {
+        cliUpdateBusy = false;
+      }
+    };
+
     function sessionStatusText(session) {
       if (!session || session.kind !== "agent") return "";
       let text = agentStatusMeta(session.status).label;   // 웹과 통일된 라벨(idle=유휴 등)
@@ -4200,6 +4456,8 @@ _MOBILE_HTML = r"""<!doctype html>
       const root = worktreeActions.dataset.root || "";
       const act = item.getAttribute("data-wt-act") || "";
       if (act === "services") { closeWorktreeSheet(); openServices(root); return; }
+      if (act === "logs") { closeWorktreeSheet(); openLogs(root); return; }
+      if (act === "git") { closeWorktreeSheet(); openGit(root); return; }
       if (act.startsWith("launch:")) { closeWorktreeSheet(); launchAgent(root, act.slice(7), item); return; }
       if (act === "pin") { closeWorktreeSheet(); await toggleWorktreePin(root); }
     };
@@ -4397,6 +4655,9 @@ _MOBILE_HTML = r"""<!doctype html>
       });
     }
     setInterval(quietPoll, autoPollMs);
+    // CLI 버전은 하루 단위로만 바뀐다(서버도 30분 캐시) — 60초에 한 번이면 충분하다.
+    loadCliUpdate();
+    setInterval(loadCliUpdate, 60000);
     // 재방문 시 다음 폴(최대 3s) 기다리지 말고 즉시 갱신 — 탭 복귀·포커스·모바일 bfcache 복원 모두 커버(load 는 자체 loading 가드로 중복 방지).
     document.addEventListener("visibilitychange", quietPoll);
     window.addEventListener("focus", quietPoll);
