@@ -202,6 +202,13 @@ class Handler(BaseHTTPRequestHandler):
             return is_loopback_client(self)   # auth 꺼진 로컬 대시보드
         return mobile_request_ok(self, parsed)
 
+    def _git_diff_payload(self, root: Path, query: dict[str, list[str]]) -> dict[str, Any]:
+        """git-diff 인자 조합 — 웹(/api/git-diff)과 모바일(/mobile/api/git-diff)이 공유한다.
+        복붙해 두면 한쪽만 고쳐진다."""
+        return git_diff(root, query.get("repo", ["."])[0],
+                        file=query.get("file", [""])[0],
+                        commit=query.get("commit", [""])[0])
+
     def _policy(self) -> AccessPolicy:
         return AccessPolicy(auth_controller().store)
 
@@ -618,6 +625,61 @@ class Handler(BaseHTTPRequestHandler):
                     self._forbidden()
                     return
                 payload = {"subagents": agent_activity(root, source, sid)}
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
+            return
+        if parsed.path in ("/mobile/api/logs/chunk", "/mobile/api/logs/matches"):
+            # 모바일 로그 뷰어(읽기 전용). 서버 로직은 웹 /api/logs/* 와 **같은 함수**를 쓴다 — 신규 0.
+            # 다운로드·콘솔로그·게이지·SSE 스트림은 넣지 않는다(작은 화면 ROI + 노출면 최소).
+            if not self._agent_api_ok(parsed, principal):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
+                service = safe_service(query.get("service", [""])[0], root)
+                path = selected_log(root, service, query.get("run", ["current"])[0])
+                if parsed.path.endswith("/matches"):
+                    q = query.get("q", [""])[0]
+                    err_only = query.get("errOnly", ["0"])[0] == "1"
+                    payload = ({"matches": [], "total": 0, "size": 0, "truncated": False}
+                               if not q and not err_only else scan_log_matches(path, q, err_only))
+                else:
+                    after_raw = query.get("after", [None])[0]
+                    payload = (read_log_chunk(path, after=int(after_raw)) if after_raw is not None
+                               else read_log_chunk(path, before=int(query.get("before", ["0"])[0])))
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            self.send_json(payload)
+            return
+        if parsed.path in ("/mobile/api/git-graph", "/mobile/api/git-wip-stat",
+                           "/mobile/api/git-diff", "/mobile/api/git-commit-info"):
+            # 모바일 깃(읽기 전용) — 커밋·푸시·머지 같은 쓰기는 의도적으로 노출하지 않는다.
+            # 레인 그래프는 안 그리고 커밋 리스트로만 쓰므로 all_remotes/avatars 도 끈다.
+            if not self._agent_api_ok(parsed, principal):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+                if not self._require_root_access(root):
+                    return
+                repo = query.get("repo", ["."])[0]
+                if parsed.path.endswith("git-graph"):
+                    payload = git_graph(root, repo,
+                                        refresh=query.get("refresh", ["0"])[0] == "1",
+                                        all_remotes=False, want_avatars=False)
+                elif parsed.path.endswith("git-wip-stat"):
+                    payload = git_wip_stat(root, repo)
+                elif parsed.path.endswith("git-commit-info"):
+                    payload = git_commit_info(root, repo, query.get("commit", [""])[0])
+                else:
+                    payload = self._git_diff_payload(root, query)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return
@@ -1078,9 +1140,7 @@ class Handler(BaseHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             try:
                 root = safe_root(query.get("root", [""])[0])
-                payload = git_diff(root, query.get("repo", ["."])[0],
-                                   file=query.get("file", [""])[0],
-                                   commit=query.get("commit", [""])[0])
+                payload = self._git_diff_payload(root, query)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return
