@@ -11,7 +11,17 @@
 2. **렌더러 어댑터 전달 방식** — 함수마다 `opts` 를 넘기는 대신 `MarinaChat.configure(adapter)` 로 한 번 등록한다. 30개 시그니처를 고치면 순수 이동이 아니게 되고 회귀 위험이 커진다. 어댑터는 5개다: `imageUrl`·`fileUrl`·`uploadUrl`·`displayModel`·`ensureAnswerState`.
 3. **웹 질문 카드는 읽기 전용** — 렌더는 하되 응답은 못 한다. 응답하려면 모바일의 선택 상태 로직(`pickAnswerOption`·`ensureAnswerState`·`submitLiveAnswer`)이 필요한데 웹에 베끼면 또 두 벌이 된다. **정석은 그 로직도 공유 렌더러로 올리는 것**이고 다음 사이클로 미뤘다. 카드 아래에 "모바일이나 [원본] 터미널에서 골라주세요" 안내를 띄운다.
 4. **추출 중 발견한 결함 2건** — (a) 순수해 보이던 렌더 함수들이 모바일에만 있는 상수·함수(`activityTypeLabels`, `IMAGE_EXT_RE`, `displayModel`, `uploadServeUrl`)를 참조해 브라우저에서만 터질 `ReferenceError` 가 됐다. 금지어 목록으로는 못 잡아 `test-chat-render-shared.sh` 에 전수 검사를 넣었다. (b) 주석 흡수 로직이 `// LIST_RECONCILE_END` 마커를 딸려가 쌍이 갈렸다.
-5. **기존 테스트 9개가 "렌더러는 모바일 안에 있다"를 전제** 하고 있었다. 코드가 옮겨갔으니 테스트도 따라갔다 — 마커 기반은 새 파일을, vm 평가는 브라우저와 같은 순서로 공유 렌더러를 먼저 싣고, 배선 검사는 두 파일을 합쳐서 본다(어느 파일인지가 아니라 서빙되는 코드에 배선이 살아 있는지가 계약).
+5. **기존 테스트 11개가 "렌더러는 모바일 안에 있다"거나 옛 배선을 전제** 하고 있었다. 코드가 옮겨갔으니 테스트도 따라갔다 — 마커 기반은 새 파일을, vm 평가는 브라우저와 같은 순서로 공유 렌더러를 먼저 싣고, 배선 검사는 두 파일을 합쳐서 본다(어느 파일인지가 아니라 서빙되는 코드에 배선이 살아 있는지가 계약).
+
+## codex 리뷰에서 잡힌 결함 (전부 반영, 커밋 `cd14e4d`)
+
+리뷰가 심각 4건·중간 5건을 찾았고 전부 재현 확인 후 고쳤다. 값진 것 순서로:
+
+1. **웹 대화가 서버 `timeline` 을 버리고 있었다.** `agent_transcript` 는 평문 `turns` 와 도구활동·이미지 ref 를 담은 `timeline` 을 둘 다 주는데 `turns` 만 `timelineFromTurns` 로 변환했다. 실측: 서버가 activity 65개를 주는 세션에서 웹은 0개를 그렸다. 고친 뒤 활동그룹 183·이미지 1개 렌더 확인. **첫 브라우저 검증에서 `activityGroups: 0` 을 보고도 "이 세션엔 없나 보다"로 읽은 것이 놓친 이유** — 증거는 있었는데 해석하지 않았다.
+2. **busy 가드가 실제 작업 중을 못 잡았다.** `_BUSY_STATUSES` 가 `("running","waiting")` 이었는데 `running` 은 **서비스** 상태고 `waiting` 은 "입력 대기(=안 바쁨)"다. 캐논 어휘는 `working`/`blocked`. 가드가 정작 필요할 때 안 걸리고 엉뚱할 때 걸렸다. 테스트가 `"running"` 을 mock 해 스스로 통과시켰으므로, 이제 웹의 `AGENT_STATUS_META` 를 진실로 삼아 어휘를 잠근다.
+3. **auth 꺼진 로컬에서 `/api/agent/*` POST 가 CSRF 에 열려 있었다.** 이 라우트들은 공통 origin 검사에 닿기 전에 반환하고, auth 가 꺼지면 `authorize()` 도 CSRF 를 안 본다. 임의 웹페이지가 `text/plain` 으로 POST 하면 프리플라이트 없이 `cli-update`·`send`·`launch` 가 실행됐다. 웹 경로에 `_origin_allowed` 를 요구해 막았다(Origin 없음=curl 은 통과).
+4. **모바일 로그 시트가 스키마를 셋 다 틀리게 읽었다.** `lines:[{t,e}]` 인데 `d.text` 를, `matches:[{o,t}]` 인데 `m.text` 를 읽었고, tail 은 `before=0`(0바이트)이라 항상 빈 화면이었다. `run` 도 임의 문자열이라 늘 400 — 서버가 받는 형식만 오도록 services 응답에 `logRuns` 를 실어 웹과 출처를 통일했다. **서비스 0개 워크트리에서 실측을 못 해 놓친 구간이다.**
+5. 그 외: 폴링이 사용자가 펼친 과거를 3초 뒤 지우던 것(`paged` 플래그), 같은 탭 응답 역전(요청 세대 번호), raw xterm 수명(sweep 이 보고 있는 화면을 dispose / Map 누수), `update_status` 바깥 캐시 미무효화, Inbox 알림이 아직 터미널로 가던 것, `git-wip-stat`·`git-commit-info` 의 repo 미검증(워크트리 안 심링크로 바깥 저장소 노출 — 웹에도 있던 선행 결함을 근원에서 막음).
 
 ## 배경
 
