@@ -93,11 +93,13 @@ print("PASS ① 큐 상태 판정: 전달(중복없음) · 삼켜짐=steered · 
 PY
 
 # ---------- 렌더 키에 큐 상태가 실려야 한다(안 실리면 배지가 새로고침 전까지 문신) ----------
-PYTHONPATH="$SCR" python3 - <<'PY' | node
-from marina_mobile import render_mobile_html
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY' | node
+# 렌더 키 헬퍼는 marina-web/chat-render.js 로 옮겨졌다(웹과 공유). 마커도 같이 따라갔다.
 import json
+import sys
+from pathlib import Path
 
-html = render_mobile_html()
+html = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 a, b = html.find("// TIMELINE_KEY_START"), html.find("// TIMELINE_KEY_END")
 if a < 0 or b < 0 or b <= a:
     raise SystemExit("TIMELINE_KEY boundaries missing")
@@ -124,9 +126,15 @@ console.log("PASS ② 렌더 키: queued/queuedCancelled/steered/images 변화�
 PY
 
 # 두 렌더 키가 같은 helper 를 쓰는지 — 따로 적어두면 또 어긋난다
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY'
+import sys
+from pathlib import Path
+
 from marina_mobile import render_mobile_html
-html = render_mobile_html()
+
+# 전체 렌더 키는 모바일에, exchange 렌더 키는 공유 렌더러에 있다. 둘 다 서빙되니 합쳐서 본다.
+html = render_mobile_html() + "\n" + (
+    Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 assert "timeline.map(timelineItemKeyParts)" in html, "전체 렌더 키가 공용 helper 를 안 씀"
 assert "(exchange.items || []).map(timelineItemKeyParts)" in html, "exchange 렌더 키가 공용 helper 를 안 씀"
 assert 'class="queuedTag steered"' in html, "steered 배지 렌더 없음"

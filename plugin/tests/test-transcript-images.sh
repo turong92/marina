@@ -119,10 +119,16 @@ print("PASS part A (transcript images): 타임라인 ref-only + 원본 왕복 + 
 PY
 
 # ---------- Part B: 모바일 렌더가 ref 를 썸네일로 그린다 ----------
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY'
+import sys
+from pathlib import Path
+
 from marina_mobile import render_mobile_html
 
-html = render_mobile_html()
+# 썸네일 렌더는 공유 렌더러(chat-render.js)에, 시트/뷰어/URL 빌더는 모바일에 있다.
+# 둘 다 서빙되니 합쳐서 본다 — 어느 파일인지가 아니라 배선이 살아 있는지가 계약이다.
+html = render_mobile_html() + "\n" + (
+    Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 required = [
     'id="galleryBtn"',            # 대화 헤더의 모아보기 버튼
     'id="gallerySheet"',          # 모아보기 시트
