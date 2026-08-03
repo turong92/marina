@@ -623,6 +623,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self.send_json(payload)
             return
+        if parsed.path == "/mobile/api/update-status":
+            # 모바일엔 업데이트 상태 라우트 자체가 없었다 — marina 플러그인도, CLI 버전도 못 봤다.
+            # 웹의 /api/update-status 와 같은 페이로드(cli 키 포함)를 준다.
+            if not self._agent_api_ok(parsed, principal):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            self.send_json(update_status())
+            return
         if parsed.path == "/api/gateway-status":
             light = urllib.parse.parse_qs(parsed.query).get("light", ["0"])[0] == "1"   # light=1: enabled/port 만(routes=비싼 스냅샷 생략 — 카드 URL 계산용)
             if not light and not self._require_admin_access():
@@ -1317,6 +1325,28 @@ class Handler(BaseHTTPRequestHandler):
                             "agent.interrupt", "ok", principal.user.id, "agent", canonical_agent(source, sid),
                         )
                     self.send_json(result)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
+            if parsed.path == "/mobile/api/cli-update":
+                # claude/codex CLI 자체를 올린다. 실행 파일을 갈아치우므로 그 하네스의 세션이
+                # 하나라도 돌고 있으면 409 로 거부한다 — 돌던 세션이 깨지는 게 더 비싸다.
+                if not self._agent_api_ok(parsed, principal):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                if not self._require_admin_access():
+                    return
+                try:
+                    from marina_cliver import BusyError, cli_update
+                    mobile_body = self.read_json()
+                    result = cli_update(str(mobile_body.get("harness", "")))
+                    if principal is not None:
+                        controller.store.audit_action(
+                            "cli.update", "ok", principal.user.id, "harness", str(result.get("harness") or ""),
+                        )
+                    self.send_json(result)
+                except BusyError as exc:
+                    self.send_json({"error": "busy", "busy": exc.busy}, 409)
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return

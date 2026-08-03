@@ -206,5 +206,12 @@ def update_status() -> dict[str, Any]:
         "harnesses": _harnesses(),
         "harnessStatus": _harness_status(),
     }
+    # 하네스 CLI 자체의 버전(claude/codex)도 같이 싣는다 — 배너가 하나고 폴링도 하나여야 하기 때문.
+    # 조회 실패가 플러그인 업데이트 배너까지 막으면 안 되니 빈 dict 로 떨어진다.
+    try:
+        from marina_cliver import cli_status
+        payload["cli"] = cli_status()
+    except Exception:
+        payload["cli"] = {}
     _status_cache.update({"ts": now, "payload": payload})
     return payload
