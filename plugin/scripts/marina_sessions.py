@@ -2017,35 +2017,52 @@ def _usage_window(key: str, label: str, used: Any, reset: Any) -> dict[str, Any]
     }
 
 
-def _claude_fable_limit(data: dict[str, Any]) -> tuple[Any, Any]:
-    """Find Fable's model-scoped weekly limit across native usage shapes."""
-    direct_percent_keys = ("fableWeekly", "fable_weekly", "sevenDayFable", "seven_day_fable")
-    direct_reset_keys = ("fableWeeklyResetAt", "fable_weekly_reset_at", "sevenDayFableResetAt",
-                         "seven_day_fable_reset_at")
-    percent = next((data.get(name) for name in direct_percent_keys if name in data), None)
-    reset = next((data.get(name) for name in direct_reset_keys if name in data), None)
-    if percent is not None:
-        return percent, reset
+_USAGE_PERCENT_KEYS = ("percent", "utilization", "used_percent", "usedPercent", "percentage")
+_USAGE_RESET_KEYS = ("resets_at", "resetAt", "resetsAt")
+# limits 항목의 kind → 우리 창. 나머지(weekly_scoped 등)는 모델 이름으로 칸을 만든다.
+_CLAUDE_LIMIT_KINDS = {"session": ("fiveHour", "5시간"), "weekly_all": ("weekly", "주간")}
 
-    def visit(value: Any) -> tuple[Any, Any] | None:
-        if isinstance(value, dict):
-            name = " ".join(str(value.get(key, "")) for key in ("display_name", "displayName", "name", "model"))
-            if "fable" in name.lower():
-                used = next((value.get(key) for key in ("utilization", "used_percent", "usedPercent", "percentage")
-                             if key in value), None)
-                reset_at = next((value.get(key) for key in ("resets_at", "resetAt", "resetsAt") if key in value), None)
-                if used is not None:
-                    return used, reset_at
-            for child in value.values():
-                found = visit(child)
-                if found:
-                    return found
-        elif isinstance(value, list):
-            for child in value:
-                found = visit(child)
-                if found:
-                    return found
-        return None
+
+def _scoped_weekly_slot(name: Any) -> tuple[str, str]:
+    """'Fable 5' → ('fableWeekly', 'Fable 주간'). 버전 꼬리는 뗀다 — 모델이 올라가도 같은 칸에 쌓인다."""
+    head = next((part for part in re.split(r"[\s_-]+", str(name or "").strip()) if part), "")
+    if not head or not head[0].isalpha():
+        return "", ""
+    return head[0].lower() + head[1:] + "Weekly", f"{head} 주간"
+
+
+def _claude_limit_windows(data: dict[str, Any]) -> list[tuple[str, str, Any, Any]]:
+    """`limits` 배열을 창 후보로 편다.
+
+    **이 배열이 계정 한도의 진짜 목록이다.** 평평한 seven_day_opus/seven_day_sonnet 등은 이 계정에서
+    전부 null 인데 배열에는 페이블 주간이 들어 있었다 — 평평한 키만 보면 영영 안 보인다. 모델을
+    하드코딩하지 않는다: 새 모델이 생기면 배열에 얹혀 그대로 뜬다.
+
+    hud 캐시의 옛 모양({"display_name": …, "utilization": …})도 같이 받는다.
+    """
+    entries = data.get("limits")
+    if not isinstance(entries, list):
+        return []
+    found: list[tuple[str, str, Any, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        percent = next((entry[name] for name in _USAGE_PERCENT_KEYS if entry.get(name) is not None), None)
+        if percent is None:
+            continue
+        reset = next((entry[name] for name in _USAGE_RESET_KEYS if entry.get(name) is not None), None)
+        slot = _CLAUDE_LIMIT_KINDS.get(str(entry.get("kind") or ""))
+        if slot:
+            found.append((slot[0], slot[1], percent, reset))
+            continue
+        scope = entry.get("scope") if isinstance(entry.get("scope"), dict) else {}
+        model = scope.get("model") if isinstance(scope.get("model"), dict) else {}
+        key, label = _scoped_weekly_slot(
+            model.get("display_name") or model.get("displayName")
+            or entry.get("display_name") or entry.get("displayName") or entry.get("name"))
+        if key:
+            found.append((key, label, percent, reset))
+    return found
 
     return visit(data) or (None, None)
 
@@ -2068,39 +2085,53 @@ def account_usage_from_rate_limits(rate_limits: dict[str, Any] | None) -> dict[s
 
 
 def account_usage_from_claude_cache(cache: dict[str, Any] | None) -> dict[str, Any]:
-    """Normalize Claude HUD usage data, including optional Fable weekly quota."""
+    """Claude 계정 사용량을 창 목록으로 정규화한다(공식 /api/oauth/usage 응답과 hud 캐시 두 모양)."""
     value = cache.get("data") if isinstance(cache, dict) and isinstance(cache.get("data"), dict) else cache
     data = value if isinstance(value, dict) else {}
+    scoped = _claude_limit_windows(data)
+    from_limits = {key: (percent, reset) for key, _, percent, reset in reversed(scoped)}
     windows: list[dict[str, Any]] = []
+    emitted: set[str] = set()
+    # 모델별 주간 창은 계정/플랜에 따라 있을 때만 값이 온다(없으면 null → 창이 안 생긴다).
     for key, label, percent_keys, reset_keys in (
         ("fiveHour", "5시간", ("fiveHour", "five_hour"), ("fiveHourResetAt", "five_hour_reset_at")),
         ("weekly", "주간", ("sevenDay", "seven_day"), ("sevenDayResetAt", "seven_day_reset_at")),
-        ("fableWeekly", "Fable 주간", (), ()),
+        ("opusWeekly", "Opus 주간", ("sevenDayOpus", "seven_day_opus"), ()),
+        ("sonnetWeekly", "Sonnet 주간", ("sevenDaySonnet", "seven_day_sonnet"), ()),
+        ("fableWeekly", "Fable 주간", ("fableWeekly", "fable_weekly", "sevenDayFable", "seven_day_fable"),
+         ("fableWeeklyResetAt", "fable_weekly_reset_at", "sevenDayFableResetAt", "seven_day_fable_reset_at")),
     ):
-        if key == "fableWeekly":
-            percent, reset = _claude_fable_limit(data)
-        else:
-            percent = next((data.get(name) for name in percent_keys if name in data), None)
-            reset = next((data.get(name) for name in reset_keys if name in data), None)
-            if isinstance(percent, dict):
-                item = percent
-                percent = next((item.get(name) for name in ("utilization", "used_percent", "usedPercent", "percentage")
-                                if name in item), None)
-                reset = next((item.get(name) for name in ("resets_at", "resetAt", "resetsAt") if name in item), reset)
+        percent = next((data.get(name) for name in percent_keys if name in data), None)
+        reset = next((data.get(name) for name in reset_keys if name in data), None)
+        if isinstance(percent, dict):
+            item = percent
+            percent = next((item.get(name) for name in _USAGE_PERCENT_KEYS if name in item), None)
+            reset = next((item.get(name) for name in _USAGE_RESET_KEYS if name in item), reset)
+        if percent is None:   # 평평한 키가 없거나 null 이면 limits 배열이 답이다
+            percent, reset = from_limits.get(key, (None, reset))
         normalized = _usage_window(key, label, percent, reset)
         if normalized:
             windows.append(normalized)
+            emitted.add(key)
+    # 위 목록에 없는 모델의 주간 창(=우리가 모르는 새 모델)은 응답 순서대로 뒤에 붙인다
+    for key, label, percent, reset in scoped:
+        normalized = _usage_window(key, label, percent, reset) if key not in emitted else None
+        if normalized:
+            windows.append(normalized)
+            emitted.add(key)
     return {"source": "claude", "windows": windows}
 
 
 def _latest_codex_rate_limits(root: Path | None = None) -> dict[str, Any] | None:
+    # 계정 한도는 **계정 단위**다. 예전엔 root 의 롤아웃을 우선 봤는데, 그 워크트리에서 codex 를
+    # 한동안 안 쓰면 낡은 숫자가 계속 떴다(다른 워크트리에서 쓴 최신 값이 있는데도). 그래서
+    # 모든 롤아웃 중 가장 최근 것을 본다 — root 는 동률일 때의 선호로만 남긴다.
     paths: list[Path] = []
-    if root is not None:
+    for base in CODEX_ROLLOUT_DIRS:
+        if base.is_dir():
+            paths.extend(Path(path) for path in glob.iglob(str(base / "**" / "rollout-*.jsonl"), recursive=True))
+    if not paths and root is not None:
         paths = [Path(str(item.get("path"))) for item in codex_agent_sessions().get(str(root), []) if item.get("path")]
-    if not paths:
-        for base in CODEX_ROLLOUT_DIRS:
-            if base.is_dir():
-                paths.extend(Path(path) for path in glob.iglob(str(base / "**" / "rollout-*.jsonl"), recursive=True))
     for path in sorted(paths, key=lambda item: item.stat().st_mtime if item.is_file() else 0, reverse=True):
         for obj in _reverse_json_objects(path):
             payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
@@ -2114,6 +2145,18 @@ def provider_account_usage(source: str, root: Path | None = None) -> dict[str, A
     if source == "codex":
         return account_usage_from_rate_limits(_latest_codex_rate_limits(root))
     if source == "claude":
+        # 1순위: 우리가 직접 가져온다(claude CLI 와 같은 /api/oauth/usage). 예전엔 써드파티 플러그인의
+        # 캐시만 읽었는데 그게 47일째 멈춰 있어 사용량이 늘 빈칸이었다 — 남의 캐시를 기다리지 않는다.
+        try:
+            from marina_usage import claude_usage_payload
+            payload = claude_usage_payload()
+        except Exception:
+            payload = None
+        if payload:
+            live = account_usage_from_claude_cache(payload)
+            if live.get("windows"):
+                return live
+        # 2순위: 그 플러그인 캐시가 **신선할 때만**(토큰을 못 읽는 환경 대비).
         try:
             cache = json.loads(CLAUDE_USAGE_CACHE_FILE.read_text(encoding="utf-8"))
             timestamp = cache.get("timestamp") if isinstance(cache, dict) else None
