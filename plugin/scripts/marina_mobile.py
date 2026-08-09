@@ -1230,7 +1230,12 @@ _MOBILE_HTML = r"""<!doctype html>
        **칼럼 배정이 밀린다** — 목록 뷰에서 프로젝트 스트립이 36px 칸에 들어가고 액션이 1fr 을 차지했다
        (실측 390px 기준 strip 36px / acts 나머지 전부. "서버 버튼이 스크롤 폭을 먹는" 증상의 진짜 원인).
        flex 는 남은 자식만으로 나누므로 숨김 여부에 흔들리지 않는다. */
-    .shellRow { display: flex; gap: 5px; align-items: center; min-height: 38px; }
+    /* min-width:0 은 필수다. .shellRow 는 header(grid)의 아이템이라 기본값 min-width:auto 면
+       자동 최소 크기 = min-content 가 되고, 제목이 긴 URL(안 쪼개지는 문자열)이면 그 폭이
+       그대로 하한이 된다 → 헤더 열이 뷰포트보다 넓어지고 #mobileApp 열까지 끌려가
+       main·작성기까지 늘어나 페이지 전체가 가로로 오버플로한다(형: "제목 섹션 때문에 전체 늘어져").
+       자식(chatNavTitle)의 ellipsis 는 이게 없으면 무력하다 — 줄어들 기회 자체가 없어서. */
+    .shellRow { display: flex; gap: 5px; align-items: center; min-height: 38px; min-width: 0; }
     .shellRow > .backBtn { flex: 0 0 auto; }
     .shellRow > .project-strip, .shellRow > .chatNavTitle { flex: 1 1 auto; min-width: 0; }
     h2 { margin: 0; font-size: 22px; }
