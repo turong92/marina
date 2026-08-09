@@ -1037,6 +1037,18 @@ def mobile_launch(body: dict[str, Any]) -> dict[str, Any]:
 
 _ANSWER_CONFIRM_TIMEOUT_S = 3.5   # PostToolUse 훅이 상태파일을 지울 때까지 기다리는 상한
 _ANSWER_CONFIRM_POLL_S = 0.15
+_ANSWER_LOG = MARINA_HOME / "answer-debug.log"
+
+
+def _answer_log(message: str) -> None:
+    """질문 응답 경로 계측(임시). 다중선택 전달 실패의 원인을 좁히면 걷어낸다.
+
+    데몬 로그(dashboard.log)는 접근 로그로 넘쳐서 묻힌다 — 전용 파일로 남긴다."""
+    try:
+        with _ANSWER_LOG.open("a", encoding="utf-8") as handle:
+            handle.write(f"{time.strftime('%H:%M:%S')} {message}\n")
+    except OSError:
+        pass
 
 
 def _await_answer_settled(sid: str, before: str) -> bool:
@@ -1169,6 +1181,7 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         pending = mobile_pending_question(source, sid) or {}
         questions = pending.get("questions") or []
         text = answer_text or _answer_as_text(questions, _parse_answers(body))
+        _answer_log("no-tid: 세션을 이어받아 글로 전달 text=%r" % text[:120])
         result = mobile_send({"root": str(root), "target": {"type": "agent", "source": source, "sid": sid},
                               "text": text})
         _clear_pending_question(sid)
@@ -1186,6 +1199,10 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
     # multiSelect 는 **훅이 잡아둔 질문 원본**에서 읽는다 — 클라이언트 주장을 믿지 않는다.
     pending = mobile_pending_question(source, sid) or {}
     questions = pending.get("questions") or []
+    # 계측: 다중선택이 "답이 아예 안 감" 으로 실패하는데 키·간격·정렬·훅데이터가 전부 정상으로 확인됐다.
+    # 남은 미지는 구동 직전/직후의 실제 상태뿐이라, 어느 분기를 어떤 입력으로 탔는지 남긴다.
+    _answer_log("drive: tid=%s answers=%r multi=%r before=%r" % (
+        tid, answers, [bool(q.get("multiSelect")) if isinstance(q, dict) else None for q in questions], before))
     for position, picks in enumerate(answers):
         if position:
             _agent_input_pause()   # 다음 질문의 셀렉터가 그려질 틈을 준다
@@ -1193,6 +1210,7 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         multi_select = bool(isinstance(question, dict) and question.get("multiSelect"))
         _drive_selector(tid, picks, multi_select)
     settled = _await_answer_settled(sid, before)
+    _answer_log("drive done: settled=%r after=%r" % (settled, _question_state_token(sid)))
     return {"ok": True, "tid": tid, "answers": answers,
             "optionIndex": answers[0][0], "settled": settled}
 
@@ -1535,7 +1553,10 @@ _MOBILE_HTML = r"""<!doctype html>
     .viewerText { flex: 1; min-height: 0; margin: 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: #e8edf4; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
     .imageViewerClose { width: 34px; min-height: 34px; flex: none; padding: 0; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; border-color: transparent; font-size: 19px; }
     .liveQuestion:empty { display: none; }
-    .liveQuestion { margin-bottom: 2px; }
+    /* 높이 상한이 필수다. 선택지가 많거나 설명이 길면 카드가 무한히 자라 **위 대화를 통째로 덮어**
+       형이 질문 맥락을 못 읽는다(형: "질문 길어지면 위에 대화내용 못읽게 되는것도 문제야").
+       화면의 45%까지만 쓰고 그 안에서 스크롤한다 — 작업 블록에서 쓴 것과 같은 처방. */
+    .liveQuestion { margin-bottom: 2px; max-height: 45dvh; overflow-y: auto; overscroll-behavior: contain; }
     .questionCard { align-self: stretch; display: flex; flex-direction: column; gap: 8px; padding: 11px 12px; border: 1px solid #b9d4f2; border-radius: 10px; background: #f2f8ff; }
     .questionHeader { color: #0b63ce; font-size: 9px; font-weight: 850; text-transform: uppercase; letter-spacing: .04em; }
     .questionText { font-size: 13px; font-weight: 650; line-height: 1.45; }
@@ -1916,8 +1937,10 @@ _MOBILE_HTML = r"""<!doctype html>
     // 탭 즉시 전송) multiSelect 가 깨지고, 막아버리면 라이브 카드가 만료된 뒤 답할 방법이 사라진다.
     function ensureAnswerState(questions, token) {
       if (token !== liveAnswer.token) {          // 새 질문 — 이전 선택/입력/실패 표시를 물려주지 않는다
+        // otherOpen/otherText 는 **질문별** 맵이다({qi: ...}) — 폼 전체에 하나면 질문이 여럿일 때
+        // 어느 질문의 기타인지 못 담는다. 그 한계 때문에 예전엔 기타를 통째로 숨겼었다.
         liveAnswer = {token, total: questions.length, questions, choices: [],
-                      sending: false, failed: false, otherOpen: false, otherText: ""};
+                      sending: false, failed: false, otherOpen: {}, otherText: {}};
       }
       liveAnswer.total = questions.length;
       liveAnswer.questions = questions;
@@ -1943,7 +1966,8 @@ _MOBILE_HTML = r"""<!doctype html>
       const pq = session && session.pendingQuestion;
       if (!pq || !Array.isArray(pq.questions) || !pq.questions.length) {
         if (liveQuestionEl.innerHTML) liveQuestionEl.innerHTML = "";
-        liveAnswer = {token: "", total: 0, choices: [], sending: false, failed: false};
+        liveAnswer = {token: "", total: 0, choices: [], sending: false, failed: false,
+                      otherOpen: {}, otherText: {}};
         return;
       }
       ensureAnswerState(pq.questions, String(pq.token || pq.toolUseId || ""));
@@ -2000,35 +2024,46 @@ _MOBILE_HTML = r"""<!doctype html>
         if (chosen.every(list => list.length)) submitLiveAnswer();
         return;
       }
-      if (event.target.closest && event.target.closest("[data-answer-other]")) {
-        liveAnswer.otherOpen = true;              // 상태로 열어서 템플릿이 그린다(imperative style 금지)
+      const otherBtn = event.target.closest && event.target.closest("[data-answer-other]");
+      if (otherBtn) {
+        liveAnswer.otherOpen[answerQIndex(otherBtn)] = true;   // 상태로 열어서 템플릿이 그린다(imperative style 금지)
         repaintLiveQuestion();
         const input = liveQuestionEl.querySelector("[data-answer-other-input]");
         if (input) input.focus();
         return;
       }
-      if (event.target.closest && event.target.closest("[data-answer-other-send]")) {
-        sendLiveOther();
+      const otherSend = event.target.closest && event.target.closest("[data-answer-other-send]");
+      if (otherSend) {
+        sendLiveOther(answerQIndex(otherSend));
         return;
       }
     });
-    function sendLiveOther() {
-      const input = liveQuestionEl.querySelector("[data-answer-other-input]");
-      const text = (input ? input.value : liveAnswer.otherText || "").trim();
+    // data-answer-q 를 숫자로. 없거나 깨졌으면 0번 질문으로 본다(질문 하나짜리가 대부분).
+    function answerQIndex(el) {
+      const raw = parseInt((el && el.getAttribute("data-answer-q")) || "0", 10);
+      return Number.isNaN(raw) ? 0 : raw;
+    }
+    function sendLiveOther(qi) {
+      const input = liveQuestionEl.querySelector(`[data-answer-other-input][data-answer-q="${qi}"]`)
+        || liveQuestionEl.querySelector("[data-answer-other-input]");
+      const text = (input ? input.value : liveAnswer.otherText[qi] || "").trim();
       if (!text) { if (input) input.focus(); return; }
-      liveAnswer.otherText = text;
+      liveAnswer.otherText[qi] = text;
+      // 지금 서버 계약은 자유입력을 **폼 단위 텍스트 하나**로만 받는다(_parse_answers 는 정수 배열만).
+      // 그래서 여기서 질문별로 섞어 보내는 형식을 지어내면 서버가 못 읽는다 — 질문별 기타 혼합은
+      // 서버 계약을 넓힌 뒤(2단계) 붙인다. 지금은 어느 질문에서 눌렀든 그 텍스트로 답한다.
       submitLiveAnswer({text});
     }
     // 입력값을 state 에 계속 보관 — 재렌더가 일어나도 값이 살아남는다.
     liveQuestionEl.addEventListener("input", event => {
       const input = event.target.closest && event.target.closest("[data-answer-other-input]");
-      if (input) liveAnswer.otherText = input.value;
+      if (input) liveAnswer.otherText[answerQIndex(input)] = input.value;
     });
     liveQuestionEl.addEventListener("keydown", event => {
       const input = event.target.closest && event.target.closest("[data-answer-other-input]");
       if (!input || event.isComposing) return;
-      if (event.key === "Enter") { event.preventDefault(); sendLiveOther(); }
-      else if (event.key === "Escape") { liveAnswer.otherOpen = false; input.blur(); repaintLiveQuestion(); }
+      if (event.key === "Enter") { event.preventDefault(); sendLiveOther(answerQIndex(input)); }
+      else if (event.key === "Escape") { liveAnswer.otherOpen[answerQIndex(input)] = false; input.blur(); repaintLiveQuestion(); }
     });
     // 포커스가 카드에서 빠지면 미뤄둔 갱신을 반영한다.
     liveQuestionEl.addEventListener("focusout", () => {

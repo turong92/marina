@@ -574,18 +574,30 @@
         // style.display 를 바꿨는데, 그러면 직렬화된 DOM 이 템플릿과 영구히 달라져 폴링마다 innerHTML
         // 이 재할당되고 입력창이 매번 파괴됐다(형: "깜빡거리면서 자꾸 초기화 → 직접 입력 자체가 불가능").
         // 그리고 아래에 줄을 더 만들지 않고 **그 줄 자체**를 입력칸으로 바꾼다.
-        const otherOpen = Boolean(state && state.otherOpen);
-        const other = !(interactive && !multi && !sending && !q.multiSelect) ? ""
+        // 기타(직접 입력)는 **모든 질문**에 있다. AskUserQuestion 은 내가 준 선택지 뒤에 Other 행을
+        // 항상 붙이므로(그래서 tool_input 의 options 에는 안 들어있다), 여기서 감추면 터미널·앱에선
+        // 되는 선택지가 마리나에서만 사라진다 — 형: "모든 질문에 기타입력 있어야 하는거 아니니?".
+        // 상태는 **질문별(qi)** 로 갖는다. 폼 전체에 하나면 질문이 여러 개일 때 어느 질문의 기타인지
+        // 표현할 수가 없어서, 예전엔 그 김에 다중선택·복수질문을 통째로 막아뒀었다.
+        const otherOpen = Boolean(state && state.otherOpen && state.otherOpen[qi]);
+        const otherText = (state && state.otherText && state.otherText[qi]) || "";
+        const other = !(interactive && !sending) ? ""
           : otherOpen
-          ? `<div class="questionOtherRow" data-question-other-row><input class="questionOtherInput" type="text" data-answer-other-input placeholder="직접 입력..." value="${esc((state && state.otherText) || "")}" enterkeyhint="send" autocomplete="off" /><button class="primary questionOtherSend" type="button" data-answer-other-send>보내기</button></div>`
-          : `<button class="questionOpt questionOther" type="button" data-answer-other>&#9998; 기타 (직접 입력)</button>`;
+          ? `<div class="questionOtherRow" data-question-other-row><input class="questionOtherInput" type="text" data-answer-other-input data-answer-q="${qi}" placeholder="직접 입력..." value="${esc(otherText)}" enterkeyhint="send" autocomplete="off" /><button class="primary questionOtherSend" type="button" data-answer-other-send data-answer-q="${qi}">보내기</button></div>`
+          : `<button class="questionOpt questionOther" type="button" data-answer-other data-answer-q="${qi}">&#9998; 기타 (직접 입력)</button>`;
         return `<div class="questionBlock">${step}${header}${text}<div class="questionOpts">${buttons}${other}</div></div>`;
       }).join("");
       const answered = questions.reduce((n, _, qi) => n + (picks(qi).length ? 1 : 0), 0);
       const anyMultiSelect = questions.some(q => q && q.multiSelect);
       const needsSubmit = multi || anyMultiSelect;   // 다중선택은 탭 즉시 전송하면 안 된다(더 고를 수 있으니)
+      // 카운터는 **형이 방금 한 행동**을 비춰야 한다. 질문이 하나인 다중선택에서 '답한 질문 수'를 세면
+      // 몇 개를 고르든 늘 1/1 이고 안 고르면 0/1 이라 아무 정보가 없다(형: "0/1 나오는것도 문제고").
+      // 질문이 여러 개일 때만 질문 진행도가 뜻이 있고, 하나일 땐 고른 개수가 뜻이 있다.
+      const submitLabel = sending ? "보내는 중..."
+        : multi ? `보내기 (${answered}/${questions.length})`
+        : `보내기 (${picks(0).length}개 선택)`;
       const submit = interactive && needsSubmit
-        ? `<div class="questionSubmitRow"><button class="primary questionSubmit" type="button" data-answer-submit${answered === questions.length && !sending ? "" : " disabled"}>${sending ? "보내는 중..." : `보내기 (${answered}/${questions.length})`}</button></div>`
+        ? `<div class="questionSubmitRow"><button class="primary questionSubmit" type="button" data-answer-submit${answered === questions.length && !sending ? "" : " disabled"}>${submitLabel}</button></div>`
         : "";
       const busy = sending && !needsSubmit ? `<div class="questionMore">보내는 중...</div>` : "";
       const failed = state && state.failed

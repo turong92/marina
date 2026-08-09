@@ -215,12 +215,14 @@ function activityFor(questions) {
 // 8) 기타(직접 입력): 닫힘 → 버튼, 열림 → **그 줄 자체**가 입력칸. 아래에 줄이 더 생기면 안 된다.
 {
   const item = activityFor([{header: "A", question: "질문?", options: [{label: "A1"}]}]);
-  const closed = renderQuestionCard(item, true, {choices: [], otherOpen: false});
+  // otherOpen/otherText 는 **질문별 맵**이다({qi: ...}) — 폼 전체 스칼라였을 땐 질문이 여럿일 때
+  // 어느 질문의 기타인지 못 담아서, 그 김에 기타를 통째로 숨겼었다(형: "모든 질문에 기타 있어야").
+  const closed = renderQuestionCard(item, true, {choices: [], otherOpen: {}});
   assert.ok(closed.includes("data-answer-other"), `닫힘 상태엔 기타 버튼: ${closed}`);
   assert.ok(!closed.includes("data-answer-other-input"), "닫힘 상태에 입력칸이 있으면 안 됨");
   assert.ok(!closed.includes("questionOtherRow"), "닫힘 상태에 숨은 행을 미리 만들면 안 됨(재렌더 루프의 원인)");
 
-  const open = renderQuestionCard(item, true, {choices: [], otherOpen: true, otherText: "직접 쓴 값"});
+  const open = renderQuestionCard(item, true, {choices: [], otherOpen: {0: true}, otherText: {0: "직접 쓴 값"}});
   assert.ok(open.includes("data-answer-other-input"), `열림 상태엔 입력칸: ${open}`);
   assert.ok(!/data-answer-other[">\s]/.test(open.replace(/data-answer-other-(input|send)/g, "")),
     `열림 상태엔 기타 버튼이 남지 않아야 함(그 줄이 입력칸으로 바뀐다): ${open}`);
@@ -234,7 +236,7 @@ function activityFor(questions) {
 // 9) 입력값에 따옴표/HTML 이 들어와도 속성이 깨지거나 실행되면 안 된다.
 {
   const item = activityFor([{header: "A", question: "질문?", options: [{label: "A1"}]}]);
-  const open = renderQuestionCard(item, true, {choices: [], otherOpen: true, otherText: '"><script>alert(1)</script>'});
+  const open = renderQuestionCard(item, true, {choices: [], otherOpen: {0: true}, otherText: {0: '"><script>alert(1)</script>'}});
   assert.ok(!/<script>/.test(open), `입력값이 실행되면 안 됨: ${open}`);
   assert.ok(open.includes("&quot;"), "따옴표가 이스케이프돼야 속성이 안 깨진다");
 }
@@ -247,11 +249,14 @@ function activityFor(questions) {
   assert.ok(!none.includes("questionOptMark"), "선택 표시는 체크박스가 아니라 하이라이트다");
   assert.ok(none.includes("여러 개 고를 수 있어요"), `안내가 필요: ${none}`);
   assert.ok(none.includes("data-answer-submit"), "multiSelect 는 즉시 전송이 아니라 보내기 버튼이 필요");
-  assert.ok(!none.includes("data-answer-other"), "multiSelect 에 기타(직접입력)를 섞으면 안 됨");
+  // AskUserQuestion 은 내가 준 선택지 뒤에 Other 행을 **항상** 붙인다(그래서 tool_input.options 엔 없다).
+  // 여기서 감추면 터미널·앱에선 되는 선택지가 마리나에서만 사라진다 — multiSelect 에도 기타가 있어야 한다.
+  assert.ok(none.includes("data-answer-other"), `multiSelect 에도 기타(직접입력)가 있어야 함: ${none}`);
 
   const some = renderQuestionCard(item, true, {choices: [[0, 2]]});
   assert.equal((some.match(/questionOpt chosen/g) || []).length, 2, `여러 개가 선택 표시돼야 함: ${some}`);
-  assert.ok(some.includes("보내기 (1/1)"), `한 질문을 다 골랐으면 보내기가 열려야 함: ${some}`);
+  // 질문이 하나면 '답한 질문 수'(늘 1/1)가 아니라 **고른 개수**를 보여준다 — 형: "0/1 나오는것도 문제".
+  assert.ok(some.includes("보내기 (2개 선택)"), `고른 개수를 세야 함: ${some}`);
   assert.ok(!/data-answer-submit\s+disabled/.test(some), "선택이 있으면 보내기 활성");
 }
 
@@ -420,9 +425,10 @@ assert "row.style.display" not in html, "style.display 조작이 남아 있으�
 assert 'data-question-other-row style="display:none"' not in html, "숨은 행을 미리 박아두면 안 된다"
 
 # ② 열림/입력값은 state 에 있다 → 템플릿과 DOM 이 일치해 재빌드가 안 일어난다
-assert "liveAnswer.otherOpen = true" in html, "기타 열림이 state 로 관리되지 않음"
-assert "liveAnswer.otherText = input.value" in html, "입력값이 state 에 보관되지 않음"
-assert "otherOpen: false, otherText: \"\"" in html, "새 질문에서 기타 상태가 초기화되지 않음"
+# 질문별 맵이라 인덱스로 쓴다 — 질문이 여럿일 때 어느 질문의 기타인지 담아야 하기 때문.
+assert "liveAnswer.otherOpen[answerQIndex(otherBtn)] = true" in html, "기타 열림이 질문별 state 로 관리되지 않음"
+assert "liveAnswer.otherText[answerQIndex(input)] = input.value" in html, "입력값이 질문별 state 에 보관되지 않음"
+assert "otherOpen: {}, otherText: {}" in html, "새 질문에서 기타 상태가 초기화되지 않음"
 
 # ③ 입력 중에는 DOM 을 갈아치우지 않고 미뤄둔다 + 포커스 빠질 때 반영
 # 가드는 **입력창 타이핑 중에만** 걸려야 한다. 버튼 포커스까지 막으면 옵션을 눌러도 화면이 안 갈려
@@ -438,8 +444,9 @@ swap = html.find("if (liveQuestionEl.innerHTML !== html) liveQuestionEl.innerHTM
 assert guard < swap, "가드가 innerHTML 교체보다 뒤에 있으면 입력이 날아간다"
 
 # ④ 엔터로 바로 보내고, Esc 로 접는다
-assert 'if (event.key === "Enter") { event.preventDefault(); sendLiveOther(); }' in html, "기타 입력에서 엔터 전송 없음"
-assert "liveAnswer.otherOpen = false; input.blur();" in html, "Esc 로 접기 없음"
+assert 'if (event.key === "Enter") { event.preventDefault(); sendLiveOther(answerQIndex(input)); }' in html, \
+    "기타 입력에서 엔터 전송 없음"
+assert "liveAnswer.otherOpen[answerQIndex(input)] = false; input.blur();" in html, "Esc 로 접기 없음"
 assert "event.isComposing" in html, "한글 조립 중 엔터를 가로채면 마지막 음절이 깨진다"
 
 # multiSelect 는 트랜스크립트 안 폴백 카드에서도 탭 즉시 전송이면 안 된다.
