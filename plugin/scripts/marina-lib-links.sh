@@ -9,7 +9,10 @@
 # mental model: links 우선순위는 기본(default) < 프로젝트 공유(central links.json) < service.links < 워크트리 override.
 # 빌드출력(build·dist·out·target·.next·*.jar)은 기본 자동링크에서 제외 — 워크트리별 독립 빌드(spec §2,
 # docker 빌드컨텍스트 심링크 깨짐=user-api JAR 버그 근본원인). 가져오려면 x-marina.links 에 명시(opt-in).
-_DEFAULT_LINKS_JSON='{"node_modules":{"glob":"node_modules","kind":"dir"},".venv":{"glob":".venv","kind":"dir"},"local-yml":{"glob":"*local.yml","kind":"file"},"local-env":{"glob":".env*.local","kind":"file"}}'
+# local-yaml 은 local-yml 과 별개 규칙 — `*local.yml` 글롭은 `.yaml` 확장자를 매치하지 못한다.
+# (Python/FastAPI 계열은 보통 `config/local.yaml` 을 쓴다. 이게 빠지면 워크트리에 로컬 설정이
+#  없어 dev 프로필로 폴백하고, 결국 dev DB·Redis 를 공유하게 된다.)
+_DEFAULT_LINKS_JSON='{"node_modules":{"glob":"node_modules","kind":"dir"},".venv":{"glob":".venv","kind":"dir"},"local-yml":{"glob":"*local.yml","kind":"file"},"local-yaml":{"glob":"*local.yaml","kind":"file"},"local-env":{"glob":".env*.local","kind":"file"}}'
 
 # 프로젝트 단위 커스텀 base 링크(~/.marina/<id>/links.json = {name: rule}) — 모든 워크트리 공유, 앱 레포 불변.
 # 대시보드 탐색기 등록이 여기 저장. rule 은 {glob,kind[,mode,subrepo]} — mode=copy 면 복제, 비면 symlink.
