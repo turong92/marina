@@ -5,6 +5,10 @@
 # 3) 프론트: AGENTS 라벨·Claude/Codex 칩·별도 접힘 Set·문법
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
+# 트랜스크립트 마스킹은 이제 **기본 꺼짐**이다(원본 JSONL 이 평문이라 그릴 때만 가리는 건 어드민 혼자인
+# 지금 얻는 게 없고 이메일 오탐만 남았다 — 형 지적). 이 테스트는 **켰을 때 동작하는지**를 잠근다.
+# member 역할이 붙어 남의 대화를 보여줄 때 이 스위치를 켜므로, 기능 자체는 계속 검증해야 한다.
+export MARINA_REDACT_TRANSCRIPT=1
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 TMP="$(mktemp -d)"; TMP="$(cd "$TMP" && pwd -P)"   # macOS /var → /private/var 심링크 정렬(서버가 resolve() 를 쓴다)
@@ -257,5 +261,15 @@ if command -v node >/dev/null 2>&1; then
     node --check "$f" || { echo "FAIL: 문법 오류 $f"; exit 1; }
   done
 fi
+
+# 기본값이 **꺼짐**이라는 것도 잠근다 — 위 단언들은 스위치를 켜고 도니까, 이게 없으면 기본이
+# 다시 켜져도 아무도 모른다. env 를 빼고 같은 함수를 부른다.
+env -u MARINA_REDACT_TRANSCRIPT PYTHONPATH="$SCR" python3 - <<'PY'
+import marina_sessions as S
+sample = "me@x.com 과 ghp_abcdefghijklmnopqrstuvwxyz012345"
+assert S._redact_transcript(sample) == sample, \
+    f"마스킹이 기본으로 켜져 있다 — 이메일 오탐이 돌아온다: {S._redact_transcript(sample)!r}"
+print("PASS 기본 꺼짐: MARINA_REDACT_TRANSCRIPT 없으면 원문 그대로")
+PY
 
 echo "PASS test-agents-section"

@@ -2490,7 +2490,16 @@ _TRANSCRIPT_SECRET_RES = [
     re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"),  # 이메일
 ]
 
+# 기본 **꺼짐**. 트랜스크립트 원본(~/.claude/projects/*.jsonl)엔 이미 평문으로 저장돼 있어서,
+# 그릴 때만 가리는 건 "대시보드 로그인은 있는데 파일 접근은 없는 사람"에게만 의미가 있다.
+# 지금 그런 사용자가 없다(어드민 혼자 = 파일도 다 본다) → 얻는 것 0, 이메일 오탐만 남았다(형 지적).
+# 의미가 생기는 시점은 member 역할이 붙어 비개발자가 남의 대화를 볼 때다. 그때 그 화면에서만 켠다.
+_REDACT_TRANSCRIPT = os.environ.get("MARINA_REDACT_TRANSCRIPT", "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _redact_transcript(text: str) -> str:
+    if not _REDACT_TRANSCRIPT:
+        return text
     for rx in _TRANSCRIPT_SECRET_RES:
         text = rx.sub("[redacted]", text)
     return text

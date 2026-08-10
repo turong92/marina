@@ -2,6 +2,10 @@
 # mobile control: token-protected phone page + remote-safe state/send endpoints.
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 환경 격리
+# 트랜스크립트 마스킹은 이제 **기본 꺼짐**이다(원본 JSONL 이 평문이라 그릴 때만 가리는 건 어드민 혼자인
+# 지금 얻는 게 없고 이메일 오탐만 남았다 — 형 지적). 이 테스트는 **켰을 때 동작하는지**를 잠근다.
+# member 역할이 붙어 남의 대화를 보여줄 때 이 스위치를 켜므로, 기능 자체는 계속 검증해야 한다.
+export MARINA_REDACT_TRANSCRIPT=1
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"; CTRL="$SCR/marina-control.py"
 TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"; mkdir -p "$MARINA_HOME"
