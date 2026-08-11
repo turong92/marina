@@ -65,6 +65,11 @@ _GATEWAY_PORT = int(_env("GATEWAY_PORT", "3902") or "3902")          # MARINA_GA
 
 _GATEWAY_STATE = str(MARINA_HOME / "gateway" / "Caddyfile")
 
+# 미리보기 전용 리스너. **앱이 URL 루트를 소유해야** 하는 앱들 때문에 대시보드와 포트를 나눈다
+# (Dozzle 처럼 base:"" 로 자기가 루트에 있다고 믿는 SPA 는 경로 접두사를 주면 라우터가 길을 잃는다).
+# 0 이면 끈다. 바깥 노출은 `tailscale funnel --https=8443 http://127.0.0.1:3903`.
+_PREVIEW_PORT = int(_env("PREVIEW_PORT", "3903") or "3903")          # MARINA_PREVIEW_PORT
+
 # 하네스 config·플러그인 매니페스트 위치 (업데이트 알림용). CLAUDE_CONFIG_DIR 는 marina-resolve 와 동일 규칙.
 CLAUDE_CONFIG_DIR = Path(os.environ.get("CLAUDE_CONFIG_DIR", str(Path.home() / ".claude")))
 

@@ -83,8 +83,25 @@ get_body2 = handler[handler.find("def do_GET"):handler.find("def do_POST")]
 assert get_body2.find('_preview_fallback(parsed, "GET")') > get_body2.find("stream_log"), \
     "fallback 이 마리나 라우팅보다 앞에 있으면 대시보드 경로를 삼킨다"
 
+# ⑬ **전용 리스너** — 경로 접두사로는 못 담는 앱이 있다. Dozzle 처럼 base:"" 로 자기가 루트에
+#    있다고 믿는 SPA 는 접두사가 붙은 주소에서 라우터가 길을 잃어 "페이지 없음"을 띄운다(형 실측).
+#    그래서 대시보드와 다른 포트에 문을 하나 더 내고, 거기선 **앱이 루트를 소유**한다.
+assert "class PreviewHandler" in handler, "미리보기 전용 리스너가 없다"
+assert "_PREVIEW_PORT" in handler, "미리보기 포트를 읽지 않는다"
+preview_cls = handler[handler.find("class PreviewHandler"):handler.find("def main()")]
+assert '_ROOM_PATH = "/__room"' in preview_cls, "방 선택 진입점이 없다"
+# 진입점은 앱 경로와 겹치면 안 된다 — 이중 밑줄로 격리한다.
+assert preview_cls.count('"/__room"') >= 1, "방 선택 경로가 앱 경로와 겹칠 수 있는 이름이다"
+# 프록시는 Handler 것을 **빌려 쓴다**(중복 구현 금지). 그러려면 클래스 상수도 같이 와야 한다.
+assert "Handler._proxy_to_gateway(self" in preview_cls, "프록시를 중복 구현했다"
+assert "_PREVIEW_LABEL_RE = Handler._PREVIEW_LABEL_RE" in preview_cls, \
+    "빌려 쓴 코드가 self 에서 찾는 상수가 없다 — 런타임 AttributeError"
+assert "_HOP_BY_HOP = Handler._HOP_BY_HOP" in preview_cls, "홉바이홉 상수가 없다"
+# 로그인은 대시보드에서 한다 — 쿠키는 포트를 가리지 않으므로 세션이 그대로 먹는다.
+assert "auth_enabled()" in preview_cls and "401" in preview_cls, "미리보기 포트가 인증 없이 열린다"
+
 print("PASS 미리보기 프록시: Host 라우팅 · 전체 경로 · GET/POST · 인증 뒤 · CSRF 면제(origin 유지) · "
-      "쿠키 차단 · 홉바이홉 · 라벨 검증 · 오류 안내 · 미리보기 모드(절대경로) · 마리나 경로 보호")
+      "쿠키 차단 · 홉바이홉 · 라벨 검증 · 오류 안내 · 미리보기 모드(절대경로) · 마리나 경로 보호 · 전용 리스너")
 PY
 
 echo "PASS test-preview-proxy"

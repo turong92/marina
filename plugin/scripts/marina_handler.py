@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import CONTROL_SCRIPT, HOST, LOG_TAIL_BYTES, MARINA_HOME, PORT, _GATEWAY_ON, _GATEWAY_PORT, _env, _gw, _mc, invalidate_registry_caches, json_bytes
+from marina_state import CONTROL_SCRIPT, HOST, LOG_TAIL_BYTES, MARINA_HOME, PORT, _GATEWAY_ON, _GATEWAY_PORT, _PREVIEW_PORT, _env, _gw, _mc, invalidate_registry_caches, json_bytes
 from marina_dockerfile import _compose_scaffold_service, _compose_scan, _detect_subrepos, _list_dockerfiles, _subrepo_compose, is_profile_var
 from marina_logtext import read_log_chunk, redact_text, scan_log_matches
 from marina_registry import containing_project_for, discover_all_roots, discover_roots, external_repos_for, is_source_checkout, load_projects, project_for, source_root_for, subrepos_of
@@ -2407,9 +2407,104 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         print("[marina]", fmt % args)
 
+class PreviewHandler(BaseHTTPRequestHandler):
+    """미리보기 전용 리스너 — **앱이 URL 루트를 소유한다**.
+
+    경로 접두사(`/preview/<label>/`)로는 안 되는 앱이 있다. Dozzle 처럼 `base:""` 로 자기가
+    루트에 있다고 믿는 SPA 는, 접두사가 붙은 주소를 받으면 자기 라우터가 길을 잃어 "페이지 없음"을
+    띄운다(형 실측). 자산을 아무리 잘 흘려줘도 이건 못 고친다 — 앱이 루트를 가져야 한다.
+
+    그래서 대시보드(443/3900)와 **다른 포트**에 문을 하나 더 낸다. 방 선택은 쿠키로 하고,
+    나머지 경로는 전부 앱 것이다. 쿠키는 포트를 가리지 않으므로 마리나 로그인 세션이 그대로
+    먹는다 — 인증을 새로 만들 필요가 없다.
+
+    바깥 노출은 `tailscale funnel --https=8443 http://127.0.0.1:<PREVIEW_PORT>` 로 붙인다.
+    """
+
+    server_version = "marina-preview"
+    _ROOM_PATH = "/__room"      # 방 선택 진입점. 앱 경로와 겹치지 않게 이중 밑줄로 격리한다.
+    # Handler 의 프록시 코드를 그대로 빌려 쓴다(중복 구현 금지) — 그 코드가 self 에서 찾는
+    # 클래스 상수도 같이 가져와야 한다. 값을 복사하지 않고 **같은 객체**를 가리키게 둔다.
+    _PREVIEW_LABEL_RE = Handler._PREVIEW_LABEL_RE
+    _HOP_BY_HOP = Handler._HOP_BY_HOP
+
+    def send_json(self, payload: Any, status: int = 200,
+                  headers: list[tuple[str, str]] | None = None) -> None:
+        # Handler._proxy_to_gateway 를 그대로 빌려 쓰므로 같은 이름이 필요하다(오류 응답에 쓴다).
+        body = json_bytes(payload)
+        self.send_response(status)
+        self.send_header("content-type", "application/json; charset=utf-8")
+        for key, value in (headers or []):
+            self.send_header(key, value)
+        self.send_header("content-length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _deny(self, status: int, message: str) -> None:
+        self.send_json({"error": message}, status)
+
+    def _handle(self, method: str) -> None:
+        parsed = urllib.parse.urlparse(self.path)
+        controller = auth_controller()
+        try:
+            if controller.store.auth_enabled() and controller._principal(self) is None:
+                # 미리보기 포트에는 로그인 폼을 두지 않는다 — 대시보드에서 로그인하고 오면 쿠키가 따라온다.
+                self._deny(401, "먼저 마리나 대시보드에서 로그인해주세요.")
+                return
+        except Exception as exc:
+            self._deny(503, f"auth unavailable: {exc}")
+            return
+        if parsed.path == self._ROOM_PATH or parsed.path.startswith(self._ROOM_PATH + "/"):
+            query = urllib.parse.parse_qs(parsed.query)
+            label = (query.get("label", [""])[0] or parsed.path[len(self._ROOM_PATH):].strip("/")).lower()
+            if not Handler._PREVIEW_LABEL_RE.match(label):
+                self._deny(400, "invalid preview target")
+                return
+            self.send_response(302)
+            self.send_header("location", "/")
+            self.send_header("set-cookie",
+                             f"marina_preview={urllib.parse.quote(label)}; Path=/; SameSite=Lax; HttpOnly")
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
+        label = Handler._preview_cookie(self)
+        if not label:
+            self._deny(400, "어느 방을 볼지 안 정해졌어요 — 대시보드에서 미리보기를 눌러주세요.")
+            return
+        target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
+        Handler._proxy_to_gateway(self, label, target, method)
+
+    def do_GET(self) -> None:      # noqa: N802
+        self._handle("GET")
+
+    def do_POST(self) -> None:     # noqa: N802
+        self._handle("POST")
+
+    def do_HEAD(self) -> None:     # noqa: N802
+        self._handle("HEAD")
+
+    def do_PUT(self) -> None:      # noqa: N802
+        self._handle("PUT")
+
+    def do_DELETE(self) -> None:   # noqa: N802
+        self._handle("DELETE")
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        print("[marina-preview]", fmt % args)
+
+
 def main() -> None:
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     print(f"marina: http://{HOST}:{PORT}")
+    if _PREVIEW_PORT:
+        import threading as _pt
+        try:
+            preview = ThreadingHTTPServer((HOST, _PREVIEW_PORT), PreviewHandler)
+        except OSError as exc:
+            print(f"[marina] preview 포트 {_PREVIEW_PORT} 을 열지 못했습니다: {exc}")
+        else:
+            _pt.Thread(target=preview.serve_forever, daemon=True, name="marina-preview").start()
+            print(f"marina preview: http://{HOST}:{_PREVIEW_PORT} (funnel 8443 로 연결)")
     if _GATEWAY_ON:                                            # 동적반영: 백그라운드 폴링(빠짐없음, diff-reload) + 이벤트 훅(즉각)
         import threading
         import time
