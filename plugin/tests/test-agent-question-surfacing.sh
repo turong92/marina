@@ -347,8 +347,17 @@ for bad in ({"optionIndex": 999}, {"optionIndexes": [0, -1]}, {"answers": [[]]},
     else:
         raise AssertionError(f"expected rejection for {bad}")
 
-# ⑤ multiSelect — 스페이스로 토글하고 마지막에 Enter. 화살표+Enter 만으로는 여러 개를 표현할 수 없다
-#    (형: "ask 여러개 선택하는거 선택이 안되는데"). multiSelect 여부는 훅이 잡아둔 질문 원본에서 읽는다.
+# ⑤ multiSelect — **Enter 로 토글**하고, **→ 로 Submit 창으로 옮겨** Enter 로 제출한다.
+#    실제 셀렉터를 PTY 로 띄워 확인한 계약이다(Enter to select · ↑/↓ to navigate · Esc to cancel):
+#
+#        ←  ☐ 선택   ✔ Submit  →
+#        ❯ 1. [ ] 가A
+#          2. [ ] 나B
+#
+#    예전 계약(스페이스 토글 + Enter 확정)은 **둘 다 틀렸다**. 스페이스는 무시되고 Enter 는 확정이
+#    아니라 토글이라, 보내던 Space+Enter 는 1번만 체크해놓고 제출하지 않았다 — 형이 본 "첫 항목만
+#    선택된 채 안 감". 제출은 목록 안이 아니라 오른쪽 Submit 창에 있다.
+#    multiSelect 여부는 훅이 잡아둔 질문 원본에서 읽는다(클라이언트 주장을 믿지 않는다).
 def arm_multi():
     mm.AGENT_QUESTIONS_DIR.mkdir(parents=True, exist_ok=True)
     state.write_text(json.dumps({
@@ -357,28 +366,44 @@ def arm_multi():
                        "options": [{"label": "a"}, {"label": "b"}, {"label": "c"}, {"label": "d"}]}],
     }), encoding="utf-8")
 
+def wire(submit_after_right=False):
+    """term_input mock. 상태파일은 **제출 시점에만** 지운다.
+
+    다중선택은 토글마다 \\r 이 나가므로 예전처럼 '\\r 보면 삭제'로 두면 첫 토글에 지워져
+    제출을 안 해도 settled=True 로 보인다 — 그 느슨함이 이 버그를 테스트에서 놓친 이유다."""
+    seen_right = {"v": False}
+
+    def _input(tid, data):
+        sent.append(data)
+        if data == "\x1b[C":
+            seen_right["v"] = True
+        elif data == "\r" and (seen_right["v"] or not submit_after_right):
+            state.unlink(missing_ok=True)
+    mm.term_input = _input
+
 arm_multi()
 sent.clear()
-mm.term_input = lambda tid, data: (sent.append(data), state.unlink(missing_ok=True) if data == "\r" else None)[0]
+wire(submit_after_right=True)
 result = mm.mobile_answer({**body, "answers": [[0, 2, 3]]})
 assert result["settled"] is True, result
-assert sent == [" ", "\x1b[B\x1b[B", " ", "\x1b[B", " ", "\r"], sent
+# 0번 토글 → 2번으로 이동·토글 → 3번으로 이동·토글 → Submit 창으로(→) → 제출(Enter)
+assert sent == ["\r", "\x1b[B\x1b[B", "\r", "\x1b[B", "\r", "\x1b[C", "\r"], sent
 assert result["answers"] == [[0, 2, 3]], result
 
-# 단일선택 질문은 스페이스를 쓰면 안 된다(토글이 아니라 확정이라 동작이 달라진다)
+# 단일선택은 Submit 창으로 갈 필요가 없다 — 목록에서 Enter 가 곧 확정이다.
 arm(questions=1)
 sent.clear()
-mm.term_input = lambda tid, data: (sent.append(data), state.unlink(missing_ok=True) if data == "\r" else None)[0]
+wire()
 mm.mobile_answer({**body, "answers": [[2]]})
 assert sent == ["\x1b[B\x1b[B", "\r"], sent
-assert " " not in sent, "단일선택에 스페이스를 넣으면 안 된다"
+assert "\x1b[C" not in sent, "단일선택에 Submit 창 이동을 넣으면 안 된다"
 
 # 클라이언트가 multiSelect 라고 우겨도 원본이 단일선택이면 단일선택으로 처리한다
 arm(questions=1)
 sent.clear()
-mm.term_input = lambda tid, data: (sent.append(data), state.unlink(missing_ok=True) if data == "\r" else None)[0]
+wire()
 mm.mobile_answer({**body, "answers": [[1, 3]]})
-assert " " not in sent, f"원본이 단일선택인데 토글을 보냈다: {sent}"
+assert "\x1b[C" not in sent, f"원본이 단일선택인데 다중선택 제출을 보냈다: {sent}"
 
 # ⑥ 셀렉터가 죽었어도 막지 않는다 — 세션을 이어받아(--resume) **고른 내용을 글로** 전달한다.
 #    전송은 원래 인수인계로 뚫고 있었는데 응답만 막는 건 일관성이 없었다(형: "다시 세션 주도권

@@ -1106,8 +1106,19 @@ def _drive_selector(tid: str, picks: list[int], multi_select: bool) -> None:
     """셀렉터 한 개를 구동한다. 커서는 첫 옵션에서 시작한다고 가정.
 
     단일선택: 아래로 N칸 → Enter.
-    다중선택: 각 항목으로 이동해 **스페이스로 토글** → 마지막에 Enter. TUI 다중선택의 관례고,
-    화살표+Enter 만으로는 애초에 여러 개를 표현할 수가 없다(형: "여러개 선택하는거 선택이 안되는데").
+
+    다중선택: 각 항목으로 이동해 **Enter 로 토글** → 마지막에 **→(오른쪽)** 로 Submit 창으로 옮겨
+    Enter 로 제출. 실제 셀렉터를 PTY 로 띄워 확인한 계약이다:
+
+        ←  ☐ 선택   ✔ Submit  →
+        ❯ 1. [ ] 가A
+          2. [ ] 나B
+        Enter to select · ↑/↓ to navigate · Esc to cancel
+
+    예전엔 스페이스로 토글하고 Enter 로 확정한다고 봤는데 둘 다 틀렸다. 스페이스는 아예 무시되고
+    Enter 는 '확정'이 아니라 '토글'이라, 마리나가 보낸 Space+Enter 는 **1번 항목만 체크해놓고
+    제출은 하지 않았다** — 형이 본 "첫 항목만 선택된 채 안 감"이 정확히 이 상태다(로그에도
+    settled=False 로 남았다). 제출은 목록 안이 아니라 **오른쪽 Submit 창**에 있다.
     """
     if not multi_select:
         target = picks[0] if picks else 0
@@ -1122,9 +1133,11 @@ def _drive_selector(tid: str, picks: list[int], multi_select: bool) -> None:
             term_input(tid, "\x1b[B" * (target - cursor))
             _agent_input_pause()
             cursor = target
-        term_input(tid, " ")          # 토글
+        term_input(tid, "\r")         # 토글 — 스페이스가 아니다
         _agent_input_pause()
-    term_input(tid, "\r")
+    term_input(tid, "\x1b[C")         # → Submit 창으로
+    _agent_input_pause()
+    term_input(tid, "\r")             # 제출
 
 
 def _answer_as_text(questions: list[Any], answers: list[list[int]]) -> str:
