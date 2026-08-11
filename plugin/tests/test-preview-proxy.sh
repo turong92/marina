@@ -63,7 +63,28 @@ assert "_PREVIEW_LABEL_RE" in handler, "라벨 검증이 없다 — Host 헤더 
 assert "gateway_off" in handler, "게이트웨이 꺼짐을 알리지 않는다"
 assert "preview_unreachable" in handler, "연결 실패를 알리지 않는다"
 
-print("PASS 미리보기 프록시: Host 라우팅 · 전체 경로 · GET/POST · 인증 뒤 · CSRF 면제(origin 유지) · 쿠키 차단 · 홉바이홉 · 라벨 검증 · 오류 안내")
+# ⑩ **미리보기 모드** — 접두사만으로는 못 푼다. 앱이 `/assets/main.js` 처럼 절대경로로 자기 자산을
+#    부르고, JS 가 실행 중에 만드는 주소는 HTML 을 고쳐도 못 잡는다(실측: uptime-kuma → 하얀 화면).
+#    그래서 한 번 열면 쿠키로 기억하고 마리나 것이 아닌 요청을 앱으로 흘린다.
+assert "marina_preview" in handler, "미리보기 대상을 기억하지 않는다 — 절대경로 자산이 전부 404"
+assert "_preview_fallback" in handler, "fallback 이 없다"
+assert "HttpOnly" in handler and "SameSite=Lax" in handler, "미리보기 쿠키가 헐겁다"
+
+# ⑪ 루트와 마리나 경로는 **절대** 넘기지 않는다. 넘기면 대시보드가 통째로 앱에 먹힌다.
+assert '_MARINA_PATHS' in handler, "마리나 소유 경로 집합이 없다"
+for own in ('"/api/"', '"/web/"', '"/preview/"', '"/login"', '"/mobile"'):
+    assert own in handler[handler.find("_MARINA_PATHS"):handler.find("_MARINA_PATHS") + 200], \
+        f"마리나 소유 경로에 {own} 가 빠졌다"
+assert 'if path == "/" or path.startswith(self._MARINA_PATHS)' in handler, \
+    "루트/마리나 경로를 배제하지 않으면 대시보드가 앱에 먹힌다"
+
+# ⑫ GET 의 fallback 은 마리나 라우팅을 **다 지나친 뒤**에 있어야 한다(앞에 두면 경로를 삼킨다).
+get_body2 = handler[handler.find("def do_GET"):handler.find("def do_POST")]
+assert get_body2.find('_preview_fallback(parsed, "GET")') > get_body2.find("stream_log"), \
+    "fallback 이 마리나 라우팅보다 앞에 있으면 대시보드 경로를 삼킨다"
+
+print("PASS 미리보기 프록시: Host 라우팅 · 전체 경로 · GET/POST · 인증 뒤 · CSRF 면제(origin 유지) · "
+      "쿠키 차단 · 홉바이홉 · 라벨 검증 · 오류 안내 · 미리보기 모드(절대경로) · 마리나 경로 보호")
 PY
 
 echo "PASS test-preview-proxy"
