@@ -337,6 +337,66 @@ class Handler(BaseHTTPRequestHandler):
         payload["sessions"] = filtered
         return payload
 
+    # 미리보기 프록시 — 폰에서 워크트리 앱 화면을 열기 위한 유일한 문.
+    #
+    # 앱은 이미 형 맥에서 돌고 있고(compose), 게이트웨이(Caddy)가 맥 안에서 라우팅까지 한다.
+    # 없는 건 **밖에서 거기로 들어가는 문**이다. 게이트웨이 주소는 `<wt>.<proj>.localhost:3902`
+    # 인데 `*.localhost` 는 폰에서 이름 해석이 안 되고, Funnel 도 3902 를 안 태운다.
+    # 그래서 이미 공개돼 있고 로그인도 걸린 대시보드(3900)에 경로를 하나 내고 그 뒤로 넘긴다.
+    #
+    # 게이트웨이는 **Host 헤더로** 라우팅하므로, 127.0.0.1:3902 에 붙어 Host 만 갈아 끼우면 된다.
+    # 첫 화면만 넘기면 안 된다 — 페이지가 열린 뒤 JS·CSS·API 를 계속 더 부르고 그 요청들도
+    # 같은 문을 통과해야 한다. 그래서 단일 응답이 아니라 경로 전체를 그대로 넘긴다.
+    _PREVIEW_LABEL_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{0,120}$")
+    # 홉바이홉 헤더는 그대로 옮기면 안 된다(연결 수명은 이쪽 소켓의 것이다).
+    _HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+                             "te", "trailers", "transfer-encoding", "upgrade"})
+
+    def _serve_preview(self, parsed: urllib.parse.ParseResult, method: str) -> bool:
+        """`/preview/<label>/<경로>` → 게이트웨이. 처리했으면 True."""
+        rest = parsed.path[len("/preview/"):]
+        label, _, tail = rest.partition("/")
+        label = urllib.parse.unquote(label).lower()
+        if not self._PREVIEW_LABEL_RE.match(label):
+            self.send_json({"error": "invalid preview target"}, 400)
+            return True
+        if not _GATEWAY_ON:
+            self.send_json({"error": "gateway_off",
+                            "message": "게이트웨이가 꺼져 있어요 — marina gateway on 으로 켜주세요."}, 503)
+            return True
+        target = "/" + tail + (f"?{parsed.query}" if parsed.query else "")
+        body = b""
+        length = int(self.headers.get("content-length") or 0)
+        if length > 0:
+            body = self.rfile.read(length)
+        headers = {k: v for k, v in self.headers.items()
+                   if k.lower() not in self._HOP_BY_HOP and k.lower() not in ("host", "cookie", "authorization")}
+        # 쿠키·인증은 넘기지 않는다 — 마리나 세션 쿠키가 앱으로 새면 안 된다(앱은 남의 코드다).
+        headers["Host"] = f"{label}.localhost"
+        headers["Accept-Encoding"] = "identity"   # 중간에서 다시 압축 풀 일을 만들지 않는다
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", _GATEWAY_PORT, timeout=30)
+            conn.request(method, target, body=body or None, headers=headers)
+            upstream = conn.getresponse()
+        except OSError as exc:
+            self.send_json({"error": "preview_unreachable",
+                            "message": f"미리보기에 연결하지 못했어요 ({exc}). 서비스가 떠 있는지 확인해주세요."}, 502)
+            return True
+        try:
+            self.send_response(upstream.status)
+            for key, value in upstream.getheaders():
+                if key.lower() in self._HOP_BY_HOP or key.lower() == "content-length":
+                    continue
+                self.send_header(key, value)
+            payload = upstream.read()
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            if method != "HEAD":
+                self.wfile.write(payload)
+        finally:
+            conn.close()
+        return True
+
     def send_json(self, payload: Any, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
         data = json_bytes(payload)
         self.send_response(status)
@@ -373,6 +433,9 @@ class Handler(BaseHTTPRequestHandler):
         if principal is AUTH_DENIED:
             return
         self.auth_principal = principal
+        # 인증 통과 **뒤에** 둔다 — /preview 는 PUBLIC_PREFIXES 가 아니므로 로그인 없이는 여기 못 온다.
+        if parsed.path.startswith("/preview/") and self._serve_preview(parsed, "GET"):
+            return
         if parsed.path == "/api/mobile/access":
             if not self._require_mobile_admin():
                 return
@@ -1268,6 +1331,9 @@ class Handler(BaseHTTPRequestHandler):
             if principal is AUTH_DENIED:
                 return
             self.auth_principal = principal
+            # 앱이 페이지를 연 뒤 부르는 API 도 같은 문을 통과해야 한다 — GET 만 열면 화면이 반쪽 난다.
+            if parsed.path.startswith("/preview/") and self._serve_preview(parsed, "POST"):
+                return
             if parsed.path in ("/api/remote/serve", "/api/remote/funnel", "/api/remote/off"):
                 if not self._require_admin_access():
                     return

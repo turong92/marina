@@ -405,7 +405,12 @@ class AuthHTTPController:
                 if not self._origin_allowed(handler):
                     handler.send_json({"error": "forbidden_origin", "message": "Request origin is not allowed."}, 403)
                     return AUTH_DENIED
-                if not self.store.verify_csrf(principal, str(handler.headers.get("x-marina-csrf") or "")):
+                # /preview 는 CSRF **토큰**을 요구하지 않는다. 그 아래로 가는 요청은 마리나 API 가
+                # 아니라 프록시되는 앱 자신의 요청이고, 그 앱의 JS 는 마리나 토큰을 알 리가 없다.
+                # 요구하면 미리보기 화면이 열리자마자 자기 API 를 다 거절당해 반쪽이 된다.
+                # 방어는 위의 origin 검사가 계속 맡는다 — 브라우저발 교차 사이트 요청은 거기서 막힌다.
+                if not parsed.path.startswith("/preview/") and \
+                        not self.store.verify_csrf(principal, str(handler.headers.get("x-marina-csrf") or "")):
                     handler.send_json({"error": "csrf_failed", "message": "Request verification failed."}, 403)
                     return AUTH_DENIED
             return principal
