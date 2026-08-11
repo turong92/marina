@@ -379,12 +379,16 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
         cmd = _agent_cli(agent_source, agent_sid, agent_prompt, agent_model, agent_effort)
         # 재사용 키는 **같은 세션의 이중 resume** 을 막는 장치다. sid 가 없으면(새 세션 launch) 막을
         # 대상 자체가 없으므로 키를 만들지 않는다 — 안 그러면 ＋Claude 두 번이 한 PTY 로 합쳐진다.
+        #
+        # prompt attach(모바일 전송)는 **매 전송이 새 턴**이라 재사용하지 않는다 — CLI 의 prompt
+        # 인자로 시작하므로 이미 돌고 있는 TUI 에 붙일 수가 없다. 그래서 키를 비운다(의도된 동작).
         key = "" if (agent_prompt or not agent_sid) else f"{cwd}::agent:{agent_source}:{agent_sid}"
         agent = {"source": agent_source, "sid": agent_sid}
         if agent_model:
             agent["model"] = agent_model
         if agent_effort:
             agent["effort"] = agent_effort
+    retire: list[str] = []
     with _lock:
         if key:                                  # 에이전트만 재사용 — resume 이중 실행 방지
             existing = _by_key.get(key)
@@ -392,6 +396,27 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
                 if not existing.detached:   # detached 는 실 fd 가 없다 — reachability 만 재사용, ioctl 생략
                     _set_winsize(existing.fd, cols, rows)
                 return {"tid": existing.tid, "reused": True}
+        # 같은 세션의 **detached** term 은 거둔다. detached = 데몬 재시작으로 master fd 를 잃어
+        # 입력을 넣을 수 없는 상태다. 프로세스는 살아있는데 조작이 안 되니 _live_agent_tid 가
+        # 빈손을 돌려주고, 호출자는 "PTY 가 없다"며 resume 을 한 번 더 띄운다 — 그래서 한 sid 에
+        # `claude --resume` 이 둘 살아남는다. 그다음 조회가 버려진 쪽을 집으면 형이 보낸 메시지가
+        # 영영 도착하지 않는다(실측 2026-08-11: 15:59 것과 16:06 것이 공존, 실제 대화는 16:06 쪽).
+        #
+        # **attached 인 옛 term 은 건드리지 않는다** — 그건 진행 중인 턴일 수 있고, 새 전송이
+        # 남의 턴을 죽이면 안 된다(그 계약은 test-term 이 잠근다).
+        if agent_sid:
+            for other in list(_by_tid.values()):
+                info = other.agent if isinstance(getattr(other, "agent", None), dict) else {}
+                if (other.alive and other.detached and other.root == cwd
+                        and str(info.get("source") or "") == agent_source
+                        and str(info.get("sid") or "") == agent_sid):
+                    retire.append(other.tid)
+    for tid in retire:
+        try:
+            term_kill(tid)     # pid 재사용 지문 검증까지 하는 정석 정리를 그대로 쓴다
+        except Exception:
+            pass
+    with _lock:
         pid, fd = pty.fork()
         if pid == 0:  # 자식 — 즉시 exec (스레드 안전을 위해 그 사이 파이썬 코드 최소화)
             try:

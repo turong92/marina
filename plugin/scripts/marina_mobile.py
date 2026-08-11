@@ -1016,7 +1016,10 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
             result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24), **options)
             tid = str(result["tid"])
             opened = not bool(result.get("reused"))
-            prompt_submitted = True
+            # 새로 띄웠으면 프롬프트가 CLI 인자로 이미 실려 갔다. **재사용**이면 그 PTY 는 이미 돌고
+            # 있어서 인자를 다시 줄 수 없다 — 아래에서 타이핑으로 넣어야 한다. 예전엔 무조건
+            # 넣은 걸로 쳐서, 재사용 분기에 걸리면 형 메시지가 조용히 사라졌다.
+            prompt_submitted = opened
             _clear_pending_session_settings(root, source, sid)
     else:
         result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24))
