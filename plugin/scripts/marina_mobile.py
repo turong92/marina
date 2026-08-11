@@ -1552,6 +1552,18 @@ _MOBILE_HTML = r"""<!doctype html>
     .imageViewer img { flex: 1; min-height: 0; max-width: 100%; margin: 0 auto; padding: 0 12px 12px; object-fit: contain; }
     .viewerText { flex: 1; min-height: 0; margin: 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: #e8edf4; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
     .imageViewerClose { width: 34px; min-height: 34px; flex: none; padding: 0; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; border-color: transparent; font-size: 19px; }
+    /* 세션 탭 — 가로 스크롤 한 줄. 목록 뷰에선 숨긴다(거기선 목록 자체가 탐색이다). */
+    .sessionTabs:empty { display: none; }
+    .sessionTabs { display: none; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain;
+                   scrollbar-width: none; padding: 2px 0 1px; }
+    .sessionTabs::-webkit-scrollbar { display: none; }
+    #mobileApp[data-view="chat"] .sessionTabs { display: flex; }
+    .sessionTab { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; max-width: 46vw;
+                  padding: 3px 6px 3px 7px; border: 1px solid #dde2ea; border-radius: 999px;
+                  background: #f4f6f9; color: #596070; font-size: 11px; font-weight: 700; line-height: 1.3; }
+    .sessionTab.active { background: #fff; border-color: #9db2d4; color: #17191f; }
+    .sessionTabLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+    .sessionTabX { flex: 0 0 auto; padding: 0 1px; color: #98a1b3; font-size: 10px; font-weight: 900; }
     .liveQuestion:empty { display: none; }
     /* 높이 상한이 필수다. 선택지가 많거나 설명이 길면 카드가 무한히 자라 **위 대화를 통째로 덮어**
        형이 질문 맥락을 못 읽는다(형: "질문 길어지면 위에 대화내용 못읽게 되는것도 문제야").
@@ -1728,6 +1740,9 @@ _MOBILE_HTML = r"""<!doctype html>
           <button class="usageBtn" id="usageBtn" type="button" title="토큰 사용량" aria-label="토큰 사용량">&#9684;</button>
         </div>
       </div>
+      <!-- 세션 탭 — shellRow 와 **별도 줄**이다(그 줄은 뒤로가기·제목·액션이 이미 꽉 찼다).
+           헤더 안에 둬서 대화를 스크롤해도 붙어 있어야 "클릭 많이 안 하고 옮겨다니기"가 성립한다. -->
+      <div class="sessionTabs" id="sessionTabs" role="tablist" aria-label="열린 세션"></div>
       <div class="usagePanel" id="usagePanel" aria-label="사용량" aria-hidden="true">
         <div class="usageSection">
           <div class="usageSectionTitle">계정 한도</div>
@@ -1927,6 +1942,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const updateBanner = document.getElementById("updateBanner");
     updateBanner.onclick = () => location.reload();
     const liveQuestionEl = document.getElementById("liveQuestion");
+    const sessionTabsEl = document.getElementById("sessionTabs");
     // 라이브 질문 카드의 로컬 상태. **카드를 낙관적으로 지우지 않는다** — 예전엔 탭하자마자 innerHTML 을
     // 비우고 4초간 숨겼는데, 응답이 안 먹으면 카드가 그냥 사라져 "눌렀는데 아무 일도 안 남"으로 보였고
     // 되돌릴 방법도 없었다. 이제 카드는 서버 진실(pendingQuestion 소멸)로만 사라진다.
@@ -1993,6 +2009,13 @@ _MOBILE_HTML = r"""<!doctype html>
       liveQuestionPending = "";
       if (liveQuestionEl.innerHTML !== html) liveQuestionEl.innerHTML = html;
     }
+    // 닫기(✕)를 탭 전환보다 먼저 본다 — ✕ 는 탭 안에 있어서 순서가 뒤집히면 닫으려다 전환된다.
+    sessionTabsEl.addEventListener("click", event => {
+      const x = event.target.closest && event.target.closest("[data-tab-close]");
+      if (x) { event.stopPropagation(); closeTab(x.getAttribute("data-tab-close")); return; }
+      const tab = event.target.closest && event.target.closest("[data-tab-key]");
+      if (tab) chooseSession(tab.getAttribute("data-tab-key"));
+    });
     function repaintLiveQuestion() { renderLiveQuestion(selectedSession()); }
     // 폴백 카드는 대화 안에 있어 turns 를 다시 그려야 반영된다(렌더키가 liveAnswer 를 모르므로 강제).
     function repaintTurns() { turnsStructureKey = ""; renderTurns(selectedSession()); }
@@ -2626,6 +2649,55 @@ _MOBILE_HTML = r"""<!doctype html>
     function selectedRoot() { return rootSelect.value || (state.worktrees[0] && state.worktrees[0].root) || ""; }
     function targetKey(root=selectedRoot()) { return `marinaMobileTarget:${root}`; }
     function selectedSession() { return (state.sessions || []).find(s => s.key === selectedSessionKey) || null; }
+
+    // ── 세션 탭 — 목록으로 돌아가지 않고 바로 옮겨다니기 ────────────────────────
+    // 웹 대화 워크스페이스와 같은 모델: **연 것만** 탭으로 남는다(전체 세션을 늘어놓으면 14개가
+    // 그대로 줄이 돼 탭의 의미가 없다). 순서는 연 순서 그대로 — 자동 정렬하면 누르려던 탭이 움직인다.
+    const TAB_LIMIT = 8;   // 그 이상은 가장 오래된 비활성 탭부터 밀어낸다(가로 스크롤이 무한해지지 않게)
+    let openTabs = [];
+    try { openTabs = JSON.parse(localStorage.getItem("marinaMobileTabs") || "[]") || []; } catch (_) { openTabs = []; }
+    if (!Array.isArray(openTabs)) openTabs = [];
+    function saveTabs() { try { localStorage.setItem("marinaMobileTabs", JSON.stringify(openTabs.slice(0, 40))); } catch (_) {} }
+    function addTab(key) {
+      if (!key || openTabs.includes(key)) return;
+      openTabs.push(key);
+      if (openTabs.length > TAB_LIMIT) {
+        const victim = openTabs.find(k => k !== key && k !== selectedSessionKey);
+        if (victim) openTabs = openTabs.filter(k => k !== victim);
+      }
+      saveTabs();
+    }
+    function closeTab(key) {
+      const at = openTabs.indexOf(key);
+      if (at < 0) return;
+      openTabs = openTabs.filter(k => k !== key);
+      saveTabs();
+      if (key !== selectedSessionKey) { renderSessionTabs(); return; }
+      // 닫은 게 보고 있던 탭이면 옆 탭으로 — 아무것도 없으면 목록으로 돌아간다.
+      const next = openTabs[Math.min(at, openTabs.length - 1)];
+      if (next) chooseSession(next);
+      else { selectedSessionKey = ""; localStorage.removeItem("marinaMobileSession"); showList(); renderSessionTabs(); }
+    }
+    function renderSessionTabs() {
+      const sessions = state.sessions || [];
+      const alive = openTabs.filter(key => sessions.some(s => s.key === key));   // 사라진 세션 탭은 조용히 정리
+      if (alive.length !== openTabs.length) { openTabs = alive; saveTabs(); }
+      // 탭이 하나뿐이면 줄을 띄울 이유가 없다 — 화면만 먹는다.
+      if (alive.length < 2) { if (sessionTabsEl.innerHTML) sessionTabsEl.innerHTML = ""; return; }
+      const html = alive.map(key => {
+        const s = sessions.find(item => item.key === key) || {};
+        const active = key === selectedSessionKey;
+        const sm = s.kind === "agent" ? agentStatusMeta(s.status) : null;
+        const label = esc(String(s.title || s.key || "세션").slice(0, 22));
+        return `<span class="sessionTab${active ? " active" : ""}" role="tab" aria-selected="${active}" tabindex="0" data-tab-key="${esc(key)}">`
+          + `<i class="wt-dot ${sm ? sm.dot : "stop"}" aria-hidden="true"></i>`
+          + `<span class="sessionTabLabel">${label}</span>`
+          + `<b class="sessionTabX" data-tab-close="${esc(key)}" aria-label="탭 닫기">&#10005;</b></span>`;
+      }).join("");
+      if (sessionTabsEl.innerHTML !== html) sessionTabsEl.innerHTML = html;
+      const activeEl = sessionTabsEl.querySelector(".sessionTab.active");
+      if (activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({block: "nearest", inline: "nearest"});
+    }
     // 세션 단위 동작은 **그 세션의 root** 를 쓴다. 전역 selectedRoot() 는 워크트리 피커/프로젝트 탭이
     // 움직이면 선택된 세션과 어긋나고, 그러면 서버의 agent_belongs_to_root 가 막아 403 이 된다
     // (형: "이 세션 모바일에서 안되잖아 · do not access this resource"). settings/interrupt 는 원래
@@ -2678,6 +2750,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (key !== selectedSessionKey) clearFailedSend();
       closeUsagePanel();
       closeDrawer();          // 좌측 패널에서 골랐으면 바로 그 대화로 — 이게 "바로바로 넘어가기"의 핵심
+      addTab(key);            // 연 세션은 탭으로 남는다 — 다음부턴 목록 안 거치고 바로 전환
       selectedSessionKey = key;
       followLatest = true;
       turnsStructureKey = "";
@@ -4039,6 +4112,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (session) showChat();
       else showList();
       chatNavTitle.textContent = session ? (session.title || "세션") : "";
+      renderSessionTabs();
       renderAgentUsage(session);
       restoreDraft();
       renderTurns(session);
