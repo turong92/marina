@@ -638,19 +638,28 @@ def _term_root(tid: str) -> Path | None:
 
 def _live_agent_tid(root: Path, source: str, sid: str) -> str:
     """조작 가능한 PTY 의 tid. detached(marina 재시작으로 master fd 를 잃은) term 은 제외한다 —
-    tid 를 돌려줘 봐야 term_input 이 거부하므로, 호출자가 인수인계 경로로 내려가게 둔다."""
+    tid 를 돌려줘 봐야 term_input 이 거부하므로, 호출자가 인수인계 경로로 내려가게 둔다.
+
+    한 세션에 term 이 **여럿** 붙어 있으면 가장 최근 것을 쓴다. 예전엔 먼저 걸리는 걸 그냥
+    돌려줬는데, 그러다 이런 일이 났다: 조회가 잠깐 빈손이면 호출자가 인수인계 경로로 내려가
+    같은 세션을 한 번 더 resume 하고, 그 결과 claude 프로세스가 둘이 된다. 그 뒤 조회가 **옛
+    프로세스**를 집으면 형이 보낸 메시지가 이미 버려진 대화로 타이핑돼 영영 안 온다
+    (형: "왜 너만 모바일로 메세지를 안먹냐" — 실측: 15:59 것과 16:06 것이 동시에 살아 있었고
+    실제 대화는 16:06 쪽이었다). 새 resume 이 곧 현재 대화이므로 최신이 이긴다.
+    """
     resolved = root.resolve()
-    for item in term_list().get("sessions", []):
-        agent = item.get("agent") if isinstance(item.get("agent"), dict) else {}
-        if (
-            bool(item.get("alive", True))
-            and not bool(item.get("detached"))
-            and str(item.get("root") or "") == str(resolved)
-            and str(agent.get("source") or "") == source
-            and str(agent.get("sid") or "") == sid
-        ):
-            return str(item.get("tid") or "")
-    return ""
+    matches = [
+        item for item in term_list().get("sessions", [])
+        if bool(item.get("alive", True))
+        and not bool(item.get("detached"))
+        and str(item.get("root") or "") == str(resolved)
+        and str((item.get("agent") or {}).get("source") or "") == source
+        and str((item.get("agent") or {}).get("sid") or "") == sid
+    ]
+    if not matches:
+        return ""
+    matches.sort(key=lambda item: float(item.get("created") or 0.0), reverse=True)
+    return str(matches[0].get("tid") or "")
 
 
 def _detached_agent_pid(root: Path, source: str, sid: str) -> int:
