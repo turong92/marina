@@ -1262,6 +1262,11 @@ _MOBILE_HTML = r"""<!doctype html>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Marina Mobile</title>
+  <!-- 아이콘을 선언하지 않으면 브라우저가 /favicon.ico 를 찾는데 마리나는 그 경로를 주지 않는다
+       → 탭 아이콘이 빈 채로 남는다(웹·로그인 화면엔 있었는데 모바일만 빠져 있었다).
+       /web/ 은 PUBLIC_PREFIXES 라 로그인 전에도 받아진다. -->
+  <link rel="icon" type="image/png" href="/web/favicon.png" />
+  <link rel="apple-touch-icon" href="/web/favicon.png" />
   <style>
     :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     body { margin: 0; overflow: hidden; background: #f4f6f9; color: #17191f; }

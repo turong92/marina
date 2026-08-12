@@ -141,3 +141,13 @@ console.log("PASS 부팅+렌더 스모크: 초기화 · 세션목록 · 카드 4
 PY
 
 echo "PASS test-mobile-boot-smoke"
+
+# 탭 아이콘 — 선언이 없으면 브라우저가 /favicon.ico 를 찾는데 마리나는 그 경로를 주지 않아
+# 아이콘이 빈 채로 남는다. 웹·로그인 화면엔 있었고 모바일만 빠져 있었다(형: "내 파비콘 어디갔어").
+PYTHONPATH="$SCR" python3 - <<'PY'
+from marina_mobile import render_mobile_html
+html = render_mobile_html()
+assert 'rel="icon"' in html, "모바일에 아이콘 선언이 없다 — 탭 아이콘이 빈다"
+assert "/web/favicon.png" in html, "아이콘이 /web/ 아래를 가리켜야 한다(로그인 전에도 받아지는 공개 경로)"
+print("PASS 탭 아이콘 선언")
+PY
