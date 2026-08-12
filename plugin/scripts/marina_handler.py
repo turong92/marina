@@ -386,6 +386,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "gateway_off",
                             "message": "게이트웨이가 꺼져 있어요 — marina gateway on 으로 켜주세요."}, 503)
             return True
+        # 업그레이드 요청은 HTTP 응답이 아니라 터널이다 — http.client 로는 다룰 수 없다.
+        if "websocket" in str(self.headers.get("upgrade") or "").lower():
+            return self._proxy_websocket(label, target)
         body = b""
         length = int(self.headers.get("content-length") or 0)
         if length > 0:
@@ -404,6 +407,12 @@ class Handler(BaseHTTPRequestHandler):
                             "message": f"미리보기에 연결하지 못했어요 ({exc}). 서비스가 떠 있는지 확인해주세요."}, 502)
             return True
         try:
+            declared = upstream.getheader("content-length")
+            # **스트리밍을 통째로 읽으면 안 된다.** SSE(text/event-stream)는 끝나지 않는 응답이라
+            # read() 가 영원히 안 돌아온다 — Dozzle 이 "API 연결 시간 초과"를 띄운 게 이것이다.
+            # 길이를 모르는 응답(=chunked·SSE)은 흘려보내고, 연결을 닫아 끝을 알린다.
+            ctype = (upstream.getheader("content-type") or "").lower()
+            streaming = declared is None or ctype.startswith("text/event-stream")
             self.send_response(upstream.status)
             for key, value in upstream.getheaders():
                 if key.lower() in self._HOP_BY_HOP or key.lower() == "content-length":
@@ -417,13 +426,71 @@ class Handler(BaseHTTPRequestHandler):
                 # HttpOnly: 앱 JS 가 이 값을 읽을 이유가 없다. SameSite=Lax: 교차 사이트 요청엔 안 딸려간다.
                 self.send_header("set-cookie",
                                  f"marina_preview={urllib.parse.quote(set_cookie)}; Path=/; SameSite=Lax; HttpOnly")
-            payload = upstream.read()
-            self.send_header("content-length", str(len(payload)))
-            self.end_headers()
-            if method != "HEAD":
-                self.wfile.write(payload)
+            if streaming:
+                self.send_header("connection", "close")   # 길이를 못 주니 닫는 것이 끝의 신호다
+                self.end_headers()
+                if method != "HEAD":
+                    while True:
+                        chunk = upstream.read(8192)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+                        self.wfile.flush()   # SSE 는 즉시 나가야 의미가 있다 — 버퍼에 쌓아두면 실시간이 아니다
+            else:
+                payload = upstream.read()
+                self.send_header("content-length", str(len(payload)))
+                self.end_headers()
+                if method != "HEAD":
+                    self.wfile.write(payload)
+        except (BrokenPipeError, ConnectionResetError):
+            pass          # 형이 탭을 닫은 것 — 스트리밍에선 정상 종료다
         finally:
             conn.close()
+        return True
+
+    def _proxy_websocket(self, label: str, target: str) -> bool:
+        """WebSocket 업그레이드를 그대로 터널링한다. 처리했으면 True.
+
+        http.client 로는 못 한다 — 101 이후는 HTTP 가 아니라 양방향 바이트 스트림이다.
+        그래서 게이트웨이에 **생 소켓**으로 붙어 요청을 그대로 흘리고, 그 뒤부터는 두 소켓을
+        서로 복사한다. 업그레이드 헤더(Upgrade·Connection)는 여기선 홉바이홉이 아니라 **본질**이라
+        반드시 살려 보내야 한다(그걸 버려서 Dozzle 의 실시간 연결이 아예 안 붙었다).
+        """
+        import selectors
+        import socket
+
+        try:
+            upstream = socket.create_connection(("127.0.0.1", _GATEWAY_PORT), timeout=10)
+        except OSError as exc:
+            self.send_json({"error": "preview_unreachable", "message": f"미리보기 연결 실패 ({exc})"}, 502)
+            return True
+        lines = [f"{self.command} {target} HTTP/1.1", f"Host: {label}.localhost"]
+        for key, value in self.headers.items():
+            if key.lower() in ("host", "cookie", "authorization"):
+                continue          # 마리나 세션은 앱으로 넘기지 않는다
+            lines.append(f"{key}: {value}")
+        upstream.sendall(("\r\n".join(lines) + "\r\n\r\n").encode("latin-1", "ignore"))
+        client = self.connection
+        upstream.settimeout(None)
+        client.settimeout(None)
+        sel = selectors.DefaultSelector()
+        sel.register(client, selectors.EVENT_READ, upstream)
+        sel.register(upstream, selectors.EVENT_READ, client)
+        try:
+            while True:
+                for key, _ in sel.select(timeout=300):
+                    data = key.fileobj.recv(65536)
+                    if not data:
+                        return True
+                    key.data.sendall(data)
+        except OSError:
+            return True
+        finally:
+            sel.close()
+            try:
+                upstream.close()
+            except OSError:
+                pass
         return True
 
     def send_json(self, payload: Any, status: int = 200, headers: list[tuple[str, str]] | None = None) -> None:
@@ -2402,10 +2469,12 @@ class PreviewHandler(BaseHTTPRequestHandler):
 
     server_version = "marina-preview"
     _ROOM_PATH = "/__room"      # 방 선택 진입점. 앱 경로와 겹치지 않게 이중 밑줄로 격리한다.
-    # Handler 의 프록시 코드를 그대로 빌려 쓴다(중복 구현 금지) — 그 코드가 self 에서 찾는
-    # 클래스 상수도 같이 가져와야 한다. 값을 복사하지 않고 **같은 객체**를 가리키게 둔다.
+    # Handler 의 프록시 코드를 그대로 빌려 쓴다(중복 구현 금지) — 그 코드가 **self 에서 찾는 것**은
+    # 상수든 메서드든 전부 여기에도 있어야 한다. 값을 복사하지 않고 같은 객체를 가리키게 둔다.
+    # (빠뜨리면 런타임 AttributeError 로 빈 응답이 나간다 — 상수·메서드 각각 한 번씩 겪었다.)
     _PREVIEW_LABEL_RE = Handler._PREVIEW_LABEL_RE
     _HOP_BY_HOP = Handler._HOP_BY_HOP
+    _proxy_websocket = Handler._proxy_websocket
 
     def send_json(self, payload: Any, status: int = 200,
                   headers: list[tuple[str, str]] | None = None) -> None:

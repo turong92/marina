@@ -90,6 +90,26 @@ assert "_PREVIEW_LABEL_RE = Handler._PREVIEW_LABEL_RE" in preview_cls, \
 assert "_HOP_BY_HOP = Handler._HOP_BY_HOP" in preview_cls, "홉바이홉 상수가 없다"
 # 로그인은 대시보드에서 한다 — 쿠키는 포트를 가리지 않으므로 세션이 그대로 먹는다.
 assert "auth_enabled()" in preview_cls and "401" in preview_cls, "미리보기 포트가 인증 없이 열린다"
+# 빌려 쓴 코드가 self 에서 찾는 것은 상수든 **메서드든** 전부 달아줘야 한다. 빠뜨리면 런타임
+# AttributeError 로 빈 응답이 나간다(상수·메서드 각각 한 번씩 겪었다 — 조용히 실패해서 티가 안 난다).
+assert "_proxy_websocket = Handler._proxy_websocket" in preview_cls, \
+    "전용 리스너에 WS 터널이 없다 — 업그레이드 요청이 AttributeError 로 죽는다"
+
+# ⑭ **스트리밍을 통째로 읽으면 안 된다.** SSE(text/event-stream)는 끝나지 않는 응답이라 read() 가
+#    영원히 안 돌아온다 — Dozzle 이 "API 연결 시간 초과"를 띄운 게 이것이다(형 실측).
+proxy = handler[handler.find("def _proxy_to_gateway"):handler.find("def _proxy_websocket")]
+assert "text/event-stream" in proxy, "SSE 를 스트리밍으로 판정하지 않는다"
+assert "upstream.read(8192)" in proxy, "응답을 통째로 읽고 있다 — SSE 에서 멈춘다"
+assert "self.wfile.flush()" in proxy, "flush 가 없으면 실시간이 아니다(버퍼에 쌓인다)"
+assert 'declared is None' in proxy, "길이를 모르는 응답(chunked)을 스트리밍으로 안 본다"
+
+# ⑮ WebSocket 은 HTTP 응답이 아니라 터널이다. 업그레이드 헤더는 여기선 홉바이홉이 아니라 **본질**이다.
+assert '"websocket" in str(self.headers.get("upgrade")' in handler, "WS 업그레이드를 감지하지 않는다"
+ws = handler[handler.find("def _proxy_websocket"):]
+ws = ws[:ws.find("\n    def ", 10)]
+assert "socket.create_connection" in ws, "생 소켓으로 붙지 않으면 101 이후를 다룰 수 없다"
+assert "selectors" in ws, "양방향 릴레이가 없다"
+assert '("host", "cookie", "authorization")' in ws, "WS 터널로 마리나 세션이 샌다"
 
 print("PASS 미리보기: Host 라우팅 · 전체 경로 · GET/POST · 인증 뒤 · CSRF 면제(origin 유지) · "
       "쿠키 차단 · 홉바이홉 · 라벨 검증 · 오류 안내 · 대시보드엔 fallback 없음 · 전용 리스너(앱이 루트 소유)")
