@@ -38,6 +38,15 @@
             "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-protected-write-hook.sh\""
           }
         ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/scripts/marina-appdata-guard-hook.sh\""
+          }
+        ]
       }
     ],
     "PostToolUse": [
