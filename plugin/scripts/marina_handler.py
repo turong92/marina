@@ -427,15 +427,34 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_header("set-cookie",
                                  f"marina_preview={urllib.parse.quote(set_cookie)}; Path=/; SameSite=Lax; HttpOnly")
             if streaming:
-                self.send_header("connection", "close")   # 길이를 못 주니 닫는 것이 끝의 신호다
+                # **HTTP/1.1 + chunked 여야 한다.** 1.0 으로 "닫힐 때까지 읽어라" 식으로 흘리면
+                # fetch 는 바이트를 받지만 **EventSource 는 이벤트를 하나도 안 뿜는다**(실측:
+                # 앱 직접 evt=1 vs 프록시 evt=0, funnel 없이도 동일). Dozzle 은 EventSource 를
+                # 쓰므로 컨테이너 목록이 영영 안 차고 "Loading…" 에 머문다.
+                chunked = self.protocol_version == "HTTP/1.1"
+                if chunked:
+                    self.send_header("transfer-encoding", "chunked")
+                else:
+                    self.send_header("connection", "close")
                 self.end_headers()
                 if method != "HEAD":
                     while True:
-                        chunk = upstream.read(8192)
+                        # **read1 이어야 한다.** http.client 의 read(n) 은 n 바이트가 찰 때까지
+                        # 블록해서, 이벤트 꼬리가 다음 이벤트가 올 때까지 우리 안에 갇힌다.
+                        # 그러면 SSE 종결자(\n\n)가 제때 안 나가 EventSource 가 이벤트를 영영
+                        # 완성하지 못한다(실측: 앱 직접은 종결자 포함 174,759B, 프록시는 172,200B
+                        # =8192×21 에서 멈춤 → Dozzle 컨테이너 목록이 안 참). read1 은 있는 만큼만 준다.
+                        chunk = upstream.read1(8192)
                         if not chunk:
                             break
-                        self.wfile.write(chunk)
+                        if chunked:
+                            self.wfile.write(b"%X\r\n" % len(chunk) + chunk + b"\r\n")
+                        else:
+                            self.wfile.write(chunk)
                         self.wfile.flush()   # SSE 는 즉시 나가야 의미가 있다 — 버퍼에 쌓아두면 실시간이 아니다
+                    if chunked:
+                        self.wfile.write(b"0\r\n\r\n")
+                        self.wfile.flush()
             else:
                 payload = upstream.read()
                 self.send_header("content-length", str(len(payload)))
@@ -2468,6 +2487,10 @@ class PreviewHandler(BaseHTTPRequestHandler):
     """
 
     server_version = "marina-preview"
+    # HTTP/1.1 이어야 chunked 로 스트리밍할 수 있다. 1.0 으로 흘리면 EventSource 가 이벤트를
+    # 하나도 안 뿜어 Dozzle 같은 앱이 영영 "Loading…" 에 머문다(실측). 대시보드 쪽은 건드리지
+    # 않는다 — 거긴 keep-alive 반응이 달라질 수 있고, 스트리밍이 필요한 건 이 리스너다.
+    protocol_version = "HTTP/1.1"
     _ROOM_PATH = "/__room"      # 방 선택 진입점. 앱 경로와 겹치지 않게 이중 밑줄로 격리한다.
     # Handler 의 프록시 코드를 그대로 빌려 쓴다(중복 구현 금지) — 그 코드가 **self 에서 찾는 것**은
     # 상수든 메서드든 전부 여기에도 있어야 한다. 값을 복사하지 않고 같은 객체를 가리키게 둔다.

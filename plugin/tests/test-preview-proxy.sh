@@ -99,7 +99,13 @@ assert "_proxy_websocket = Handler._proxy_websocket" in preview_cls, \
 #    영원히 안 돌아온다 — Dozzle 이 "API 연결 시간 초과"를 띄운 게 이것이다(형 실측).
 proxy = handler[handler.find("def _proxy_to_gateway"):handler.find("def _proxy_websocket")]
 assert "text/event-stream" in proxy, "SSE 를 스트리밍으로 판정하지 않는다"
-assert "upstream.read(8192)" in proxy, "응답을 통째로 읽고 있다 — SSE 에서 멈춘다"
+assert "upstream.read(8192)" not in proxy, \
+    "read(n) 은 n 바이트가 찰 때까지 블록해 이벤트 꼬리를 가둔다 — SSE 종결자가 늦어 EventSource 가 죽는다"
+assert "upstream.read1(8192)" in proxy, "read1(있는 만큼만) 이어야 SSE 가 제때 흘러간다"
+# HTTP/1.1 + chunked 여야 스트리밍이 성립한다(1.0 의 '닫힐 때까지' 방식으론 EventSource 가 안 먹는다).
+assert 'chunked = self.protocol_version == "HTTP/1.1"' in proxy, "chunked 판정이 없다"
+assert 'b"%X\\r\\n" % len(chunk)' in proxy, "chunk 프레이밍이 없다"
+assert 'protocol_version = "HTTP/1.1"' in handler, "전용 리스너가 HTTP/1.1 이 아니면 chunked 를 못 쓴다"
 assert "self.wfile.flush()" in proxy, "flush 가 없으면 실시간이 아니다(버퍼에 쌓인다)"
 assert 'declared is None' in proxy, "길이를 모르는 응답(chunked)을 스트리밍으로 안 본다"
 
