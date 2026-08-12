@@ -1265,6 +1265,8 @@ _MOBILE_HTML = r"""<!doctype html>
   <!-- 아이콘을 선언하지 않으면 브라우저가 /favicon.ico 를 찾는데 마리나는 그 경로를 주지 않는다
        → 탭 아이콘이 빈 채로 남는다(웹·로그인 화면엔 있었는데 모바일만 빠져 있었다).
        /web/ 은 PUBLIC_PREFIXES 라 로그인 전에도 받아진다. -->
+  <link rel="icon" type="image/png" href="/web/favicon.png" media="(prefers-color-scheme: light)" />
+  <link rel="icon" type="image/png" href="/web/favicon-dark.png" media="(prefers-color-scheme: dark)" />
   <link rel="icon" type="image/png" href="/web/favicon.png" />
   <link rel="apple-touch-icon" href="/web/favicon.png" />
   <style>

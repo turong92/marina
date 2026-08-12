@@ -149,5 +149,12 @@ from marina_mobile import render_mobile_html
 html = render_mobile_html()
 assert 'rel="icon"' in html, "모바일에 아이콘 선언이 없다 — 탭 아이콘이 빈다"
 assert "/web/favicon.png" in html, "아이콘이 /web/ 아래를 가리켜야 한다(로그인 전에도 받아지는 공개 경로)"
-print("PASS 탭 아이콘 선언")
+assert "favicon-dark.png" in html and "prefers-color-scheme: dark" in html, \
+    "다크모드용 아이콘이 없다 — 어두운 탭에서 남색 아이콘이 묻힌다"
+# 폴백은 **진한 쪽**이어야 한다. media 를 못 읽는 브라우저에서 흰 아이콘이 뜨면 밝은 탭 배경에
+# 아예 묻혀 안 보인다(형: "화이트모드에서 흰거 잘 안보여서"). 남색은 어두운 배경에서도 윤곽이 남는다.
+tail = html[html.rfind('rel="icon"'):]
+assert "favicon.png" in tail.split(">")[0] and "favicon-dark" not in tail.split(">")[0], \
+    "마지막(폴백) 아이콘 선언이 흰색 버전이다 — 밝은 배경에서 안 보인다"
+print("PASS 탭 아이콘: 라이트/다크 분리 + 폴백은 진한 쪽")
 PY

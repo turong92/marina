@@ -8,7 +8,9 @@
   <!-- 파비콘 — 탭 색(OS 테마)에 따라 자동 스왑: 라이트 탭=네이비, 다크 탭=흰색 -->
   <link rel="icon" type="image/png" href="/web/favicon.png" media="(prefers-color-scheme: light)" />
   <link rel="icon" type="image/png" href="/web/favicon-dark.png" media="(prefers-color-scheme: dark)" />
-  <link rel="icon" type="image/png" href="/web/favicon-dark.png" />
+  <!-- 폴백은 **진한 쪽**이다. media 를 못 읽는 브라우저에서 흰 아이콘이 뜨면 밝은 탭 배경에
+       묻혀 아예 안 보인다(형 지적). 남색은 어두운 배경에서도 윤곽이 남아 덜 나쁘다. -->
+  <link rel="icon" type="image/png" href="/web/favicon.png" />
   <link rel="stylesheet" href="/web/styles.css" />
   <link rel="stylesheet" href="/web/vendor-xterm.css" />
 </head>
