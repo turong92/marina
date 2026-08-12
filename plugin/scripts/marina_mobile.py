@@ -1607,8 +1607,16 @@ _MOBILE_HTML = r"""<!doctype html>
     .questionOpts { display: flex; flex-direction: column; gap: 6px; }
     .questionOpt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; min-height: 40px; padding: 8px 11px; border: 1px solid #b9c6d8; border-radius: 8px; background: #fff; text-align: left; }
     .questionOpt:disabled { opacity: .45; background: #f2f4f8; cursor: not-allowed; }
-    #contextBtn[data-level="warn"] { color: #a8571a; }
-    #contextBtn[data-level="critical"] { color: #a02222; font-weight: 900; }
+    /* 우상단 사용량 게이지 — conic-gradient 로 채운 링. 안에 숫자를 겹쳐 한눈에 읽히게 한다.
+       예전 아이콘은 고정 문자(◔)라 값이 안 변해 장식일 뿐이었다. */
+    .usageRing { position: relative; display: inline-flex; width: 26px; height: 26px; align-items: center; justify-content: center;
+                 border-radius: 50%; background: conic-gradient(var(--ring, #4d5665) calc(var(--pct, 0) * 1%), #e3e7ee 0); }
+    .usageRing::after { content: ""; position: absolute; inset: 3px; border-radius: 50%; background: #fff; }
+    .usageRing[data-level="warn"] { --ring: #d08321; }
+    .usageRing[data-level="critical"] { --ring: #c0392b; }
+    .usageRingNum { position: relative; z-index: 1; font-size: 9px; font-weight: 900; color: #4d5665; line-height: 1; }
+    .usageRing[data-level="warn"] .usageRingNum { color: #a8571a; }
+    .usageRing[data-level="critical"] .usageRingNum { color: #a02222; }
     .questionBlocked { padding: 7px 9px; border-radius: 7px; background: #f2f4f8; color: #4d5665; font-size: 11px; line-height: 1.45; }
     .questionOptLabel { font-size: 12px; font-weight: 800; color: #1f2733; }
     .questionOptDesc { font-size: 10px; color: #63708a; line-height: 1.4; }
@@ -1769,7 +1777,7 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="chatNavTitle" id="chatNavTitle"></div>
         <div class="shellActions">
           <button class="usageBtn" id="galleryBtn" type="button" title="이미지 모아보기" aria-label="이미지 모아보기" style="display:none">&#9635;</button>
-          <button class="usageBtn" id="usageBtn" type="button" title="토큰 사용량" aria-label="토큰 사용량">&#9684;</button>
+          <button class="usageBtn" id="usageBtn" type="button" title="토큰 사용량" aria-label="토큰 사용량"><span class="usageRing" id="usageRing"><span class="usageRingNum" id="usageRingNum"></span></span></button>
         </div>
       </div>
       <!-- 세션 탭 — shellRow 와 **별도 줄**이다(그 줄은 뒤로가기·제목·액션이 이미 꽉 찼다).
@@ -1820,7 +1828,6 @@ _MOBILE_HTML = r"""<!doctype html>
       <div class="liveQuestion" id="liveQuestion"></div>
       <div class="sessionControls">
         <button class="sessionControlBtn" id="settingsBtn" type="button">모델 · 기본값</button>
-        <button class="sessionControlBtn" id="contextBtn" type="button" style="display:none" title="토큰 사용량 자세히">컨텍스트 -</button>
         <button class="sessionControlBtn" id="subagentSessionBtn" type="button" style="display:none">서브에이전트 <span id="subagentCount">0</span></button>
         <div class="status" id="status" aria-live="polite"></div>
         <button class="stopBtn" id="stopBtn" type="button" title="현재 응답 중단" aria-label="현재 응답 중단">&#9632;</button>
@@ -1952,7 +1959,8 @@ _MOBILE_HTML = r"""<!doctype html>
     const drawerBackdrop = document.getElementById("drawerBackdrop");
     const chatNavTitle = document.getElementById("chatNavTitle");
     const usageBtn = document.getElementById("usageBtn");
-    const contextBtn = document.getElementById("contextBtn");
+    const usageRing = document.getElementById("usageRing");
+    const usageRingNum = document.getElementById("usageRingNum");
     const usagePanel = document.getElementById("usagePanel");
     const usagePercent = document.getElementById("usagePercent");
     const usageUsed = document.getElementById("usageUsed");
@@ -3254,17 +3262,17 @@ _MOBILE_HTML = r"""<!doctype html>
       usageFill.style.width = `${percent == null ? 0 : Math.max(0, Math.min(100, percent))}%`;
       usagePanel.dataset.level = percent != null && percent >= 90 ? "critical" : percent != null && percent >= 70 ? "warn" : "normal";
       usagePanel.title = usage && usage.contextWindow ? `컨텍스트 ${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindow)}` : "컨텍스트 한도 정보 없음";
-      // 사용량은 **항상 보이게** 한 줄로도 띄운다 — 작은 아이콘 버튼 뒤에만 두면 있는 줄도 모른다(형 지적).
-      if (percent == null) {
-        contextBtn.style.display = "none";
-      } else {
-        contextBtn.style.display = "inline-block";
-        contextBtn.textContent = `컨텍스트 ${percent.toFixed(0)}%`;
-        contextBtn.dataset.level = percent >= 90 ? "critical" : percent >= 70 ? "warn" : "normal";
-        contextBtn.title = usage && usage.contextWindow
-          ? `${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindow)} · 남음 ${formatTokens(usage.remainingTokens)}`
-          : "토큰 사용량 자세히";
-      }
+      // 우상단 게이지에 담는다. 예전엔 입력창 위에 "컨텍스트 NN%" 한 줄을 따로 뒀는데, 그 줄은
+      // 매 턴 보는 자리를 차지하면서 정작 아이콘 버튼과 같은 값을 두 번 말하고 있었다(형 지적).
+      // 아이콘은 고정 문자(◔)라 값이 안 변해 아무 정보도 못 줬으므로, 아이콘 쪽을 진짜 게이지로 만든다.
+      const level = percent == null ? "normal" : percent >= 90 ? "critical" : percent >= 70 ? "warn" : "normal";
+      usageRing.dataset.level = level;
+      usageRing.style.setProperty("--pct", String(percent == null ? 0 : Math.max(0, Math.min(100, percent))));
+      usageRingNum.textContent = percent == null ? "" : String(Math.round(percent));
+      usageBtn.title = percent == null ? "토큰 사용량"
+        : (usage && usage.contextWindow
+           ? `컨텍스트 ${percent.toFixed(0)}% · ${formatTokens(usage.usedTokens)} / ${formatTokens(usage.contextWindow)}`
+           : `컨텍스트 ${percent.toFixed(0)}%`);
     }
     async function loadAgentUsage(session) {
       if (!session || session.kind !== "agent") {
@@ -4529,7 +4537,6 @@ _MOBILE_HTML = r"""<!doctype html>
       else if (intent === "close") { closeDrawer(); drawerTouch = null; }
     }, {passive: true});
     app.addEventListener("touchend", () => { drawerTouch = null; }, {passive: true});
-    contextBtn.onclick = () => usageBtn.click();   // 한 줄 표시를 눌러도 상세 패널이 열린다
     usageBtn.onclick = event => {
       event.stopPropagation();
       const opening = !usagePanel.classList.contains("open");

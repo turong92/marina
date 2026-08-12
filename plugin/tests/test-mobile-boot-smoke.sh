@@ -156,5 +156,12 @@ assert "favicon-dark.png" in html and "prefers-color-scheme: dark" in html, \
 tail = html[html.rfind('rel="icon"'):]
 assert "favicon.png" in tail.split(">")[0] and "favicon-dark" not in tail.split(">")[0], \
     "마지막(폴백) 아이콘 선언이 흰색 버전이다 — 밝은 배경에서 안 보인다"
+# 사용량은 **우상단 게이지 한 곳**에서만 말한다. 예전엔 입력창 위에도 "컨텍스트 NN%" 한 줄이
+# 있었는데, 매 턴 보는 자리를 차지하면서 아이콘과 같은 값을 두 번 말했다(형 지적).
+assert "contextBtn" not in html, "입력창 위 컨텍스트 줄이 돌아왔다 — 우상단 게이지와 중복"
+assert "usageRing" in html and "conic-gradient" in html, \
+    "우상단이 진짜 게이지가 아니다 — 고정 문자 아이콘은 값이 안 변해 정보가 없다"
+assert "--pct" in html, "게이지가 퍼센트를 반영하지 않는다"
+print("PASS 사용량: 우상단 게이지 단일 표시(컨텍스트 줄 제거)")
 print("PASS 탭 아이콘: 라이트/다크 분리 + 폴백은 진한 쪽")
 PY
