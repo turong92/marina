@@ -352,9 +352,6 @@ class Handler(BaseHTTPRequestHandler):
     _HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                              "te", "trailers", "transfer-encoding", "upgrade"})
 
-    # 마리나가 소유한 경로. 이 집합 **밖**의 요청만 미리보기로 흘려보낸다.
-    _MARINA_PATHS = ("/api/", "/web/", "/preview/", "/login", "/logout", "/mobile")
-
     def _preview_cookie(self) -> str:
         for chunk in str(self.headers.get("cookie") or "").split(";"):
             name, _, value = chunk.strip().partition("=")
@@ -363,25 +360,15 @@ class Handler(BaseHTTPRequestHandler):
                 return value if self._PREVIEW_LABEL_RE.match(value) else ""
         return ""
 
-    def _preview_fallback(self, parsed: urllib.parse.ParseResult, method: str) -> bool:
-        """미리보기 모드일 때 **마리나 것이 아닌** 요청을 앱으로 흘린다. 처리했으면 True.
-
-        경로 접두사만으로는 부족하다. 앱은 `/assets/main.js` 처럼 **절대 경로**로 자기 자산을
-        부르고, JS 가 실행 중에 만드는 주소는 HTML 을 고쳐도 못 잡는다(실측: uptime-kuma 가
-        `/assets/...`·`/manifest.webmanifest` 를 절대경로로 부른다 → /preview 아래에서 하얀 화면).
-        그래서 미리보기를 한 번 열면 쿠키로 대상을 기억하고, 마리나 소유 경로가 아닌 요청은
-        그 앱으로 넘긴다. 앱 입장에선 자기가 루트에 있는 것처럼 보인다.
-
-        루트(`/`)는 넘기지 않는다 — 거긴 대시보드다.
-        """
-        path = parsed.path
-        if path == "/" or path.startswith(self._MARINA_PATHS):
-            return False
-        label = self._preview_cookie()
-        if not label:
-            return False
-        return self._proxy_to_gateway(label, path + (f"?{parsed.query}" if parsed.query else ""),
-                                      method, set_cookie="")
+    # 대시보드 포트에는 **쿠키 기반 fallback 을 두지 않는다.**
+    #
+    # 한때 "미리보기 모드"라며 마리나 소유가 아닌 경로를 앱으로 흘렸는데, 그 목록이 닫혀 있다는
+    # 전제가 틀렸다. 브라우저는 `/favicon.ico`·`/manifest.webmanifest`·`/apple-touch-icon.png`
+    # 같은 걸 **알아서** 요청하고, 그게 전부 앱으로 새서 마리나 탭 아이콘이 Dozzle 것으로
+    # 바뀌었다(형 발견). 소유 경로를 아무리 열거해도 브라우저·표준이 추가하는 경로를 다 못 쫓는다.
+    #
+    # 루트를 요구하는 앱은 **전용 포트**(PreviewHandler)가 담당한다 — 거긴 앱이 경로를 통째로
+    # 소유하므로 이런 충돌 자체가 없다. 한 문제에 장치는 하나면 된다.
 
     def _serve_preview(self, parsed: urllib.parse.ParseResult, method: str) -> bool:
         """`/preview/<label>/<경로>` → 게이트웨이. 처리했으면 True."""
@@ -392,8 +379,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json({"error": "invalid preview target"}, 400)
             return True
         target = "/" + tail + (f"?{parsed.query}" if parsed.query else "")
-        # 여기로 들어온 순간이 "이 방을 보는 중"의 시작이다 — 이후 절대경로 요청을 흘려보낼 근거.
-        return self._proxy_to_gateway(label, target, method, set_cookie=label)
+        return self._proxy_to_gateway(label, target, method)
 
     def _proxy_to_gateway(self, label: str, target: str, method: str, set_cookie: str = "") -> bool:
         if not _GATEWAY_ON:
@@ -1357,9 +1343,6 @@ class Handler(BaseHTTPRequestHandler):
             self.stream_log(root, service, run, from_offset)
             return
 
-        # 마리나 라우팅을 **다 지나친 뒤**에만 미리보기로 흘린다 — 앞에 두면 대시보드 경로를 삼킨다.
-        if self._preview_fallback(parsed, "GET"):
-            return
         self.send_json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
@@ -1379,10 +1362,6 @@ class Handler(BaseHTTPRequestHandler):
             self.auth_principal = principal
             # 앱이 페이지를 연 뒤 부르는 API 도 같은 문을 통과해야 한다 — GET 만 열면 화면이 반쪽 난다.
             if parsed.path.startswith("/preview/") and self._serve_preview(parsed, "POST"):
-                return
-            # 절대경로로 오는 앱 API(`/api/status` 같은 것 말고 앱 자신의 것). _preview_fallback 이
-            # 마리나 소유 경로(/api/·/web/·/mobile·/login·/)를 먼저 배제하므로 여기 둬도 안전하다.
-            if self._preview_fallback(parsed, "POST"):
                 return
             if parsed.path in ("/api/remote/serve", "/api/remote/funnel", "/api/remote/off"):
                 if not self._require_admin_access():
