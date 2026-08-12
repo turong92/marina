@@ -39,6 +39,23 @@ def _projects_file() -> str:
     return os.path.join(os.environ.get("MARINA_HOME") or os.path.expanduser("~/.marina"), "projects.json")
 
 
+# 원격 지시자 — 이게 있으면 명령이 **다른 기계**를 향한다. 마리나의 포트 격리와 무관하다.
+# ssh/도커 원격호스트/쿠버네티스/컨테이너 안 실행 정도면 실무에서 만나는 경우는 거의 덮는다.
+_REMOTE_RE = re.compile(
+    r"(?:^|[;&|]\s*|\s)(?:ssh|scp|rsync)\s"          # ssh 계열
+    r"|(?:^|\s)DOCKER_HOST="                          # 원격 도커 데몬
+    r"|(?:^|\s)docker\s+(?:-H|--host)\s"
+    r"|(?:^|\s)docker\s+context\s+use\s"
+    r"|(?:^|\s)(?:kubectl|helm)\s"                   # 쿠버네티스
+    r"|(?:^|\s)docker\s+(?:exec|compose\s+exec)\s",  # 컨테이너 안에서 도는 것
+    re.I)
+
+
+def _targets_remote(cmd: str) -> bool:
+    """이 명령이 다른 기계(또는 컨테이너 안)를 향하나."""
+    return bool(_REMOTE_RE.search(cmd or ""))
+
+
 def _strip_quoted(cmd: str) -> str:
     """따옴표 구간을 공백으로 치환 — `rg 'npm run dev' README.md`·`echo \"docker compose up\"` 같은
     검색/인용 텍스트가 기동 명령으로 오탐되지 않게(코덱스 P2). 닫히지 않은 따옴표는 그대로 둔다(보수적)."""
@@ -84,6 +101,13 @@ def main() -> int:
         return 0
     cmd = str((d.get("tool_input") or {}).get("command") or "")
     if not cmd or "MARINA_DIRECT=1" in cmd:                        # 의도적 직접 실행 탈출구
+        return 0
+    if _targets_remote(cmd):
+        # **다른 기계에서 도는 명령은 마리나가 막을 대상이 아니다.** 이 훅의 목적은 워크트리별
+        # 포트 격리인데, 사무실 PC 나 원격 도커 호스트엔 그 개념이 없다. 그런데도 명령문에
+        # `docker compose up` 이 보인다는 이유로 막으면, 원격 작업마다 MARINA_DIRECT 를 붙이게 된다.
+        # 그게 진짜 위험이다 — "막히면 붙이면 되네"가 습관이 되면 정작 로컬에서 막아야 할 때도
+        # 반사적으로 우회한다(형 지적). 탈출구가 탈출구로 남으려면 애초에 안 막아야 한다.
         return 0
     bare = _strip_quoted(cmd)                                      # 따옴표 안(검색어·인용)은 판정 비대상
     if not any(re.search(p, bare) for p in PATTERNS):              # 싼 검사 먼저 — git/파일 IO 전에

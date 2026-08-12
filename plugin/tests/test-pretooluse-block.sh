@@ -49,6 +49,15 @@ allow "$(printf 'docker compose ps\necho please start the server')" "$proj"
 deny  "$(printf 'git pull\nnpm run dev')" "$proj"
 # 통과: 탈출구
 allow "MARINA_DIRECT=1 npm run dev" "$proj"
+
+# 원격을 향한 명령은 막지 않는다 — 이 훅의 목적은 워크트리별 포트 격리인데 다른 기계엔 그 개념이 없다.
+# 막으면 원격 작업마다 MARINA_DIRECT 를 붙이게 되고, 그 습관이 정작 로컬에서의 보호를 무력화한다.
+allow 'ssh office-pc "cd ~/app && docker compose up -d"' "$proj"
+allow 'DOCKER_HOST=tcp://office:2375 docker compose up -d' "$proj"
+allow 'docker -H tcp://office:2375 compose up -d' "$proj"
+allow 'kubectl rollout restart deploy/web' "$proj"
+allow 'docker compose exec web npm run dev' "$proj"
+
 # 통과: 미등록 레포
 other="$TMP/other"; mkdir -p "$other"; ( cd "$other" && git init -q )
 allow "npm run dev" "$other"
