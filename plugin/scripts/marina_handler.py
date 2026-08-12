@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import CONTROL_SCRIPT, HOST, LOG_TAIL_BYTES, MARINA_HOME, PORT, _GATEWAY_ON, _GATEWAY_PORT, _PREVIEW_PORT, _env, _gw, _mc, invalidate_registry_caches, json_bytes
+from marina_state import CONTROL_SCRIPT, HOST, LOG_TAIL_BYTES, MARINA_HOME, PORT, _GATEWAY_ON, _GATEWAY_PORT, _PREVIEW_PORT, _PREVIEW_PUBLIC_PORT, _env, _gw, _mc, invalidate_registry_caches, json_bytes
 from marina_dockerfile import _compose_scaffold_service, _compose_scan, _detect_subrepos, _list_dockerfiles, _subrepo_compose, is_profile_var
 from marina_logtext import read_log_chunk, redact_text, scan_log_matches
 from marina_registry import containing_project_for, discover_all_roots, discover_roots, external_repos_for, is_source_checkout, load_projects, project_for, source_root_for, subrepos_of
@@ -628,8 +628,23 @@ class Handler(BaseHTTPRequestHandler):
                         None,
                     )
                     if snapshot:
+                        # 게이트웨이 주소(<wt>.<proj>.localhost:3902)는 **이 맥에서만** 열린다.
+                        # 폰이나 다른 기기로 접속했으면 그 주소를 줘도 이름 해석이 안 돼 아무 일도
+                        # 안 일어난다. 그때는 미리보기 문(전용 포트)을 거치는 주소를 준다 —
+                        # 형이 접속에 쓴 호스트를 그대로 쓰므로 별도 설정이 필요 없다.
+                        remote_host = str(self.headers.get("host") or "").split(":")[0]
+                        is_local = remote_host in ("localhost", "127.0.0.1", "::1", "")
                         for route in _gw().summarize_gateway([snapshot], _GATEWAY_PORT):
-                            open_urls[str(route.get("service") or "")] = f"http://{route['domain']}/"
+                            name = str(route.get("service") or "")
+                            domain = str(route.get("domain") or "")
+                            if is_local:
+                                open_urls[name] = f"http://{domain}/"
+                            else:
+                                label = domain.split(":")[0]
+                                if label.endswith(".localhost"):
+                                    label = label[: -len(".localhost")]
+                                open_urls[name] = (f"https://{remote_host}:{_PREVIEW_PUBLIC_PORT}"
+                                                   f"/__room?label={urllib.parse.quote(label)}")
                 services = [{
                     "service": str(item.get("service") or ""),
                     "running": bool(item.get("running")),

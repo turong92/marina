@@ -121,4 +121,19 @@ print("PASS 미리보기: Host 라우팅 · 전체 경로 · GET/POST · 인증 
       "쿠키 차단 · 홉바이홉 · 라벨 검증 · 오류 안내 · 대시보드엔 fallback 없음 · 전용 리스너(앱이 루트 소유)")
 PY
 
+# ⑯ "웹 열기" 버튼이 접속 위치에 맞는 주소를 준다 — 폰에서 게이트웨이 주소를 주면 아무 일도 안 난다.
+PYTHONPATH="$SCR" python3 - "$SCR" <<'PY'
+import sys
+from pathlib import Path
+
+handler = (Path(sys.argv[1]) / "marina_handler.py").read_text(encoding="utf-8")
+window = handler[handler.find("open_urls: dict[str, str] = {}"):handler.find('"logRuns"')]
+assert 'self.headers.get("host")' in window, "접속 호스트를 안 본다 — 폰에서도 localhost 주소를 준다"
+assert '("localhost", "127.0.0.1", "::1", "")' in window, "로컬 판정이 없다"
+assert "_PREVIEW_PUBLIC_PORT" in window, "원격일 때 미리보기 포트를 안 쓴다"
+assert "/__room?label=" in window, "미리보기 방 선택 진입점을 안 쓴다"
+assert 'f"http://{domain}/"' in window, "로컬에서는 게이트웨이 주소를 그대로 줘야 한다(더 빠르다)"
+print("PASS openUrl: 로컬=게이트웨이 · 원격=미리보기(__room)")
+PY
+
 echo "PASS test-preview-proxy"
