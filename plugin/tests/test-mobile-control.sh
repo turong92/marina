@@ -349,11 +349,17 @@ queued = mm.mobile_send({
     "text": "Run this after the current turn",
 })
 assert queued == {"ok": True, "tid": "live-agent-2", "opened": False, "delivery": "queue"}, queued
-assert inputs[-2:] == [
+# 예약해 둔 모델·강도는 **전달 직전에 회수된다**. 예전엔 claude 만 이 자리에서 무시돼(codex 만 적용)
+# 살아있는 세션에선 바꾼 모델이 영영 안 먹었다 — test-agent-settings-live 가 그 계약을 지킨다.
+assert inputs[-6:] == [
+    ("live-agent-2", "/model claude-fable-5"),
+    ("live-agent-2", "\r"),
+    ("live-agent-2", "/effort high"),
+    ("live-agent-2", "\r"),
     ("live-agent-2", "Run this after the current turn"),
     ("live-agent-2", "\r"),
 ], inputs
-assert pauses == [True, True], pauses
+assert pauses == [True] * 6, pauses      # 앞 전송 1 + 설정 4 + 이번 전달 1
 mm.mobile_pending_session_settings = original_pending_settings
 
 codex_queued = mm.mobile_send({**body, "delivery": "queue", "text": "Follow up next turn"})
@@ -362,7 +368,7 @@ assert inputs[-2:] == [
     ("live-agent-1", "Follow up next turn"),
     ("live-agent-1", "\t"),
 ], inputs
-assert pauses == [True, True, True], pauses
+assert pauses == [True] * 7, pauses       # 예약이 비어 있어 이번엔 전달 1 만 는다
 assert not opens, opens
 
 original_native_active = mm._native_agent_active
@@ -514,7 +520,10 @@ pending = mm.mobile_update_session_settings({
     "root": str(root), "source": "codex", "sid": "codex-session-0001",
     "model": "gpt-5.6-sol", "effort": "medium",
 })
-assert pending == {"model": "gpt-5.6-sol", "effort": "medium", "applyMode": "pending"}, pending
+# 미룬 이유까지 돌려준다 — 살아있는 세션에 "다음 Marina 연결에 적용"이라고만 하면 그 '다음'이
+# 언제인지 알 수 없다(작업 중 = 이번 응답이 끝나면).
+assert pending == {"model": "gpt-5.6-sol", "effort": "medium",
+                   "applyMode": "pending", "pendingReason": "busy"}, pending
 assert mm.mobile_pending_session_settings(root, "codex", "codex-session-0001") == {
     "model": "gpt-5.6-sol", "effort": "medium",
 }

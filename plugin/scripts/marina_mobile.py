@@ -88,15 +88,17 @@ def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
     _agent_cli(source, sid, model=value["model"], effort=value["effort"])
     with _AGENT_SEND_LOCK:
         tid = _live_agent_tid(root, source, sid)
-        if tid and source == "codex" and not _native_agent_active(root, source, sid):
-            try:
-                if _apply_live_codex_settings(tid, value["model"], value["effort"]):
-                    _clear_pending_session_settings(root, source, sid)
-                    return {**value, "applyMode": "live"}
-            except (OSError, ValueError):
-                pass
+        try:
+            if _apply_live_agent_settings(root, source, sid, tid, value["model"], value["effort"]):
+                _clear_pending_session_settings(root, source, sid)
+                return {**value, "applyMode": "live"}
+        except (OSError, ValueError):
+            pass
         _persist_pending_session_settings(root, source, sid, value)
-    return {**value, "applyMode": "pending"}
+        # 왜 미뤘는지까지 말해야 한다. 살아있는 세션에 "다음 Marina 연결에 적용합니다"라고만 하면
+        # 그 '다음'이 언제인지 알 수 없고, 실제로 오지 않을 수도 있다.
+        reason = "busy" if tid else "detached"
+    return {**value, "applyMode": "pending", "pendingReason": reason}
 
 
 def _clear_pending_session_settings(root: Path, source: str, sid: str) -> None:
@@ -869,6 +871,42 @@ def _deliver_agent_input(tid: str, source: str, text: str, requested: str = "") 
     return delivery
 
 
+def _apply_live_claude_settings(tid: str, model: str, effort: str) -> bool:
+    """Claude Code 의 슬래시 명령에 **인자를 실어** 보낸다 — `/model <name>`·`/effort <level>`.
+
+    codex 처럼 목록을 열고 화살표를 세어 내려갈 필요가 없다(그 방식은 목록이 하나만 바뀌어도
+    엉뚱한 걸 고른다). 값 검증은 CLI 인자를 만들 때와 **같은 규칙**을 재사용한다 — 두 경로가
+    서로 다른 걸 허용하면 한쪽에서만 통과하는 값이 생긴다."""
+    if not (model or effort):
+        return False
+    _agent_cli("claude", "", model=model, effort=effort)   # 규칙 위반이면 여기서 ValueError
+    for command, argument in (("/model", model), ("/effort", effort)):
+        if not argument:
+            continue
+        term_input(tid, f"{command} {argument}")
+        _agent_input_pause()
+        term_input(tid, "\r")
+        _agent_input_pause()
+    return True
+
+
+def _apply_live_agent_settings(root: Path, source: str, sid: str, tid: str,
+                               model: str, effort: str) -> bool:
+    """살아있는 marina 소유 PTY 에 모델·추론강도를 **지금** 먹인다.
+
+    **작업 중이면 하지 않는다.** 응답 중에 슬래시를 치면 명령이 아니라 메시지로 큐에 들어간다.
+    그땐 예약으로 남고, 다음 유휴 전송 때 회수된다(mobile_send)."""
+    if not tid or not (model or effort):
+        return False
+    if _native_agent_active(root, source, sid):
+        return False
+    if source == "codex":
+        return _apply_live_codex_settings(tid, model, effort)
+    if source == "claude":
+        return _apply_live_claude_settings(tid, model, effort)
+    return False
+
+
 def _apply_live_codex_settings(tid: str, model: str, effort: str) -> bool:
     """Drive Codex's native /model picker in its Marina-owned PTY."""
     models = (mobile_agent_options().get("codex") or {}).get("models") or []
@@ -981,14 +1019,14 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
             tid = _live_agent_tid(root, source, sid)
             if tid:
                 saved = mobile_pending_session_settings(root, source, sid)
-                if (
-                    source == "codex"
-                    and (saved["model"] or saved["effort"])
-                    and not _native_agent_active(root, source, sid)
-                ):
-                    if not _apply_live_codex_settings(tid, saved["model"], saved["effort"]):
+                if saved["model"] or saved["effort"]:
+                    # 예약해 둔 설정의 **회수 지점**이다. 예전엔 codex 만 여기서 적용하고 claude 는
+                    # 읽어놓고 아무것도 안 했다 — 그래서 살아있는 세션에선 바꾼 모델이 영영 안 먹고
+                    # 예약 배지만 남았다(형: "클로드는 펜딩이 아니라 그냥 안먹는거같은데").
+                    if _apply_live_agent_settings(root, source, sid, tid, saved["model"], saved["effort"]):
+                        _clear_pending_session_settings(root, source, sid)
+                    elif source == "codex" and not _native_agent_active(root, source, sid):
                         raise ValueError("예약한 모델 설정을 현재 CLI에 적용할 수 없어요. 세션을 다시 열어주세요")
-                    _clear_pending_session_settings(root, source, sid)
                 delivery = _deliver_agent_input(tid, source, text, str(body.get("delivery") or ""))
                 return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
             # 여기까지 왔다 = 조작 가능한 PTY 가 없다. 이중 실행 판정은 **세션(sid) 단위**다
@@ -3985,7 +4023,9 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       closeSettings();
       renderSessionControls(session);
-      showToast(result.applyMode === "live" ? "현재 CLI에 적용했습니다" : "다음 Marina 연결에 적용합니다");
+      showToast(result.applyMode === "live" ? "현재 CLI에 적용했습니다"
+                : result.pendingReason === "busy" ? "작업 중이라 이번 응답이 끝난 뒤 적용합니다"
+                : "다음 Marina 연결에 적용합니다");
     }
     async function interruptCurrentTurn() {
       const session = selectedSession();

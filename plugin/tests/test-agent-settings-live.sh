@@ -1,0 +1,94 @@
+#!/usr/bin/env bash
+# 모델·추론강도를 바꾸면 **지금** 먹어야 한다 — 형: "모델 변경 클로드는 펜딩이 아니라 그냥 안먹는거같은데".
+#
+# **왜 안 먹었나.** 라이브 적용이 codex 에만 있었다. claude 는 예약(pending)으로 떨어지는데,
+# 예약이 실제로 쓰이는 곳은 PTY 가 없어 새로 열 때(`--model` 인자)뿐이다. 마리나로 계속 대화하면
+# 그 PTY 는 계속 살아 있으니 그 경로에 영영 안 들어간다 = 바뀐 적이 없다.
+#
+# **어떻게 고쳤나.** Claude Code 의 슬래시 명령은 인자를 받는다(`/model <name>`·`/effort <level>`).
+# codex 처럼 목록을 화살표로 세지 않아도 되고 목록이 바뀌어도 안 깨진다.
+set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
+HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+SCR="$HERE/../scripts"
+
+PYTHONPATH="$SCR" python3 - "$HERE" <<'PY'
+import sys
+from pathlib import Path
+
+import marina_mobile as mm
+
+root = Path(sys.argv[1]).resolve()
+mm.safe_root = lambda value: Path(str(value)).resolve()   # 등록된 워크트리 없이 순수 판정만 본다
+sent = []
+mm.term_input = lambda tid, text: sent.append((tid, text))
+mm._agent_input_pause = lambda: None
+
+busy = {"value": False}
+mm._native_agent_active = lambda r, s, i: busy["value"]
+mm._live_agent_tid = lambda r, s, i: "tid-1"
+
+# ① claude 도 살아있는 PTY 면 지금 먹는다. 화살표가 아니라 **인자 있는 슬래시 명령**으로.
+result = mm.mobile_update_session_settings({
+    "root": str(root), "source": "claude", "sid": "claude-sid-0001",
+    "model": "claude-opus-5", "effort": "high",
+})
+assert result["applyMode"] == "live", result
+typed = [text for _, text in sent]
+assert "/model claude-opus-5" in typed, typed
+assert "/effort high" in typed, typed
+assert not any("\x1b[A" in text for text in typed), "claude 는 화살표로 목록을 세지 않는다"
+assert mm.mobile_pending_session_settings(root, "claude", "claude-sid-0001") == {"model": "", "effort": ""}, \
+    "지금 먹였으면 예약이 남아 있으면 안 된다"
+
+# ② 작업 중이면 슬래시를 치지 않는다 — 응답 중 입력은 명령이 아니라 메시지로 큐에 들어간다.
+sent.clear()
+busy["value"] = True
+result = mm.mobile_update_session_settings({
+    "root": str(root), "source": "claude", "sid": "claude-sid-0002",
+    "model": "claude-sonnet-5", "effort": "low",
+})
+assert result["applyMode"] == "pending", result
+assert result["pendingReason"] == "busy", result   # 왜 미뤘는지까지 말해야 한다
+assert sent == [], sent
+saved = mm.mobile_pending_session_settings(root, "claude", "claude-sid-0002")
+assert saved == {"model": "claude-sonnet-5", "effort": "low"}, saved
+
+# ③ 예약은 다음 유휴 전송 때 회수된다 — 이게 없으면 예약 배지가 영원히 남는다(원래 버그).
+sent.clear()
+busy["value"] = False
+mm._deliver_agent_input = lambda tid, source, text, delivery: "send"
+out = mm.mobile_send({"root": str(root), "text": "안녕",
+                      "target": {"type": "agent", "source": "claude", "sid": "claude-sid-0002"}})
+assert out["ok"], out
+typed = [text for _, text in sent]
+assert "/model claude-sonnet-5" in typed and "/effort low" in typed, typed
+assert mm.mobile_pending_session_settings(root, "claude", "claude-sid-0002") == {"model": "", "effort": ""}, \
+    "회수했으면 예약을 지워야 한다"
+
+# ④ PTY 가 없으면 예약이고, 이유는 'detached' 다(다음 실행 인자로 들어간다).
+sent.clear()
+mm._live_agent_tid = lambda r, s, i: ""
+result = mm.mobile_update_session_settings({
+    "root": str(root), "source": "claude", "sid": "claude-sid-0003", "model": "claude-opus-5", "effort": "",
+})
+assert result["applyMode"] == "pending" and result["pendingReason"] == "detached", result
+
+# ⑤ 값 검증은 CLI 인자 경로와 같은 규칙을 쓴다 — 한쪽만 통과하는 값이 생기면 안 된다.
+mm._live_agent_tid = lambda r, s, i: "tid-1"
+for bad in ({"model": "opus; rm -rf /", "effort": ""}, {"model": "", "effort": "turbo"}):
+    try:
+        mm.mobile_update_session_settings({"root": str(root), "source": "claude",
+                                           "sid": "claude-sid-0004", **bad})
+    except ValueError:
+        continue
+    raise AssertionError(f"검증을 통과하면 안 되는 값: {bad}")
+
+print("ok claude 모델·강도가 지금 먹고, 작업 중이면 다음 전송 때 회수된다")
+PY
+
+html="$(PYTHONPATH="$SCR" python3 -c 'from marina_mobile import render_mobile_html; print(render_mobile_html())')"
+grep -qF '작업 중이라 이번 응답이 끝난 뒤 적용합니다' <<<"$html" \
+  || { echo "FAIL: 미룬 이유를 화면이 말하지 않는다"; exit 1; }
+
+echo "PASS test-agent-settings-live"
