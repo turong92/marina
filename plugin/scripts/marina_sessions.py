@@ -1155,6 +1155,24 @@ def _json_objects(path: Path) -> list[dict[str, Any]]:
     return objects
 
 
+def _scan_json_objects(path: Path, markers: tuple[bytes, ...]):
+    """파일 전체를 처음부터 흘려 읽는다 — _json_objects 는 끝 256KB 만 봐서 긴 세션의 앞부분을
+    통째로 놓친다(서브에이전트 호출은 대개 대화 초반에 몰려 있어 목록이 아예 비었다).
+    값싼 바이트 필터로 관심 없는 줄은 파싱조차 하지 않는다."""
+    if not path.is_file():
+        return
+    with path.open("rb") as handle:
+        for raw in handle:
+            if markers and not any(marker in raw for marker in markers):
+                continue
+            try:
+                obj = json.loads(raw)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                yield obj
+
+
 def _reverse_json_objects(path: Path):
     """Yield complete JSONL objects newest-first without a fixed tail window."""
     if not path.is_file() or path.stat().st_size == 0:
@@ -1702,7 +1720,8 @@ def _claude_agent_activity(root: Path, sid: str) -> list[dict[str, Any]]:
         return []
     calls: dict[str, dict[str, Any]] = {}
     order: list[str] = []
-    for obj in _json_objects(parent):
+    markers = (b'"tool_use"', b'"tool_result"', b"task-notification")
+    for obj in _scan_json_objects(parent, markers):
         message_content = (obj.get("message") or {}).get("content")
         notification = obj.get("content") if isinstance(obj.get("content"), str) else message_content if isinstance(message_content, str) else ""
         if "<task-notification>" in notification:
@@ -1739,6 +1758,7 @@ def _claude_agent_activity(root: Path, sid: str) -> list[dict[str, Any]]:
                     "status": "running",
                     "preview": _safe_activity_text(args.get("prompt") or args.get("description") or ""),
                     "turns": [],
+                    "name": str(args.get("name") or ""),
                 }
                 order.append(call_id)
             elif block.get("type") == "tool_result":
@@ -1757,10 +1777,13 @@ def _claude_agent_activity(root: Path, sid: str) -> list[dict[str, Any]]:
                 if result_text and item["status"] != "running":
                     item["preview"] = _safe_activity_text(result_text)
 
-    child_dir = session_dir / sid / "subagents"
-    child_paths = {path.stem.removeprefix("agent-"): path for path in child_dir.glob("agent-*.jsonl")} if child_dir.is_dir() else {}
-    for item in calls.values():
-        child = child_paths.get(str(item["id"]))
+    by_tool, by_name, by_id = _claude_subagent_index(session_dir / sid / "subagents")
+    for call_id, item in calls.items():
+        # 파일명(agentId)은 비동기로 띄운 것만 결과 텍스트에 실린다. 동기 실행·이름 붙은
+        # 팀메이트는 agentId 가 없어 지금껏 파일이 있는데도 못 붙었다 — .meta.json 의
+        # toolUseId·name 이 하네스가 남긴 진짜 연결고리다.
+        name = str(item.pop("name", "") or "")
+        child = by_tool.get(call_id) or by_id.get(str(item["id"])) or (by_name.get(name) if name else None)
         if not child:
             continue
         turns = _transcript_turns(child, "claude")
@@ -1768,6 +1791,30 @@ def _claude_agent_activity(root: Path, sid: str) -> list[dict[str, Any]]:
         if turns:
             item["preview"] = turns[-1]["text"]
     return [calls[call_id] for call_id in order][-20:]
+
+
+def _claude_subagent_index(child_dir: Path) -> tuple[dict[str, Path], dict[str, Path], dict[str, Path]]:
+    """subagents/ 를 toolUseId·name·파일명(agentId) 세 갈래로 색인한다."""
+    by_tool: dict[str, Path] = {}
+    by_name: dict[str, Path] = {}
+    by_id: dict[str, Path] = {}
+    if not child_dir.is_dir():
+        return by_tool, by_name, by_id
+    for path in child_dir.glob("agent-*.jsonl"):
+        by_id[path.stem.removeprefix("agent-")] = path
+        try:
+            meta = json.loads(path.with_suffix(".meta.json").read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(meta, dict):
+            continue
+        tool_use_id = str(meta.get("toolUseId") or "")
+        name = str(meta.get("name") or "")
+        if tool_use_id:
+            by_tool[tool_use_id] = path
+        if name:
+            by_name[name] = path
+    return by_tool, by_name, by_id
 
 
 def _codex_agent_activity(root: Path, sid: str) -> list[dict[str, Any]]:
@@ -1780,7 +1827,7 @@ def _codex_agent_activity(root: Path, sid: str) -> list[dict[str, Any]]:
     spawn_calls: dict[str, str] = {}
     wait_calls: dict[str, list[str]] = {}
     order: list[str] = []
-    for obj in _json_objects(parent_path):
+    for obj in _scan_json_objects(parent_path, (b'"function_call"', b'"function_call_output"')):
         payload = obj.get("payload") or {}
         payload_type = payload.get("type")
         call_id = str(payload.get("call_id") or "")

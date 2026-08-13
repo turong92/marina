@@ -651,6 +651,73 @@ assert codex[0]["turns"][-1]["text"] == "Looks good", codex
 print("ok mobile subagent activity")
 PY
 
+# 서브에이전트 연결 — 대화가 안 보이던 두 뿌리를 고정한다.
+#  (1) 긴 세션: Agent 호출이 끝 256KB 밖에 있으면 목록 자체가 비었다.
+#  (2) agentId 없는 호출: 동기 실행·이름 붙은 팀메이트는 결과 텍스트에 agentId 가 없어
+#      파일이 있는데도 못 붙었다 — .meta.json 의 toolUseId·name 이 진짜 연결고리다.
+PYTHONPATH="$SCR" python3 - "$TMP" "$P" <<'PY'
+import json
+from pathlib import Path
+import sys
+
+import marina_sessions as ms
+
+tmp = Path(sys.argv[1]) / "link"
+root = Path(sys.argv[2]).resolve()
+claude_home = tmp / "claude-projects"
+ms.CLAUDE_PROJECTS_DIR = claude_home
+session_dir = claude_home / ms._claude_project_slug(root)
+session_dir.mkdir(parents=True)
+sid = "claude-session-link"
+sync_id = "toolu_sync_1"
+mate_id = "toolu_mate_1"
+lines = [
+    json.dumps({"type": "assistant", "message": {"content": [{
+        "type": "tool_use", "id": sync_id, "name": "Task",
+        "input": {"description": "Trace the bug", "prompt": "Where does it break?"},
+    }]}}),
+    json.dumps({"type": "user", "message": {"content": [{
+        "type": "tool_result", "tool_use_id": sync_id,
+        "content": [{"type": "text", "text": "Findings below. It breaks in the parser."}],
+    }]}}),
+    json.dumps({"type": "assistant", "message": {"content": [{
+        "type": "tool_use", "id": mate_id, "name": "Agent",
+        "input": {"description": "Review the branch", "name": "pre-main-review", "prompt": "Review"},
+    }]}}),
+]
+# 끝 256KB 를 채우는 잡음 — 위 호출들을 tail 창 밖으로 밀어낸다(실제 긴 세션과 같은 모양).
+filler = json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "x" * 2000}]}})
+lines += [filler] * 200
+(session_dir / f"{sid}.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+assert (session_dir / f"{sid}.jsonl").stat().st_size > ms.AGENT_TRANSCRIPT_TAIL_BYTES
+
+child_dir = session_dir / sid / "subagents"
+child_dir.mkdir(parents=True)
+(child_dir / "agent-a11b22c33.jsonl").write_text("\n".join([
+    json.dumps({"type": "user", "message": {"content": "Where does it break?"}}),
+    json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "It breaks in the parser"}]}}),
+]) + "\n", encoding="utf-8")
+(child_dir / "agent-a11b22c33.meta.json").write_text(json.dumps({
+    "agentType": "Explore", "description": "Trace the bug", "toolUseId": sync_id, "spawnDepth": 1,
+}), encoding="utf-8")
+(child_dir / "agent-apre-main-review-99f0.jsonl").write_text("\n".join([
+    json.dumps({"type": "user", "message": {"content": "Review"}}),
+    json.dumps({"type": "assistant", "message": {"content": [{"type": "text", "text": "Branch looks clean"}]}}),
+]) + "\n", encoding="utf-8")
+(child_dir / "agent-apre-main-review-99f0.meta.json").write_text(json.dumps({
+    "agentType": "pre-main-review", "description": "Review the branch", "name": "pre-main-review",
+    "spawnDepth": 0, "taskKind": "in_process_teammate",
+}), encoding="utf-8")
+
+items = ms.agent_activity(root, "claude", sid)
+assert len(items) == 2, items
+by_title = {item["title"]: item for item in items}
+assert by_title["Trace the bug"]["turns"][-1]["text"] == "It breaks in the parser", items
+assert by_title["Review the branch"]["turns"][-1]["text"] == "Branch looks clean", items
+assert "name" not in by_title["Review the branch"], items
+print("ok subagent linking (tail window · meta sidecar)")
+PY
+
 PYTHONPATH="$SCR" python3 - "$TMP" "$P" <<'PY'
 import json
 from pathlib import Path
