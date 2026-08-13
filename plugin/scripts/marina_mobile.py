@@ -2699,6 +2699,22 @@ _MOBILE_HTML = r"""<!doctype html>
     function targetKey(root=selectedRoot()) { return `marinaMobileTarget:${root}`; }
     function selectedSession() { return (state.sessions || []).find(s => s.key === selectedSessionKey) || null; }
 
+    // SESSION_HOLD_START
+    // 새로 연 대화는 **잠깐 어느 목록에도 없다**. PTY 를 띄운 직후엔 서버가 아직 안 싣고,
+    // 첫 지시로 승격(term → agent)되는 순간엔 term 카드가 빠지고 agent 카드가 tid 를 달기까지
+    // 폴 한 번이 빈다. 그 한 번을 "세션이 사라졌다"로 읽으면 render 가 목록으로 되돌려 보내
+    // **새 대화를 시작하자마자 밖으로 튕긴다**(형 지적). 사라진 게 아니라 오는 중이므로,
+    // 마지막으로 실물이었던 세션을 잠깐 붙들고 화면을 지킨다 — 진짜로 없어졌으면 곧 목록으로.
+    const SESSION_HOLD_MS = 20000;
+    function holdSession(current, held, heldAt, key, now, graceMs) {
+      if (current) return current;
+      if (!key || !held || held.key !== key) return null;
+      return (now - heldAt) < graceMs ? held : null;
+    }
+    // SESSION_HOLD_END
+    let heldSession = null;
+    let heldSessionAt = 0;
+
     // ── 세션 탭 — 목록으로 돌아가지 않고 바로 옮겨다니기 ────────────────────────
     // 웹 대화 워크스페이스와 같은 모델: **연 것만** 탭으로 남는다(전체 세션을 늘어놓으면 14개가
     // 그대로 줄이 돼 탭의 의미가 없다). 순서는 연 순서 그대로 — 자동 정렬하면 누르려던 탭이 움직인다.
@@ -2729,7 +2745,9 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function renderSessionTabs() {
       const sessions = state.sessions || [];
-      const alive = openTabs.filter(key => sessions.some(s => s.key === key));   // 사라진 세션 탭은 조용히 정리
+      // 사라진 세션 탭은 조용히 정리 — 단 **보고 있는 탭**은 예외다. 기동·승격 틈에 폴 한 번
+      // 빠졌다고 지우면, 그 세션이 돌아왔을 때 탭이 없어져 있다(holdSession 과 같은 이유).
+      const alive = openTabs.filter(key => key === selectedSessionKey || sessions.some(s => s.key === key));
       if (alive.length !== openTabs.length) { openTabs = alive; saveTabs(); }
       // 탭이 하나뿐이면 줄을 띄울 이유가 없다 — 화면만 먹는다.
       if (alive.length < 2) { if (sessionTabsEl.innerHTML) sessionTabsEl.innerHTML = ""; return; }
@@ -4157,7 +4175,9 @@ _MOBILE_HTML = r"""<!doctype html>
       renderSourceTabs();
       renderSessions();
       renderInbox();
-      const session = selectedSession();
+      const live = selectedSession();
+      if (live) { heldSession = live; heldSessionAt = Date.now(); }
+      const session = holdSession(live, heldSession, heldSessionAt, selectedSessionKey, Date.now(), SESSION_HOLD_MS);
       if (session) showChat();
       else showList();
       chatNavTitle.textContent = session ? (session.title || "세션") : "";
@@ -4495,11 +4515,13 @@ _MOBILE_HTML = r"""<!doctype html>
         // 그 지시가 훅을 깨워 세션이 에이전트로 승격된다(입양).
         // 폴 타이밍상 방금 띄운 PTY 가 아직 state 에 없을 수 있어 화면 전환을 폴에 맡기지 않는다.
         if (d.tid) {
-          // 어느 쪽으로 가든 드로어는 닫는다. chooseSession 은 스스로 닫지만 아래 경로는 안 닫아서,
-          // 폴 타이밍에 따라 +CC 뒤에 패널이 새 대화를 덮은 채 남았다(같은 버튼인데 결과가 달라 보임).
-          closeDrawer();
-          if ((state.sessions || []).some(s => s.key === `term:${d.tid}`)) chooseSession(`term:${d.tid}`);
-          else { ensureLiveTermSession(d.tid, root, "", {type: "term", tid: d.tid}); showChat(); render(); }
+          // 진입 경로는 **하나**다. 예전엔 폴이 새 PTY 를 실었느냐에 따라 chooseSession 과 손수
+          // 만든 경로로 갈렸는데, 후자는 탭 등록도 history 푸시도 안 해서 같은 버튼인데 결과가
+          // 달라 보였다(패널이 덮은 채 남고, 뒤로가기 한 번에 목록으로 튕김).
+          // 아직 안 실렸으면 자리만 만들어 두고(ensureLiveTermSession), 통과는 늘 chooseSession 으로.
+          clearFailedSend();   // 새 대화다 — 앞 세션의 전송 실패 배너를 들고 가지 않는다
+          ensureLiveTermSession(d.tid, root, "", {type: "term", tid: d.tid});
+          chooseSession(`term:${d.tid}`);
         }
       } catch (error) {
         showToast(`세션 시작 실패 · ${String(error)}`);

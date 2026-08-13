@@ -46,7 +46,10 @@ assert handler.find("data-tab-close") < handler.find("data-tab-key"), \
 assert "alive.length < 2" in html, "탭 1개일 때 줄을 숨기지 않는다"
 
 # ⑥ 죽은 세션 탭은 조용히 정리된다(세션이 사라져도 탭이 남으면 눌렀을 때 아무 일도 안 난다).
-assert "openTabs.filter(key => sessions.some" in html, "사라진 세션의 탭을 정리하지 않는다"
+#    단 **보고 있는 탭**은 예외 — 새 세션은 기동·승격 틈에 폴 한 번 목록에서 빠진다. 그때 지우면
+#    돌아왔을 때 탭이 없다(test-mobile-new-session-hold 와 같은 뿌리).
+assert "openTabs.filter(key => key === selectedSessionKey || sessions.some" in html, \
+    "사라진 세션의 탭을 정리하지 않거나, 보고 있는 탭까지 지운다"
 
 # ⑦ 라벨은 잘려야 한다 — 세션 제목이 긴 URL 이면 탭 하나가 줄을 다 먹는다(헤더에서 겪은 그 문제).
 css = html[html.find(".sessionTab {"):html.find(".liveQuestion")]
