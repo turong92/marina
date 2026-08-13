@@ -1309,6 +1309,21 @@
     .chat-turns .activityGroup { margin: 6px 0; font-size: 12px; color: var(--sys-cont-neutral-light); }
     .chat-turns .mdTableWrap { overflow-x: auto; }
     .chat-turns .turnMeta { color: var(--sys-cont-neutral-lightest); font-size: 11px; }
+    /* 질문 카드 — 웹엔 스킨이 아예 없어 공유 렌더러가 낸 마크업이 날것으로 나왔다.
+       클래스는 chat-render.js 가 정한 그대로(모바일과 동일), 색만 시스템 토큰으로. */
+    .chat-turns .questionCard { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 12px; padding: 11px 12px; border: 1px solid var(--sys-style-primary-light, var(--sys-style-neutral-default)); border-radius: 10px; background: var(--sys-bg-base); }
+    .chat-turns .questionBlock { display: flex; flex-direction: column; gap: 8px; }
+    .chat-turns .questionBlock + .questionBlock { padding-top: 9px; border-top: 1px solid var(--sys-style-neutral-light); }
+    .chat-turns .questionHeader { color: var(--sys-cont-primary-default); font-size: 9px; font-weight: 850; text-transform: uppercase; letter-spacing: .04em; }
+    .chat-turns .questionText { font-size: 13px; font-weight: 650; line-height: 1.45; }
+    .chat-turns .questionStep { color: var(--sys-cont-neutral-lightest); font-size: 9px; font-weight: 800; letter-spacing: .04em; }
+    .chat-turns .questionOpts { display: flex; flex-direction: column; gap: 6px; }
+    .chat-turns .questionOpt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; padding: 8px 11px; border: 1px solid var(--sys-style-neutral-default); border-radius: 8px; background: var(--sys-bg-surface); text-align: left; }
+    .chat-turns .questionOpt:disabled { opacity: .45; cursor: not-allowed; }
+    .chat-turns .questionOpt.chosen { border-color: var(--sys-cont-primary-default); box-shadow: inset 0 0 0 1px var(--sys-cont-primary-default); }
+    .chat-turns .questionOptLabel { font-size: 12px; font-weight: 800; }
+    .chat-turns .questionOptDesc { color: var(--sys-cont-neutral-lightest); font-size: 10px; line-height: 1.4; }
+    .chat-turns .questionMore, .chat-turns .questionBlocked { color: var(--sys-cont-neutral-lightest); font-size: 11px; }
 
     /* ── 대화 뷰어·모아보기 ── 마크업 클래스는 모바일과 맞추고 스킨만 여기서 */
     .chat-viewer { position: fixed; inset: 0; z-index: 300; display: flex; flex-direction: column; background: rgb(12 14 18 / 92%); }

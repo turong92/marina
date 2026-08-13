@@ -284,7 +284,11 @@
       // 활동은 **진짜 도구 호출만**. 예전엔 마지막 것 말고 모든 어시스턴트 텍스트를 "진행 메모" 활동으로
       // 바꿔 접힌 목록에 묻었는데, 그러면 결과만 덩그러니 남고 왜 그랬는지가 사라진다(형 지적).
       const activities = items.filter(item => item.kind === "activity");
-      return {user, queued, activities, assistant: assistantIndex >= 0 ? items[assistantIndex] : null};
+      // 질문은 활동이 아니라 대화다 — 접힌 목록엔 안 들어가되, 골격 비교에는 잡혀야 한다
+      // (안 그러면 질문 카드가 붙어도 exchange 를 다시 안 그려 화면에 안 나타난다).
+      const questions = items.filter(item => item.kind === "question");
+      return {user, queued, activities, questions,
+              assistant: assistantIndex >= 0 ? items[assistantIndex] : null};
     }
     // EXCHANGE_RUNS_START
     // exchange 를 **시간 순서대로** 조각낸다: 말풍선(어시스턴트 설명 · 끼어든 메시지)과 연속 활동 묶음.
@@ -361,6 +365,7 @@
       return cells ? `<div class="${className || "turnAttachments"}">${cells}</div>` : "";
     }
     function renderTimelineMessage(item) {
+      if (item && item.kind === "question") return renderAnsweredQuestion(item);
       const text = String(item.text || "");
       const role = item.role === "user" ? "user" : item.role === "output" ? "output" : "assistant";
       const {items: attachments, stripped} = extractAttachments(text);
@@ -503,7 +508,10 @@
     }
     // QUESTION_CARD_START
     function questionsFromActivity(item) {
-      if (!item || item.name !== "AskUserQuestion") return null;
+      if (!item) return null;
+      // 서버가 질문을 1급 항목으로 내려주면(kind:"question") 파싱할 게 없다 — 그대로 쓴다.
+      if (Array.isArray(item.questions) && item.questions.length) return item.questions;
+      if (item.name !== "AskUserQuestion") return null;
       try {
         const parsed = JSON.parse(item.detail || "{}");
         const questions = parsed.questions || (parsed.input && parsed.input.questions);
@@ -511,7 +519,8 @@
       } catch (e) { return null; }
     }
     function pendingQuestionActivity(sections) {
-      return (sections.activities || []).find(item =>
+      const pool = [...(sections.questions || []), ...(sections.activities || [])];
+      return pool.find(item =>
         item.name === "AskUserQuestion" && item.status !== "completed" && questionsFromActivity(item));
     }
     // 구조화된 카드(헤더/질문문/옵션 버튼)를 만들 재료가 하나도 없을 때, 원문에서 뽑아낼 수 있는
@@ -610,6 +619,35 @@
         : `<div class="questionBlocked">${esc((state && state.reason) || "여기서는 답할 수 없어요")}</div>`;
       return `<div class="questionCard">${blocks}${submit}${busy}${failed}${note}</div>`;
     }
+    // ANSWERED_QUESTION_START
+    // 이미 답한 질문 — 대화에 남는 기록이다. 선택지를 다시 다 늘어놓지 않고 **물은 것과 고른 것**만
+    // 보여준다(그게 형이 못 보고 있던 두 가지다). 아직 답 전이면 기다리는 중이라고 말한다.
+    function renderAnsweredQuestion(item) {
+      const questions = questionsFromActivity(item);
+      if (!questions) return "";
+      const answers = Array.isArray(item.answers) ? item.answers : [];
+      const blocks = questions.map((rawQ, qi) => {
+        const q = (rawQ && typeof rawQ === "object") ? rawQ : {};
+        const header = q.header ? `<div class="questionHeader">${esc(String(q.header))}</div>` : "";
+        const questionText = typeof q.question === "string" && q.question.trim() ? q.question : "";
+        const text = questionText ? `<div class="questionText">${renderRichText(String(questionText))}</div>` : "";
+        if (!header && !text) {
+          const fallback = questionFallbackText(rawQ) || "질문을 표시할 수 없습니다(형식 확인 필요)";
+          return `<div class="questionBlock"><div class="questionText">${esc(fallback)}</div></div>`;
+        }
+        const answer = answers[qi] || {};
+        const picked = (Array.isArray(answer.picked) && answer.picked.length)
+          ? answer.picked
+          : (answer.text ? [answer.text] : []);
+        const rows = picked.map(label =>
+          `<div class="questionOpt chosen answered"><span class="questionOptLabel">${esc(String(label))}</span></div>`).join("");
+        const waiting = item.status !== "completed" && item.status !== "failed";
+        const none = rows ? "" : `<div class="questionMore">${waiting ? "답을 기다리는 중" : "고른 답을 찾지 못했어요"}</div>`;
+        return `<div class="questionBlock">${header}${text}<div class="questionOpts">${rows}${none}</div></div>`;
+      }).join("");
+      return `<div class="questionCard answered">${blocks}</div>`;
+    }
+    // ANSWERED_QUESTION_END
     // QUESTION_CARD_END
     function renderConversationSequence(exchange, session, isLatest=false) {
       const sections = exchangeSections(exchange);
@@ -674,7 +712,7 @@
     renderTimelineMessage, timelineDetailAttrs, activityItemKey, activityItemFingerprint,
     activityGroupSummary, renderActivityItem, renderActivityGroup, reconcileActivityList,
     renderTimelineSequence, questionsFromActivity, pendingQuestionActivity,
-    questionFallbackText, renderQuestionCard, renderConversationSequence, pendingKeyPart,
+    questionFallbackText, renderQuestionCard, renderAnsweredQuestion, renderConversationSequence, pendingKeyPart,
     timelineItemKeyParts, exchangeRenderKey,
   };
 })();

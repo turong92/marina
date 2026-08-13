@@ -1634,6 +1634,10 @@ _MOBILE_HTML = r"""<!doctype html>
     .questionBlock + .questionBlock { padding-top: 9px; border-top: 1px solid #cfe0f3; }
     .questionStep { color: #63708a; font-size: 9px; font-weight: 800; letter-spacing: .04em; }
     .questionOpt.chosen { border-color: #0b63ce; background: #e3efff; box-shadow: inset 0 0 0 1px #0b63ce; }
+    /* 이미 답한 질문 = 기록이다. 누를 수 없다는 게 보여야 하고(커서·최소높이 없음), 대화 흐름을
+       끊지 않게 라이브 카드보다 조용해야 한다. */
+    .questionCard.answered { background: transparent; border-style: dashed; }
+    .questionOpt.answered { min-height: 0; cursor: default; }
     .questionSubmitRow { display: flex; }
     .questionSubmit { width: 100%; min-height: 40px; }
     .questionFailed { padding: 7px 9px; border-radius: 7px; background: #fdecec; color: #a02222; font-size: 11px; line-height: 1.45; }
@@ -2596,7 +2600,7 @@ _MOBILE_HTML = r"""<!doctype html>
       renderTimelineMessage, timelineDetailAttrs, activityItemKey, activityItemFingerprint,
       activityGroupSummary, renderActivityItem, renderActivityGroup, reconcileActivityList,
       renderTimelineSequence, questionsFromActivity, pendingQuestionActivity,
-      questionFallbackText, renderQuestionCard, renderConversationSequence, pendingKeyPart,
+      questionFallbackText, renderQuestionCard, renderAnsweredQuestion, renderConversationSequence, pendingKeyPart,
       timelineItemKeyParts, exchangeRenderKey,
       setDetailScope, noteDetailToggle, IMAGE_EXT_RE, collectViewables,
     } = window.MarinaChat;
@@ -3428,6 +3432,8 @@ _MOBILE_HTML = r"""<!doctype html>
         (sections.queued || []).map(message),
         message(sections.assistant),
         question ? [question.id || "", question.status, question.detail] : 0,
+        // 답한 질문 카드는 말풍선 쪽에 그려진다 — 여기 안 넣으면 붙어도 다시 안 그린다.
+        (sections.questions || []).map(item => [item.id || "", item.status, JSON.stringify(item.answers || [])]),
         Boolean((sections.activities || []).length),   // 목록의 유무가 바뀌면 골격이 달라진다
       ]);
     }

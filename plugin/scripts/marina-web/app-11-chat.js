@@ -376,8 +376,10 @@
       // 대기 중인 질문이 있으면 카드를 **읽기 전용**으로 얹는다. 웹에서 응답까지 하려면 모바일의
       // 선택 상태 로직(pickAnswerOption·ensureAnswerState)이 필요한데, 여기 베끼면 또 두 벌이 된다.
       // 그 로직을 공유 렌더러로 올리는 게 정석이고, 그건 다음 사이클이다.
+      // 답한 질문은 이제 타임라인에 kind:"question" 으로 실려 대화 안에 그려진다. 여기서 찾는 건
+      // **아직 답 안 한 것** 하나뿐 — 그것도 같은 kind 로 오므로 활동만 훑으면 못 찾는다.
       const pending = MarinaChat.pendingQuestionActivity(
-        {activities: (tab.items || []).filter(i => i.kind === 'activity')});
+        {activities: (tab.items || []).filter(i => i.kind === 'activity' || i.kind === 'question')});
       const card = pending ? MarinaChat.renderQuestionCard(pending, false, null)
         + '<div class="chat-answer-hint">이 질문은 모바일이나 [원본] 터미널에서 골라주세요</div>' : '';
       list.innerHTML = MarinaChat.renderTimelineSequence(tab.items) + card;

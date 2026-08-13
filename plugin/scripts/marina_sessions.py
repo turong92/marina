@@ -1448,9 +1448,88 @@ def _activity_failed(value: Any, container: dict[str, Any]) -> bool:
     return bool(parsed.get("is_error") or parsed.get("isError") or parsed.get("error"))
 
 
+# 질문·답은 **대화**다 — 도구가 아니다.
+#
+# 답을 마친 AskUserQuestion 은 지금껏 접힌 "작업" 서랍 안의 도구 한 줄로 들어갔다. 질문 전문도
+# 형이 고른 답도 그 안에 다 들어 있는데 대화엔 안 보였다(형: "질문한거랑 답변한거 왜 안보여줘").
+# 그래서 활동이 아니라 **전용 kind** 로 내보낸다. 웹·모바일이 같은 타임라인을 쓰므로 여기 하나면 된다.
+_QUESTION_TOOL = "AskUserQuestion"
+_ANSWER_TAIL_RE = re.compile(r"\.\s*You can now continue.*$", re.S)
+
+
+def _question_blocks(raw_input: Any) -> list[dict[str, Any]]:
+    payload = _json_value(raw_input)
+    raw = payload.get("questions")
+    if not isinstance(raw, list):
+        return []
+    blocks: list[dict[str, Any]] = []
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        options = [
+            {"label": _safe_activity_text(option.get("label"), 200),
+             "description": _safe_activity_text(option.get("description"), 400)}
+            for option in (entry.get("options") or []) if isinstance(option, dict)
+        ]
+        blocks.append({
+            "question": _safe_activity_text(entry.get("question"), 600),
+            "header": _safe_activity_text(entry.get("header"), 60),
+            "multiSelect": bool(entry.get("multiSelect")),
+            "options": options,
+        })
+    return blocks
+
+
+def _question_answers(questions: list[dict[str, Any]], result: str) -> list[dict[str, Any]]:
+    """결과 문구에서 질문별로 고른 답을 뽑는다.
+
+    형식은 `Your questions have been answered: "<질문>"="<답>", … .` 인데, **문자열을 따옴표로
+    쪼개면 안 된다** — 질문 안에 따옴표가 들어가면(실제로 있었다) 바로 어긋난다. 질문 원문으로
+    자리를 잡고, 거기서부터는 **아는 선택지 라벨과 대조**해 고른 것을 찾는다."""
+    body = _ANSWER_TAIL_RE.sub("", str(result or "")).strip()
+    answers: list[dict[str, Any]] = []
+    for entry in questions:
+        question = str(entry.get("question") or "")
+        marker = f'"{question}"="'
+        at = body.find(marker) if question else -1
+        rest = body[at + len(marker):] if at >= 0 else ""
+        end = rest.rfind('"')
+        text = (rest[:end] if end > 0 else rest).strip()
+        labels = sorted((str(option.get("label") or "") for option in entry.get("options") or []),
+                        key=len, reverse=True)
+        picked: list[str] = []
+        for label in labels:
+            # 긴 라벨부터 본다 — 짧은 라벨이 긴 라벨의 일부일 때 둘 다 고른 것처럼 보이면 안 된다.
+            if label and label in text and not any(label in chosen for chosen in picked):
+                picked.append(label)
+        answers.append({"text": text, "picked": picked})
+    return answers
+
+
+def _new_timeline_question(source: str, offset: int, index: int, call_id: str,
+                           questions: list[dict[str, Any]], model: str, effort: str) -> dict[str, Any]:
+    item = {
+        "id": f"{source}:question:{call_id or f'{offset}:{index}'}",
+        "kind": "question",
+        "name": _QUESTION_TOOL,
+        "questions": questions,
+        "answers": [],
+        "status": "running",
+    }
+    if model:
+        item["model"] = model
+    if effort:
+        item["effort"] = effort
+    return item
+
+
 def _new_timeline_activity(source: str, offset: int, index: int, name: str,
                            call_id: str, raw_input: Any, model: str = "",
                            effort: str = "") -> dict[str, Any]:
+    if name == _QUESTION_TOOL:
+        questions = _question_blocks(raw_input)
+        if questions:
+            return _new_timeline_question(source, offset, index, call_id, questions, model, effort)
     detail = _activity_value_text(raw_input)
     activity_type = _activity_type(name, detail)
     item = {
@@ -1623,8 +1702,13 @@ def _transcript_timeline_bounded(rows: list[tuple[int, dict[str, Any]]],
                     call_id = str(block.get("tool_use_id") or "")
                     item = calls.get(call_id)
                     if item is not None:
-                        item["result"] = _activity_value_text(block.get("content"))
+                        result_text = _activity_value_text(block.get("content"))
                         item["status"] = "failed" if _activity_failed(block.get("content"), block) else "completed"
+                        if item.get("kind") == "question":
+                            # 질문 카드는 결과 원문을 싣지 않는다 — 고른 답만 대화에 보이면 된다.
+                            item["answers"] = _question_answers(item.get("questions") or [], result_text)
+                        else:
+                            item["result"] = result_text
                         # 스크린샷·이미지 Read 의 결과는 tool_result 안에 base64 로 들어온다 — 참조만 붙인다.
                         result_images = _image_descriptors(block.get("content"), offset, (index,))
                         if result_images:
