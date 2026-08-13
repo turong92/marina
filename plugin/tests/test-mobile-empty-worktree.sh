@@ -61,3 +61,18 @@ print("PASS 프론트: 터미널 집계·필터·배지에서 자리표시자 �
 PY
 
 echo "PASS test-mobile-empty-worktree"
+
+# 승격 대기 PTY — "Claude 대화 열기" 직후엔 sid 가 아직 없어 마리나엔 터미널로 보인다.
+# 그때 제목이 tid 해시고 본문이 CLI 부팅 찌꺼기면 고장인 줄 안다(형: "저 꼬라지인데 어캄?").
+# 고장이 아니라 시작 중이라고 말해줘야 한다.
+PYTHONPATH="$SCR" python3 - <<'PY2'
+import marina_mobile as M
+src = open(M.__file__, encoding="utf-8").read()
+assert '"새 대화 (시작 중…)"' in src, "승격 대기 제목이 없다 — tid 해시가 그대로 보인다"
+assert '"첫 메시지를 보내면 시작돼요."' in src, "승격 대기 안내가 없다 — 터미널 출력이 그대로 보인다"
+assert 'pending_agent = str((term.get("agent") or {}).get("source") or "")' in src, \
+    "승격 대기 판정이 없다(agent.source 있고 sid 없음)"
+# 순수 터미널은 건드리면 안 된다 — 그건 진짜 터미널이라 fg/cmd 가 맞는 제목이다.
+assert 'else term.get("fg") or term.get("cmd") or tid' in src, "순수 터미널 제목까지 바꿨다"
+print("PASS 승격 대기 표시: 제목·안내 + 순수 터미널 불변")
+PY2

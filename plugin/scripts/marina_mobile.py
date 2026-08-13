@@ -576,13 +576,22 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                 if agent_target and str(agent_target.get("sid") or ""):
                     continue
                 target = {"type": "term", "tid": tid}
+                # 에이전트로 띄웠지만 아직 sid 가 안 붙은 PTY = **승격 대기**. sid 는 시작 시점에
+                # 알 수 없고(훅이 {sid,pid} 를 남겨야 입양된다), 그 전까지 마리나엔 그냥 터미널로
+                # 보인다. 그래서 "Claude 대화 열기"를 눌렀는데 제목이 tid 해시고 본문이 CLI 부팅
+                # 찌꺼기(`●high·/effort`)로 나왔다 — 고장인 줄 알 수밖에 없다(형 지적).
+                # 고장이 아니라 시작 중이라는 걸 말해준다. 첫 메시지를 보내면 승격된다.
+                pending_agent = str((term.get("agent") or {}).get("source") or "")
                 sessions.append({
                     "key": f"term:{tid}",
                     "kind": "term",
                     "root": str(root),
-                    "title": term.get("fg") or term.get("cmd") or tid,
-                    "subtitle": f"터미널 · {label or root.name}",
-                    "preview": term.get("preview") or "",
+                    "title": ("새 대화 (시작 중…)" if pending_agent
+                              else term.get("fg") or term.get("cmd") or tid),
+                    "subtitle": (f"{pending_agent} · {label or root.name}" if pending_agent
+                                 else f"터미널 · {label or root.name}"),
+                    "preview": ("첫 메시지를 보내면 시작돼요." if pending_agent
+                                else term.get("preview") or ""),
                     "tid": tid,
                     "target": target,
                     "turns": [],
