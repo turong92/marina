@@ -15,12 +15,17 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
+from marina_agent_events import latest_agent_event
 from marina_sessions import (
     _live_agent_cwds,
+    _live_agent_tids,
+    _native_agent_status,
     _root_has_live_agent,
     agent_runtime_settings,
+    agent_transcript_path,
     agents_payload,
     claude_model_catalog,
+    resolve_session_liveness,
     safe_root,
     worktree_info,
 )
@@ -33,6 +38,9 @@ CLAUDE_HOME = Path(os.environ.get("CLAUDE_HOME", str(Path.home() / ".claude")))
 CODEX_USER_HOME = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex")))
 AGENTS_HOME = Path(os.environ.get("AGENTS_HOME", str(Path.home() / ".agents")))
 PENDING_SETTINGS_FILE = MARINA_HOME / "mobile-pending-agent-settings.json"
+# 라이브로 먹인 설정의 기억. current 는 트랜스크립트의 마지막 assistant 행에서 읽는데, /model 을
+# 쳐도 다음 응답 전엔 새 행이 없다 — 그 공백 동안 화면이 옛 모델로 되돌아가 "안 먹었다"로 보인다.
+APPLIED_SETTINGS_FILE = MARINA_HOME / "mobile-applied-agent-settings.json"
 CODEX_MODELS_FILE = CODEX_USER_HOME / "models_cache.json"
 _SESSION_SETTINGS_LOCK = threading.Lock()
 _AGENT_SEND_LOCK = threading.Lock()
@@ -61,23 +69,32 @@ def mobile_pending_session_settings(root: Path, source: str, sid: str) -> dict[s
     return {"model": str(raw.get("model") or ""), "effort": str(raw.get("effort") or "")}
 
 
-def _persist_pending_session_settings(root: Path, source: str, sid: str,
-                                      value: dict[str, str]) -> None:
-    key = _session_settings_key(root, source, sid)
+def _settings_file_update(path: Path, key: str, value: dict[str, Any] | None) -> None:
+    """세션 설정 JSON 의 원자적 갱신 — value=None 이면 삭제. pending/applied 두 파일이 같이 쓴다."""
     with _SESSION_SETTINGS_LOCK:
-        payload = _read_json(PENDING_SETTINGS_FILE)
-        payload[key] = value
-        PENDING_SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
-        temporary = PENDING_SETTINGS_FILE.with_name(f".{PENDING_SETTINGS_FILE.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+        payload = _read_json(path)
+        if value is None:
+            if key not in payload:
+                return
+            payload.pop(key, None)
+        else:
+            payload[key] = value
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temporary = path.with_name(f".{path.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
         try:
             temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
             os.chmod(temporary, 0o600)
-            os.replace(temporary, PENDING_SETTINGS_FILE)
+            os.replace(temporary, path)
         finally:
             try:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+
+
+def _persist_pending_session_settings(root: Path, source: str, sid: str,
+                                      value: dict[str, str]) -> None:
+    _settings_file_update(PENDING_SETTINGS_FILE, _session_settings_key(root, source, sid), value)
 
 
 def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
@@ -102,22 +119,37 @@ def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
 
 
 def _clear_pending_session_settings(root: Path, source: str, sid: str) -> None:
+    _settings_file_update(PENDING_SETTINGS_FILE, _session_settings_key(root, source, sid), None)
+
+
+def _record_applied_session_settings(root: Path, source: str, sid: str,
+                                     model: str, effort: str) -> None:
+    """라이브 적용 성공을 기억한다 — 트랜스크립트가 따라잡을 때까지 current 를 이 값으로 보인다.
+
+    base = 적용 시점의 트랜스크립트 값. 다음 턴이 기록되면(어느 모델이든) current 가 base 에서
+    벗어나고, 그 순간부터는 트랜스크립트가 진실이다(기록은 지운다). CLI 에서 직접 바꾼 경우도
+    같은 규칙으로 자연히 트랜스크립트가 이긴다."""
+    base = agent_runtime_settings(root, source, sid)
+    _settings_file_update(APPLIED_SETTINGS_FILE, _session_settings_key(root, source, sid), {
+        "model": model, "effort": effort,
+        "baseModel": base["model"], "baseEffort": base["effort"], "ts": time.time(),
+    })
+
+
+def mobile_current_session_settings(root: Path, source: str, sid: str) -> dict[str, str]:
+    """화면의 '현재 모델·강도'. 트랜스크립트 값 위에, 방금 라이브로 먹인 값을 덮는다."""
+    current = agent_runtime_settings(root, source, sid)
     key = _session_settings_key(root, source, sid)
-    with _SESSION_SETTINGS_LOCK:
-        payload = _read_json(PENDING_SETTINGS_FILE)
-        if key not in payload:
-            return
-        payload.pop(key, None)
-        temporary = PENDING_SETTINGS_FILE.with_name(f".{PENDING_SETTINGS_FILE.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
-        try:
-            temporary.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-            os.chmod(temporary, 0o600)
-            os.replace(temporary, PENDING_SETTINGS_FILE)
-        finally:
-            try:
-                temporary.unlink()
-            except FileNotFoundError:
-                pass
+    record = _read_json(APPLIED_SETTINGS_FILE).get(key)
+    if not isinstance(record, dict):
+        return current
+    caught_up = current != {"model": str(record.get("baseModel") or ""),
+                            "effort": str(record.get("baseEffort") or "")}
+    if caught_up:
+        _settings_file_update(APPLIED_SETTINGS_FILE, key, None)
+        return current
+    return {"model": str(record.get("model") or "") or current["model"],
+            "effort": str(record.get("effort") or "") or current["effort"]}
 
 
 def mobile_agent_options() -> dict[str, Any]:
@@ -564,7 +596,7 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                     "controllable": controllable,
                     "externalActive": _root_has_live_agent(root, live_cwds),
                     "settings": {
-                        "current": agent_runtime_settings(root, source, sid),
+                        "current": mobile_current_session_settings(root, source, sid),
                         "pending": mobile_pending_session_settings(root, source, sid),
                     },
                     "pendingQuestion": pending_question,
@@ -762,6 +794,32 @@ def mobile_outbox_pending(root: Path, source: str, sid: str) -> list[str]:
         return []
 
 
+def mobile_settings_drain() -> int:
+    """작업 중이라 미뤄둔 모델·강도 예약을 세션이 유휴가 되는 순간 적용한다(보류 메시지와 같은 장치).
+
+    이게 없으면 예약은 **다음 메시지를 보낼 때까지** 회수되지 않아 "→ 다음 X" 배지가 하염없이
+    남는다(형이 본 그 화면). PTY 가 없는 예약(detached)은 그대로 둔다 — 다음 실행 인자로 먹는다."""
+    applied = 0
+    for key, record in list(_read_json(PENDING_SETTINGS_FILE).items()):
+        parts = key.split("\n")
+        if len(parts) != 3 or not isinstance(record, dict):
+            continue
+        root, source, sid = Path(parts[0]), parts[1], parts[2]
+        model, effort = str(record.get("model") or ""), str(record.get("effort") or "")
+        if not root.is_dir() or not (model or effort):
+            _settings_file_update(PENDING_SETTINGS_FILE, key, None)
+            continue
+        with _AGENT_SEND_LOCK:
+            try:
+                tid = _live_agent_tid(root, source, sid)
+                if tid and _apply_live_agent_settings(root, source, sid, tid, model, effort):
+                    _clear_pending_session_settings(root, source, sid)
+                    applied += 1
+            except (OSError, ValueError):
+                continue                      # 한 건이 실패해도 나머지는 계속
+    return applied
+
+
 def mobile_outbox_drain() -> int:
     """유휴가 된 세션에 보류 메시지를 전달한다. 전달한 세션 수를 돌려준다(fail-open)."""
     delivered = 0
@@ -834,13 +892,26 @@ def _takeover_agent(source: str, sid: str, pid: int) -> bool:
 
 
 def _native_agent_active(root: Path, source: str, sid: str) -> bool:
-    """Use native transcript lifecycle when desktop apps hide the SID from ps."""
-    return any(
-        str(item.get("source") or "") == source
-        and str(item.get("sid") or "") == sid
-        and str(item.get("status") or "") == "working"
-        for item in agents_payload(root, refresh=True)
+    """이 세션 **하나**가 지금 작업 중인가.
+
+    예전엔 agents_payload(refresh=True) 를 불렀다 — claude·codex 전체 세션 재발견 + ps + lsof,
+    실측 2.2초. 이 판정을 보내기·설정 변경이 _AGENT_SEND_LOCK 을 쥔 채 기다리고 드레이너가
+    3초마다 되풀이해서, 마리나 전체가 굼떠 보였다(형: "적용 자체도 엄청 느리네").
+    답에 필요한 건 그 세션의 트랜스크립트·훅·프로세스 신호뿐이다(~10ms). 판정 규칙은
+    agents_payload 와 같은 캐논 하나(resolve_session_liveness)라 결과도 달라지지 않는다."""
+    try:
+        path = agent_transcript_path(root, source, sid)
+    except ValueError:
+        return False          # 트랜스크립트가 없다 = 아직 시작 전이거나 만료 — 작업 중일 수 없다
+    canonical = root.resolve()
+    resolved = resolve_session_liveness(
+        source, sid, canonical,
+        native=_native_agent_status(path, source),
+        event=latest_agent_event(source, sid, canonical),
+        live_cwds=_live_agent_cwds(False),
+        live_tids=_live_agent_tids(False),
     )
+    return str(resolved.get("status") or "") == "working"
 
 
 def _agent_input_pause() -> None:
@@ -900,11 +971,14 @@ def _apply_live_agent_settings(root: Path, source: str, sid: str, tid: str,
         return False
     if _native_agent_active(root, source, sid):
         return False
-    if source == "codex":
-        return _apply_live_codex_settings(tid, model, effort)
-    if source == "claude":
-        return _apply_live_claude_settings(tid, model, effort)
-    return False
+    applied = (_apply_live_codex_settings(tid, model, effort) if source == "codex"
+               else _apply_live_claude_settings(tid, model, effort) if source == "claude"
+               else False)
+    if applied:
+        # current 는 트랜스크립트에서 읽는데 다음 응답 전엔 새 행이 없다 — 그 공백 동안
+        # 화면이 옛 모델로 되돌아가지 않게 적용 사실을 기억해 둔다.
+        _record_applied_session_settings(root, source, sid, model, effort)
+    return applied
 
 
 def _apply_live_codex_settings(tid: str, model: str, effort: str) -> bool:

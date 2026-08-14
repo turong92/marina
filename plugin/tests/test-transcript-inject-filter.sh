@@ -88,6 +88,19 @@ st = native_status(
 assert st["status"] != "working", f"주입 user 로 상태 working 고착: {st}"
 print("OK 상태: 주입 user 는 working 판정 제외")
 
+# --- 슬래시 명령(/model 등): user 행으로 남지만 턴 시작이 아니다 ---
+# 진짜 입력으로 읽으면 "user 가 마지막 = 작업 중"인데 슬래시 명령엔 응답도 Stop 훅도 안 와서
+# 영원히 작업중에 고착된다(형: "무한으로 작업중이고 정지버튼 안먹었었어" — /model 직후 실제 발생).
+slash = native_status(
+    {"type": "assistant", "message": {"role": "assistant", "stop_reason": "end_turn", "content": []}},
+    {"type": "user", "message": {"role": "user", "content": "<command-name>/model</command-name>\n<command-message>model</command-message>\n<command-args>claude-fable-5</command-args>"}},
+    {"type": "user", "message": {"role": "user", "content": "<local-command-stdout>Set model to Fable 5</local-command-stdout>"}},
+)
+assert slash["status"] != "working", f"슬래시 명령으로 working 고착: {slash}"
+cmd_row = {"type": "user", "message": {"role": "user", "content": "<command-name>/model</command-name>"}}
+assert turns(cmd_row, "claude") == [], "슬래시 명령이 사용자 말풍선으로 샌다"
+print("OK 슬래시 명령: working 고착 없음 + 말풍선 제외")
+
 # --- [Request interrupted by user]: 렌더 숨김 + 상태는 completed(턴 종료) ---
 interrupt = {"type": "user", "message": {"role": "user", "content": "[Request interrupted by user]"}}
 assert turns(interrupt, "claude") == [], "interrupt turns 누출"

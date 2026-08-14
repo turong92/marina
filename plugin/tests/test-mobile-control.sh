@@ -413,11 +413,9 @@ root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
 mm._root_has_live_agent = lambda root_arg, live_cwds: True    # 워크트리엔 '다른' 에이전트가 살아 있다
-mm.agents_payload = lambda value, refresh=False, include_all=False: [{
-    "source": "claude", "sid": "other-session-0002", "status": "working",
-}, {
-    "source": "codex", "sid": "codex-session-0001", "status": "idle",
-}]
+# 바쁨 판정은 이제 세션 겨냥(_native_agent_active) — 워크트리의 다른 세션이 작업 중이어도
+# 이 세션(codex-session-0001)이 유휴면 resume 이 열려야 한다.
+mm._native_agent_active = lambda r, s, i: (s, i) == ("claude", "other-session-0002")
 opens = []
 mm.term_open = lambda *args, **kwargs: opens.append(kwargs) or {"tid": "resumed", "reused": False}
 
@@ -441,11 +439,7 @@ root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
 mm._root_has_live_agent = lambda root_arg, live_cwds: False
-mm.agents_payload = lambda value, refresh=False, include_all=False: [{
-    "source": "codex", "sid": "codex-session-0001", "status": "working",
-}, {
-    "source": "claude", "sid": "claude-session-0001", "status": "working",
-}]
+mm._native_agent_active = lambda r, s, i: True   # 두 세션 다 작업 중
 mm.term_open = lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("native-active resume opened"))
 
 # 작업 중인 세션에는 끼어들지 않는다 — 차단이 아니라 **보류**(끝나면 자동 전달).

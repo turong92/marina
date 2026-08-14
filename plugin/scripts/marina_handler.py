@@ -2606,10 +2606,11 @@ def main() -> None:
     import time as _time
 
     def _outbox_loop() -> None:
-        from marina_mobile import mobile_outbox_drain
+        from marina_mobile import mobile_outbox_drain, mobile_settings_drain
         while True:
             try:
                 mobile_outbox_drain()
+                mobile_settings_drain()   # 미뤄둔 모델·강도 예약도 유휴 순간 회수(같은 장치)
             except Exception:
                 pass
             _time.sleep(max(2, int(_env("OUTBOX_POLL", "3") or "3")))

@@ -1199,8 +1199,12 @@ def _reverse_json_objects(path: Path):
 
 
 # 사용자 라인 중 하네스/도구가 주입한 것 — 진짜 입력이 아니라 turn 에서 뺀다.
+# 슬래시 명령(/model 등)도 user 행으로 남는다(<command-name>·<local-command-stdout>). 이걸 진짜
+# 입력으로 읽으면 "user 가 마지막 = 작업 중"인데 슬래시 명령엔 응답도 Stop 훅도 안 와서
+# **영원히 작업중**에 고착된다(형: "무한으로 작업중이고 정지버튼 안먹었었어" — /model 직후).
 _CLAUDE_INJECT_PREFIXES = ("<task-notification>", "<system-reminder>",
-                           "[SYSTEM NOTIFICATION")
+                           "[SYSTEM NOTIFICATION", "<command-name>",
+                           "<local-command-stdout>", "<local-command-caveat>")
 _CODEX_INJECT_PREFIXES = ("# AGENTS.md instructions", "<INSTRUCTIONS>",
                           "<user_instructions>", "<environment_context>")
 

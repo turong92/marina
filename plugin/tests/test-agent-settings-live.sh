@@ -85,6 +85,48 @@ for bad in ({"model": "opus; rm -rf /", "effort": ""}, {"model": "", "effort": "
     raise AssertionError(f"검증을 통과하면 안 되는 값: {bad}")
 
 print("ok claude 모델·강도가 지금 먹고, 작업 중이면 다음 전송 때 회수된다")
+
+# ⑥ 드레이너가 예약을 회수한다 — 메시지를 안 보내도 유휴가 되는 순간 적용된다.
+#    (이게 없으면 "→ 다음 X" 배지가 다음 전송 때까지 하염없이 남는다.)
+mm._clear_pending_session_settings(root, "claude", "claude-sid-0003")   # ④의 잔여 예약 정리
+busy["value"] = True
+sent.clear()
+mm.mobile_update_session_settings({  # busy 상태에서 예약을 만든다
+    "root": str(root), "source": "claude", "sid": "claude-sid-0005",
+    "model": "claude-opus-5", "effort": "max",
+})
+assert sent == [], sent
+busy["value"] = False
+assert mm.mobile_settings_drain() == 1
+typed = [text for _, text in sent]
+assert "/model claude-opus-5" in typed and "/effort max" in typed, typed
+assert mm.mobile_pending_session_settings(root, "claude", "claude-sid-0005") == {"model": "", "effort": ""}
+# 여전히 작업 중이면 건드리지 않는다.
+busy["value"] = True
+mm.mobile_update_session_settings({"root": str(root), "source": "claude",
+                                   "sid": "claude-sid-0006", "model": "claude-opus-5", "effort": ""})
+sent.clear()
+assert mm.mobile_settings_drain() == 0 and sent == [], sent
+busy["value"] = False
+
+# ⑦ 적용 직후 current 는 적용값을 보인다 — 트랜스크립트가 따라잡기 전까지의 공백 동안
+#    화면이 옛 모델로 되돌아가면 "안 먹었다"로 보인다(형이 본 그 깜빡임).
+transcript = {"value": {"model": "claude-old-1", "effort": "low"}}
+mm.agent_runtime_settings = lambda r, s, i: dict(transcript["value"])
+sent.clear()
+result = mm.mobile_update_session_settings({
+    "root": str(root), "source": "claude", "sid": "claude-sid-0007",
+    "model": "claude-fable-5", "effort": "high",
+})
+assert result["applyMode"] == "live", result
+shown = mm.mobile_current_session_settings(root, "claude", "claude-sid-0007")
+assert shown == {"model": "claude-fable-5", "effort": "high"}, shown
+# 새 턴이 기록되면(어느 값이든) 트랜스크립트가 이기고 기억은 지워진다.
+transcript["value"] = {"model": "claude-fable-5", "effort": "high"}
+assert mm.mobile_current_session_settings(root, "claude", "claude-sid-0007") == transcript["value"]
+transcript["value"] = {"model": "claude-cli-pick-7", "effort": "low"}   # CLI 에서 직접 바꾼 경우
+assert mm.mobile_current_session_settings(root, "claude", "claude-sid-0007") == transcript["value"], \
+    "기억이 트랜스크립트를 계속 덮으면 CLI 에서 바꾼 게 영영 안 보인다"
 PY
 
 html="$(PYTHONPATH="$SCR" python3 -c 'from marina_mobile import render_mobile_html; print(render_mobile_html())')"

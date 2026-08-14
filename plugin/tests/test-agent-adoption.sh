@@ -142,9 +142,7 @@ root = Path(sys.argv[1]).resolve()
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
 busy = {"now": True}
-mm.agents_payload = lambda value, refresh=False, include_all=False: [
-    {"source": "claude", "sid": "sid-desktop-0005", "status": "working" if busy["now"] else "idle"},
-]
+mm._native_agent_active = lambda r, s, i: busy["now"]   # 바쁨 판정은 세션 겨냥으로 옮겨갔다
 opens = []
 mm.term_open = lambda *a, **k: opens.append(k) or {"tid": "resumed", "reused": False}
 
@@ -180,9 +178,7 @@ d = ap._dir(); d.mkdir(parents=True, exist_ok=True)
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}
 working = {"now": True}
-mm.agents_payload = lambda value, refresh=False, include_all=False: [
-    {"source": "claude", "sid": "sid-busy-0006", "status": "working" if working["now"] else "idle"},
-]
+mm._native_agent_active = lambda r, s, i: working["now"]   # 바쁨 판정은 세션 겨냥으로 옮겨갔다
 opens = []
 mm.term_open = lambda *a, **k: opens.append(k) or {"tid": "resumed", "reused": False}
 
