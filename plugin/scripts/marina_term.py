@@ -396,6 +396,27 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
                 if not existing.detached:   # detached 는 실 fd 가 없다 — reachability 만 재사용, ioctl 생략
                     _set_winsize(existing.fd, cols, rows)
                 return {"tid": existing.tid, "reused": True}
+        # _by_key 는 **키 있는** term 만 안다. prompt attach(모바일 전송의 resume)는 의도적으로
+        # 키가 없어서, 그 PTY 가 살아 있는데 데스크톱이 같은 sid 로 term-open 하면 키 조회가
+        # 빈손 → `claude --resume` 이 하나 더 뜬다. 실측(2026-08-16): 그렇게 둘이 된 뒤 옛
+        # 프로세스가 좀비로 남아 같은 세션 파일을 물고 있었다. 키와 무관하게 sid 로 훑는다.
+        if agent_sid:
+            match = next((t for t in _by_tid.values()
+                          if t.alive and not t.detached and t.root == cwd
+                          and isinstance(getattr(t, "agent", None), dict)
+                          and str(t.agent.get("source") or "") == agent_source
+                          and str(t.agent.get("sid") or "") == agent_sid), None)
+            if match is not None:
+                if agent_prompt:
+                    # 살아있는 PTY 가 있는데 prompt-resume 을 또 띄우면 위의 이중 실행 그 자체다.
+                    # 호출자(mobile_send)는 라이브 tid 를 먼저 쓰므로 여기 오면 경쟁 상황 — 거절이 정답.
+                    raise ValueError("이 세션의 PTY 가 이미 살아 있어요 — 잠시 후 다시 보내주세요")
+                _set_winsize(match.fd, cols, rows)
+                if key:
+                    match.key = key            # term_kill/reap 의 _by_key 청소가 찾도록 키를 입양
+                    _by_key[key] = match       # 다음부터는 빠른 경로로 잡힌다
+                    _persist_term(match)       # 재시작 복원 메타에도 반영
+                return {"tid": match.tid, "reused": True}
         # 같은 세션의 **detached** term 은 거둔다. detached = 데몬 재시작으로 master fd 를 잃어
         # 입력을 넣을 수 없는 상태다. 프로세스는 살아있는데 조작이 안 되니 _live_agent_tid 가
         # 빈손을 돌려주고, 호출자는 "PTY 가 없다"며 resume 을 한 번 더 띄운다 — 그래서 한 sid 에

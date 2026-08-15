@@ -127,6 +127,39 @@ assert mm.mobile_current_session_settings(root, "claude", "claude-sid-0007") == 
 transcript["value"] = {"model": "claude-cli-pick-7", "effort": "low"}   # CLI 에서 직접 바꾼 경우
 assert mm.mobile_current_session_settings(root, "claude", "claude-sid-0007") == transcript["value"], \
     "기억이 트랜스크립트를 계속 덮으면 CLI 에서 바꾼 게 영영 안 보인다"
+
+# ⑧ **바꾼 것만 친다** — 형: "바꾼것만 보고 바로 적용돼야하는거아니야?". 모델만 바꿨는데
+#    강도까지 다시 치면 느리고, 미룰 때도 안 바꾼 항목이 예약에 끼어 배지에 물고 늘어진다.
+transcript["value"] = {"model": "claude-fable-5", "effort": "high"}
+sent.clear()
+result = mm.mobile_update_session_settings({
+    "root": str(root), "source": "claude", "sid": "claude-sid-0008",
+    "model": "claude-opus-5", "effort": "high",       # 모델만 다르다
+})
+assert result["applyMode"] == "live", result
+typed = [text for _, text in sent]
+assert "/model claude-opus-5" in typed, typed
+assert not any(text.startswith("/effort") for text in typed), f"안 바꾼 강도까지 쳤다: {typed}"
+
+# ⑧-1 둘 다 이미 그 값이면(방금 적용한 기억까지 현재값이다) 칠 것도, 예약할 것도 없다.
+sent.clear()
+result = mm.mobile_update_session_settings({
+    "root": str(root), "source": "claude", "sid": "claude-sid-0008",
+    "model": "claude-opus-5", "effort": "high",
+})
+assert result["applyMode"] == "live", result
+assert sent == [], f"이미 현재값인데 쳤다: {sent}"
+
+# ⑨ 예약이 기다리는 사이 트랜스크립트가 따라잡았으면(CLI 에서 직접 바꿈 등) 예약은 끝난 것 —
+#    드레이너가 다시 치지 않고 지운다.
+mm._clear_pending_session_settings(root, "claude", "claude-sid-0006")   # ⑥의 잔여 예약 정리
+mm._persist_pending_session_settings(root, "claude", "claude-sid-0009",
+                                     {"model": "claude-fable-5", "effort": "high"})
+sent.clear()
+assert mm.mobile_settings_drain() == 1   # 수렴 = 적용 완료로 센다
+assert sent == [], f"이미 수렴했는데 쳤다: {sent}"
+assert mm.mobile_pending_session_settings(root, "claude", "claude-sid-0009") == {"model": "", "effort": ""}
+print("ok 바뀐 것만 치고, 수렴한 예약은 걷는다")
 PY
 
 # 적용은 **확인돼야** 성공이다 — 실측에서 유휴 TUI 에 친 /model 이 흔적 없이 사라진 적이 있다.

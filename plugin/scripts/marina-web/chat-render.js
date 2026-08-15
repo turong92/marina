@@ -229,6 +229,9 @@
       if (delivery === "queue") return "작업 끝나면 전달돼요 · 대기열";
       if (delivery === "started") return "새 작업 시작 중";
       if (delivery === "failed") return "전송 안 됨 · 탭해서 다시 보내기";
+      // held = 세션이 입력을 안 받아(트랜스크립트 확인 실패) 보류함에 보존됨 — 회복되면 자동 전달.
+      if (delivery === "held") return "세션이 입력을 안 받아 보류 중 · 회복되면 자동 전달";
+      if (delivery === "held-compacting") return "컨텍스트가 가득 차 압축 중 · 끝나면 자동 전달";
       // delivery 미확정(서버 응답 전 pending)만 오래되면 실패로 표기.
       if (createdAt && Date.now() - Number(createdAt) > 15000) return "전달 확인 안 됨";
       return "전송 확인 중";

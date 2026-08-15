@@ -23,6 +23,7 @@ from marina_sessions import (
     _root_has_live_agent,
     agent_runtime_settings,
     agent_transcript_path,
+    agent_usage_from_path,
     agents_payload,
     claude_model_catalog,
     resolve_session_liveness,
@@ -30,7 +31,7 @@ from marina_sessions import (
     worktree_info,
 )
 from marina_state import MARINA_HOME, PORT
-from marina_term import _agent_cli, term_input, term_list, term_open
+from marina_term import _agent_cli, term_input, term_kill, term_list, term_open
 
 
 TOKEN_FILE = MARINA_HOME / "mobile-token"
@@ -97,6 +98,16 @@ def _persist_pending_session_settings(root: Path, source: str, sid: str,
     _settings_file_update(PENDING_SETTINGS_FILE, _session_settings_key(root, source, sid), value)
 
 
+def _diff_against_current(root: Path, source: str, sid: str,
+                          value: dict[str, str]) -> dict[str, str]:
+    """이미 현재값과 같은 항목은 지운다 — **바꾼 것만** 슬래시로 친다(형: "바꾼것만 보고 바로
+    적용돼야"). 모델만 바꿨는데 강도까지 다시 치면 느리고, 예약 배지도 안 바꾼 항목까지 물고
+    늘어진다. 현재값을 모르면(빈 문자열) 지우지 않는다 — 모르는 것과 같은 것은 다르다."""
+    current = mobile_current_session_settings(root, source, sid)
+    return {key: ("" if value[key] and value[key] == current.get(key) else value[key])
+            for key in ("model", "effort")}
+
+
 def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
     root = safe_root(str(body.get("root") or ""))
     source = str(body.get("source") or "")
@@ -104,9 +115,13 @@ def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
     value = {"model": str(body.get("model") or ""), "effort": str(body.get("effort") or "")}
     _agent_cli(source, sid, model=value["model"], effort=value["effort"])
     with _AGENT_SEND_LOCK:
+        wanted = _diff_against_current(root, source, sid, value)
+        if not (wanted["model"] or wanted["effort"]):
+            _clear_pending_session_settings(root, source, sid)   # 이미 그 값 — 남은 예약도 무의미
+            return {**value, "applyMode": "live"}
         tid = _live_agent_tid(root, source, sid)
         try:
-            if _apply_live_agent_settings(root, source, sid, tid, value["model"], value["effort"]):
+            if _apply_live_agent_settings(root, source, sid, tid, wanted["model"], wanted["effort"]):
                 _clear_pending_session_settings(root, source, sid)
                 return {**value, "applyMode": "live"}
         except (OSError, ValueError):
@@ -121,7 +136,7 @@ def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
         else:
             reason = "unverified"
         _persist_pending_session_settings(
-            root, source, sid, {**value, "attempts": 1} if reason == "unverified" else value)
+            root, source, sid, {**wanted, "attempts": 1} if reason == "unverified" else wanted)
     return {**value, "applyMode": "pending", "pendingReason": reason}
 
 
@@ -759,11 +774,13 @@ def _outbox_path(source: str, sid: str) -> Path:
 
 
 def mobile_outbox_put(root: Path, source: str, sid: str, text: str,
-                      model: str = "", effort: str = "") -> dict[str, Any]:
-    """작업 중인 세션으로 갈 메시지를 보류함에 넣는다.
+                      model: str = "", effort: str = "",
+                      extra: dict[str, Any] | None = None) -> dict[str, Any]:
+    """세션으로 못 간 메시지를 보류함에 넣는다 — 작업 중(끼어들지 않는다)이거나,
+    전달 확인 실패(입력을 삼키는 세션)일 때. 유휴·회복되는 순간 드레이너가 전달한다.
 
-    **진행 중이던 턴은 절대 끊지 않는다** — 몇 시간짜리 작업을 끼어들기로 날리지 않기 위해서다.
-    유휴가 되는 순간 드레이너가 인수인계 후 전달한다(그때는 잃을 게 없다)."""
+    extra: 전달 실패 경로의 상태(compactingSince·compactOffset 등). 기존 항목의 그 상태는
+    새 메시지를 얹어도 유지된다 — 안 그러면 압축 대기 중 재전송이 대기 표식을 지워버린다."""
     with _OUTBOX_LOCK:
         OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
         try:
@@ -772,14 +789,19 @@ def mobile_outbox_put(root: Path, source: str, sid: str, text: str,
             pass
         path = _outbox_path(source, sid)
         try:
-            record = json.loads(path.read_text(encoding="utf-8"))
-            messages = list(record.get("messages") or [])
+            previous = json.loads(path.read_text(encoding="utf-8"))
+            previous = previous if isinstance(previous, dict) else {}
         except (OSError, ValueError):
-            messages = []
+            previous = {}
+        messages = list(previous.get("messages") or [])
         messages.append(text)
+        carried = {key: previous[key]
+                   for key in ("attempts", "lastAttempt", "compactingSince", "compactOffset")
+                   if key in previous}
         record = {
             "source": source, "sid": sid, "root": str(root.resolve()),
             "messages": messages, "model": model, "effort": effort, "ts": time.time(),
+            **carried, **(extra or {}),
         }
         tmp = path.with_suffix(".tmp")
         tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
@@ -801,6 +823,31 @@ def mobile_outbox_pending(root: Path, source: str, sid: str) -> list[str]:
         return []
 
 
+def _outbox_record(source: str, sid: str) -> dict[str, Any]:
+    try:
+        record = json.loads(_outbox_path(source, sid).read_text(encoding="utf-8"))
+        return record if isinstance(record, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _outbox_note_failure(source: str, sid: str) -> None:
+    """전달 실패를 항목에 새긴다 — 드레이너가 백오프한다(안 받는 세션에 3초마다 타이핑 금지)."""
+    with _OUTBOX_LOCK:
+        path = _outbox_path(source, sid)
+        try:
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(record, dict):
+            return
+        record["attempts"] = int(record.get("attempts") or 0) + 1
+        record["lastAttempt"] = time.time()
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+
+
 _SETTINGS_RETRY_MAX = 5
 
 
@@ -819,6 +866,13 @@ def _recover_pending_settings(root: Path, source: str, sid: str, tid: str) -> st
     if not (model or effort):
         _settings_file_update(PENDING_SETTINGS_FILE, key, None)
         return "none"
+    # 예약해 둔 사이 트랜스크립트가 따라잡았을 수 있다(CLI 에서 직접 바꿨거나 이미 그 값) —
+    # 수렴한 항목은 다시 치지 않는다. 전부 수렴했으면 예약은 끝난 것이다.
+    wanted = _diff_against_current(root, source, sid, {"model": model, "effort": effort})
+    model, effort = wanted["model"], wanted["effort"]
+    if not (model or effort):
+        _settings_file_update(PENDING_SETTINGS_FILE, key, None)
+        return "applied"
     attempts = int(record.get("attempts") or 0)
     if attempts >= _SETTINGS_RETRY_MAX:
         return "capped"
@@ -881,6 +935,22 @@ def mobile_outbox_drain() -> int:
                 continue
             if _native_agent_active(root, source, sid):
                 continue                      # 아직 작업 중 — 기다린다(끊지 않는다)
+            since = float(record.get("compactingSince") or 0)
+            if since and time.time() - since < _COMPACT_WAIT_MAX_S:
+                # /compact 회복 대기 중 — 끝났는지 트랜스크립트로만 확인하고, 그 전엔 타이핑하지
+                # 않는다(압축 중 재타이핑은 같은 메시지를 여러 벌 쌓는다).
+                try:
+                    transcript = agent_transcript_path(root, source, sid)
+                    done = _await_transcript_markers(
+                        transcript, int(record.get("compactOffset") or 0),
+                        _COMPACT_DONE_MARKERS, timeout=0.0, any_of=True)
+                except (OSError, ValueError):
+                    done = True
+                if not done:
+                    continue
+            attempts = int(record.get("attempts") or 0)
+            if attempts and time.time() - float(record.get("lastAttempt") or 0) < min(900, 30 * attempts):
+                continue                      # 백오프 — 실패가 쌓일수록 드물게 재시도
             text = "\n\n".join(messages)
             body = {"root": str(root), "target": {"type": "agent", "source": source, "sid": sid},
                     "text": text, "_from_outbox": True}
@@ -888,7 +958,11 @@ def mobile_outbox_drain() -> int:
                 body["model"] = str(record["model"])
             if record.get("effort"):
                 body["effort"] = str(record["effort"])
-            mobile_send(body)
+            try:
+                mobile_send(body)
+            except ValueError:
+                _outbox_note_failure(source, sid)   # 전달 확인 실패 — 보류 유지 + 백오프
+                continue
             entry.unlink(missing_ok=True)
             delivered += 1
         except Exception:
@@ -983,15 +1057,12 @@ def _deliver_agent_input(tid: str, source: str, text: str, requested: str = "") 
 _SLASH_CONFIRM_TIMEOUT_S = 3.0
 
 
-def _confirm_slash_commands(transcript: Path, offset: int, arguments: list[str],
-                            timeout: float | None = None) -> bool:
-    """슬래시 명령이 진짜 실행됐는지 트랜스크립트로 확인한다.
-
-    실행된 명령은 즉시 `<command-args>…</command-args>` 행을 남긴다. 쳤다고 믿지 말 것 —
-    실측에서 유휴 TUI 에 친 `/model` 이 흔적 없이 사라진 적이 있다(재현 불가, 원인 미상).
-    사후에 알 수 없는 상태를 추측하는 대신 결과를 본다(질문 캡처 훅의 settled 와 같은 패턴)."""
-    wanted = [f"<command-args>{argument}</command-args>" for argument in arguments]
-    deadline = time.time() + (_SLASH_CONFIRM_TIMEOUT_S if timeout is None else timeout)
+def _await_transcript_markers(transcript: Path, offset: int, markers: list[str],
+                              timeout: float, any_of: bool = False) -> bool:
+    """offset 이후 append 된 바이트에 마커가 나타날 때까지 폴링한다 — 입력이 진짜 도착했는지의
+    유일한 물증. 쳤다고 믿지 말 것: 실측에서 유휴 TUI 에 친 입력이 2시간 반 동안 전부(메시지·
+    슬래시 모두) 흔적 없이 사라진 적이 있다(컨텍스트 만료 상태의 CLI 가 삼킴, 2026-08-16)."""
+    deadline = time.time() + timeout
     while True:
         try:
             with transcript.open("rb") as handle:
@@ -999,11 +1070,116 @@ def _confirm_slash_commands(transcript: Path, offset: int, arguments: list[str],
                 appended = handle.read().decode("utf-8", errors="ignore")
         except OSError:
             appended = ""
-        if all(marker in appended for marker in wanted):
+        found = (any if any_of else all)(marker in appended for marker in markers)
+        if found:
             return True
         if time.time() >= deadline:
             return False
         time.sleep(0.3)
+
+
+def _confirm_slash_commands(transcript: Path, offset: int, arguments: list[str],
+                            timeout: float | None = None) -> bool:
+    """슬래시 명령이 진짜 실행됐는지 확인한다 — 실행된 명령은 즉시 `<command-args>…</command-args>`
+    행을 남긴다(질문 캡처 훅의 settled 와 같은 패턴)."""
+    wanted = [f"<command-args>{argument}</command-args>" for argument in arguments]
+    return _await_transcript_markers(
+        transcript, offset, wanted, _SLASH_CONFIRM_TIMEOUT_S if timeout is None else timeout)
+
+
+def _delivery_marker(text: str) -> str:
+    """메시지 전달 확인용 마커 — 원문에서 JSON 이스케이프에 안 걸리는(따옴표·역슬래시·제어문자
+    없는) 조각을 고른다. 트랜스크립트는 UTF-8 원문 그대로라 이 조각은 바이트로 그대로 나타난다."""
+    runs = re.findall(r'[^"\\\x00-\x1f]{6,}', text)
+    return max(runs, key=len) if runs else ""
+
+
+_DELIVERY_CONFIRM_TIMEOUT_S = 4.0
+
+
+def _confirm_text_delivery(transcript: Path, offset: int, text: str,
+                           timeout: float | None = None) -> bool:
+    """유휴 세션에 친 메시지가 트랜스크립트에 user 행으로 남았는지 확인한다.
+
+    마커를 못 뽑는 텍스트(전부 특수문자 등)는 확인 불가 — 그때만 성공으로 간주한다."""
+    marker = _delivery_marker(text)
+    if not marker:
+        return True
+    return _await_transcript_markers(
+        transcript, offset, [marker], _DELIVERY_CONFIRM_TIMEOUT_S if timeout is None else timeout)
+
+
+# 컨텍스트 만료로 삼킨 세션의 회복. 실측(2026-08-16): 컨텍스트가 꽉 찬 유휴 claude TUI 는
+# 메시지도 슬래시 명령도 흔적 없이 버린다. 형이 실제로 뚫은 순서를 그대로 자동화한다 —
+# 새 PTY 로 resume → /compact → 압축이 끝나면 전달(압축 중 타이핑은 큐에 남아 안전함이 실측됨).
+_CONTEXT_COMPACT_PERCENT = 80.0
+_COMPACT_CONFIRM_ROW = "<command-name>/compact</command-name>"
+_COMPACT_DONE_MARKERS = ['"isCompactSummary":true', "Compacted (ctrl+o"]
+_COMPACT_WAIT_MAX_S = 15 * 60
+
+
+def _compact_wedged_claude(root: Path, sid: str, tid: str, transcript: Path) -> bool:
+    """입력을 삼키는 유휴 claude PTY 에 /compact 를 먹인다. 반환: 압축이 시작됐는지(명령 행 확인).
+
+    ① 그 자리에서 /compact — 명령 행이 남으면 성공. ② 안 남으면 그 TUI 는 명령도 삼키는
+    상태(모달 등)다: PTY 를 접고 새 resume 에서 /compact(새 TUI 는 명령을 받는 것이 실측됨).
+    유휴일 때만 불린다 — 작업 중인 턴을 죽이는 일은 없다."""
+
+    def compact_into(target_tid: str, timeout: float) -> bool:
+        offset = transcript.stat().st_size
+        term_input(target_tid, "/compact")
+        _agent_input_pause()
+        term_input(target_tid, "\r")
+        return _await_transcript_markers(transcript, offset, [_COMPACT_CONFIRM_ROW], timeout)
+
+    try:
+        if compact_into(tid, 2.0):
+            return True
+        term_kill(tid)                       # 명령까지 삼킨다 — 유휴이므로 접어도 잃을 턴이 없다
+        reopened = term_open(root, agent_source="claude", agent_sid=sid)
+        # 새 TUI 부팅 전에 타이핑해도 PTY 가 버퍼링한다 — 확인 타임아웃만 넉넉히 준다.
+        return compact_into(str(reopened["tid"]), 8.0)
+    except (OSError, ValueError):
+        return False
+
+
+def _deliver_to_live_agent(root: Path, source: str, sid: str, tid: str, text: str,
+                           requested: str, from_outbox: bool) -> dict[str, Any]:
+    """살아있는 PTY 로의 전달. **유휴 claude 는 도착을 트랜스크립트로 확인한다** — 실측에서
+    컨텍스트 만료된 CLI 가 형 메시지를 2시간 반 동안 소리 없이 버렸고, marina 는 그동안
+    "보냈다"고 보고했다(2026-08-16). 확인 실패면 보류함에 보존하고, 컨텍스트가 가득이면
+    /compact 회복을 시작한다. 성공을 지어내지 않는다.
+
+    busy claude(queue 전달)와 codex 는 종전대로 — 확인 행이 응답 종료 전엔 안 나타난다."""
+    transcript: Path | None = None
+    if source == "claude" and not _native_agent_active(root, source, sid):
+        try:
+            candidate = agent_transcript_path(root, source, sid)
+            transcript = candidate if candidate.is_file() else None
+        except (OSError, ValueError):
+            transcript = None
+    if transcript is None:
+        delivery = _deliver_agent_input(tid, source, text, requested)
+        return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
+    offset = transcript.stat().st_size
+    delivery = _deliver_agent_input(tid, source, text, requested)
+    if _confirm_text_delivery(transcript, offset, text):
+        return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
+    if from_outbox:
+        raise ValueError("전달 확인 실패 — 보류 유지")
+    since = float(_outbox_record(source, sid).get("compactingSince") or 0)
+    compacting = 0 < time.time() - since < _COMPACT_WAIT_MAX_S   # 이미 압축 중 — 또 손대지 않는다
+    extra: dict[str, Any] = {}
+    if not compacting:
+        percent = agent_usage_from_path(transcript, "claude").get("contextPercent")
+        if isinstance(percent, (int, float)) and percent >= _CONTEXT_COMPACT_PERCENT:
+            compacting = _compact_wedged_claude(root, sid, tid, transcript)
+            if compacting:
+                extra = {"compactingSince": time.time(),
+                         "compactOffset": transcript.stat().st_size}
+    queued = mobile_outbox_put(root, source, sid, text, extra=extra)
+    return {"ok": True, "tid": tid, "opened": False, "delivery": "held",
+            "compacting": compacting, **queued}
 
 
 def _apply_live_claude_settings(tid: str, model: str, effort: str,
@@ -1178,8 +1354,9 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
                 if (_recover_pending_settings(root, source, sid, tid) == "failed"
                         and source == "codex"):
                     raise ValueError("예약한 모델 설정을 현재 CLI에 적용할 수 없어요. 세션을 다시 열어주세요")
-                delivery = _deliver_agent_input(tid, source, text, str(body.get("delivery") or ""))
-                return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
+                return _deliver_to_live_agent(root, source, sid, tid, text,
+                                              str(body.get("delivery") or ""),
+                                              from_outbox=bool(body.get("_from_outbox")))
             # 여기까지 왔다 = 조작 가능한 PTY 가 없다. 이중 실행 판정은 **세션(sid) 단위**다
             # (워크트리 단위로 보면 같은 워크트리의 다른 세션까지 통째로 막힌다 — 워크트리 하나에
             # 터미널·데스크톱·모바일 세션이 공존하므로 "워크트리=세션 1:1" 은 전송 타게팅엔 안 맞는다).
@@ -4550,9 +4727,15 @@ _MOBILE_HTML = r"""<!doctype html>
           closeSuggestions();
           failedSend = null;
           followLatest = true;
-          selectReturnedTerm(d.tid, text, target, d.delivery || (target.type === "agent" ? "started" : "sent"));
-          statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(d.delivery || "started") : `보냄 · ${d.tid}`;
-          if (target.type === "agent") optimisticWorkUntil = Date.now() + 6000;   // 착수 즉시 작업중 느낌
+          // held = 세션이 입력을 안 받아 서버 보류함에 보존됨(회복 후 자동 전달). 압축 회복이
+          // 시작됐으면 그 사실까지 라벨로 — "보냈다" 착시를 만들지 않는다.
+          const delivery = d.delivery === "held" && d.compacting ? "held-compacting"
+            : (d.delivery || (target.type === "agent" ? "started" : "sent"));
+          selectReturnedTerm(d.tid, text, target, delivery);
+          statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(delivery) : `보냄 · ${d.tid}`;
+          if (delivery === "held" || delivery === "held-compacting") showToast(pendingDeliveryLabel(delivery));
+          if (target.type === "agent" && delivery !== "held" && delivery !== "held-compacting")
+            optimisticWorkUntil = Date.now() + 6000;   // 착수 즉시 작업중 느낌
         }
         setTimeout(() => load({quiet: true}).catch(() => {}), 500);
         setTimeout(() => load({quiet: true}).catch(() => {}), 1500);   // working 상태 빨리 잡기
@@ -4841,10 +5024,12 @@ _MOBILE_HTML = r"""<!doctype html>
       const root = record.root || selectedRoot();
       try {
         const d = await postSend(root, target, record.text);
-        queuePendingTurn(sessionKey, record.text, d.delivery || (target.type === "agent" ? "started" : "sent"), d.tid || "", target, root);
+        const delivery = d.delivery === "held" && d.compacting ? "held-compacting"
+          : (d.delivery || (target.type === "agent" ? "started" : "sent"));
+        queuePendingTurn(sessionKey, record.text, delivery, d.tid || "", target, root);
         if (selectedSessionKey === sessionKey) {
           followLatest = true;
-          statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(d.delivery || "started") : `보냄 · ${d.tid}`;
+          statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(delivery) : `보냄 · ${d.tid}`;
         }
         // 인수인계: 다른 데 열려 있던(유휴) 세션을 넘겨받았다. 작업 중인 세션은 여기 오지 않는다
         // — 그건 보류함(delivery: queue)으로 가고 끝난 뒤 자동 전달된다.

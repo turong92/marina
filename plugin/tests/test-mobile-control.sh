@@ -845,6 +845,7 @@ mm.term_list = lambda: {"sessions": [
     {"tid": "agent-term", "root": str(root), "agent": {"source": "codex", "sid": "sid0001"}, "preview": "sent text", "created": 20},
     {"tid": "shell-term", "root": str(root), "agent": None, "preview": "shell preview", "created": 5},
 ]}
+mm._live_agent_cwds = lambda refresh=False: set()   # externalActive 는 실 ps 스캔 — 격리(간헐 오탐 실측)
 state = mm.mobile_state()
 keys = [s["key"] for s in state["sessions"]]
 assert "agent:codex:sid0001:%s" % root in keys, keys
@@ -882,6 +883,7 @@ mm.term_list = lambda: {"sessions": [
     {"tid": "adopted-term", "root": str(root), "agent": {"source": "codex", "sid": "sid0001"},
      "preview": "sent text", "created": 20, "alive": True, "detached": True},
 ]}
+mm._live_agent_cwds = lambda refresh=False: set()   # externalActive 는 실 ps 스캔 — 격리
 state = mm.mobile_state()
 agent = next(s for s in state["sessions"] if s["key"].startswith("agent:codex:"))
 assert agent["tid"] == "adopted-term", agent

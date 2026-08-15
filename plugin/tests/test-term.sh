@@ -108,21 +108,40 @@ mt.term_kill(d8["tid"])
 mt.term_kill(d3["tid"])
 
 # 모바일/원격 제어처럼 prompt 를 같이 넘기는 attach 는 TUI stdin 에 키를 쓰지 않고
-# CLI 의 prompt 인자로 시작한다. 같은 sid 라도 매 전송이 새 턴이어야 하므로 재사용하지 않는다.
+# CLI 의 prompt 인자로 시작한다. 재사용은 못 하지만(돌고 있는 TUI 에 인자를 줄 수 없다),
+# **살아있는 PTY 가 있는데 하나 더 띄우는 것도 금지다** — 같은 세션 파일을 문 resume 이
+# 둘이 되고, 옛쪽이 좀비로 남아 입력을 삼킨다(실측 2026-08-16). 거절이 정답: 호출자는
+# 잠시 후 재전송하고, 그때는 살아있는 tid 로 타이핑 전달된다.
 p1 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0003", agent_prompt="HELLO")
-p2 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0003", agent_prompt="AGAIN")
-assert not p1["reused"] and not p2["reused"] and p1["tid"] != p2["tid"], "prompt attach 는 기존 TUI 재사용 금지"
-for dct, want in [(p1, b"FAKE_sid0003_HELLO"), (p2, b"FAKE_sid0003_AGAIN")]:
-    term = mt._by_tid[dct["tid"]]
-    deadline = time.time() + 15
-    while time.time() < deadline:
-        with term.cond:
-            if want in bytes(term.history):
-                break
-        time.sleep(0.2)
-    else:
-        raise AssertionError(f"prompt attach 출력 미도착: {want!r} / {bytes(term.history)[-300:]!r}")
-    mt.term_kill(dct["tid"])
+assert not p1["reused"], p1
+try:
+    mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0003", agent_prompt="AGAIN")
+except ValueError:
+    pass
+else:
+    raise AssertionError("살아있는 PTY 를 두고 같은 sid 의 prompt-resume 이 하나 더 떴다")
+term = mt._by_tid[p1["tid"]]
+deadline = time.time() + 15
+while time.time() < deadline:
+    with term.cond:
+        if b"FAKE_sid0003_HELLO" in bytes(term.history):
+            break
+    time.sleep(0.2)
+else:
+    raise AssertionError(f"prompt attach 출력 미도착: {bytes(term.history)[-300:]!r}")
+mt.term_kill(p1["tid"])
+# 그 PTY 가 죽고 나면 prompt attach 는 다시 된다 — 거절은 '살아있는 동안'만이다.
+p3 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0003", agent_prompt="AGAIN")
+assert not p3["reused"] and p3["tid"] != p1["tid"], p3
+mt.term_kill(p3["tid"])
+
+# prompt attach 는 재사용 키가 없다(의도) — 그런데 그 PTY 가 살아있는 동안 데스크톱이 같은
+# sid 로 (prompt 없이) term-open 하면, 키 조회가 빈손이라 resume 이 하나 더 떴다. 이게
+# 2026-08-16 좀비 사고의 직접 원인: 키와 무관하게 sid 로 훑어 **재사용**해야 한다.
+p4 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0004", agent_prompt="HI")
+d10 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0004")
+assert d10["reused"] and d10["tid"] == p4["tid"], "키 없는 prompt-attach PTY 를 재사용하지 않고 resume 을 또 띄웠다"
+mt.term_kill(p4["tid"])
 
 # ── 죽은 세션 수거 — exit 한 셸의 시체가 history(최대 256KB)를 문 채 남으면 안 된다 ──
 d9 = mt.term_open(Path(tmp), 80, 24)
