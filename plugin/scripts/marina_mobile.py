@@ -1635,22 +1635,36 @@ _MOBILE_HTML = r"""<!doctype html>
 <html lang="ko">
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <!-- viewport-fit=cover 가 없으면 env(safe-area-inset-*) 이 전부 0 이다. 브라우저 탭에선 티가
+       안 나지만 홈 화면 앱으로 열면 노치와 홈바 밑으로 내용이 깔린다 — 이미 CSS 는 그 값을
+       쓰고 있었으므로 여기 한 줄이 빠져 있던 것이 곧 버그였다. -->
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
   <title>Marina Mobile</title>
   <!-- 아이콘을 선언하지 않으면 브라우저가 /favicon.ico 를 찾는데 마리나는 그 경로를 주지 않는다
        → 탭 아이콘이 빈 채로 남는다(웹·로그인 화면엔 있었는데 모바일만 빠져 있었다).
        /web/ 은 PUBLIC_PREFIXES 라 로그인 전에도 받아진다. -->
   <link rel="icon" type="image/png" href="/web/favicon.png" media="(prefers-color-scheme: light)" />
   <link rel="icon" type="image/png" href="/web/favicon-dark.png" media="(prefers-color-scheme: dark)" />
+  <!-- 홈 화면에 추가해야 아이폰에서 알림을 받을 수 있다(사파리 탭에서는 원천적으로 불가).
+       매니페스트·아이콘이 없으면 '추가'해도 웹 클립일 뿐이라 푸시 권한이 안 생긴다. -->
+  <link rel="manifest" href="/mobile/manifest.webmanifest" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="marina" />
+  <link rel="apple-touch-icon" href="/mobile/icon.png" />
+  <!-- media 를 못 읽는 브라우저용 폴백은 **진한 쪽**이어야 한다(흰 아이콘은 밝은 탭에서 묻힌다).
+       apple-touch-icon 은 위의 512px 하나만 둔다 — 여기서 또 선언하면 그게 이겨서 홈 화면
+       아이콘이 64px 파비콘으로 떨어진다. -->
   <link rel="icon" type="image/png" href="/web/favicon.png" />
-  <link rel="apple-touch-icon" href="/web/favicon.png" />
   <style>
     :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     body { margin: 0; overflow: hidden; background: #f4f6f9; color: #17191f; }
     #mobileApp { --app-height: 100dvh; height: var(--app-height); min-height: 0; display: none; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
     #mobileLogin { min-height: 100vh; display: none; align-items: stretch; justify-content: center; flex-direction: column; padding: 24px; box-sizing: border-box; gap: 14px; }
     #mobileLogin form { display: flex; flex-direction: column; gap: 10px; }
-    header { position: relative; z-index: 4; display: grid; gap: 4px; padding: 4px 8px 6px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
+    /* 홈 화면 앱으로 열면 주소창이 없어 화면이 상태바 밑까지 온다 — 노치를 피해 앉힌다.
+       브라우저 탭에서는 inset 이 0 이라 지금과 똑같이 보인다. */
+    header { position: relative; z-index: 4; display: grid; gap: 4px; padding: max(4px, env(safe-area-inset-top)) 8px 6px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
     /* grid 였을 때: 자식(backBtn·chatNavTitle)이 뷰에 따라 display:none 이 되면 그리드 흐름에서 빠져
        **칼럼 배정이 밀린다** — 목록 뷰에서 프로젝트 스트립이 36px 칸에 들어가고 액션이 1fr 을 차지했다
        (실측 390px 기준 strip 36px / acts 나머지 전부. "서버 버튼이 스크롤 폭을 먹는" 증상의 진짜 원인).
@@ -2002,6 +2016,14 @@ _MOBILE_HTML = r"""<!doctype html>
     .questionOpt.chosen { border-color: #0b63ce; background: #e3efff; box-shadow: inset 0 0 0 1px #0b63ce; }
     /* 이미 답한 질문 = 기록이다. 누를 수 없다는 게 보여야 하고(커서·최소높이 없음), 대화 흐름을
        끊지 않게 라이브 카드보다 조용해야 한다. */
+    .installHint { position: fixed; left: 8px; right: 8px; bottom: max(10px, env(safe-area-inset-bottom)); z-index: 21; display: flex; gap: 8px; align-items: center; padding: 9px 10px; border: 1px solid #b9d4f2; border-radius: 9px; background: #0b63ce; color: #fff; box-shadow: 0 6px 20px rgb(23 25 31 / 22%); font-size: 12px; line-height: 1.45; }
+    .installHint[hidden] { display: none; }
+    .installHintClose { flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: rgb(255 255 255 / 18%); color: #fff; font-size: 16px; line-height: 1; }
+    /* 실시간 연결 표시 — 켜져 있으면 은은히 맥박, 끊기면 회색. 형이 "멈춘 것 같다"고 느낀 자리다. */
+    .liveDot { width: 7px; height: 7px; margin-right: 2px; border-radius: 50%; background: #b6bec9; flex: none; align-self: center; }
+    body[data-live="on"] .liveDot { background: #26845b; animation: livePulse 2.4s ease-in-out infinite; }
+    @keyframes livePulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+    @media (prefers-reduced-motion: reduce) { body[data-live="on"] .liveDot { animation: none; } }
     .questionCard.answered { background: transparent; border-style: dashed; }
     /* 보냈지만 서버가 아직 안 내린 카드 — 눌리지 않는다는 걸 눈으로도 알려준다. */
     .questionCard.submitted { opacity: .62; border-style: dashed; }
@@ -2157,6 +2179,10 @@ _MOBILE_HTML = r"""<!doctype html>
         <button class="iconBtn backBtn" id="backBtn" type="button" title="세션 목록 열기/닫기" aria-label="세션 목록 열기/닫기" aria-expanded="false" style="display:none">&#9776;</button>
         <div class="chatNavTitle" id="chatNavTitle"></div>
         <div class="shellActions">
+          <!-- 살아있음 표시. 폴링이 조용히 돌던 시절엔 화면이 멈춘 건지 알 길이 없었다
+               (형: "폴링중인게 보이지도 않으니 멈춘 것 같고"). 점 하나로 연결 상태를 늘 보여준다. -->
+          <span class="liveDot" id="liveDot" title="실시간 연결" aria-hidden="true"></span>
+          <button class="usageBtn" id="notifyBtn" type="button" title="알림" aria-label="알림">&#128276;</button>
           <button class="usageBtn" id="galleryBtn" type="button" title="이미지 모아보기" aria-label="이미지 모아보기" style="display:none">&#9635;</button>
           <button class="usageBtn" id="usageBtn" type="button" title="토큰 사용량" aria-label="토큰 사용량"><span class="usageRing" id="usageRing"><span class="usageRingNum" id="usageRingNum"></span></span></button>
         </div>
@@ -2203,6 +2229,12 @@ _MOBILE_HTML = r"""<!doctype html>
         <button class="newMessagesBtn" id="newMessagesBtn" type="button">새 메시지</button>
     <button class="updateBanner" id="updateBanner" type="button">새 버전 · 탭하여 새로고침</button>
     <button class="cliUpdateBanner" id="cliUpdateBanner" type="button" hidden></button>
+    <!-- 홈 화면에 추가하면 주소창이 사라지고 알림도 켤 수 있다. 둘 다 그 한 번의 설치에 걸려
+         있는데 방법을 모르면 영영 못 쓴다 — 한 번만 알려주고 닫으면 다시 안 띄운다. -->
+    <div class="installHint" id="installHint" hidden>
+      <span>홈 화면에 추가하면 주소창이 사라지고 알림도 받을 수 있어요 &nbsp;·&nbsp; 공유 <b>&#8593;</b> → “홈 화면에 추가”</span>
+      <button class="installHintClose" id="installHintClose" type="button" aria-label="닫기">&times;</button>
+    </div>
       </section>
     </main>
     <div class="chatComposer" id="chatComposer" style="display:none">
@@ -2581,7 +2613,11 @@ _MOBILE_HTML = r"""<!doctype html>
     let state = {worktrees: [], terms: [], sessions: [], agentOptions: {}};
     let serverInstance = "";   // 데몬 프로세스 식별자 — 바뀌면 재시작된 것 → 자동 새로고침
     let servicesState = {root: "", running: 0, defined: 0, services: []};
-    const autoPollMs = 3000;
+    // 폴링은 이제 **안전망**이다. 평소엔 서버가 변화를 밀어주고(SSE), 그게 끊긴 동안만 자주 돈다.
+    // 터널·프록시가 스트림을 접는 환경이 실제로 있어서 폴링을 없애면 그런 데서 화면이 통째로 멈춘다.
+    const POLL_LIVE_MS = 15000;    // 밀어주기가 살아 있음 — 어긋남만 가끔 맞춘다
+    const POLL_FALLBACK_MS = 3000; // 밀어주기가 끊김 — 예전처럼
+    let autoPollMs = POLL_FALLBACK_MS;
     let loading = false;
     let sending = false;
     let optimisticWorkUntil = 0;   // send 직후 폴이 working 잡을 때까지 낙관적으로 '작업 중'+정지버튼 표시(가만있는 느낌 방지)
@@ -5398,7 +5434,180 @@ _MOBILE_HTML = r"""<!doctype html>
         if (pollFailStreak === 3) statusEl.textContent = CONN_MSG;
       });
     }
-    setInterval(quietPoll, autoPollMs);
+    // LIVE_STREAM_START
+    // 서버가 밀어주는 변화를 듣는다. 이게 붙어 있으면 폴링을 느리게 돌리고, 끊기면 되돌린다.
+    // **연결 자체가 화면 상태다** — 살아 있음을 헤더에 표시해야 "멈춘 것 같다"는 느낌이 사라진다.
+    let liveSource = null;
+    let liveBackoffMs = 1000;
+    let liveConnected = false;
+    let pollTimer = 0;
+    function setPollInterval(ms) {
+      if (autoPollMs === ms && pollTimer) return;
+      autoPollMs = ms;
+      if (pollTimer) clearInterval(pollTimer);
+      pollTimer = setInterval(quietPoll, autoPollMs);
+    }
+    function markLive(connected) {
+      liveConnected = connected;
+      if (typeof document !== "undefined" && document.body) {
+        document.body.dataset.live = connected ? "on" : "off";
+      }
+      setPollInterval(connected ? POLL_LIVE_MS : POLL_FALLBACK_MS);
+    }
+    function liveEventUrl() {
+      const token = new URLSearchParams(location.search).get("token");
+      return "/mobile/api/events" + (token ? `?token=${encodeURIComponent(token)}` : "");
+    }
+    function connectLive() {
+      if (liveSource || document.visibilityState === "hidden") return;
+      let source;
+      try { source = new EventSource(liveEventUrl()); }
+      catch (e) { markLive(false); return; }
+      liveSource = source;
+      source.onopen = () => { liveBackoffMs = 1000; markLive(true); };
+      source.onmessage = event => {
+        markLive(true);
+        let payload = null;
+        try { payload = JSON.parse(event.data); } catch (e) { return; }
+        // 사건은 "뭔가 바뀌었다"는 신호일 뿐 — 화면의 진실은 여전히 state 다. 바로 한 번 당겨온다.
+        // (사건 안의 값으로 화면을 직접 고치면 서버와 화면이 두 벌로 갈라진다.)
+        if (payload && payload.kind) load({quiet: true}).catch(() => {});
+      };
+      source.onerror = () => {
+        try { source.close(); } catch (e) {}
+        if (liveSource === source) liveSource = null;
+        markLive(false);
+        // 끊긴 채로 두면 폰이 절전에서 깨도 안 붙는다 — 점점 뜸하게, 최대 30초 간격으로 재시도.
+        setTimeout(connectLive, liveBackoffMs);
+        liveBackoffMs = Math.min(liveBackoffMs * 2, 30000);
+      };
+    }
+    function disconnectLive() {
+      if (!liveSource) return;
+      try { liveSource.close(); } catch (e) {}
+      liveSource = null;
+      markLive(false);
+    }
+    // LIVE_STREAM_END
+    // PUSH_OPT_IN_START
+    // 폰이 잠겨 있어도 오는 알림. 아이폰은 **홈 화면에 추가**한 상태에서만 권한이 생기고,
+    // 구독은 https 에서만 된다 — 안 되는 이유를 삼키지 말고 그대로 말해준다(그래야 형이 고친다).
+    const NOTIFY_KEY = "marinaMobileNotify";
+    function pushBlockedReason() {
+      if (typeof navigator === "undefined" || !("serviceWorker" in navigator)
+          || typeof window === "undefined" || !("PushManager" in window)) {
+        // iOS 는 홈 화면에 설치해야 PushManager 가 생긴다. 사파리 탭에선 아무리 눌러도 안 된다.
+        return isStandalone() ? "이 브라우저는 알림을 지원하지 않아요"
+                              : "홈 화면에 추가한 뒤 거기서 열면 알림을 켤 수 있어요";
+      }
+      if (typeof window !== "undefined" && !window.isSecureContext)
+        return "https 주소(원격 접속 주소)로 열어야 알림을 켤 수 있어요";
+      if (typeof Notification !== "undefined" && Notification.permission === "denied")
+        return "알림 권한이 거부돼 있어요 — 설정에서 허용해야 켜져요";
+      return "";
+    }
+    function isStandalone() {
+      // navigator·matchMedia 가 없는 환경(테스트 하네스, 구형 웹뷰)에서도 터지지 않아야 한다 —
+      // 여기서 예외가 나면 그 아래 초기화가 통째로 멈춰 화면이 빈 채로 남는다.
+      const nav = typeof navigator === "undefined" ? null : navigator;
+      if (nav && nav.standalone) return true;
+      return Boolean(typeof matchMedia === "function"
+        && matchMedia("(display-mode: standalone)").matches);
+    }
+    function notifyOn() { return localStorage.getItem(NOTIFY_KEY) === "1"; }
+    function updateNotifyButton() {
+      const btn = document.getElementById("notifyBtn");
+      if (!btn) return;
+      const blocked = pushBlockedReason();
+      const on = notifyOn() && !blocked;
+      btn.textContent = on ? "\u{1F514}" : "\u{1F515}";
+      btn.classList.toggle("active", on);
+      btn.title = blocked || (on ? "알림 켜짐 — 누르면 꺼요" : "알림 꺼짐 — 누르면 켜요");
+    }
+    function urlBase64ToUint8Array(value) {
+      const padded = (value + "=".repeat((4 - value.length % 4) % 4)).replace(/-/g, "+").replace(/_/g, "/");
+      const raw = atob(padded);
+      return Uint8Array.from([...raw].map(ch => ch.charCodeAt(0)));
+    }
+    async function enablePush() {
+      const blocked = pushBlockedReason();
+      if (blocked) { showToast(blocked); updateNotifyButton(); return; }
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") { showToast("알림 권한을 허용해야 켜져요"); updateNotifyButton(); return; }
+      const registration = await navigator.serviceWorker.register("/mobile/sw.js", {scope: "/mobile"});
+      await navigator.serviceWorker.ready;
+      const keyResponse = await fetch("/mobile/api/push-key", {headers: headers()});
+      const {key} = await keyResponse.json();
+      if (!key) throw new Error("서버 키를 못 받았어요");
+      const existing = await registration.pushManager.getSubscription();
+      const subscription = existing || await registration.pushManager.subscribe({
+        userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(key),
+      });
+      await fetch("/mobile/api/push-subscribe", {
+        method: "POST", headers: headers(true),
+        body: JSON.stringify({endpoint: subscription.endpoint, label: navigator.platform || ""}),
+      });
+      localStorage.setItem(NOTIFY_KEY, "1");
+      updateNotifyButton();
+      showToast("알림을 켰어요 — 폰이 잠겨 있어도 와요");
+    }
+    async function disablePush() {
+      localStorage.setItem(NOTIFY_KEY, "0");
+      updateNotifyButton();
+      try {
+        const registration = await navigator.serviceWorker.getRegistration("/mobile");
+        const subscription = registration && await registration.pushManager.getSubscription();
+        if (subscription) {
+          await fetch("/mobile/api/push-unsubscribe", {
+            method: "POST", headers: headers(true),
+            body: JSON.stringify({endpoint: subscription.endpoint}),
+          });
+          await subscription.unsubscribe();
+        }
+      } catch (e) { /* 이미 없으면 그만 — 끈 것은 로컬 표시가 진실이다 */ }
+      showToast("알림을 껐어요");
+    }
+    const notifyBtn = document.getElementById("notifyBtn");
+    if (notifyBtn) {
+      notifyBtn.onclick = () => {
+        (notifyOn() ? disablePush() : enablePush())
+          .catch(error => { showToast(`알림 설정 실패 · ${String(error)}`); updateNotifyButton(); });
+      };
+      updateNotifyButton();
+    }
+    // 알림을 눌러 들어오면 그 세션을 연다(서비스워커가 열린 창에 알려준다).
+    if (typeof navigator !== "undefined" && "serviceWorker" in navigator) {
+      navigator.serviceWorker.addEventListener("message", event => {
+        const data = event.data || {};
+        if (data.type === "marina-open-session" && data.session) chooseSession(data.session);
+      });
+      // 켜둔 적이 있으면 조용히 다시 등록한다 — 서비스워커는 갱신돼야 고친 알림 로직이 걸린다.
+      if (notifyOn() && !pushBlockedReason()) {
+        navigator.serviceWorker.register("/mobile/sw.js", {scope: "/mobile"}).catch(() => {});
+      }
+    }
+    // 설치 안내 — 주소창 숨김도 알림도 **홈 화면 추가** 한 번에 걸려 있다. iOS 사파리는 문서가
+    // 스크롤될 때만 주소창을 숨기는데 마리나는 화면을 꽉 채운 고정 레이아웃이라 영영 안 숨는다.
+    // 설치하면 주소창 자체가 없어진다. 이미 설치했거나 닫았으면 다시 띄우지 않는다.
+    (function showInstallHint() {
+      const hint = document.getElementById("installHint");
+      if (!hint || isStandalone() || localStorage.getItem("marinaInstallHint") === "0") return;
+      const nav = typeof navigator === "undefined" ? null : navigator;
+      const iOS = Boolean(nav) && (/iPad|iPhone|iPod/.test(nav.userAgent || "")
+        || (nav.platform === "MacIntel" && nav.maxTouchPoints > 1));
+      if (!iOS) return;                       // 안드로이드·데스크톱은 브라우저가 알아서 안내한다
+      hint.hidden = false;
+      const close = document.getElementById("installHintClose");
+      if (close) close.onclick = () => { hint.hidden = true; localStorage.setItem("marinaInstallHint", "0"); };
+    })();
+    // PUSH_OPT_IN_END
+    setPollInterval(POLL_FALLBACK_MS);
+    connectLive();
+    document.addEventListener("visibilitychange", () => {
+      // 화면을 끄면 스트림을 접는다(배터리·연결 수). 돌아오면 즉시 다시 붙고 한 번 당겨온다.
+      if (document.visibilityState === "hidden") disconnectLive();
+      else { liveBackoffMs = 1000; connectLive(); }
+    });
     // CLI 버전은 하루 단위로만 바뀐다(서버도 30분 캐시) — 60초에 한 번이면 충분하다.
     loadCliUpdate();
     setInterval(loadCliUpdate, 60000);

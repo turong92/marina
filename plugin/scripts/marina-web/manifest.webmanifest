@@ -1,0 +1,15 @@
+{
+  "name": "marina",
+  "short_name": "marina",
+  "description": "워크트리·세션 원격 조종",
+  "start_url": "/mobile",
+  "scope": "/mobile",
+  "display": "standalone",
+  "background_color": "#101418",
+  "theme_color": "#101418",
+  "orientation": "portrait",
+  "icons": [
+    {"src": "/mobile/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "any"},
+    {"src": "/mobile/icon.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}

@@ -588,6 +588,56 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(data)
             return
+        # 서비스워커·매니페스트는 **정적 자산**이고 인증을 요구하면 안 된다. 서비스워커는 로그인
+        # 쿠키 없이 등록되는 순간이 있고(설치 시점), 등록에 실패하면 푸시 알림 자체가 불가능해진다.
+        # 내용에 비밀이 없다(코드뿐) — 알림 내용은 SW 가 인증된 요청으로 따로 가져온다.
+        if parsed.path in ("/mobile/sw.js", "/mobile/manifest.webmanifest", "/mobile/icon.png"):
+            asset = parsed.path.rsplit("/", 1)[1]
+            try:
+                data = (_WEB_DIR / asset).read_bytes()
+            except OSError:
+                self.send_json({"error": "not found"}, 404)
+                return
+            self.send_response(200)
+            self.send_header("content-type",
+                             "application/javascript; charset=utf-8" if asset.endswith(".js")
+                             else "image/png" if asset.endswith(".png")
+                             else "application/manifest+json; charset=utf-8")
+            # 서비스워커는 최신이어야 한다 — 옛 SW 가 남으면 고친 알림 로직이 영영 안 걸린다.
+            self.send_header("cache-control", "no-cache")
+            self.send_header("content-length", str(len(data)))
+            controller.add_security_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path == "/mobile/api/push-key":
+            if not self._agent_api_ok(parsed, principal):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            try:
+                from marina_push import public_key
+                self.send_json({"key": public_key()})
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 500)
+            return
+        if parsed.path == "/mobile/api/alerts":
+            if not self._agent_api_ok(parsed, principal):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            from marina_notify import pending_alerts
+            raw = urllib.parse.parse_qs(parsed.query).get("since", ["0"])[0]
+            try:
+                since = float(raw)
+            except ValueError:
+                since = 0.0
+            self.send_json({"alerts": pending_alerts(since)})
+            return
+        if parsed.path == "/mobile/api/events":
+            if not self._agent_api_ok(parsed, principal):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            self.stream_marina_events()
+            return
         if parsed.path in ("/mobile/api/state", "/api/mobile-state"):
             if not self._agent_api_ok(parsed, principal):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
@@ -1639,6 +1689,21 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return
+            if parsed.path in ("/mobile/api/push-subscribe", "/mobile/api/push-unsubscribe"):
+                if not self._agent_api_ok(parsed, principal):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                from marina_push import add_subscription, remove_subscription
+                try:
+                    body = self.read_json()
+                    endpoint = str(body.get("endpoint") or "")
+                    # endswith("subscribe") 로 가르면 unsubscribe 도 걸린다 — 경로를 정확히 본다.
+                    self.send_json(add_subscription(endpoint, str(body.get("label") or ""))
+                                   if parsed.path == "/mobile/api/push-subscribe"
+                                   else remove_subscription(endpoint))
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
             if parsed.path == "/mobile/api/answer":
                 if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
@@ -1753,6 +1818,17 @@ class Handler(BaseHTTPRequestHandler):
                     return
             if self.path == "/api/console":
                 self.send_json(append_console_log(body))
+                return
+
+            # 훅이 "방금 뭔가 했다"고 찌른다 — 감시 루프가 다음 주기를 기다리지 않게.
+            # **로컬 전용**: 프록시를 거쳐 오면 거부한다. 아무 것도 바꾸지 않는 신호지만,
+            # 외부에서 마음대로 부르면 상태 계산을 무한정 돌릴 수 있다(값싼 DoS 표면).
+            if self.path == "/api/events-poke":
+                if self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host"):
+                    self.send_json({"error": "local only"}, 403)
+                    return
+                from marina_events import poke
+                self.send_json({"ok": True, "watching": poke()})
                 return
 
             # ── 터미널 탭 — PTY 셸 = 원격 코드 실행. 로컬 대시보드 전용: 게이트웨이/프록시 경유(X-Forwarded-*) 거부 ──
@@ -2385,6 +2461,42 @@ class Handler(BaseHTTPRequestHandler):
         auth_controller().add_security_headers(self)
         self.end_headers()
 
+    def stream_marina_events(self) -> None:
+        """상태 변화를 밀어준다 — 폰이 3초마다 물어보지 않아도 되게.
+
+        연결이 끊겨도 화면은 폴링으로 계속 돈다(SSE 는 빠르게 하는 장치이지 유일한 통로가
+        아니다). 터널·프록시가 스트림을 접는 환경이 실제로 있어서, 폴백을 없애면 그런 데서
+        화면이 통째로 멈춘다. 하트비트를 주기적으로 보내 죽은 연결을 서로 빨리 알아챈다."""
+        from marina_events import event_bus, sse_frame
+
+        bus = event_bus()
+        token = bus.subscribe()
+        self.send_response(200)
+        self.send_header("content-type", "text/event-stream")
+        self.send_header("cache-control", "no-cache")
+        self.send_header("x-accel-buffering", "no")   # 프록시가 모아뒀다 보내면 실시간이 아니다
+        origin = self.headers.get("origin")
+        if origin and origin_allowed(origin, True):
+            self.send_header("access-control-allow-origin", origin)
+            self.send_header("vary", "origin")
+        auth_controller().add_security_headers(self)
+        self.end_headers()
+        try:
+            self.wfile.write(b": connected\n\n")
+            self.wfile.flush()
+            while True:
+                events = bus.wait(token, 20.0)
+                if not events:
+                    self.wfile.write(b": ping\n\n")      # 하트비트 — 끊긴 연결을 빨리 알아챈다
+                else:
+                    for event in events:
+                        self.wfile.write(sse_frame(event))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError, ValueError):
+            pass                                          # 폰이 화면을 껐다 — 정상 종료다
+        finally:
+            bus.unsubscribe(token)
+
     def stream_log(self, root: Path, service: str, run: str | None, from_offset: int | None = None) -> None:
         path = selected_log(root, service, run)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -2629,4 +2741,42 @@ def main() -> None:
             pass
 
     _threading.Thread(target=_warm_loop, daemon=True, name="worktree-warm").start()
+
+    # 변화 감지 — 화면에 밀어주고(SSE), 사람을 불러야 하면 폰을 깨운다(푸시).
+    # 이 루프가 없으면 폰은 계속 3초마다 물어봐야 하고, "방금 바뀌었다"를 아는 곳이 없어
+    # 알림을 보낼 근거 자체가 생기지 않는다.
+    def _events_snapshot() -> dict:
+        from marina_events import build_snapshot
+        from marina_mobile import mobile_state
+
+        def services():
+            memory = memory_snapshot()
+            return [session_payload(root, memory=memory) for root in discover_roots()]
+
+        return build_snapshot(mobile_state, services)
+
+    def _on_events(events: list) -> None:
+        from marina_events import _WATCHER
+        from marina_notify import is_engaged, record_alerts, should_notify
+        from marina_push import broadcast, subscriptions
+
+        marks = (getattr(_WATCHER, "_previous", None) or {}).get("sessions") or {}
+        now = _time.time()
+        alerts = [e for e in events
+                  if should_notify(e, engaged=is_engaged(e, marks, now),
+                                   hidden=False, now=now)]
+        if not alerts:
+            return
+        record_alerts(alerts, now)
+        if subscriptions():
+            broadcast()      # 내용 없는 푸시 — 깨어난 서비스워커가 위 기록을 가져간다
+
+    def _events_loop() -> None:
+        try:
+            from marina_events import start_watching
+            start_watching(_events_snapshot, _on_events)
+        except Exception:
+            pass             # 감지층이 못 떠도 폴링 화면은 그대로 돈다
+
+    _threading.Thread(target=_events_loop, daemon=True, name="marina-events-boot").start()
     server.serve_forever()

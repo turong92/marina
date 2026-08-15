@@ -551,7 +551,29 @@ def main() -> int:
         marina_agent_procs.record_from_hook(payload, source=_source(payload, os.environ) or "")
     except Exception:
         pass
+    poke_daemon()
     return 0
+
+
+POKE_TIMEOUT_S = 0.4
+
+
+def poke_daemon() -> bool:
+    """데몬한테 "방금 뭔가 했다"고 알린다 — 그래야 폰이 다음 주기를 기다리지 않는다.
+
+    훅은 턴을 붙잡고 도는 코드다. 그래서 **절대 기다리지 않고, 실패해도 무시한다** —
+    데몬이 꺼져 있든 느리든 훅이 대화를 지연시키면 안 된다. 놓쳐도 감시 루프가 곧 잡는다."""
+    try:
+        import urllib.request
+
+        from marina_state import HOST, PORT
+
+        request = urllib.request.Request(f"http://{HOST}:{PORT}/api/events-poke",
+                                         data=b"", method="POST")
+        with urllib.request.urlopen(request, timeout=POKE_TIMEOUT_S):
+            return True
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":

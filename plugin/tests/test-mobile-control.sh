@@ -62,7 +62,13 @@ grep -q 'mobileLogin' <<<"$mobile_html" || { echo "FAIL: /mobile token page miss
 grep -q 'logoutBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page missing logout button"; exit 1; }
 grep -q 'localStorage.removeItem("marinaMobileToken")' <<<"$mobile_html" || { echo "FAIL: /mobile page missing logout storage clear"; exit 1; }
 grep -q 'autoPollMs' <<<"$mobile_html" || { echo "FAIL: /mobile page missing auto polling"; exit 1; }
-! grep -q 'notifyBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page should not promise unsupported background notifications"; exit 1; }
+# 예전 계약은 "백그라운드 알림을 약속하지 말 것"이었다 — 그땐 지원이 아예 없었으니 맞았다.
+# 이제는 진짜로 보낸다(웹 푸시). 계약이 뒤집혔다: 버튼이 **있어야** 하고, 안 되는 환경에서는
+# **이유를 그대로 말해야** 한다. 조용히 실패하면 형은 왜 안 오는지 알 길이 없다.
+grep -q 'notifyBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page missing notification toggle"; exit 1; }
+grep -q '홈 화면에 추가한 뒤' <<<"$mobile_html" || { echo "FAIL: iOS 에서 안 되는 이유를 말하지 않는다"; exit 1; }
+grep -q 'https 주소' <<<"$mobile_html" || { echo "FAIL: http 접속에서 안 되는 이유를 말하지 않는다"; exit 1; }
+grep -q '/mobile/sw.js' <<<"$mobile_html" || { echo "FAIL: 서비스워커를 등록하지 않는다(잠긴 폰에 알림 불가)"; exit 1; }
 # 전체보기 때문에 템플릿 리터럴이 됐다(`?all=1`) — 여전히 모바일 전용 경로를 쓴다는 게 요점.
 grep -q '/mobile/api/state' <<<"$mobile_html" || { echo "FAIL: /mobile page should fetch mobile-scoped state API"; exit 1; }
 grep -q 'showAll ? "?all=1" : ""' <<<"$mobile_html" || { echo "FAIL: 전체보기가 서버에 전달되지 않는다"; exit 1; }

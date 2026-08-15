@@ -84,8 +84,9 @@ changed_symbols = set()
 for line in git(*diff_args) or git("diff", "-U0", "HEAD~1"):
     found = symbol.match(line)
     name = (found.group(1) or found.group(2)) if found else ""
-    # 흔한 짧은 이름(user·write·render…)은 아무 데나 걸린다 — 고유한 것만 신호로 쓴다.
-    if name and (name.startswith("_") or len(name) >= 8):
+    # 흔한 낱말(services·render·user…)은 아무 데나 걸려 신호가 안 된다. 실측: `def services`
+    # 하나 때문에 선택이 55개→117개로 부풀었다. 밑줄이 든 이름이나 아주 긴 이름만 신호로 쓴다.
+    if name and ("_" in name or len(name) >= 12):
         changed_symbols.add(name)
 
 closure, frontier = set(changed_modules), set(changed_modules)
@@ -109,9 +110,14 @@ asset_names = {Path(c).name for c in changed if not c.endswith(".py") and "/plug
 changed_tests = {Path(c).name for c in changed if "/tests/" in c and c.endswith(".sh")}
 
 deep = os.environ.get("DEEP") == "1"
-direct, indirect, skipped = [], [], []
+direct, indirect, heavy, skipped = [], [], [], []
 for name in tests:
     text = (here / name).read_text(encoding="utf-8", errors="ignore")
+    # 도커·caddy 를 실제로 띄우는 e2e 는 한 건에 수 분이다. 컨테이너 오케스트레이션을 건드리지
+    # 않았으면 기본 실행에서 뺀다(--all 로 돌린다). 무엇을 뺐는지는 아래에서 반드시 말한다.
+    container_e2e = ("docker compose" in text or "caddy" in text)
+    touches_containers = any(mod in ("marina_compose", "marina_gateway", "marina_weave", "marina_links")
+                             for mod in changed_modules)
     hits = lambda names: any(re.search(rf"\b{re.escape(n)}\b", text) for n in names)
     if (name in changed_tests or hits(changed_modules) or hits(changed_symbols)
             or any(asset in text for asset in asset_names)):
@@ -120,12 +126,17 @@ for name in tests:
         indirect.append(name)                                 # 의존 모듈·데몬을 통해서만 닿는다
     else:
         skipped.append(name)
+    if container_e2e and not touches_containers and name in direct:
+        direct.remove(name)
+        heavy.append(name)
 
 selected = direct + (indirect if deep else [])
 print("\n".join(selected))
 note = (f"{origin} {len(changed)}개 파일 · 영향 모듈 {len(closure)}개 → "
         f"바뀐 심볼 {len(changed_symbols)}개 → 직접 {len(direct)}개" + (f" + 데몬 간접 {len(indirect)}개" if deep else "") +
         f" 실행, 무관 {len(skipped)}개 제외")
+if heavy:
+    note += f"\n::note::도커/caddy e2e {len(heavy)}개는 건너뜀(컨테이너 코드 안 바뀜) — 필요하면 --all"
 if indirect and not deep:
     # 조용히 빠지면 "다 통과"로 읽힌다 — 무엇을 안 돌렸는지 항상 말한다.
     note += f"\n::note::데몬 간접 {len(indirect)}개는 건너뜀 — push 전엔 --deep 으로 한 번 돌릴 것"
