@@ -2003,6 +2003,8 @@ _MOBILE_HTML = r"""<!doctype html>
     /* 이미 답한 질문 = 기록이다. 누를 수 없다는 게 보여야 하고(커서·최소높이 없음), 대화 흐름을
        끊지 않게 라이브 카드보다 조용해야 한다. */
     .questionCard.answered { background: transparent; border-style: dashed; }
+    /* 보냈지만 서버가 아직 안 내린 카드 — 눌리지 않는다는 걸 눈으로도 알려준다. */
+    .questionCard.submitted { opacity: .62; border-style: dashed; }
     .questionOpt.answered { min-height: 0; cursor: default; }
     .questionSubmitRow { display: flex; }
     .questionSubmit { width: 100%; min-height: 40px; }
@@ -2370,17 +2372,33 @@ _MOBILE_HTML = r"""<!doctype html>
     let liveQuestionPending = "";   // 입력 중이라 미뤄둔 카드 HTML(포커스 빠질 때 반영)
     // 라이브 카드와 대화 안 폴백 카드가 **같은 상태**를 쓴다. 폴백에 별도 구현을 두면(예전처럼
     // 탭 즉시 전송) multiSelect 가 깨지고, 막아버리면 라이브 카드가 만료된 뒤 답할 방법이 사라진다.
+    // ANSWER_STATE_START  (테스트가 이 블록을 vm 에 싣는다)
     function ensureAnswerState(questions, token) {
       if (token !== liveAnswer.token) {          // 새 질문 — 이전 선택/입력/실패 표시를 물려주지 않는다
         // otherOpen/otherText 는 **질문별** 맵이다({qi: ...}) — 폼 전체에 하나면 질문이 여럿일 때
         // 어느 질문의 기타인지 못 담는다. 그 한계 때문에 예전엔 기타를 통째로 숨겼었다.
         liveAnswer = {token, total: questions.length, questions, choices: [],
-                      sending: false, failed: false, otherOpen: {}, otherText: {}};
+                      sending: false, failed: false, submitted: false, submittedAt: 0,
+                      otherOpen: {}, otherText: {}};
       }
       liveAnswer.total = questions.length;
       liveAnswer.questions = questions;
       return liveAnswer;
     }
+    // 보낸 뒤에도 카드를 잠가둔다 — 서버가 그 질문을 내리기까지의 틈에 한 번 더 눌리면 같은 질문에
+    // 두 번 답한다(형: "답 보낸거 바로 안사라져서 또 보낼 뻔 했다"). 실패면 잠그지 않는다.
+    function markAnswerSubmitted(ok, now) {
+      liveAnswer.sending = false;
+      liveAnswer.submitted = Boolean(ok);
+      liveAnswer.submittedAt = ok ? now : 0;
+      liveAnswer.failed = !ok;
+    }
+    // 다만 **영원히** 잠그지는 않는다. 응답이 삼켜졌는데 카드가 잠긴 채면 답할 길이 사라진다.
+    const ANSWER_LOCK_MS = 15000;
+    function answerLockExpired(state, now) {
+      return Boolean(state && state.submitted) && now - (state.submittedAt || 0) > ANSWER_LOCK_MS;
+    }
+    // ANSWER_STATE_END
     // 카드 어디서 눌렸든 같은 규칙으로 선택을 반영한다.
     function pickAnswerOption(qi, index) {
       const question = (liveAnswer.questions || [])[qi] || {};
@@ -2406,6 +2424,12 @@ _MOBILE_HTML = r"""<!doctype html>
         return;
       }
       ensureAnswerState(pq.questions, String(pq.token || pq.toolUseId || ""));
+      if (answerLockExpired(liveAnswer, Date.now())) {
+        // 보냈는데 서버가 계속 이 질문을 들고 있다 = 반영이 안 됐다. 잠금을 풀고 사실대로 말한다.
+        liveAnswer.submitted = false;
+        liveAnswer.submittedAt = 0;
+        liveAnswer.failed = true;
+      }
       // PTY 를 쥐고 있지 않아도 고를 수 있다 — 서버가 세션을 이어받아(--resume) 고른 내용을 글로 전달한다.
       // 전송은 원래 그렇게 뚫고 있었는데 응답만 막아둘 이유가 없다(형 지적).
       const canAnswer = session.kind === "agent" && sessionSource(session) === "claude";
@@ -2445,9 +2469,8 @@ _MOBILE_HTML = r"""<!doctype html>
       repaintLiveQuestion();
       const body = payload || {answers: Array.from({length: liveAnswer.total}, (_, i) => liveAnswer.choices[i] || [])};
       const result = await answerQuestion(body);
-      liveAnswer.sending = false;
       // settled === false → 상태파일이 그대로다 = 셀렉터가 안 움직였다. 카드를 되살려 다시 누르게 한다.
-      liveAnswer.failed = !result || result.settled === false;
+      markAnswerSubmitted(Boolean(result) && result.settled !== false, Date.now());
       repaintLiveQuestion();
       load({quiet: true}).catch(() => {});
     }

@@ -1312,6 +1312,7 @@
     /* 질문 카드 — 웹엔 스킨이 아예 없어 공유 렌더러가 낸 마크업이 날것으로 나왔다.
        클래스는 chat-render.js 가 정한 그대로(모바일과 동일), 색만 시스템 토큰으로. */
     .chat-turns .questionCard { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 12px; padding: 11px 12px; border: 1px solid var(--sys-style-primary-light, var(--sys-style-neutral-default)); border-radius: 10px; background: var(--sys-bg-base); }
+.chat-turns .questionCard.submitted { opacity: .62; border-style: dashed; }   /* 보냈고 반영 대기 — 다시 눌리지 않는다 */
     .chat-turns .questionBlock { display: flex; flex-direction: column; gap: 8px; }
     .chat-turns .questionBlock + .questionBlock { padding-top: 9px; border-top: 1px solid var(--sys-style-neutral-light); }
     .chat-turns .questionHeader { color: var(--sys-cont-primary-default); font-size: 9px; font-weight: 850; text-transform: uppercase; letter-spacing: .04em; }

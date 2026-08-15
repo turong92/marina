@@ -558,6 +558,11 @@
       const choices = (state && state.choices) || [];
       const picks = qi => Array.isArray(choices[qi]) ? choices[qi] : (Number.isInteger(choices[qi]) ? [choices[qi]] : []);
       const sending = Boolean(state && state.sending);
+      // 보내고 **나서도** 잠가둔다. 카드는 서버의 pendingQuestion 으로 그려지는데, 서버가 그 질문을
+      // 내리는 건 다음 폴 뒤라 그 사이 카드가 멀쩡하게 되살아난다 — 형이 같은 질문에 두 번 답할
+      // 뻔한 자리다. 잠금은 서버가 질문을 내리거나(토큰 소멸) 반영이 없다고 판정될 때 풀린다.
+      const submitted = Boolean(state && state.submitted);
+      const locked = sending || submitted;
       const multi = questions.length > 1;
       const blocks = questions.map((rawQ, qi) => {
         const q = (rawQ && typeof rawQ === "object") ? rawQ : {};
@@ -578,7 +583,7 @@
           const label = esc(String((opt && (opt.label || opt.value)) || `옵션 ${index + 1}`));
           const desc = opt && opt.description ? `<span class="questionOptDesc">${esc(String(opt.description))}</span>` : "";
           const chosen = picks(qi).includes(index) ? " chosen" : "";
-          const attrs = interactive && !sending ? `data-answer-q="${qi}" data-answer-option="${index}"` : "disabled";
+          const attrs = interactive && !locked ? `data-answer-q="${qi}" data-answer-option="${index}"` : "disabled";
           return `<button class="questionOpt${chosen}" type="button" ${attrs}><span class="questionOptLabel">${label}</span>${desc}</button>`;
         }).join("");
         // 기타(직접 입력) — 질문이 하나일 때만. 여러 질문은 셀렉터를 순서대로 확정해야 해서 자유입력을 못 섞는다.
@@ -593,7 +598,7 @@
         // 표현할 수가 없어서, 예전엔 그 김에 다중선택·복수질문을 통째로 막아뒀었다.
         const otherOpen = Boolean(state && state.otherOpen && state.otherOpen[qi]);
         const otherText = (state && state.otherText && state.otherText[qi]) || "";
-        const other = !(interactive && !sending) ? ""
+        const other = !(interactive && !locked) ? ""
           : otherOpen
           ? `<div class="questionOtherRow" data-question-other-row><input class="questionOtherInput" type="text" data-answer-other-input data-answer-q="${qi}" placeholder="직접 입력..." value="${esc(otherText)}" enterkeyhint="send" autocomplete="off" /><button class="primary questionOtherSend" type="button" data-answer-other-send data-answer-q="${qi}">보내기</button></div>`
           : `<button class="questionOpt questionOther" type="button" data-answer-other data-answer-q="${qi}">&#9998; 기타 (직접 입력)</button>`;
@@ -605,13 +610,14 @@
       // 카운터는 **형이 방금 한 행동**을 비춰야 한다. 질문이 하나인 다중선택에서 '답한 질문 수'를 세면
       // 몇 개를 고르든 늘 1/1 이고 안 고르면 0/1 이라 아무 정보가 없다(형: "0/1 나오는것도 문제고").
       // 질문이 여러 개일 때만 질문 진행도가 뜻이 있고, 하나일 땐 고른 개수가 뜻이 있다.
-      const submitLabel = sending ? "보내는 중..."
+      const submitLabel = sending ? "보내는 중..." : submitted ? "보냈어요"
         : multi ? `보내기 (${answered}/${questions.length})`
         : `보내기 (${picks(0).length}개 선택)`;
       const submit = interactive && needsSubmit
-        ? `<div class="questionSubmitRow"><button class="primary questionSubmit" type="button" data-answer-submit${answered === questions.length && !sending ? "" : " disabled"}>${submitLabel}</button></div>`
+        ? `<div class="questionSubmitRow"><button class="primary questionSubmit" type="button" data-answer-submit${answered === questions.length && !locked ? "" : " disabled"}>${submitLabel}</button></div>`
         : "";
-      const busy = sending && !needsSubmit ? `<div class="questionMore">보내는 중...</div>` : "";
+      const busy = sending && !needsSubmit ? `<div class="questionMore">보내는 중...</div>`
+        : submitted && !needsSubmit ? `<div class="questionMore">보냈어요 · 반영을 기다리는 중</div>` : "";
       const failed = state && state.failed
         ? `<div class="questionFailed">응답이 안 먹었어요 — 다시 눌러보세요. 계속 이러면 터미널에서 직접 답해야 해요.</div>`
         : "";
@@ -620,7 +626,7 @@
             ? `<div class="questionBlocked">이 세션 터미널을 marina 가 쥐고 있지 않아, 고르면 세션을 이어받아 답을 전달해요${"\u0020"}(작업 중이면 끝난 뒤에)</div>`
             : "")
         : `<div class="questionBlocked">${esc((state && state.reason) || "여기서는 답할 수 없어요")}</div>`;
-      return `<div class="questionCard">${blocks}${submit}${busy}${failed}${note}</div>`;
+      return `<div class="questionCard${submitted ? " submitted" : ""}">${blocks}${submit}${busy}${failed}${note}</div>`;
     }
     // ANSWERED_QUESTION_START
     // 이미 답한 질문 — 대화에 남는 기록이다. 선택지를 다시 다 늘어놓지 않고 **물은 것과 고른 것**만
