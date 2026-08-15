@@ -39,13 +39,29 @@ _VALID_SESSION_ID = re.compile(r"^[A-Za-z0-9._-]{1,160}$")
 _VALID_EVENTS = {"working", "blocked", "ended", "failed"}
 
 
+_CANONICAL_CACHE: dict[str, str | None] = {}
+_CANONICAL_CACHE_MAX = 4096
+
+
 def _canonical_path(value: object) -> str | None:
+    """경로 정규화 — 결과를 기억한다.
+
+    resolve() 한 번이 심링크 단계마다 readlink 를 부른다. 저널 한 줄마다 root 를 정규화하니
+    폴 한 번에 readlink 가 9천 번 났다(모바일 새로고침 2.1초 중 0.4초). 같은 문자열은 같은
+    경로로 풀리므로 기억해도 된다 — 도중에 심링크가 바뀌는 경우는 데몬 수명 안에선 없다시피
+    하고, 있어도 다음 기동에 자연히 갱신된다."""
     if not isinstance(value, str) or not value:
         return None
+    if value in _CANONICAL_CACHE:
+        return _CANONICAL_CACHE[value]
     try:
-        return str(Path(value).expanduser().resolve(strict=False))
+        resolved: str | None = str(Path(value).expanduser().resolve(strict=False))
     except (OSError, ValueError):
-        return None
+        resolved = None
+    if len(_CANONICAL_CACHE) >= _CANONICAL_CACHE_MAX:
+        _CANONICAL_CACHE.clear()
+    _CANONICAL_CACHE[value] = resolved
+    return resolved
 
 
 def _session_id(payload: Mapping[str, Any]) -> str | None:
@@ -190,6 +206,34 @@ def _open_regular_at(source_fd: int, name: str, *, create: bool = False, writabl
     except Exception:
         os.close(fd)
         raise
+
+
+# 저널 판정 캐시: 파일이 안 바뀌었으면 다시 파싱하지 않는다. 모바일은 몇 초마다 전 세션을
+# 훑는데, 그때마다 저널 꼬리 256KB 를 통째로 JSON 파싱했다(폴 한 번에 loads 8688회).
+_EVENT_CACHE: dict[tuple[str, str, str, str], tuple[tuple[int, int, int], dict[str, Any] | None]] = {}
+_EVENT_CACHE_MAX = 512
+
+
+def _path_fingerprint(path: Path) -> tuple[int, int, int] | None:
+    """경로로 직접 재는 지문 — 캐시 적중 확인 전용(읽기는 항상 검증된 fd 경로로 한다)."""
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except (OSError, ValueError):
+        return None
+    return (info.st_mtime_ns, info.st_size, info.st_ino) if stat.S_ISREG(info.st_mode) else None
+
+
+def _journal_fingerprint(source_fd: int, name: str) -> tuple[int, int, int] | None:
+    """저널의 (mtime_ns, size, inode) — 내용이 바뀌면 반드시 달라진다.
+
+    심링크는 따라가지 않는다(_open_regular_at 과 같은 규칙: 정규 파일만 인정)."""
+    try:
+        info = os.stat(name, dir_fd=source_fd, follow_symlinks=False)
+    except (OSError, ValueError):
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        return None
+    return (info.st_mtime_ns, info.st_size, info.st_ino)
 
 
 def _journal_exists(source_fd: int, name: str) -> bool:
@@ -447,9 +491,23 @@ def latest_agent_event(
         journal_name = f"{sid}.jsonl"
         lock_name = f"{sid}.lock"
         current = time.time() if now is None else now
+        cache_key = (source, sid, canonical_root, str(resolved_home))
+        # 빠른 경로: 저널 경로를 직접 lstat 해서 캐시 적중을 먼저 확인한다. 적중이면 디렉터리
+        # 열기(_source_directory: 세 단계 openat + 권한 검사)조차 하지 않는다 — 그 준비 비용만
+        # 폴 한 번에 0.16초였다. 실제 **읽기**는 종전대로 검증된 fd 경로로만 한다.
+        quick = _path_fingerprint(resolved_home / ".marina" / "agent-events" / source / journal_name)
+        if quick is not None:
+            cached = _EVENT_CACHE.get(cache_key)
+            if cached is not None and cached[0] == quick:
+                return cached[1]
         with _source_directory(resolved_home, source, create=False) as source_fd:
-            if not _journal_exists(source_fd, journal_name):
+            fingerprint = _journal_fingerprint(source_fd, journal_name)
+            if fingerprint is None:
+                _EVENT_CACHE.pop(cache_key, None)
                 return None
+            cached = _EVENT_CACHE.get(cache_key)
+            if cached is not None and cached[0] == fingerprint:
+                return cached[1]
             with _open_lock(source_fd, lock_name) as lock_fd:
                 if not _acquire_lock(lock_fd, fcntl.LOCK_SH):
                     return None
@@ -457,14 +515,18 @@ def latest_agent_event(
                     rows = _read_rows(source_fd, journal_name, source=source, sid=sid)
                 finally:
                     fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        matching = [
+        candidates = [
             row for row in rows
-            if row["source"] == source
-            and row["sid"] == sid
-            and row["root"] == canonical_root
-            and row["ts"] <= current + MAX_FUTURE_SECONDS
+            if row["source"] == source and row["sid"] == sid and row["root"] == canonical_root
         ]
-        return max(enumerate(matching), key=lambda pair: (pair[1]["ts"], pair[0]))[1] if matching else None
+        matching = [row for row in candidates if row["ts"] <= current + MAX_FUTURE_SECONDS]
+        result = max(enumerate(matching), key=lambda pair: (pair[1]["ts"], pair[0]))[1] if matching else None
+        # 미래 시각 행이 잘려 나갔다면 결과가 시계에 따라 달라진다 — 그런 판정은 기억하지 않는다.
+        if len(matching) == len(candidates):
+            if len(_EVENT_CACHE) >= _EVENT_CACHE_MAX:
+                _EVENT_CACHE.clear()
+            _EVENT_CACHE[cache_key] = (fingerprint, result)
+        return result
     except Exception:
         return None
 

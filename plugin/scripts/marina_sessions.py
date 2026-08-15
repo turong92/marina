@@ -524,6 +524,15 @@ def _agent_event_ts(obj: dict[str, Any], fallback: float) -> float:
     return float(fallback)
 
 
+def _file_fingerprint(path: Path) -> tuple[int, int, int] | None:
+    """(mtime_ns, size, inode) — 내용이 바뀌면 반드시 달라진다. 캐시 무효화의 단일 기준."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return (info.st_mtime_ns, info.st_size, info.st_ino)
+
+
 def _agent_state_rows(path: Path) -> tuple[list[dict[str, Any]], float]:
     try:
         with path.open("rb") as fh:
@@ -563,24 +572,29 @@ def _is_tool_result_only(content: Any) -> bool:
     return all(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
 
 
-def _native_agent_status(path: Path, source: str, *, now: float | None = None) -> dict[str, Any]:
-    """Normalize native Claude/Codex turn boundaries without reading an entire rollout."""
-    rows, mtime = _agent_state_rows(path)
-    current = time.time() if now is None else now
-    best: dict[str, Any] | None = None
+# 상태 후보 캐시. 판정은 폴마다 세션 전부에 대해 도는데 대부분의 폴에서 트랜스크립트는 그대로다
+# (모바일 새로고침 2.1초 중 1.0초가 이 재스캔이었다). 파일 지문이 같으면 후보 목록을 재사용하고,
+# **시계에 따라 달라지는 선택은 캐시하지 않는다** — 그건 아래 _native_agent_status 가 매번 한다.
+_STATUS_CANDIDATE_CACHE: dict[str, tuple[tuple[int, int, int], list[tuple[str, float, str | None]], float]] = {}
+_STATUS_CANDIDATE_CACHE_MAX = 256
+
+
+def _agent_status_candidates(path: Path, source: str) -> tuple[list[tuple[str, float, str | None]], float]:
+    """트랜스크립트 꼬리에서 턴 경계 후보 (status, ts, reason) 를 순서대로 뽑는다(시계 무관)."""
+    key = f"{source}\n{path}"
+    fingerprint = _file_fingerprint(path)
+    if fingerprint is None:
+        _STATUS_CANDIDATE_CACHE.pop(key, None)
+    else:
+        cached = _STATUS_CANDIDATE_CACHE.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            return cached[1], cached[2]
+    candidates: list[tuple[str, float, str | None]] = []
 
     def offer(status: str, ts: float, reason: str | None = None) -> None:
-        nonlocal best
-        if not math.isfinite(ts) or ts > current + 300:
-            return
-        candidate: dict[str, Any] = {"status": status, "statusTs": ts}
-        if reason:
-            candidate["statusReason"] = reason[:120]
-        # Iterating in append order makes an equal timestamp deterministically
-        # prefer the later native record, while newer timestamps always win.
-        if best is None or ts >= best["statusTs"]:
-            best = candidate
+        candidates.append((status, ts, reason))
 
+    rows, mtime = _agent_state_rows(path)
     if source == "codex":
         for obj in rows:
             payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
@@ -629,6 +643,28 @@ def _native_agent_status(path: Path, source: str, *, now: float | None = None) -
                     continue                # 주입 user(Continue 등)는 턴 경계 아님 — working 고착 방지
                 else:
                     offer("working", ts)
+    if fingerprint is not None:
+        if len(_STATUS_CANDIDATE_CACHE) >= _STATUS_CANDIDATE_CACHE_MAX:
+            _STATUS_CANDIDATE_CACHE.clear()
+        _STATUS_CANDIDATE_CACHE[key] = (fingerprint, candidates, mtime)
+    return candidates, mtime
+
+
+def _native_agent_status(path: Path, source: str, *, now: float | None = None) -> dict[str, Any]:
+    """Normalize native Claude/Codex turn boundaries without reading an entire rollout."""
+    candidates, mtime = _agent_status_candidates(path, source)
+    current = time.time() if now is None else now
+    best: dict[str, Any] | None = None
+    for status, ts, reason in candidates:
+        if not math.isfinite(ts) or ts > current + 300:
+            continue
+        candidate: dict[str, Any] = {"status": status, "statusTs": ts}
+        if reason:
+            candidate["statusReason"] = reason[:120]
+        # Iterating in append order makes an equal timestamp deterministically
+        # prefer the later native record, while newer timestamps always win.
+        if best is None or ts >= best["statusTs"]:
+            best = candidate
     if best is not None:
         return best
     if mtime and mtime <= current and current - mtime < 120:
@@ -1983,6 +2019,10 @@ def agent_activity(root: Path, source: str, sid: str) -> list[dict[str, Any]]:
     return []
 
 
+_RUNTIME_SETTINGS_CACHE: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
+_RUNTIME_SETTINGS_CACHE_MAX = 256
+
+
 def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
     """Read the model/effort last recorded by the native CLI session."""
     if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_-]{3,63}", sid or ""):
@@ -1996,6 +2036,22 @@ def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
         return {"model": "", "effort": ""}
     if not path.is_file():
         return {"model": "", "effort": ""}
+    # 화면의 '현재 모델·강도'는 폴마다 세션 전부에 대해 읽힌다. 트랜스크립트를 뒤에서부터 훑는
+    # 작업이라 안 바뀐 파일에 매번 하면 비싸다(새로고침 1.1초 중 0.43초) — 지문으로 재사용한다.
+    key = f"{source}\n{path}"
+    fingerprint = _file_fingerprint(path)
+    if fingerprint is not None:
+        cached = _RUNTIME_SETTINGS_CACHE.get(key)
+        if cached is not None and cached[0] == fingerprint:
+            return dict(cached[1])
+
+    def remember(value: dict[str, str]) -> dict[str, str]:
+        if fingerprint is not None:
+            if len(_RUNTIME_SETTINGS_CACHE) >= _RUNTIME_SETTINGS_CACHE_MAX:
+                _RUNTIME_SETTINGS_CACHE.clear()
+            _RUNTIME_SETTINGS_CACHE[key] = (fingerprint, dict(value))
+        return value
+
     for obj in _reverse_json_objects(path):
         if source == "claude" and obj.get("type") == "assistant":
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
@@ -2014,8 +2070,8 @@ def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
         else:
             continue
         if model or effort:
-            return {"model": model, "effort": effort}
-    return {"model": "", "effort": ""}
+            return remember({"model": model, "effort": effort})
+    return remember({"model": "", "effort": ""})
 
 
 def _usage_token_count(usage: dict[str, Any], key: str) -> int:
