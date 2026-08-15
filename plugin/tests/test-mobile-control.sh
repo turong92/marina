@@ -338,11 +338,9 @@ assert inputs == [
 ], inputs
 assert pauses == [True], pauses
 
-original_pending_settings = mm.mobile_pending_session_settings
-mm.mobile_pending_session_settings = lambda root_arg, source, sid: (
-    {"model": "claude-fable-5", "effort": "high"}
-    if source == "claude" else {"model": "", "effort": ""}
-)
+# 예약은 이제 파일이 진실이다(_recover_pending_settings 가 직접 읽는다) — 스텁 대신 실제로 쓴다.
+mm._persist_pending_session_settings(root, "claude", "claude-session-0001",
+                                     {"model": "claude-fable-5", "effort": "high"})
 queued = mm.mobile_send({
     "root": str(root),
     "target": {"type": "agent", "source": "claude", "sid": "claude-session-0001"},
@@ -360,7 +358,6 @@ assert inputs[-6:] == [
     ("live-agent-2", "\r"),
 ], inputs
 assert pauses == [True] * 6, pauses      # 앞 전송 1 + 설정 4 + 이번 전달 1
-mm.mobile_pending_session_settings = original_pending_settings
 
 codex_queued = mm.mobile_send({**body, "delivery": "queue", "text": "Follow up next turn"})
 assert codex_queued == {"ok": True, "tid": "live-agent-1", "opened": False, "delivery": "queue"}, codex_queued
@@ -372,11 +369,10 @@ assert pauses == [True] * 7, pauses       # 예약이 비어 있어 이번엔 �
 assert not opens, opens
 
 original_native_active = mm._native_agent_active
-original_clear_pending = mm._clear_pending_session_settings
-mm.mobile_pending_session_settings = lambda *args: {"model": "gpt-5.6-sol", "effort": "high"}
+# 작업 중인 세션의 예약: 건드리지도 지우지도 않는다(끝나면 드레이너가 회수).
+mm._persist_pending_session_settings(root, "codex", "codex-session-0001",
+                                     {"model": "gpt-5.6-sol", "effort": "high"})
 mm._native_agent_active = lambda *args: True
-cleared = []
-mm._clear_pending_session_settings = lambda *args: cleared.append(args)
 input_offset = len(inputs)
 active_queued = mm.mobile_send({**body, "delivery": "queue", "text": "Keep this queued while busy"})
 assert active_queued["delivery"] == "queue", active_queued
@@ -384,10 +380,11 @@ assert inputs[input_offset:] == [
     ("live-agent-1", "Keep this queued while busy"),
     ("live-agent-1", "\t"),
 ], inputs[input_offset:]
-assert not cleared, cleared
-mm.mobile_pending_session_settings = original_pending_settings
+assert mm.mobile_pending_session_settings(root, "codex", "codex-session-0001") == {
+    "model": "gpt-5.6-sol", "effort": "high",
+}, "작업 중엔 예약이 남아 있어야 한다"
+mm._clear_pending_session_settings(root, "codex", "codex-session-0001")
 mm._native_agent_active = original_native_active
-mm._clear_pending_session_settings = original_clear_pending
 
 stopped = mm.mobile_interrupt({"root": str(root), "target": body["target"]})
 assert stopped == {"ok": True, "tid": "live-agent-1", "interrupted": True}, stopped

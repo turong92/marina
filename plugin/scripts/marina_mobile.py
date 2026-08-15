@@ -111,10 +111,17 @@ def mobile_update_session_settings(body: dict[str, Any]) -> dict[str, str]:
                 return {**value, "applyMode": "live"}
         except (OSError, ValueError):
             pass
-        _persist_pending_session_settings(root, source, sid, value)
         # 왜 미뤘는지까지 말해야 한다. 살아있는 세션에 "다음 Marina 연결에 적용합니다"라고만 하면
         # 그 '다음'이 언제인지 알 수 없고, 실제로 오지 않을 수도 있다.
-        reason = "busy" if tid else "detached"
+        # unverified = 쳤는데 트랜스크립트에 실행 행이 안 보였다 — 드레이너가 유휴 때 재시도한다.
+        if not tid:
+            reason = "detached"
+        elif _native_agent_active(root, source, sid):
+            reason = "busy"
+        else:
+            reason = "unverified"
+        _persist_pending_session_settings(
+            root, source, sid, {**value, "attempts": 1} if reason == "unverified" else value)
     return {**value, "applyMode": "pending", "pendingReason": reason}
 
 
@@ -794,6 +801,39 @@ def mobile_outbox_pending(root: Path, source: str, sid: str) -> list[str]:
         return []
 
 
+_SETTINGS_RETRY_MAX = 5
+
+
+def _recover_pending_settings(root: Path, source: str, sid: str, tid: str) -> str:
+    """예약된 모델·강도를 살아있는 PTY 에 회수 시도한다.
+
+    반환: applied(먹였고 확인됨) · busy(작업 중 — 기다린다) · failed(쳤는데 확인 안 됨,
+    attempts+1) · capped(재시도 상한 도달 — 다음 resume 인자로만 남긴다) · none(예약 없음).
+    실패를 세는 이유: 확인 안 되는 적용을 무한 반복하면 3초마다 남의 입력창에 슬래시를
+    치는 꼴이 된다. 상한 뒤엔 접고, 예약 자체는 남아 다음 실행 인자로는 확실히 먹는다."""
+    key = _session_settings_key(root, source, sid)
+    record = _read_json(PENDING_SETTINGS_FILE).get(key)
+    if not isinstance(record, dict):
+        return "none"
+    model, effort = str(record.get("model") or ""), str(record.get("effort") or "")
+    if not (model or effort):
+        _settings_file_update(PENDING_SETTINGS_FILE, key, None)
+        return "none"
+    attempts = int(record.get("attempts") or 0)
+    if attempts >= _SETTINGS_RETRY_MAX:
+        return "capped"
+    if not tid:
+        return "none"
+    if _native_agent_active(root, source, sid):
+        return "busy"
+    if _apply_live_agent_settings(root, source, sid, tid, model, effort):
+        _settings_file_update(PENDING_SETTINGS_FILE, key, None)
+        return "applied"
+    _settings_file_update(PENDING_SETTINGS_FILE, key,
+                          {"model": model, "effort": effort, "attempts": attempts + 1})
+    return "failed"
+
+
 def mobile_settings_drain() -> int:
     """작업 중이라 미뤄둔 모델·강도 예약을 세션이 유휴가 되는 순간 적용한다(보류 메시지와 같은 장치).
 
@@ -804,16 +844,14 @@ def mobile_settings_drain() -> int:
         parts = key.split("\n")
         if len(parts) != 3 or not isinstance(record, dict):
             continue
-        root, source, sid = Path(parts[0]), parts[1], parts[2]
-        model, effort = str(record.get("model") or ""), str(record.get("effort") or "")
-        if not root.is_dir() or not (model or effort):
+        root = Path(parts[0])
+        if not root.is_dir():
             _settings_file_update(PENDING_SETTINGS_FILE, key, None)
             continue
         with _AGENT_SEND_LOCK:
             try:
-                tid = _live_agent_tid(root, source, sid)
-                if tid and _apply_live_agent_settings(root, source, sid, tid, model, effort):
-                    _clear_pending_session_settings(root, source, sid)
+                tid = _live_agent_tid(root, parts[1], parts[2])
+                if tid and _recover_pending_settings(root, parts[1], parts[2], tid) == "applied":
                     applied += 1
             except (OSError, ValueError):
                 continue                      # 한 건이 실패해도 나머지는 계속
@@ -942,15 +980,49 @@ def _deliver_agent_input(tid: str, source: str, text: str, requested: str = "") 
     return delivery
 
 
-def _apply_live_claude_settings(tid: str, model: str, effort: str) -> bool:
+_SLASH_CONFIRM_TIMEOUT_S = 3.0
+
+
+def _confirm_slash_commands(transcript: Path, offset: int, arguments: list[str],
+                            timeout: float | None = None) -> bool:
+    """슬래시 명령이 진짜 실행됐는지 트랜스크립트로 확인한다.
+
+    실행된 명령은 즉시 `<command-args>…</command-args>` 행을 남긴다. 쳤다고 믿지 말 것 —
+    실측에서 유휴 TUI 에 친 `/model` 이 흔적 없이 사라진 적이 있다(재현 불가, 원인 미상).
+    사후에 알 수 없는 상태를 추측하는 대신 결과를 본다(질문 캡처 훅의 settled 와 같은 패턴)."""
+    wanted = [f"<command-args>{argument}</command-args>" for argument in arguments]
+    deadline = time.time() + (_SLASH_CONFIRM_TIMEOUT_S if timeout is None else timeout)
+    while True:
+        try:
+            with transcript.open("rb") as handle:
+                handle.seek(offset)
+                appended = handle.read().decode("utf-8", errors="ignore")
+        except OSError:
+            appended = ""
+        if all(marker in appended for marker in wanted):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.3)
+
+
+def _apply_live_claude_settings(tid: str, model: str, effort: str,
+                                transcript: Path | None = None) -> bool:
     """Claude Code 의 슬래시 명령에 **인자를 실어** 보낸다 — `/model <name>`·`/effort <level>`.
 
     codex 처럼 목록을 열고 화살표를 세어 내려갈 필요가 없다(그 방식은 목록이 하나만 바뀌어도
     엉뚱한 걸 고른다). 값 검증은 CLI 인자를 만들 때와 **같은 규칙**을 재사용한다 — 두 경로가
-    서로 다른 걸 허용하면 한쪽에서만 통과하는 값이 생긴다."""
+    서로 다른 걸 허용하면 한쪽에서만 통과하는 값이 생기다. transcript 를 주면 실행 여부를
+    행으로 확인하고, 확인 못 하면 False — 성공을 지어내지 않는다."""
     if not (model or effort):
         return False
     _agent_cli("claude", "", model=model, effort=effort)   # 규칙 위반이면 여기서 ValueError
+    offset = -1
+    if transcript is not None:
+        try:
+            offset = transcript.stat().st_size
+        except OSError:
+            offset = -1
     for command, argument in (("/model", model), ("/effort", effort)):
         if not argument:
             continue
@@ -958,7 +1030,9 @@ def _apply_live_claude_settings(tid: str, model: str, effort: str) -> bool:
         _agent_input_pause()
         term_input(tid, "\r")
         _agent_input_pause()
-    return True
+    if offset < 0:
+        return True
+    return _confirm_slash_commands(transcript, offset, [a for a in (model, effort) if a])
 
 
 def _apply_live_agent_settings(root: Path, source: str, sid: str, tid: str,
@@ -971,8 +1045,14 @@ def _apply_live_agent_settings(root: Path, source: str, sid: str, tid: str,
         return False
     if _native_agent_active(root, source, sid):
         return False
+    transcript: Path | None = None
+    if source == "claude":
+        try:
+            transcript = agent_transcript_path(root, source, sid)
+        except ValueError:
+            transcript = None      # 트랜스크립트가 아직 없으면 확인 없이 친다(새 세션 직후)
     applied = (_apply_live_codex_settings(tid, model, effort) if source == "codex"
-               else _apply_live_claude_settings(tid, model, effort) if source == "claude"
+               else _apply_live_claude_settings(tid, model, effort, transcript) if source == "claude"
                else False)
     if applied:
         # current 는 트랜스크립트에서 읽는데 다음 응답 전엔 새 행이 없다 — 그 공백 동안
@@ -1092,15 +1172,12 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
         with _AGENT_SEND_LOCK:
             tid = _live_agent_tid(root, source, sid)
             if tid:
-                saved = mobile_pending_session_settings(root, source, sid)
-                if saved["model"] or saved["effort"]:
-                    # 예약해 둔 설정의 **회수 지점**이다. 예전엔 codex 만 여기서 적용하고 claude 는
-                    # 읽어놓고 아무것도 안 했다 — 그래서 살아있는 세션에선 바꾼 모델이 영영 안 먹고
-                    # 예약 배지만 남았다(형: "클로드는 펜딩이 아니라 그냥 안먹는거같은데").
-                    if _apply_live_agent_settings(root, source, sid, tid, saved["model"], saved["effort"]):
-                        _clear_pending_session_settings(root, source, sid)
-                    elif source == "codex" and not _native_agent_active(root, source, sid):
-                        raise ValueError("예약한 모델 설정을 현재 CLI에 적용할 수 없어요. 세션을 다시 열어주세요")
+                # 예약해 둔 설정의 **회수 지점**이다. 예전엔 codex 만 여기서 적용하고 claude 는
+                # 읽어놓고 아무것도 안 했다 — 그래서 살아있는 세션에선 바꾼 모델이 영영 안 먹고
+                # 예약 배지만 남았다(형: "클로드는 펜딩이 아니라 그냥 안먹는거같은데").
+                if (_recover_pending_settings(root, source, sid, tid) == "failed"
+                        and source == "codex"):
+                    raise ValueError("예약한 모델 설정을 현재 CLI에 적용할 수 없어요. 세션을 다시 열어주세요")
                 delivery = _deliver_agent_input(tid, source, text, str(body.get("delivery") or ""))
                 return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
             # 여기까지 왔다 = 조작 가능한 PTY 가 없다. 이중 실행 판정은 **세션(sid) 단위**다
@@ -4099,6 +4176,7 @@ _MOBILE_HTML = r"""<!doctype html>
       renderSessionControls(session);
       showToast(result.applyMode === "live" ? "현재 CLI에 적용했습니다"
                 : result.pendingReason === "busy" ? "작업 중이라 이번 응답이 끝난 뒤 적용합니다"
+                : result.pendingReason === "unverified" ? "적용 확인이 안 돼요 — 잠시 후 자동 재시도합니다"
                 : "다음 Marina 연결에 적용합니다");
     }
     async function interruptCurrentTurn() {

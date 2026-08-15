@@ -129,8 +129,76 @@ assert mm.mobile_current_session_settings(root, "claude", "claude-sid-0007") == 
     "기억이 트랜스크립트를 계속 덮으면 CLI 에서 바꾼 게 영영 안 보인다"
 PY
 
+# 적용은 **확인돼야** 성공이다 — 실측에서 유휴 TUI 에 친 /model 이 흔적 없이 사라진 적이 있다.
+# 실행된 슬래시 명령은 트랜스크립트에 <command-args> 행을 즉시 남기므로 그걸 본다.
+TMP="$(mktemp -d)"
+trap 'rm -rf "$TMP"' EXIT
+PYTHONPATH="$SCR" python3 - "$TMP" "$HERE" <<'PY'
+import sys
+from pathlib import Path
+
+import marina_mobile as mm
+
+tmp, root = Path(sys.argv[1]), Path(sys.argv[2]).resolve()
+mm.safe_root = lambda value: Path(str(value)).resolve()
+mm.PENDING_SETTINGS_FILE = tmp / "pending.json"
+mm.APPLIED_SETTINGS_FILE = tmp / "applied.json"
+mm._SLASH_CONFIRM_TIMEOUT_S = 0.3          # 테스트에서 3초씩 기다리지 않는다
+mm._agent_input_pause = lambda: None
+mm._native_agent_active = lambda r, s, i: False
+mm._live_agent_tid = lambda r, s, i: "tid-1"
+
+transcript = tmp / "fake-transcript.jsonl"
+transcript.write_text("{}\n", encoding="utf-8")
+mm.agent_transcript_path = lambda r, s, i: transcript
+
+# ① CLI 처럼 실행 행을 남기는 term_input → 확인 성공 → live
+def echoing_term_input(tid, text):
+    if text.startswith("/"):
+        command, _, argument = text.partition(" ")
+        with transcript.open("a", encoding="utf-8") as fh:
+            fh.write(f'{{"type":"user","message":{{"content":"<command-args>{argument}</command-args>"}}}}\n')
+mm.term_input = echoing_term_input
+result = mm.mobile_update_session_settings({
+    "root": str(root), "source": "claude", "sid": "claude-sid-0010",
+    "model": "claude-opus-5", "effort": "high",
+})
+assert result["applyMode"] == "live", result
+
+# ② 아무 행도 안 남는 term_input(실측의 그 소실) → live 라고 거짓말하지 않는다
+mm.term_input = lambda tid, text: None
+result = mm.mobile_update_session_settings({
+    "root": str(root), "source": "claude", "sid": "claude-sid-0011",
+    "model": "claude-opus-5", "effort": "",
+})
+assert result["applyMode"] == "pending" and result["pendingReason"] == "unverified", result
+
+# ③ 드레이너가 재시도하되, 상한(5회)을 넘으면 접는다 — 남의 입력창에 3초마다 슬래시를 치지 않는다
+calls = []
+mm.term_input = lambda tid, text: calls.append(text)
+for expected_attempts in (2, 3, 4, 5):
+    assert mm.mobile_settings_drain() == 0
+    raw = mm._read_json(mm.PENDING_SETTINGS_FILE)
+    key = mm._session_settings_key(root, "claude", "claude-sid-0011")
+    assert raw[key]["attempts"] == expected_attempts, raw[key]
+calls.clear()
+assert mm.mobile_settings_drain() == 0
+assert calls == [], "상한을 넘겼는데 계속 슬래시를 친다"
+raw = mm._read_json(mm.PENDING_SETTINGS_FILE)
+assert key in raw, "상한 뒤에도 예약은 남아야 한다 — 다음 resume 인자로 먹는 마지막 보루"
+
+# ④ 상한 전에 성공하면 예약이 지워진다
+mm.term_input = echoing_term_input
+mm._settings_file_update(mm.PENDING_SETTINGS_FILE, key, {"model": "claude-opus-5", "effort": "", "attempts": 2})
+assert mm.mobile_settings_drain() == 1
+assert key not in mm._read_json(mm.PENDING_SETTINGS_FILE)
+print("ok 적용은 트랜스크립트로 확인하고, 실패는 세다가 접는다")
+PY
+
 html="$(PYTHONPATH="$SCR" python3 -c 'from marina_mobile import render_mobile_html; print(render_mobile_html())')"
 grep -qF '작업 중이라 이번 응답이 끝난 뒤 적용합니다' <<<"$html" \
   || { echo "FAIL: 미룬 이유를 화면이 말하지 않는다"; exit 1; }
+grep -qF '적용 확인이 안 돼요' <<<"$html" \
+  || { echo "FAIL: 확인 실패를 화면이 말하지 않는다"; exit 1; }
 
 echo "PASS test-agent-settings-live"
