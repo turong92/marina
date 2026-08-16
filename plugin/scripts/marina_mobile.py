@@ -5573,7 +5573,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (blocked) { showToast(blocked); updateNotifyButton(); return; }
       const permission = await Notification.requestPermission();
       if (permission !== "granted") { showToast("알림 권한을 허용해야 켜져요"); updateNotifyButton(); return; }
-      const registration = await navigator.serviceWorker.register("/mobile/sw.js", {scope: "/mobile"});
+      const registration = await navigator.serviceWorker.register("/sw.js", {scope: "/"});
       await navigator.serviceWorker.ready;
       const keyResponse = await fetch("/mobile/api/push-key", {headers: headers()});
       const {key} = await keyResponse.json();
@@ -5622,7 +5622,7 @@ _MOBILE_HTML = r"""<!doctype html>
       });
       // 켜둔 적이 있으면 조용히 다시 등록한다 — 서비스워커는 갱신돼야 고친 알림 로직이 걸린다.
       if (notifyOn() && !pushBlockedReason()) {
-        navigator.serviceWorker.register("/mobile/sw.js", {scope: "/mobile"}).catch(() => {});
+        navigator.serviceWorker.register("/sw.js", {scope: "/"}).catch(() => {});
       }
     }
     // 설치 안내 — 주소창 숨김도 알림도 **홈 화면 추가** 한 번에 걸려 있다. iOS 사파리는 문서가

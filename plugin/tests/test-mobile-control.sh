@@ -68,7 +68,7 @@ grep -q 'autoPollMs' <<<"$mobile_html" || { echo "FAIL: /mobile page missing aut
 grep -q 'notifyBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page missing notification toggle"; exit 1; }
 grep -q '홈 화면에 추가한 뒤' <<<"$mobile_html" || { echo "FAIL: iOS 에서 안 되는 이유를 말하지 않는다"; exit 1; }
 grep -q 'https 주소' <<<"$mobile_html" || { echo "FAIL: http 접속에서 안 되는 이유를 말하지 않는다"; exit 1; }
-grep -q '/mobile/sw.js' <<<"$mobile_html" || { echo "FAIL: 서비스워커를 등록하지 않는다(잠긴 폰에 알림 불가)"; exit 1; }
+grep -q 'serviceWorker.register' <<<"$mobile_html" || { echo "FAIL: 서비스워커를 등록하지 않는다(잠긴 폰에 알림 불가)"; exit 1; }
 # 버튼이 **보여야** 쓸 수 있다. .usageBtn 은 기본이 display:none 이고 대화 화면에서 .available 이
 # 붙을 때만 뜬다 — 그 클래스만 주면 마크업엔 있는데 화면엔 영영 안 나온다(형이 실제로 겪었다).
 grep -q 'usageBtn notifyBtn' <<<"$mobile_html" || { echo "FAIL: 알림 버튼에 전용 표시 클래스가 없다"; exit 1; }
@@ -831,6 +831,30 @@ assert opened[0]["agent_prompt"] == "hello agent", opened
 assert inputs == [], inputs
 print("ok mobile agent prompt")
 PY
+# 서비스워커의 **관할 범위 규칙**: 스크립트가 놓인 폴더 밖은 맡을 수 없다. /mobile/sw.js 를
+# scope "/mobile" 로 등록하면 브라우저가 SecurityError 로 거부한다(폴더는 "/mobile/" 이고
+# "/mobile" 은 그 밖이다) — 실측 2026-08-17: 형이 종을 눌렀을 때 서버에 요청조차 안 왔다.
+# 페이지가 /mobile 이므로 관할은 "/" 여야 하고, 그러려면 스크립트가 루트에 있어야 한다.
+PYTHONPATH="$SCR" python3 - <<'PY2'
+import re
+from marina_mobile import render_mobile_html
+
+html = render_mobile_html()
+registrations = re.findall(r'serviceWorker\.register\(\s*"([^"]+)"\s*,\s*\{\s*scope:\s*"([^"]+)"', html)
+assert registrations, "서비스워커 등록이 사라졌다 — 잠긴 폰 알림 불가"
+for script, scope in registrations:
+    folder = script.rsplit("/", 1)[0] + "/"
+    assert scope.startswith(folder), (
+        f"관할 범위가 스크립트 폴더 밖이다: script={script} folder={folder} scope={scope} "
+        "— 브라우저가 등록을 거부한다")
+    assert "/mobile".startswith(scope.rstrip("/")) or scope == "/", (
+        f"페이지(/mobile)가 관할 밖이다: scope={scope}")
+print("ok 서비스워커 관할 범위가 스크립트 위치와 맞는다")
+PY2
+
+PYTHONPATH="$SCR" python3 - <<'PY'
+print("", end="")
+PY
 
 PYTHONPATH="$SCR" python3 - "$P" <<'PY'
 from pathlib import Path
@@ -965,9 +989,9 @@ cookie_state_code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie_jar" "$a
 # 서비스워커를 페이지와 별개 요청으로 가져오는데, 그게 401 이면 홈 화면 추가가 그냥 북마크가
 # 되고(주소창 그대로) 서비스워커 등록이 실패해 알림이 원천 불가능해진다.
 # 실측(2026-08-17): 인증 없는 테스트만 있어서 이 결함을 놓쳤고, 형 폰에서 매니페스트가 401 이었다.
-for asset in sw.js manifest.webmanifest icon.png; do
-  asset_code="$(curl -s -o /dev/null -w '%{http_code}' "$auth_base/mobile/$asset")"
-  [[ "$asset_code" == "200" ]] || { echo "FAIL: auth 켜짐 · /mobile/$asset → $asset_code (설치·알림 불가)"; exit 1; }
+for asset in /sw.js /mobile/sw.js /mobile/manifest.webmanifest /mobile/icon.png; do
+  asset_code="$(curl -s -o /dev/null -w '%{http_code}' "$auth_base$asset")"
+  [[ "$asset_code" == "200" ]] || { echo "FAIL: auth 켜짐 · $asset → $asset_code (설치·알림 불가)"; exit 1; }
 done
 # 반대로 **내용**은 인증 뒤에 있어야 한다 — 알림 목록이 열려 있으면 남이 대화 제목을 읽는다.
 alerts_code="$(curl -s -o /dev/null -w '%{http_code}' "$auth_base/mobile/api/alerts")"
