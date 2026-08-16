@@ -1824,7 +1824,9 @@ class Handler(BaseHTTPRequestHandler):
             # **로컬 전용**: 프록시를 거쳐 오면 거부한다. 아무 것도 바꾸지 않는 신호지만,
             # 외부에서 마음대로 부르면 상태 계산을 무한정 돌릴 수 있다(값싼 DoS 표면).
             if self.path == "/api/events-poke":
-                if self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host"):
+                # 인증 없이 받되(훅엔 쿠키가 없다) **루프백에서만**. 프록시를 거친 흔적도 거부한다.
+                if (not is_loopback_client(self)
+                        or self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host")):
                     self.send_json({"error": "local only"}, 403)
                     return
                 from marina_events import poke

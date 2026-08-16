@@ -961,6 +961,25 @@ curl -sf -c "$cookie_jar" -H 'content-type: application/json' \
 cookie_state_code="$(curl -s -o /dev/null -w '%{http_code}' -b "$cookie_jar" "$auth_base/mobile/api/state")"
 [[ "$cookie_state_code" == "200" ]] || { echo "FAIL: auth-enabled mobile cookie should work, got $cookie_state_code"; exit 1; }
 
+# 앱 설치용 자산은 **인증이 켜져도** 쿠키 없이 받아져야 한다. 브라우저는 매니페스트와
+# 서비스워커를 페이지와 별개 요청으로 가져오는데, 그게 401 이면 홈 화면 추가가 그냥 북마크가
+# 되고(주소창 그대로) 서비스워커 등록이 실패해 알림이 원천 불가능해진다.
+# 실측(2026-08-17): 인증 없는 테스트만 있어서 이 결함을 놓쳤고, 형 폰에서 매니페스트가 401 이었다.
+for asset in sw.js manifest.webmanifest icon.png; do
+  asset_code="$(curl -s -o /dev/null -w '%{http_code}' "$auth_base/mobile/$asset")"
+  [[ "$asset_code" == "200" ]] || { echo "FAIL: auth 켜짐 · /mobile/$asset → $asset_code (설치·알림 불가)"; exit 1; }
+done
+# 반대로 **내용**은 인증 뒤에 있어야 한다 — 알림 목록이 열려 있으면 남이 대화 제목을 읽는다.
+alerts_code="$(curl -s -o /dev/null -w '%{http_code}' "$auth_base/mobile/api/alerts")"
+[[ "$alerts_code" == "401" ]] || { echo "FAIL: 알림 목록이 인증 없이 열렸다($alerts_code)"; exit 1; }
+
+# 훅의 찌르기는 쿠키가 없다 — 루프백이면 통과해야 한다(막히면 실시간·알림이 훅 신호를 못 받는다).
+poke_code="$(curl -s -o /dev/null -w '%{http_code}' -X POST "$auth_base/api/events-poke")"
+[[ "$poke_code" == "200" ]] || { echo "FAIL: auth 켜짐 · 훅 찌르기 → $poke_code"; exit 1; }
+# 프록시를 거친 흔적이 있으면 거부한다(외부에서 상태 계산을 돌리지 못하게).
+poke_proxied="$(curl -s -o /dev/null -w '%{http_code}' -X POST -H 'X-Forwarded-For: 1.2.3.4' "$auth_base/api/events-poke")"
+[[ "$poke_proxied" == "403" ]] || { echo "FAIL: 프록시 경유 찌르기가 통과했다($poke_proxied)"; exit 1; }
+
 grep -q 'mobile)' "$SCR/marina-entrypoint.sh" || {
   echo "FAIL: marina mobile CLI missing"; exit 1;
 }
