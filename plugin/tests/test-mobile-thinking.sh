@@ -102,7 +102,10 @@ print(r'''
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
 const slot = {hidden: true, innerHTML: "", dataset: {}};
-const context = {thinkingSlot: slot};
+const classes = new Set();
+const view = {classList: {add: c => classes.add(c), remove: c => classes.delete(c),
+                          contains: c => classes.has(c)}};
+const context = {thinkingSlot: slot, chatView: view};
 vm.createContext(context);
 vm.runInContext(`${src}
 this.thinkingLabelFor = thinkingLabelFor;
@@ -130,6 +133,8 @@ renderThinkingSlot(agent({status: "working"}), false);
 assert.equal(slot.hidden, false);
 assert.match(slot.innerHTML, /thinkingBubble/);
 assert.match(slot.innerHTML, /생각 중/);
+// 떠 있는 표시라 마지막 말풍선을 가린다 — 보이는 동안엔 그만큼 자리를 연다.
+assert.equal(view.classList.contains("thinking"), true, "여백을 안 열어 마지막 말풍선이 가린다");
 // 같은 상태로 다시 그려도 DOM 을 건드리지 않는다 — 갈아끼우면 애니메이션이 매번 처음으로 튄다.
 slot.innerHTML = "SENTINEL";
 renderThinkingSlot(agent({status: "working"}), false);
@@ -138,12 +143,37 @@ assert.equal(slot.innerHTML, "SENTINEL", "같은 상태인데 DOM 을 다시 썼
 renderThinkingSlot(agent({status: "idle"}), false);
 assert.equal(slot.hidden, true);
 assert.equal(slot.innerHTML, "");
+assert.equal(view.classList.contains("thinking"), false, "끝났는데 빈 자리가 남는다");
 
 // 마크업은 이스케이프된다(라벨이 언젠가 서버발이 되어도 안전하게).
 assert.doesNotMatch(renderThinking("<img src=x onerror=1>"), /<img/);
 console.log("ok 생각 중: 작업 중에만·질문 땐 숨김·불필요한 재렌더 없음");
 ''')
 PY
+
+# ③-1 **보이는 자리**에 있어야 한다. 마크업에 채워 넣는 것만으론 부족하다 — #chatView 는 행
+# 두 개짜리 그리드라, 평범한 자식으로 두면 암묵 행으로 밀려 overflow:hidden 에 통째로 잘린다
+# (실측 2026-08-17: 형 "생각중 안뜨고 그냥 작업중이네"). 그때도 위 테스트는 전부 통과했다.
+PYTHONPATH="$SCR" python3 - <<'PY2'
+import re
+from marina_mobile import render_mobile_html
+
+html = render_mobile_html()
+chat_view = re.search(r"#chatView \{([^}]*)\}", html)
+assert chat_view, "#chatView 규칙을 못 찾았다"
+rows = re.search(r"grid-template-rows:\s*([^;]+);", chat_view.group(1))
+slot = re.search(r"#thinkingSlot \{([^}]*)\}", html)
+assert slot, "#thinkingSlot 스타일이 없다"
+declared_rows = len((rows.group(1) if rows else "").split())
+floating = "position: absolute" in slot.group(1)
+# 그리드 행이 부족한데 평범한 자식이면 잘린다. 떠 있거나(absolute), 제 행이 선언돼 있어야 한다.
+assert floating or declared_rows >= 3, (
+    f"#thinkingSlot 이 잘리는 자리에 있다 — rows={declared_rows}, style={slot.group(1).strip()}")
+if floating:
+    assert "#chatView" in html and "thinking .turns" in html,         "떠 있으면 마지막 말풍선을 가린다 — 그만큼 아래 여백을 열어야 한다"
+    assert 'classList.add("thinking")' in html and 'classList.remove("thinking")' in html,         "여백을 여닫는 코드가 없다"
+print("ok 생각 중이 잘리지 않는 자리에 있다")
+PY2
 
 # ④ 낙관적 말풍선: 누르는 즉시 서고, 응답이 오면 **같은 레코드에** 결과가 얹힌다.
 python3 - "$SCR" <<'PY2' | node

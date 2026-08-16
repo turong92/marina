@@ -2054,8 +2054,12 @@ _MOBILE_HTML = r"""<!doctype html>
     /* 이미 답한 질문 = 기록이다. 누를 수 없다는 게 보여야 하고(커서·최소높이 없음), 대화 흐름을
        끊지 않게 라이브 카드보다 조용해야 한다. */
     /* 생각 중 — 답변 쪽(왼쪽)에 붙여 "여기 답이 나온다"를 암시한다. */
-    #thinkingSlot { padding: 0 10px 8px; }
+    /* #chatView 는 행 두 개짜리 그리드다. 평범한 자식으로 넣으면 암묵 행으로 밀려 overflow:hidden
+       에 잘려 아예 안 보인다(실측 2026-08-17: 형 "생각중 안뜨고"). 대화 목록 안에 넣는 것도 안 된다
+       — 재조정기가 모르는 자식을 지운다. 그래서 **떠 있게** 두고, 가릴 만큼만 아래 여백을 준다. */
+    #thinkingSlot { position: absolute; left: 9px; bottom: 6px; z-index: 2; }
     #thinkingSlot[hidden] { display: none; }
+    #chatView.thinking .turns { padding-bottom: 42px; }
     .thinkingBubble { display: inline-flex; gap: 8px; align-items: center; padding: 8px 11px; border: 1px solid #dde2ea; border-radius: 12px 12px 12px 3px; background: #fff; color: #5b6472; font-size: 12px; }
     .thinkingDots { display: inline-flex; gap: 3px; }
     .thinkingDots i { width: 5px; height: 5px; border-radius: 50%; background: #8b95a5; animation: thinkingPulse 1.2s ease-in-out infinite; }
@@ -2655,7 +2659,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const inboxSheet = document.getElementById("inboxSheet");
     const inboxList = document.getElementById("inboxList");
     const statusEl = document.getElementById("status");
-    const thinkingSlot = document.getElementById("thinkingSlot");
+    const thinkingSlot = document.getElementById("thinkingSlot");   // chatView 는 위에서 이미 잡았다
     const servicesSheet = document.getElementById("servicesSheet");
     const serviceList = document.getElementById("serviceList");
     const servicesSheetTitle = document.getElementById("servicesSheetTitle");
@@ -4013,9 +4017,15 @@ _MOBILE_HTML = r"""<!doctype html>
     function renderThinkingSlot(session, optimisticWorking) {
       const label = thinkingLabelFor(session, optimisticWorking, Date.now());
       if (!label) {
-        if (!thinkingSlot.hidden) { thinkingSlot.hidden = true; thinkingSlot.innerHTML = ""; }
+        if (!thinkingSlot.hidden) {
+          thinkingSlot.hidden = true;
+          thinkingSlot.innerHTML = "";
+          thinkingSlot.dataset.label = "";
+          if (chatView) chatView.classList.remove("thinking");
+        }
         return;
       }
+      if (chatView) chatView.classList.add("thinking");   // 마지막 말풍선이 가리지 않게 자리를 연다
       // 같은 라벨이면 DOM 을 건드리지 않는다 — 매 폴마다 갈아끼우면 애니메이션이 처음으로 튄다.
       if (thinkingSlot.dataset.label === label && !thinkingSlot.hidden) return;
       thinkingSlot.dataset.label = label;
