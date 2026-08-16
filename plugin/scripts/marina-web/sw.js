@@ -9,6 +9,8 @@
 
 const ALERT_ENDPOINT = "/mobile/api/alerts";
 const NOTIFICATION_ICON = "/mobile/icon.png";   // 로그인 없이 받아지는 공개 자산
+// 배지는 **단색 실루엣**이어야 한다. 컬러 아이콘을 주면 안드로이드가 알파만 읽어 흰 덩어리가 된다.
+const NOTIFICATION_BADGE = "/mobile/badge.png";
 const LAST_SEEN_KEY = "marina-last-alert-ts";
 
 // 마지막으로 처리한 알림 시각 — 같은 알림을 두 번 띄우지 않으려고 캐시에 적어 둔다
@@ -62,7 +64,7 @@ self.addEventListener("push", event => {
       await self.registration.showNotification(alert.title || "마리나", {
         body: alert.body || "",
         icon: NOTIFICATION_ICON,                       // 없으면 브라우저 기본 아이콘이라 뭔지 모른다
-        badge: NOTIFICATION_ICON,                      // 안드로이드 상태표시줄의 작은 아이콘
+        badge: NOTIFICATION_BADGE,                      // 안드로이드 상태표시줄의 작은 아이콘
         tag: alert.tag || alert.session || "marina",   // 같은 자리에 덮어써 알림이 쌓이지 않게
         renotify: alert.kind === "question",           // 질문은 답을 기다리므로 다시 울려도 된다
         // 질문은 형이 답할 때까지 일이 멈춰 있다 — 데스크톱에서 몇 초 만에 사라지면 놓친다.

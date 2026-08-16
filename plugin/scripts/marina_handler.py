@@ -594,7 +594,7 @@ class Handler(BaseHTTPRequestHandler):
         # 서비스워커는 **자기가 놓인 폴더 아래만** 관할할 수 있다. /mobile/sw.js 로 두면 관할이
         # /mobile/ 로 묶여 페이지(/mobile)를 못 맡는다 — 등록 자체가 SecurityError 로 거부된다
         # (실측 2026-08-17: 형이 종을 눌렀을 때 서버에 요청조차 안 왔다). 루트에서도 준다.
-        if parsed.path in ("/sw.js", "/mobile/sw.js", "/mobile/manifest.webmanifest", "/mobile/icon.png"):
+        if parsed.path in ("/sw.js", "/mobile/sw.js", "/mobile/manifest.webmanifest", "/mobile/icon.png", "/mobile/badge.png"):
             asset = parsed.path.rsplit("/", 1)[1]
             try:
                 data = (_WEB_DIR / asset).read_bytes()

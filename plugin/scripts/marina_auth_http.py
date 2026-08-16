@@ -31,6 +31,7 @@ PUBLIC_PATHS = {
     "/mobile/sw.js",
     "/mobile/manifest.webmanifest",
     "/mobile/icon.png",
+    "/mobile/badge.png",
     # 훅이 "방금 뭔가 했다"고 찌르는 신호. 훅엔 로그인 쿠키가 없어 인증 뒤에 두면 늘 401 이고,
     # 그러면 알림·실시간 갱신이 훅 신호 없이 안전망 주기에만 의존하게 된다(실측: 계속 401).
     # 아래 핸들러가 **루프백에서만** 받는다 — 아무것도 바꾸지 않는 신호지만 외부에 열어 두면
