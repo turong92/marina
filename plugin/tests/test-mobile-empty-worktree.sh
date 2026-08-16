@@ -21,9 +21,11 @@ root = (Path(sys.argv[1]) / "compliance").resolve()
 root.mkdir()
 mm.discover_all_roots = lambda refresh=False: [root]
 # 새로 만든 워크트리 — 세션도 터미널도 없고, HEAD 커밋 제목만 있다.
-mm.worktree_info = lambda value, refresh=False: {
+# 모바일은 이제 worktree_labels 로 **이름표만** 받는다(git 배지를 계산하지 않는다). 커밋 제목은
+# 세션 타이틀이 없을 때의 폴백이라 sessionTitle 자리로 들어온다.
+mm.worktree_labels = lambda value: {
     "id": "wt-1", "alias": "compliance", "projectId": "p", "projectLabel": "mdc-main",
-    "source": "registry", "headSubject": "docs(skill): 아바타·캐릭터 사용 가이드 domain",
+    "source": "registry", "sessionTitle": "docs(skill): 아바타·캐릭터 사용 가이드 domain",
 }
 mm.term_list = lambda: {"sessions": []}
 mm.agents_payload = lambda *a, **k: []

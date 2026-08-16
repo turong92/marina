@@ -2765,6 +2765,48 @@ def repo_ahead_of_main(repo: Path) -> int | None:
     except Exception:
         return None
 
+_HEAD_SUBJECT_TTL = 600.0        # 커밋 제목은 커밋할 때만 바뀐다 — 자주 물을 이유가 없다
+_head_subject_cache: dict[str, tuple[float, str]] = {}
+
+
+def worktree_labels(root: Path) -> dict[str, str]:
+    """카드에 쓸 **이름표만** — git 배지(브랜치·dirty·ahead·du)를 계산하지 않는다.
+
+    형: "내가 지금 깃을 안보고있는데 깃을 부를 필요가 있나?" — 맞는 지적이었다. 모바일은
+    worktree_info() 를 부르고 거기서 이름표 6개만 꺼내 썼는데, 그 함수는 워크트리마다 git 을
+    ~24번 돌린다. 브랜치·ahead 는 '깃' 탭이 따로 가져가므로 이 경로엔 애초에 필요가 없었다.
+
+    제목은 세션 타이틀(앱이 붙인 이름) → 커밋 제목 순. 커밋 제목만 git 한 번인데 10분 캐시라
+    사실상 공짜다. 이름표 나머지는 레지스트리·메타 파일이라 git 이 아예 없다."""
+    key = str(root)
+    title = ""
+    try:
+        entry = claude_session_titles().get(key)
+        title = str((entry or {}).get("title") or "") or str(codex_session_titles().get(key) or "")
+    except Exception:
+        title = ""
+    if not title:
+        cached = _head_subject_cache.get(key)
+        if cached and time.time() - cached[0] < _HEAD_SUBJECT_TTL:
+            title = cached[1]
+        else:
+            try:
+                title = repo_head_subject(root)
+            except Exception:
+                title = ""
+            _head_subject_cache[key] = (time.time(), title)
+    project = project_for(root)
+    return {
+        "id": session_id(root),
+        "alias": read_meta(root).get("alias", ""),
+        "root": key,
+        "source": root_source(root),
+        "projectId": str(project["id"]) if project else project_label(root),
+        "projectLabel": project_label(root),
+        "sessionTitle": title,
+    }
+
+
 def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
     key = str(root)
     cached = _worktree_info_cache.get(key)

@@ -29,6 +29,7 @@ from marina_sessions import (
     resolve_session_liveness,
     safe_root,
     worktree_info,
+    worktree_labels,
 )
 from marina_state import MARINA_HOME, PORT
 from marina_term import _agent_cli, term_input, term_kill, term_list, term_open
@@ -599,7 +600,10 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
     live_cwds = _live_agent_cwds(refresh)   # S1 — root 별 externalActive 판정(ps command= 파싱 없음)
     for root in discover_all_roots(refresh):
         try:
-            info = worktree_info(root, refresh)
+            # 이름표만 있으면 된다 — git 배지(브랜치·dirty·ahead)는 '깃' 탭이 따로 가져간다.
+            # 예전엔 worktree_info() 를 불러 6개 필드만 꺼내 썼는데, 그 함수는 워크트리마다
+            # git 을 ~24번 돌린다(형: "깃을 안보고있는데 깃을 부를 필요가 있나?").
+            info = worktree_labels(root)
             root_terms = [t for t in terms if str(t.get("root") or "") == str(root)]
             agent_terms = {
                 (str(t["agent"].get("source") or ""), str(t["agent"].get("sid") or "")): t
