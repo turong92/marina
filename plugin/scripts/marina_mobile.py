@@ -2054,6 +2054,11 @@ _MOBILE_HTML = r"""<!doctype html>
     .installHint[hidden] { display: none; }
     .installHintClose { flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: rgb(255 255 255 / 18%); color: #fff; font-size: 16px; line-height: 1; }
     /* 실시간 연결 표시 — 켜져 있으면 은은히 맥박, 끊기면 회색. 형이 "멈춘 것 같다"고 느낀 자리다. */
+    /* 알림 토글은 **어느 화면에서든** 보여야 한다. .usageBtn 은 기본이 숨김이고 대화 화면에서
+       .available 이 붙을 때만 뜨는 규칙이라, 그 클래스만 주면 영영 안 보인다(형: "모아보기랑
+       초록색 동그라미 밖에 안보이는데"). 모양은 물려받고 표시 규칙만 따로 쓴다. */
+    .usageBtn.notifyBtn { display: inline-flex; align-items: center; justify-content: center; }
+    .usageBtn.notifyBtn.active { color: #26845b; }
     .liveDot { width: 7px; height: 7px; margin-right: 2px; border-radius: 50%; background: #b6bec9; flex: none; align-self: center; }
     body[data-live="on"] .liveDot { background: #26845b; animation: livePulse 2.4s ease-in-out infinite; }
     @keyframes livePulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
@@ -2216,7 +2221,7 @@ _MOBILE_HTML = r"""<!doctype html>
           <!-- 살아있음 표시. 폴링이 조용히 돌던 시절엔 화면이 멈춘 건지 알 길이 없었다
                (형: "폴링중인게 보이지도 않으니 멈춘 것 같고"). 점 하나로 연결 상태를 늘 보여준다. -->
           <span class="liveDot" id="liveDot" title="실시간 연결" aria-hidden="true"></span>
-          <button class="usageBtn" id="notifyBtn" type="button" title="알림" aria-label="알림">&#128276;</button>
+          <button class="usageBtn notifyBtn" id="notifyBtn" type="button" title="알림" aria-label="알림">&#128276;</button>
           <button class="usageBtn" id="galleryBtn" type="button" title="이미지 모아보기" aria-label="이미지 모아보기" style="display:none">&#9635;</button>
           <button class="usageBtn" id="usageBtn" type="button" title="토큰 사용량" aria-label="토큰 사용량"><span class="usageRing" id="usageRing"><span class="usageRingNum" id="usageRingNum"></span></span></button>
         </div>

@@ -69,6 +69,11 @@ grep -q 'notifyBtn' <<<"$mobile_html" || { echo "FAIL: /mobile page missing noti
 grep -q '홈 화면에 추가한 뒤' <<<"$mobile_html" || { echo "FAIL: iOS 에서 안 되는 이유를 말하지 않는다"; exit 1; }
 grep -q 'https 주소' <<<"$mobile_html" || { echo "FAIL: http 접속에서 안 되는 이유를 말하지 않는다"; exit 1; }
 grep -q '/mobile/sw.js' <<<"$mobile_html" || { echo "FAIL: 서비스워커를 등록하지 않는다(잠긴 폰에 알림 불가)"; exit 1; }
+# 버튼이 **보여야** 쓸 수 있다. .usageBtn 은 기본이 display:none 이고 대화 화면에서 .available 이
+# 붙을 때만 뜬다 — 그 클래스만 주면 마크업엔 있는데 화면엔 영영 안 나온다(형이 실제로 겪었다).
+grep -q 'usageBtn notifyBtn' <<<"$mobile_html" || { echo "FAIL: 알림 버튼에 전용 표시 클래스가 없다"; exit 1; }
+grep -qE '\.usageBtn\.notifyBtn \{[^}]*display: inline-flex' <<<"$mobile_html" \
+  || { echo "FAIL: 알림 버튼이 숨김 규칙에 걸려 안 보인다"; exit 1; }
 # 전체보기 때문에 템플릿 리터럴이 됐다(`?all=1`) — 여전히 모바일 전용 경로를 쓴다는 게 요점.
 grep -q '/mobile/api/state' <<<"$mobile_html" || { echo "FAIL: /mobile page should fetch mobile-scoped state API"; exit 1; }
 grep -q 'showAll ? "?all=1" : ""' <<<"$mobile_html" || { echo "FAIL: 전체보기가 서버에 전달되지 않는다"; exit 1; }
