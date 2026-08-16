@@ -90,6 +90,12 @@ if (!/visibilityState === "visible"/.test(src)) { console.error("FAIL: 보이는
 if (!/watchingSession/.test(src)) { console.error("FAIL: 보고 있는 세션을 거르지 않는다"); process.exit(1); }
 if (!/notificationclick/.test(src)) { console.error("FAIL: 알림을 눌러도 대화로 못 간다"); process.exit(1); }
 if (!/userVisibleOnly|showNotification/.test(src)) { console.error("FAIL: 알림을 안 띄운다"); process.exit(1); }
+// 아이콘이 없으면 브라우저 기본 아이콘으로 떠서 무슨 알림인지 알 수 없다(형: "아이콘 같은건 못넣나").
+if (!/icon:\s*NOTIFICATION_ICON/.test(src)) { console.error("FAIL: 알림에 아이콘이 없다"); process.exit(1); }
+if (!/badge:/.test(src)) { console.error("FAIL: 상태표시줄 배지 아이콘이 없다"); process.exit(1); }
+// 질문은 답할 때까지 일이 멈춘다 — 데스크톱에서 몇 초 만에 사라지면 놓친다.
+if (!/requireInteraction:\s*alert\.kind === "question"/.test(src)) {
+  console.error("FAIL: 질문 알림이 저절로 사라진다"); process.exit(1); }
 console.log("ok 서비스워커: 보는 대화는 안 울리고, 누르면 그 대화로 간다");
 '
 
