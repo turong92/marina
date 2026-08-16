@@ -225,6 +225,9 @@
       // queue/steer/started 는 서버가 이미 전달을 확정한 상태 — 에이전트가 현재 턴을 끝내야 트랜스크립트에
       // 나타나므로(긴 턴이면 수 분) 나이와 무관하게 제 라벨을 유지한다. 예전엔 10초 지나면 무조건
       // "전달 확인 안 됨" 으로 뒤집혀 큐 메시지가 오탐으로 실패처럼 보였다(형 피드백).
+      // accepted = 한가한 세션에 넣고 **도착까지 확인**했다. 예전엔 이것도 "대기열"로 떠서
+      // 놀고 있던 세션에 보내도 줄 선 것처럼 보였다(형: "바로바로 접수된거로 표현").
+      if (delivery === "accepted") return "접수됨";
       if (delivery === "steer") return "현재 작업에 전달됨";
       if (delivery === "queue") return "작업 끝나면 전달돼요 · 대기열";
       if (delivery === "started") return "새 작업 시작 중";
@@ -234,7 +237,7 @@
       if (delivery === "held-compacting") return "컨텍스트가 가득 차 압축 중 · 끝나면 자동 전달";
       // delivery 미확정(서버 응답 전 pending)만 오래되면 실패로 표기.
       if (createdAt && Date.now() - Number(createdAt) > 15000) return "전달 확인 안 됨";
-      return "전송 확인 중";
+      return "보내는 중…";   // 서버 응답 전. "확인 중"은 안 간 것처럼 읽혀 불안하다
     }
     function runtimeLabel(runtime, includeSource="") {
       const parts = [includeSource, host.displayModel(runtime && runtime.model), runtime && runtime.effort].filter(Boolean);
@@ -628,6 +631,16 @@
         : `<div class="questionBlocked">${esc((state && state.reason) || "여기서는 답할 수 없어요")}</div>`;
       return `<div class="questionCard${submitted ? " submitted" : ""}">${blocks}${submit}${busy}${failed}${note}</div>`;
     }
+    // THINKING_BUBBLE_START
+    // 답이 나올 자리에서 도는 표시. 헤더의 "작업 중…" 은 대화와 떨어져 있어 와닿지 않는다
+    // (형: "채팅창 너 대답 부분에 작업중 돌리는 것 처럼 생각 중 같은거 넣자").
+    function renderThinking(label) {
+      const text = String(label || "생각 중");
+      return `<div class="thinkingBubble" role="status" aria-live="polite">`
+        + `<span class="thinkingDots"><i></i><i></i><i></i></span>`
+        + `<span class="thinkingLabel">${esc(text)}</span></div>`;
+    }
+    // THINKING_BUBBLE_END
     // ANSWERED_QUESTION_START
     // 이미 답한 질문 — 대화에 남는 기록이다. 선택지를 다시 다 늘어놓지 않고 **물은 것과 고른 것**만
     // 보여준다(그게 형이 못 보고 있던 두 가지다). 아직 답 전이면 기다리는 중이라고 말한다.
@@ -715,7 +728,7 @@
     configure, setDetailScope, noteDetailToggle, IMAGE_EXT_RE, collectViewables,
     esc, renderInlineMarkdown, renderRichText, mdTableCells, mdIsTableRow, mdIsTableDivider,
     mdListMarker, renderMarkdownBlocks, mdRenderList, renderActivityCode, sessionSource,
-    pendingDeliveryLabel, runtimeLabel, mergeHistoryTurns, timelineFromTurns,
+    pendingDeliveryLabel, renderThinking, runtimeLabel, mergeHistoryTurns, timelineFromTurns,
     mergeTimelineItems, exchangeSections, exchangeRuns, exchangeRuntime, renderTurnMeta,
     renderLiveAction, extractAttachments, renderTurnAttachments, renderTimelineImages,
     renderTimelineMessage, timelineDetailAttrs, activityItemKey, activityItemFingerprint,

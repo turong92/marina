@@ -53,7 +53,9 @@ def target(sid):
 # ① 건강한 세션: 확인되고 종전대로 전달된다.
 mm.term_input = echoing_term_input
 out = mm.mobile_send(target("sid-ok"))
-assert out["ok"] and out["delivery"] == "queue", out
+# 한가한 세션에 넣고 도착까지 확인했으면 "대기열"이 아니라 **접수됨**이다 — 줄을 선 것과
+# 바로 받은 것은 다른 사실이고, 화면 문구가 그걸 구분해야 한다.
+assert out["ok"] and out["delivery"] == "accepted", out
 assert mm.mobile_outbox_pending(root, "claude", "sid-ok") == [], "확인됐는데 보류함에 남았다"
 
 # ② 삼키는 세션 + 컨텍스트 여유: held 로 정직하게 응답하고 메시지는 보류함에 보존된다.

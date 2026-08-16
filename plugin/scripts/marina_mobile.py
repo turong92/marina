@@ -1198,7 +1198,10 @@ def _deliver_to_live_agent(root: Path, source: str, sid: str, tid: str, text: st
     offset = transcript.stat().st_size
     delivery = _deliver_agent_input(tid, source, text, requested)
     if _confirm_text_delivery(transcript, offset, text):
-        return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
+        # 여기까지 왔다 = 한가한 세션에 넣고 도착까지 확인했다. 그런데 claude 의 전달 방식은
+        # 언제나 "queue" 라, 화면이 놀고 있던 세션에도 "작업 끝나면 전달돼요 · 대기열"을 띄웠다
+        # (형: "바로바로 접수된거로 표현"). 줄을 선 것과 바로 받은 것은 다른 사실이다.
+        return {"ok": True, "tid": tid, "opened": False, "delivery": "accepted"}
     if from_outbox:
         raise ValueError("전달 확인 실패 — 보류 유지")
     since = float(_outbox_record(source, sid).get("compactingSince") or 0)
@@ -2050,6 +2053,16 @@ _MOBILE_HTML = r"""<!doctype html>
     .questionOpt.chosen { border-color: #0b63ce; background: #e3efff; box-shadow: inset 0 0 0 1px #0b63ce; }
     /* 이미 답한 질문 = 기록이다. 누를 수 없다는 게 보여야 하고(커서·최소높이 없음), 대화 흐름을
        끊지 않게 라이브 카드보다 조용해야 한다. */
+    /* 생각 중 — 답변 쪽(왼쪽)에 붙여 "여기 답이 나온다"를 암시한다. */
+    #thinkingSlot { padding: 0 10px 8px; }
+    #thinkingSlot[hidden] { display: none; }
+    .thinkingBubble { display: inline-flex; gap: 8px; align-items: center; padding: 8px 11px; border: 1px solid #dde2ea; border-radius: 12px 12px 12px 3px; background: #fff; color: #5b6472; font-size: 12px; }
+    .thinkingDots { display: inline-flex; gap: 3px; }
+    .thinkingDots i { width: 5px; height: 5px; border-radius: 50%; background: #8b95a5; animation: thinkingPulse 1.2s ease-in-out infinite; }
+    .thinkingDots i:nth-child(2) { animation-delay: .15s; }
+    .thinkingDots i:nth-child(3) { animation-delay: .3s; }
+    @keyframes thinkingPulse { 0%, 80%, 100% { opacity: .28; transform: translateY(0); } 40% { opacity: 1; transform: translateY(-2px); } }
+    @media (prefers-reduced-motion: reduce) { .thinkingDots i { animation: none; opacity: .6; } }
     .installHint { position: fixed; left: 8px; right: 8px; bottom: max(10px, env(safe-area-inset-bottom)); z-index: 21; display: flex; gap: 8px; align-items: center; padding: 9px 10px; border: 1px solid #b9d4f2; border-radius: 9px; background: #0b63ce; color: #fff; box-shadow: 0 6px 20px rgb(23 25 31 / 22%); font-size: 12px; line-height: 1.45; }
     .installHint[hidden] { display: none; }
     .installHintClose { flex: none; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 6px; background: rgb(255 255 255 / 18%); color: #fff; font-size: 16px; line-height: 1; }
@@ -2137,6 +2150,7 @@ _MOBILE_HTML = r"""<!doctype html>
       .chatComposer { background: #171d27; border-color: #303846; }
       .attachBtn { background: #222c3a; color: #c4ccd8; border-color: #3a4453; }
       .attachChip { background: #1c2431; border-color: #343f4e; color: #c4ccd8; }
+      .thinkingBubble { background: #171c24; border-color: #2b3340; color: #9aa5b4; }
       .questionCard { background: #16202e; border-color: #2c4a6b; }
       .questionText { color: #e8edf4; }
       .questionOpt { background: #1c2431; border-color: #3a4453; }
@@ -2265,6 +2279,9 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="historyStatus" id="historyStatus" aria-live="polite"></div>
         <div class="trimNotice" id="trimNotice"></div>
         <div class="turns" id="turns"></div>
+        <!-- 답이 나올 자리에서 도는 표시. 대화 목록의 형제로 둔다 — 목록 안에 넣으면
+             재조정기가 모르는 자식이라 렌더마다 지워진다. -->
+        <div id="thinkingSlot" hidden></div>
         <button class="newMessagesBtn" id="newMessagesBtn" type="button">새 메시지</button>
     <button class="updateBanner" id="updateBanner" type="button">새 버전 · 탭하여 새로고침</button>
     <button class="cliUpdateBanner" id="cliUpdateBanner" type="button" hidden></button>
@@ -2534,15 +2551,19 @@ _MOBILE_HTML = r"""<!doctype html>
     // 폴백 카드는 대화 안에 있어 turns 를 다시 그려야 반영된다(렌더키가 liveAnswer 를 모르므로 강제).
     function repaintTurns() { turnsStructureKey = ""; renderTurns(selectedSession()); }
     async function submitLiveAnswer(payload) {
-      if (liveAnswer.sending) return;
-      liveAnswer.sending = true;
-      liveAnswer.failed = false;
+      if (liveAnswer.sending || liveAnswer.submitted) return;
+      // **누르는 즉시** 보낸 것으로 잠근다. 예전엔 서버 확인(최대 3.5초)을 기다린 뒤에야 카드가
+      // 바뀌어서, 그 사이 화면이 반응 없는 것처럼 보였다(형: "대화창에서 바로 안사라지는 느낌이
+      // 없게끔"). 확인은 뒤에서 하고, **실패했을 때만** 되돌린다.
+      markAnswerSubmitted(true, Date.now());
       repaintLiveQuestion();
       const body = payload || {answers: Array.from({length: liveAnswer.total}, (_, i) => liveAnswer.choices[i] || [])};
       const result = await answerQuestion(body);
       // settled === false → 상태파일이 그대로다 = 셀렉터가 안 움직였다. 카드를 되살려 다시 누르게 한다.
-      markAnswerSubmitted(Boolean(result) && result.settled !== false, Date.now());
-      repaintLiveQuestion();
+      if (!result || result.settled === false) {
+        markAnswerSubmitted(false, Date.now());
+        repaintLiveQuestion();
+      }
       load({quiet: true}).catch(() => {});
     }
     liveQuestionEl.addEventListener("click", event => {
@@ -2634,6 +2655,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const inboxSheet = document.getElementById("inboxSheet");
     const inboxList = document.getElementById("inboxList");
     const statusEl = document.getElementById("status");
+    const thinkingSlot = document.getElementById("thinkingSlot");
     const servicesSheet = document.getElementById("servicesSheet");
     const serviceList = document.getElementById("serviceList");
     const servicesSheetTitle = document.getElementById("servicesSheetTitle");
@@ -3058,7 +3080,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const {
       esc, renderInlineMarkdown, renderRichText, mdTableCells, mdIsTableRow, mdIsTableDivider,
       mdListMarker, renderMarkdownBlocks, mdRenderList, renderActivityCode, sessionSource,
-      pendingDeliveryLabel, runtimeLabel, mergeHistoryTurns, timelineFromTurns,
+      pendingDeliveryLabel, renderThinking, runtimeLabel, mergeHistoryTurns, timelineFromTurns,
       mergeTimelineItems, exchangeSections, exchangeRuns, exchangeRuntime, renderTurnMeta,
       renderLiveAction, extractAttachments, renderTurnAttachments, renderTimelineImages,
       renderTimelineMessage, timelineDetailAttrs, activityItemKey, activityItemFingerprint,
@@ -3392,13 +3414,35 @@ _MOBILE_HTML = r"""<!doctype html>
         delivery, failed: delivery === "failed", tid: tid || "", createdAt: Date.now(), target: target || null, root: root || "",
       }]).slice(-12);
     }
-    function selectAgentAfterSend(text, target, delivery="pending", tid="") {
+    // OPTIMISTIC_TURN_START  (테스트가 이 블록을 vm 에 싣는다)
+    // 보낸 즉시 세우고, 서버 응답이 오면 **같은 레코드에** 결과를 얹는다. 새로 만들면 같은 말이
+    // 두 번 보이고, 안 세우면 응답 전까지 화면이 죽은 것처럼 보인다.
+    function queueOptimisticTurn(key, text, target, root) {
+      queuePendingTurn(key, text, "pending", "", target, root);
+      const list = pendingTurns[key] || [];
+      return list.length ? list[list.length - 1].id : "";
+    }
+    function settleOptimisticTurn(key, id, delivery, tid) {
+      if (!id) return false;
+      const list = pendingTurns[key] || [];
+      const record = list.find(turn => turn.id === id);
+      if (!record) return false;              // 그새 확정돼 사라졌다 — 서버 행이 대신한다
+      record.delivery = delivery;
+      record.failed = delivery === "failed";
+      if (tid) record.tid = tid;
+      return true;
+    }
+    // OPTIMISTIC_TURN_END
+    function selectAgentAfterSend(text, target, delivery="pending", tid="", existingId="") {
       const root = selectedRoot();
       const current = selectedSession();
       const key = current && sameTarget(current.target, target) ? selectedSessionKey : agentSessionKey(target, root);
       selectedSessionKey = key;
       localStorage.setItem("marinaMobileSession", key);
-      queuePendingTurn(key, text, delivery, tid, target, root);
+      // 이미 낙관적으로 세워 둔 말풍선이 이 세션에 있으면 다시 만들지 않는다 — 만들면 같은 말이
+      // 두 개로 보인다(하나는 결과가 얹힌 것, 하나는 새로 만든 것).
+      const already = existingId && (pendingTurns[key] || []).some(turn => turn.id === existingId);
+      if (!already) queuePendingTurn(key, text, delivery, tid, target, root);
       const value = targetValue(target);
       localStorage.setItem("marinaMobileTarget", value);
       localStorage.setItem(targetKey(root), value);
@@ -3431,14 +3475,15 @@ _MOBILE_HTML = r"""<!doctype html>
       if (root) localStorage.setItem("marinaMobileRoot", root);
       return key;
     }
-    function selectReturnedTerm(tid, text, target=null, delivery="pending") {
+    function selectReturnedTerm(tid, text, target=null, delivery="pending", existingId="") {
       if (target && target.type === "agent") {
-        selectAgentAfterSend(text, target, delivery, tid);
+        selectAgentAfterSend(text, target, delivery, tid, existingId);
         return;
       }
       const root = selectedRoot();
       const key = ensureLiveTermSession(tid, root, text, target);
-      queuePendingTurn(key, text, delivery, tid, target || {type: "term", tid}, root);
+      const already = existingId && (pendingTurns[key] || []).some(turn => turn.id === existingId);
+      if (!already) queuePendingTurn(key, text, delivery, tid, target || {type: "term", tid}, root);
       const value = targetValue(target || {type: "term", tid});
       localStorage.setItem("marinaMobileTarget", value);
       localStorage.setItem(targetKey(root), value);
@@ -3952,6 +3997,32 @@ _MOBILE_HTML = r"""<!doctype html>
       });
       [...turnsEl.children].forEach(node => { if (!kept.has(node)) turnsEl.removeChild(node); });
     }
+    // THINKING_STATE_START  (테스트가 이 블록을 vm 에 싣는다)
+    // 언제 "생각 중"을 보일까. 헤더의 작업중 표시는 대화와 떨어져 있어 와닿지 않았다.
+    //  · 에이전트 대화일 때만(터미널·셸엔 '생각'이 없다)
+    //  · 서버가 working 이거나, 방금 보내서 아직 서버가 못 따라잡았을 때(낙관적)
+    //  · 답을 기다리는 질문이 떠 있으면 **안 보인다** — 그건 내가 아니라 형 차례다
+    function thinkingLabelFor(session, optimisticWorking, now) {
+      if (!session || session.kind !== "agent") return "";
+      const status = String(session.status || "");
+      if (session.pendingQuestion) return "";
+      if (status === "working") return "생각 중";
+      if (optimisticWorking) return "생각 중";
+      return "";
+    }
+    function renderThinkingSlot(session, optimisticWorking) {
+      const label = thinkingLabelFor(session, optimisticWorking, Date.now());
+      if (!label) {
+        if (!thinkingSlot.hidden) { thinkingSlot.hidden = true; thinkingSlot.innerHTML = ""; }
+        return;
+      }
+      // 같은 라벨이면 DOM 을 건드리지 않는다 — 매 폴마다 갈아끼우면 애니메이션이 처음으로 튄다.
+      if (thinkingSlot.dataset.label === label && !thinkingSlot.hidden) return;
+      thinkingSlot.dataset.label = label;
+      thinkingSlot.innerHTML = renderThinking(label);
+      thinkingSlot.hidden = false;
+    }
+    // THINKING_STATE_END
     function renderTurns(session) {
       // 펼친 <details> 기억은 렌더러가 세션별로 들고 있다 — 그릴 때마다 스코프를 맞춰 준다.
       setDetailScope(selectedSessionKey);
@@ -4398,6 +4469,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const running = isAgent && session.controllable && session.status === "working";
       stopBtn.style.display = running ? "inline-block" : "none";
       if (!sending) statusEl.textContent = optimisticWorking ? "작업 중…" : sessionStatusText(session);
+      renderThinkingSlot(session, optimisticWorking);   // 대화 안에서도 같은 사실을 보여준다
       renderLiveQuestion(session);
     }
     function sourceOptions(session) {
@@ -4814,22 +4886,31 @@ _MOBILE_HTML = r"""<!doctype html>
       sending = true;
       sendBtn.disabled = true;
       retryBtn.style.display = "none";
+      // **누르는 즉시** 대화에 세운다. 서버 응답(그리고 그 안의 도착 확인)을 기다렸다가 그리면,
+      // 그 사이 화면엔 아무 일도 안 일어난다 — 형이 "바로 접수된 걸로 보이게" 라 한 자리다.
+      // 입력창도 지금 비운다(보낸 것처럼 보이는데 글자가 남아 있으면 두 번 보내게 된다).
+      const optimisticId = queueOptimisticTurn(requestContext.sessionKey, text, target, requestContext.root);
+      if (requestIsActive()) {
+        pendingAttachments = [];
+        renderAttachStrip();
+        promptInput.value = "";
+        autoGrowComposer();
+        closeSuggestions();
+        followLatest = true;
+        renderTurns(selectedSession());
+      }
       try {
         const d = await postSend(requestContext.root, target, outgoingText);
         localStorage.removeItem(requestContext.draftKey);
         if (requestIsActive()) {
-          pendingAttachments = [];
-          renderAttachStrip();
-          promptInput.value = "";
-          autoGrowComposer();
-          closeSuggestions();
           failedSend = null;
-          followLatest = true;
           // held = 세션이 입력을 안 받아 서버 보류함에 보존됨(회복 후 자동 전달). 압축 회복이
           // 시작됐으면 그 사실까지 라벨로 — "보냈다" 착시를 만들지 않는다.
           const delivery = d.delivery === "held" && d.compacting ? "held-compacting"
             : (d.delivery || (target.type === "agent" ? "started" : "sent"));
-          selectReturnedTerm(d.tid, text, target, delivery);
+          // 미리 세운 말풍선에 결과만 얹는다 — 여기서 새로 만들면 같은 말이 두 개로 보인다.
+          settleOptimisticTurn(requestContext.sessionKey, optimisticId, delivery, d.tid);
+          selectReturnedTerm(d.tid, text, target, delivery, optimisticId);
           statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(delivery) : `보냄 · ${d.tid}`;
           if (delivery === "held" || delivery === "held-compacting") showToast(pendingDeliveryLabel(delivery));
           if (target.type === "agent" && delivery !== "held" && delivery !== "held-compacting")
@@ -4839,7 +4920,9 @@ _MOBILE_HTML = r"""<!doctype html>
         setTimeout(() => load({quiet: true}).catch(() => {}), 1500);   // working 상태 빨리 잡기
       } catch (error) {
         failedSend = requestContext;
+        settleOptimisticTurn(requestContext.sessionKey, optimisticId, "failed", "");
         if (requestIsActive()) {
+          renderTurns(selectedSession());
           statusEl.textContent = `전송 실패 · ${String(error)}`;
           showToast(`전송 실패 · ${String(error)}`);
           retryBtn.style.display = "inline-block";
