@@ -172,10 +172,12 @@ class ChangeWatcher:
     """스냅샷을 떠서 비교하고 사건을 낸다. 훅이 찌르면 기다리지 않고 즉시 한 바퀴 돈다."""
 
     def __init__(self, snapshot: Callable[[], dict[str, Any]], bus: EventBus,
-                 interval: float = WATCH_INTERVAL_S) -> None:
+                 interval: float = WATCH_INTERVAL_S,
+                 interval_fn: Callable[[], float] | None = None) -> None:
         self._snapshot = snapshot
         self._bus = bus
         self._interval = interval
+        self._interval_fn = interval_fn
         self._previous: dict[str, Any] | None = None
         self._wake = threading.Event()
         self._lock = threading.Lock()
@@ -198,27 +200,50 @@ class ChangeWatcher:
         self._bus.publish(events)
         return events
 
+    def interval(self) -> float:
+        """지금 얼마나 자주 볼지. **아무도 안 듣고 있으면 느리게 돈다.**
+
+        듣는 사람이 없으면 사건을 즉시 만들 이유가 없다(훅이 찌르면 어차피 곧장 깬다).
+        실측: 0.3초 고정이면 코어의 5.4%를 계속 먹는다 — 노트북에서 이유 없이 낼 값이 아니다.
+        느리게 돌아도 캐시는 계속 데워져서 '오랜만에 열었을 때 첫 화면이 느린' 문제는 그대로 막힌다."""
+        if self._interval_fn is None:
+            return self._interval
+        try:
+            return max(self._interval, float(self._interval_fn()))
+        except Exception:
+            return self._interval
+
     def run_forever(self) -> None:
         while True:
             self.tick()
             # 훅이 찌르면 즉시 깨고, 아니면 주기만큼 잔다. 찔림이 몰리면 잠깐 뭉쳐 한 번만 돈다.
-            if self._wake.wait(self._interval):
+            if self._wake.wait(self.interval()):
                 self._wake.clear()
                 time.sleep(POKE_DEBOUNCE_S)
 
 
-def build_snapshot(mobile_state: Callable[[], dict[str, Any]],
-                   service_sessions: Callable[[], list[dict[str, Any]]]) -> dict[str, Any]:
+SERVICE_EVERY_N_TICKS = 10       # 서비스 상태는 대화만큼 자주 안 바뀐다 — 0.3초 × 10 = 3초
+
+
+def build_snapshot(watch_state: Callable[[], dict[str, Any]],
+                   service_sessions: Callable[[], list[dict[str, Any]]] | None = None,
+                   previous_services: dict[str, Any] | None = None) -> dict[str, Any]:
     """비교용 스냅샷 한 장. 실패한 쪽은 비워두고 나머지는 살린다 —
-    서비스 조회가 실패했다고 대화 갱신까지 멈추면 안 된다."""
+    서비스 조회가 실패했다고 대화 갱신까지 멈추면 안 된다.
+
+    service_sessions 가 None 이면 지난 서비스 표를 그대로 물려준다(이번 틱은 건너뛴다).
+    서비스 조회는 compose·git 을 타서 비싸다 — 0.3초마다 하면 배보다 배꼽이 커진다."""
     try:
-        sessions = _session_marks(mobile_state())
+        sessions = _session_marks(watch_state())
     except Exception:
         sessions = {}
-    try:
-        services = _service_marks(service_sessions())
-    except Exception:
-        services = {}
+    if service_sessions is None:
+        services = dict(previous_services or {})
+    else:
+        try:
+            services = _service_marks(service_sessions())
+        except Exception:
+            services = dict(previous_services or {})
     return {"sessions": sessions, "services": services}
 
 
@@ -238,9 +263,14 @@ def event_bus() -> EventBus:
         return _BUS
 
 
+IDLE_INTERVAL_S = 15.0           # 듣는 사람이 없을 때. 훅이 찌르면 어차피 즉시 깬다
+                                 # (3초로 뒀더니 하는 일 없이 코어의 2.7%를 계속 먹었다)
+
+
 def start_watching(snapshot: Callable[[], dict[str, Any]],
                    on_events: Callable[[list[dict[str, Any]]], None] | None = None,
-                   interval: float = WATCH_INTERVAL_S) -> ChangeWatcher:
+                   interval: float = WATCH_INTERVAL_S,
+                   interval_fn: Callable[[], float] | None = None) -> ChangeWatcher:
     """데몬 부팅 때 한 번. on_events 는 알림 판단층으로 가는 갈래다(버스와 별개로 받는다)."""
     global _WATCHER
     with _SINGLETON_LOCK:
@@ -259,7 +289,7 @@ def start_watching(snapshot: Callable[[], dict[str, Any]],
                         pass          # 알림이 실패해도 화면 갱신은 계속돼야 한다
                 return events
 
-        _WATCHER = _Watcher(snapshot, bus, interval)
+        _WATCHER = _Watcher(snapshot, bus, interval, interval_fn)
         threading.Thread(target=_WATCHER.run_forever, daemon=True, name="marina-events").start()
         return _WATCHER
 

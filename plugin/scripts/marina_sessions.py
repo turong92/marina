@@ -286,8 +286,14 @@ def append_console_log(payload: dict[str, Any]) -> dict[str, Any]:
 # 신선도 분리(실측): 깃 배지(dirty/ahead/branch)는 root 당 ~0.1s 로 싸서 짧게,
 # du(diskMb/cacheCats)는 root 당 ~1.5s 라 장수 캐시 + 만료 시 백그라운드 갱신.
 WORKTREE_INFO_TTL = 15.0
-# 이 나이를 넘으면 옛 값을 주지 않고 동기 계산한다(오래된 배지를 무한정 보여주지 않기 위해).
-WORKTREE_INFO_MAX_STALE = float(_env("WORKTREE_INFO_MAX_STALE", "120") or "120")
+# 이 나이를 넘으면 옛 값을 주지 않고 **동기로** 계산한다. 예전 값은 120초였는데, 그게
+# "오랜만에 열면 첫 화면이 한참 멈추는" 원인이었다(형 지적). 2분만 안 들어가도 모든 워크트리의
+# 캐시가 이 선을 넘고, 다음 요청 하나가 root 28개 × git ~24회를 통째로 기다린다(실측 19초).
+#
+# 배지(브랜치·dirty·ahead)는 몇 분 낡아도 해가 없고, 만료 즉시 백그라운드 갱신이 걸려 곧
+# 최신이 된다. 그러니 **먼저 보여주고 뒤에서 고치는** 쪽이 항상 낫다. 동기 계산은 캐시가
+# 아예 없을 때(첫 방문·데몬 재시작)만 남긴다.
+WORKTREE_INFO_MAX_STALE = float(_env("WORKTREE_INFO_MAX_STALE", "86400") or "86400")
 WORKTREE_DU_TTL = 600.0
 _du_inflight: set[str] = set()
 _du_lock = threading.Lock()

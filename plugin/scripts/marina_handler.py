@@ -2745,15 +2745,22 @@ def main() -> None:
     # 변화 감지 — 화면에 밀어주고(SSE), 사람을 불러야 하면 폰을 깨운다(푸시).
     # 이 루프가 없으면 폰은 계속 3초마다 물어봐야 하고, "방금 바뀌었다"를 아는 곳이 없어
     # 알림을 보낼 근거 자체가 생기지 않는다.
+    _tick = {"n": 0, "services": {}}
+
     def _events_snapshot() -> dict:
-        from marina_events import build_snapshot
-        from marina_mobile import mobile_state
+        from marina_events import SERVICE_EVERY_N_TICKS, build_snapshot
+        from marina_mobile import mobile_watch_state
 
         def services():
             memory = memory_snapshot()
             return [session_payload(root, memory=memory) for root in discover_roots()]
 
-        return build_snapshot(mobile_state, services)
+        # 세션은 매 틱, 서비스는 N 틱마다. 서비스 조회는 compose·git 을 타서 비싸다.
+        _tick["n"] += 1
+        due = _tick["n"] % SERVICE_EVERY_N_TICKS == 1
+        snapshot = build_snapshot(mobile_watch_state, services if due else None, _tick["services"])
+        _tick["services"] = snapshot["services"]
+        return snapshot
 
     def _on_events(events: list) -> None:
         from marina_events import _WATCHER
@@ -2773,8 +2780,15 @@ def main() -> None:
 
     def _events_loop() -> None:
         try:
-            from marina_events import start_watching
-            start_watching(_events_snapshot, _on_events)
+            from marina_events import IDLE_INTERVAL_S, WATCH_INTERVAL_S, event_bus, start_watching
+            from marina_push import subscriptions
+
+            def _pace() -> float:
+                # 듣는 사람(SSE 연결·등록된 폰)이 있을 때만 촘촘히 본다. 없으면 캐시만 데운다.
+                listening = event_bus().subscriber_count() > 0 or bool(subscriptions())
+                return WATCH_INTERVAL_S if listening else IDLE_INTERVAL_S
+
+            start_watching(_events_snapshot, _on_events, interval_fn=_pace)
         except Exception:
             pass             # 감지층이 못 떠도 폴링 화면은 그대로 돈다
 

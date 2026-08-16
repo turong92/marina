@@ -562,6 +562,36 @@ def mobile_set_hidden(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "keys": keys[:500]}
 
 
+def mobile_watch_state(refresh: bool = False) -> dict[str, Any]:
+    """변화 감지 전용 상태 — **git 을 부르지 않는다.**
+
+    감지 루프는 0.3초마다 돈다. 화면용 mobile_state 를 그대로 쓰면 worktree_info 가 딸려오고,
+    그 캐시는 15초 TTL 이라 매번 백그라운드 갱신이 걸린다. 실측: 워크트리 28개 기준
+    **초당 git 40회**가 쉬지 않고 돌았다(배포 전에 재서 잡았다).
+
+    감지에 필요한 건 세션의 상태·질문·마지막 활동뿐이다. 워크트리 별칭·브랜치·ahead 배지는
+    화면이 그릴 때만 있으면 된다."""
+    sessions: list[dict[str, Any]] = []
+    for root in discover_all_roots(refresh):
+        try:
+            for agent in agents_payload(root, refresh, False):
+                source = str(agent.get("source") or "")
+                sid = str(agent.get("sid") or "")
+                question = mobile_pending_question(source, sid)
+                sessions.append({
+                    "kind": "agent",
+                    "key": f"agent:{source}:{sid}:{root}",
+                    "root": str(root), "source": source, "sid": sid,
+                    "title": agent.get("title") or sid or source,
+                    "status": "blocked" if question else (agent.get("status") or "idle"),
+                    "ts": agent.get("ts") or 0,
+                    "pendingQuestion": question,
+                })
+        except Exception:
+            continue          # 워크트리 하나가 망가져도 나머지 감지는 계속된다
+    return {"sessions": sessions}
+
+
 def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, Any]:
     worktrees: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []
