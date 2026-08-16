@@ -234,4 +234,64 @@ grep -qF '작업 중이라 이번 응답이 끝난 뒤 적용합니다' <<<"$htm
 grep -qF '적용 확인이 안 돼요' <<<"$html" \
   || { echo "FAIL: 확인 실패를 화면이 말하지 않는다"; exit 1; }
 
+# 화면의 '현재 모델'은 **슬래시 명령 행**에서도 읽어야 한다 — 형: "적용한게 바로바로 안되네.
+# 다음 대화 치면 그 전 모델로 떴다가 답변 오면서 바뀌네".
+#
+# 모델이 적힌 assistant 행은 **다음 답변 때야** 생긴다. 반면 /model 실행 행은 즉시 남는다.
+# 응답 행만 보면 그 사이 내내 옛 모델을 보여준다(형이 본 그 지연).
+TMP2="$(mktemp -d)"
+trap 'rm -rf "$TMP2"' EXIT
+PYTHONPATH="$SCR" python3 - "$TMP2" <<'PY2'
+import json
+import sys
+from pathlib import Path
+
+import marina_sessions as ms
+
+tmp = Path(sys.argv[1])
+project = tmp / "projects" / ms._claude_project_slug(tmp / "wt")
+project.mkdir(parents=True, exist_ok=True)
+ms.CLAUDE_PROJECTS_DIR = tmp / "projects"
+sid = "sid-slash-0001"
+path = project / f"{sid}.jsonl"
+
+def write(*rows):
+    path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+
+def answered(model, effort):
+    return {"type": "assistant", "effort": effort, "message": {"model": model}}
+
+def slash(command, argument):
+    return {"type": "user", "message": {"content":
+            f"<command-name>{command}</command-name>\n<command-args>{argument}</command-args>"}}
+
+read = lambda: ms.agent_runtime_settings(tmp / "wt", "claude", sid)
+
+# ① 응답 행만 있으면 종전대로.
+write(answered("claude-fable-5", "high"))
+assert read() == {"model": "claude-fable-5", "effort": "high"}, read()
+
+# ② /model 을 친 직후 — 아직 답이 없어도 **바로** 새 모델로 보여야 한다.
+write(answered("claude-fable-5", "high"), slash("/model", "claude-opus-5"))
+assert read() == {"model": "claude-opus-5", "effort": "high"}, read()
+
+# ③ 모델만 바꿨으면 강도는 옛 응답 행에서 그대로 온다(한 행에서 둘 다 찾으려 하면 어긋난다).
+write(answered("claude-fable-5", "max"), slash("/model", "claude-opus-5"))
+assert read() == {"model": "claude-opus-5", "effort": "max"}, read()
+
+# ④ 강도만 바꾼 경우도 대칭으로.
+write(answered("claude-fable-5", "low"), slash("/effort", "high"))
+assert read() == {"model": "claude-fable-5", "effort": "high"}, read()
+
+# ⑤ 답이 오면 응답 행이 더 새 정보다 — 명령 행에 발목 잡히지 않는다.
+write(slash("/model", "claude-opus-5"), answered("claude-sonnet-5", "low"))
+assert read() == {"model": "claude-sonnet-5", "effort": "low"}, read()
+
+# ⑥ 다른 슬래시 명령은 설정과 무관하다.
+write(answered("claude-fable-5", "high"), slash("/compact", ""))
+assert read() == {"model": "claude-fable-5", "effort": "high"}, read()
+
+print("ok 현재 모델·강도를 슬래시 명령 행에서 즉시 읽는다")
+PY2
+
 echo "PASS test-agent-settings-live"

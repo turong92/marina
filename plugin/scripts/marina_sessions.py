@@ -2025,6 +2025,25 @@ def agent_activity(root: Path, source: str, sid: str) -> list[dict[str, Any]]:
     return []
 
 
+_SLASH_COMMAND_RE = re.compile(r"<command-name>([^<]*)</command-name>")
+_SLASH_ARGS_RE = re.compile(r"<command-args>([^<]*)</command-args>")
+
+
+def _slash_command_of(obj: dict[str, Any]) -> tuple[str, str]:
+    """실행된 슬래시 명령과 인자. CLI 는 실행 즉시 이 행을 남긴다(응답보다 먼저)."""
+    message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
+    content = message.get("content")
+    if isinstance(content, list):
+        content = " ".join(block.get("text", "") for block in content
+                           if isinstance(block, dict) and block.get("type") == "text")
+    text = str(content or "")
+    if "<command-name>" not in text:
+        return "", ""
+    name = _SLASH_COMMAND_RE.search(text)
+    args = _SLASH_ARGS_RE.search(text)
+    return (name.group(1).strip() if name else ""), (args.group(1).strip() if args else "")
+
+
 _RUNTIME_SETTINGS_CACHE: dict[str, tuple[tuple[int, int, int], dict[str, str]]] = {}
 _RUNTIME_SETTINGS_CACHE_MAX = 256
 
@@ -2058,6 +2077,17 @@ def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
             _RUNTIME_SETTINGS_CACHE[key] = (fingerprint, dict(value))
         return value
 
+    # 뒤에서부터 훑되 **모델과 강도를 따로** 채운다. 하나는 슬래시 명령으로, 다른 하나는 응답
+    # 행으로 오는 경우가 흔해서(예: /model 만 바꾼 직후) 한 행에서 둘 다 찾으려 하면 어긋난다.
+    found = {"model": "", "effort": ""}
+
+    def take(model: str, effort: str) -> bool:
+        if model and not found["model"]:
+            found["model"] = model
+        if effort and not found["effort"]:
+            found["effort"] = effort
+        return bool(found["model"] and found["effort"])
+
     for obj in _reverse_json_objects(path):
         if source == "claude" and obj.get("type") == "assistant":
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
@@ -2066,18 +2096,26 @@ def agent_runtime_settings(root: Path, source: str, sid: str) -> dict[str, str]:
             effort = str(obj.get("effort") or message.get("effort") or "")
             if model == "<synthetic>":   # Claude Code 합성 어시스턴트 메시지 — 실모델 아님, 더 뒤로 스캔
                 continue
+            if take(model, effort):
+                break
+        elif source == "claude" and obj.get("type") == "user":
+            # **슬래시 명령 행**도 읽는다. /model 을 치면 이 행은 즉시 남지만 모델이 적힌 응답
+            # 행은 다음 답변 때야 생긴다 — 그 사이 화면이 옛 모델을 보여준다(형: "다음 대화 치면
+            # 그 전 모델로 떴다가 답변 오면서 바뀌네"). 명령 행이 더 새 정보다.
+            command, argument = _slash_command_of(obj)
+            if command == "/model" and take(argument, ""):
+                break
+            if command == "/effort" and take("", argument):
+                break
         elif source == "codex" and obj.get("type") in ("turn_context", "event_msg"):
             payload = obj.get("payload") if isinstance(obj.get("payload"), dict) else {}
             if obj.get("type") == "event_msg" and payload.get("type") != "thread_settings_applied":
                 continue
             settings = payload.get("thread_settings") if isinstance(payload.get("thread_settings"), dict) else payload
-            model = str(settings.get("model") or "")
-            effort = str(settings.get("effort") or settings.get("reasoning_effort") or "")
-        else:
-            continue
-        if model or effort:
-            return remember({"model": model, "effort": effort})
-    return remember({"model": "", "effort": ""})
+            if take(str(settings.get("model") or ""),
+                    str(settings.get("effort") or settings.get("reasoning_effort") or "")):
+                break
+    return remember(dict(found))
 
 
 def _usage_token_count(usage: dict[str, Any], key: str) -> int:
