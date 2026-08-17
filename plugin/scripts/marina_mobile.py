@@ -34,6 +34,7 @@ from marina_sessions import (
     worktree_info,
     worktree_labels,
 )
+from marina_paths import write_meta
 from marina_state import MARINA_HOME, PORT
 from marina_term import (_agent_cli, term_await_redraw, term_input, term_kill, term_list,
                          term_open, term_output_mark, term_tail)
@@ -670,6 +671,21 @@ def mobile_set_archived(body: dict[str, Any]) -> dict[str, Any]:
     value = {"at": time.time(), "mark": current_room_mark(root)} if archived else None
     _settings_file_update(ARCHIVE_FILE, str(root), value)
     return {"ok": True, "archived": archived, "root": str(root)}
+
+
+def mobile_rename_room(body: dict[str, Any]) -> dict[str, Any]:
+    """방 이름을 바꾼다 — 저장 자리는 **워크트리 별칭**이다.
+
+    별칭은 웹 대시보드가 이미 쓰는 자리다. 새 저장소를 만들면 같은 것이 두 군데 살고, 웹에서
+    고친 이름과 폰에서 고친 이름이 갈라진다. 빈 이름은 지우기 — 자동 이름으로 돌아간다.
+
+    돌려주는 값은 **실제로 저장된 값**이다(write_meta 가 길이를 자른다). 입력을 그대로
+    돌려주면 폰에는 긴 이름이 떴다가 다음 폴에 짧게 바뀌어, 안 먹은 것처럼 보인다."""
+    root = safe_root(str(body.get("root") or ""))
+    # 폰 자판에서 공백이 잘 딸려 온다 — 가운데 중복 공백까지 한 번에 다듬는다.
+    name = " ".join(str(body.get("name") or "").split())
+    saved = write_meta(root, {"alias": name})
+    return {"ok": True, "root": str(root), "name": str(saved.get("alias") or "")}
 
 
 HIDDEN_FILE = MARINA_HOME / "hidden-sessions.json"
