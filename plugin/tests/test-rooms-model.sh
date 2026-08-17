@@ -95,4 +95,76 @@ assert str(root) not in rooms._changes_cache
 print("ok 변경 판정: 미커밋·앞선 커밋·캐시·실패 내성")
 PY
 
+# 방 조립 — 워크트리 하나 + 그 안의 세션들이 탭(스펙 §2).
+PYTHONPATH="$SCR" python3 - <<'PY'
+from pathlib import Path
+
+from marina_rooms import build_room, fold_status
+
+labels = {"id": "wt-1", "alias": "결제정리", "projectLabel": "mdc-main",
+          "sessionTitle": "결제 플로우 정리", "projectId": "p1", "source": "registry"}
+
+
+def no_questions(source, sid):
+    return None
+
+
+# ① 탭이 하나면 그 상태가 방 상태다.
+room = build_room(Path("/wt"), labels, [
+    {"source": "claude", "sid": "s1", "title": "결제 플로우 정리", "status": "working", "ts": 100},
+], has_changes=False, questions=no_questions)
+assert room["status"] == "작업중", room
+assert len(room["tabs"]) == 1 and room["tabs"][0]["primary"] is True
+assert room["lastAt"] == 100, room
+assert room["canShip"] is False, "배포는 아직 자리만 잡아둔다(스펙 확장 지점)"
+
+# ② 이름은 **하나**다 — 배경의 "이름이 세 번 반복된다"가 여기서 다시 나오면 안 된다.
+assert room["name"] == "결제정리", room["name"]
+assert "wt-1" not in room["name"] and "mdc-main" not in room["name"], room["name"]
+
+# ③ 탭이 여럿이면 **사람 조치가 필요한 것**이 방 상태로 올라온다(스펙 §2 우선순위).
+room = build_room(Path("/wt"), labels, [
+    {"source": "claude", "sid": "s1", "title": "A", "status": "idle", "ts": 100},
+    {"source": "codex", "sid": "s2", "title": "B", "status": "blocked", "ts": 50},
+], has_changes=False, questions=no_questions)
+assert room["status"] == "응답필요", room["status"]
+assert len(room["tabs"]) == 2
+
+# ④ primary = 마지막 활동이 가장 최근인 탭. 방을 열면 그게 먼저 열린다(스펙 §2).
+assert room["tabs"][0]["sid"] == "s1" and room["tabs"][0]["primary"] is True
+assert room["tabs"][1]["primary"] is False
+
+# ⑤ 답을 기다리는 질문이 있으면 그 탭은 응답필요다 — 실행 중이 아니라 형 차례다.
+def asking(source, sid):
+    return {"token": "q1"} if sid == "s1" else None
+
+
+room = build_room(Path("/wt"), labels, [
+    {"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 100},
+], has_changes=False, questions=asking)
+assert room["tabs"][0]["status"] == "응답필요", room["tabs"]
+assert room["status"] == "응답필요"
+
+# ⑥ 세션이 하나도 없는 워크트리도 방이다(아직 아무도 말 안 건 일감).
+room = build_room(Path("/wt"), labels, [], has_changes=False, questions=no_questions)
+assert room["tabs"] == [] and room["status"] == "대기", room
+
+# ⑦ 완료는 변경 유무로 갈린다(스펙 §4) — 조립 단계에서도 그대로.
+done = [{"source": "claude", "sid": "s1", "title": "A", "status": "completed", "ts": 10}]
+assert build_room(Path("/wt"), labels, done, has_changes=True, questions=no_questions)["status"] == "완료"
+assert build_room(Path("/wt"), labels, done, has_changes=False, questions=no_questions)["status"] == "대기"
+
+# ⑧ 이름이 없으면 세션 제목 → id 순으로 떨어진다(빈 이름은 아무것도 못 고르게 만든다).
+noname = build_room(Path("/wt"), {**labels, "alias": ""}, [], has_changes=False, questions=no_questions)
+assert noname["name"] == "결제 플로우 정리", noname["name"]
+bare = build_room(Path("/wt"), {"id": "wt-9"}, [], has_changes=False, questions=no_questions)
+assert bare["name"] == "wt-9", bare["name"]
+
+# ⑨ 접기 규칙 자체
+assert fold_status(["대기", "작업중"]) == "작업중"
+assert fold_status(["작업중", "문제"]) == "문제"
+assert fold_status([]) == "대기"
+print("ok 방 조립: 이름 하나·탭·우선순위·primary·질문·빈 방")
+PY
+
 echo "PASS test-rooms-model"

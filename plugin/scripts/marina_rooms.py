@@ -83,3 +83,51 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
     result = bool(dirty or ahead)
     _changes_cache[key] = (current, result)
     return result
+
+
+def fold_status(tab_statuses: list[str]) -> str:
+    """탭들의 상태를 방 상태 하나로. 사람 조치가 필요한 것이 위로 올라온다(스펙 §2).
+
+    방 목록에서 놓치면 안 되는 순서라, '가장 최근'이 아니라 '가장 급한' 것을 고른다."""
+    for candidate in ROOM_STATUS_ORDER:
+        if candidate in tab_statuses:
+            return candidate
+    return "대기"
+
+
+def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]], *,
+               has_changes: bool, questions: Callable[[str, str], Any]) -> dict[str, Any]:
+    """방 하나를 조립한다 — 워크트리 1개 + 그 안의 세션들(탭).
+
+    이름은 **하나**다. 배경에 적힌 "이름이 세 번 반복된다"가 여기서 다시 나오지 않도록,
+    별칭 → 세션 제목 → 워크트리 id 순으로 **한 줄만** 고른다. 슬러그는 상세에서만 쓴다.
+
+    questions 는 "이 세션이 답을 기다리는 질문이 있나"를 돌려주는 함수다. 있으면 그 탭은
+    실행 중이 아니라 **형 차례**이므로 응답필요로 본다."""
+    tabs: list[dict[str, Any]] = []
+    # 마지막 활동이 최근인 것부터 — 맨 앞이 방을 열었을 때 먼저 열리는 탭이다.
+    for agent in sorted(agents, key=lambda item: float(item.get("ts") or 0), reverse=True):
+        source, sid = str(agent.get("source") or ""), str(agent.get("sid") or "")
+        canon = "blocked" if questions(source, sid) else str(agent.get("status") or "idle")
+        tabs.append({
+            "source": source,
+            "sid": sid,
+            "title": str(agent.get("title") or sid or source),
+            "status": room_status(canon, has_changes),
+            "primary": not tabs,
+        })
+    name = (str(labels.get("alias") or "").strip()
+            or str(labels.get("sessionTitle") or "").strip()
+            or str(labels.get("id") or "").strip())
+    return {
+        "id": str(labels.get("id") or ""),
+        "name": name,
+        "project": str(labels.get("projectLabel") or ""),
+        "projectId": str(labels.get("projectId") or ""),
+        "root": str(root),
+        "status": fold_status([tab["status"] for tab in tabs]),
+        "tabs": tabs,
+        "lastAt": max((float(item.get("ts") or 0) for item in agents), default=0),
+        # 배포는 지금 만들지 않는다 — 자리만 잡아둔다(스펙 확장 지점).
+        "canShip": False,
+    }
