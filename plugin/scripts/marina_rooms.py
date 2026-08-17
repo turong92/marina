@@ -182,8 +182,11 @@ def attention_mark(status: str, tabs: list[dict[str, Any]]) -> str:
             f"{tab.get('sid') or ''}={tab.get('question') or int(float(tab.get('ts') or 0))}"
             for tab in tabs if str(tab.get("status") or "") == "응답필요"))
     if status == "문제":
-        return "f:" + ",".join(sorted(str(tab.get("sid") or "") for tab in tabs
-                                      if str(tab.get("status") or "") == "문제"))
+        # 시각을 함께 넣는다 — sid 만 쓰면 **같은 세션이 다시 실패해도** 지문이 그대로라
+        # 접어둔 방이 안 펴진다(응답필요 갈래와 같은 이유, 같은 처방).
+        return "f:" + ",".join(sorted(
+            f"{tab.get('sid') or ''}={int(float(tab.get('ts') or 0))}"
+            for tab in tabs if str(tab.get("status") or "") == "문제"))
     if status == "완료":
         return "done"
     return ""
@@ -199,7 +202,11 @@ def finalize_room(room: dict[str, Any]) -> dict[str, Any]:
 
     **hidden 탭은 세지 않는다.** 숨김의 뜻이 "나를 부르지 마라"이므로, 보이기만 하고 상태에는
     영향을 주지 않는다 — 그래야 보는 화면(전체보기/일반)에 따라 방 상태가 달라지지 않는다."""
-    counted = [tab for tab in room.get("tabs", []) if not tab.get("hidden")]
+    # 안 세는 탭이 두 종류다. **뜻이 달라서 따로 둔다** — hidden 은 형이 직접 숨긴 것이고
+    # (해제할 수 있다), stale 은 기준 방 밖(오래된 대화)이라 볼 수만 있는 것이다. 하나로
+    # 뭉치면 숨긴 적 없는 대화에 "숨김" 배지가 붙고 해제를 눌러도 안 없어진다.
+    counted = [tab for tab in room.get("tabs", [])
+               if not tab.get("hidden") and not tab.get("stale")]
     room["status"] = fold_status([str(tab.get("status") or "") for tab in counted])
     room["mark"] = attention_mark(room["status"], counted)
     room["lastAt"] = max((float(tab.get("ts") or 0) for tab in counted), default=0)

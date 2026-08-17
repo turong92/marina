@@ -801,7 +801,12 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                         extra = build_room(root, info, rest, has_changes=changed,
                                            questions=pending_question)["tabs"]
                         for tab in extra:
-                            tab["hidden"] = True
+                            # 왜 밖에 있었는지를 **구별해서** 적는다. 형이 숨긴 것은 해제할 수
+                            # 있지만, 오래돼서 기준 밖인 것은 해제할 대상이 아니다 — 뭉쳐 놓으면
+                            # 숨긴 적 없는 대화에 "숨김" 배지가 붙고 눌러도 안 없어진다.
+                            key = f"{tab.get('source')}:{tab.get('sid')}"
+                            tab["hidden"] = key in hide
+                            tab["stale"] = key not in hide
                             tab["primary"] = False
                         room["tabs"] = room["tabs"] + extra
                         finalize_room(room)     # 탭을 건드렸으면 부른다(값 셋이 같이 움직인다)

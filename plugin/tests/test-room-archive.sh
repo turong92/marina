@@ -164,6 +164,11 @@ assert 기본["status"] == 전체["status"] == "작업중", (기본["status"], �
 assert 기본["mark"] == 전체["mark"], "보는 화면에 따라 지문이 달라진다 — 접기가 안 먹는다"
 assert 기본["archived"] is True and 전체["archived"] is True, (기본["archived"], 전체["archived"])
 assert {t["sid"] for t in 전체["tabs"]} == {"s2", "오래된"}, 전체["tabs"]
+# 기준 밖이라 안 세는 것과 **형이 숨긴 것**은 다르다. 뭉쳐서 "숨김"이라고 하면, 숨긴 적 없는
+# 오래된 대화에 배지가 붙고 해제를 눌러도 안 없어진다(HIDDEN_FILE 에 없으니 no-op 이다).
+배지 = {t["sid"]: (t.get("hidden"), t.get("stale")) for t in 전체["tabs"]}
+assert 배지["오래된"] == (False, True), f"숨긴 적 없는 대화에 숨김 배지: {배지}"
+assert 배지["s2"] == (None, None) or 배지["s2"] == (False, False), 배지
 print("ok 아카이브: 기록·끈적한 복귀·해제·목록 반영·숨김·전체보기 왕복")
 PY
 

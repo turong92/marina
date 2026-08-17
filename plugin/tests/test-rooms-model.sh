@@ -263,6 +263,20 @@ assert 질문방["mark"] and 질문방["mark"] != 다른질문["mark"], (질문�
                    [{"source": "claude", "sid": "s2", "title": "B", "status": "failed", "ts": 5}],
                    has_changes=False, questions=no_questions)
 assert 실패1["mark"] != 실패2["mark"], (실패1["mark"], 실패2["mark"])
+# **같은 세션이 다시 실패**해도 구별된다 — sid 만 쓰면 지문이 그대로라 접어둔 방이 안 펴진다.
+재실패 = build_room(Path("/wt"), labels,
+                    [{"source": "claude", "sid": "s1", "title": "A", "status": "failed", "ts": 900}],
+                    has_changes=False, questions=no_questions)
+assert 실패1["mark"] != 재실패["mark"], (실패1["mark"], 재실패["mark"])
+
+# stale(기준 방 밖) 탭도 상태 계산에서 빠진다 — hidden 과 뜻은 다르지만 안 세는 건 같다.
+섞인방 = build_room(Path("/wt"), labels,
+                    [{"source": "claude", "sid": "s1", "title": "A", "status": "idle", "ts": 10}],
+                    has_changes=False, questions=no_questions)
+섞인방["tabs"].append({"source": "claude", "sid": "옛것", "status": "문제", "ts": 999, "stale": True})
+from marina_rooms import finalize_room
+finalize_room(섞인방)
+assert 섞인방["status"] == "대기" and 섞인방["lastAt"] == 10, 섞인방
 
 # 완료는 한 번뿐인 사건이라 고정값 — 완료인 채로 치운 방이 파일 시각이 갱신됐다고 다시
 # 들이밀리면 안 된다(그게 접기를 무의미하게 만든 예전 결함이다).
