@@ -842,7 +842,10 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                 "sessionTitle": title,
                 "agents": agents,
             })
-            for agent in agents:
+            # **all_agents** 를 쓴다(카드용 상위 3개가 아니라). 방의 4번째 탭을 눌렀을 때
+            # chooseSession 이 이 목록에서 세션을 못 찾으면 아무 일도 안 일어난다 —
+            # 탭은 안 잘랐는데 갈 방법이 없었다. 카드 목록은 worktrees[].agents(상위 3개)를 쓴다.
+            for agent in all_agents:
                 source = str(agent.get("source") or "")
                 sid = str(agent.get("sid") or "")
                 preview = str(agent.get("preview") or "")
@@ -2125,7 +2128,16 @@ _MOBILE_HTML = r"""<!doctype html>
                border-radius: 8px; background: transparent; color: inherit; font: inherit;
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
     .roomTab.current { border-color: #2f81f7; }
-    .roomTab.hidden { opacity: .55; }
+    .roomTabRow { display: flex; gap: 6px; align-items: stretch; }
+    .roomTabRow .roomTab { flex: 1 1 auto; min-width: 0; }
+    .roomTab.off, .roomTab.stale { opacity: .55; }
+    .roomTabUnhide { flex: 0 0 auto; padding: 0 10px; border: 1px solid var(--line);
+                     border-radius: 8px; background: transparent; color: inherit;
+                     font: inherit; font-size: 12px; cursor: pointer; }
+    .roomTabNote { flex: 0 0 auto; align-self: center; font-size: 11px; opacity: .6; }
+    .roomStartRow { display: flex; gap: 8px; padding: 0 8px 10px; }
+    .roomStart { flex: 1 1 0; padding: 10px; border: 1px dashed var(--line); border-radius: 8px;
+                 background: transparent; color: inherit; font: inherit; cursor: pointer; }
     .roomRow.archived { opacity: .55; }
     .roomEmpty { padding: 32px 16px; text-align: center; opacity: .7; line-height: 1.6; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
@@ -3456,19 +3468,42 @@ _MOBILE_HTML = r"""<!doctype html>
 
     // withArchived 는 "전체보기"에서 켜진다. 접은 방을 다시 볼 길이 없으면 접는 순간
     // 잃어버린 것과 같다 — 접기는 치우는 것이지 버리는 게 아니다.
-    function renderRooms(rooms, now, withArchived) {
-      const live = (rooms || []).filter(room => withArchived || !room.archived);
+    function renderRooms(rooms, now, withArchived, query, projectId) {
+      const q = String(query || "").trim().toLowerCase();
+      const live = (rooms || []).filter(room => {
+        if (!withArchived && room.archived) return false;
+        // 프로젝트 칩·검색창은 화면에 그대로 보인다 — 방 목록에 안 먹으면 UI 가 거짓말을 한다
+        // (칩이 개수를 광고하는데 눌러도 28개 그대로였다).
+        if (projectId && String(room.projectId || "") !== projectId) return false;
+        if (!q) return true;
+        const 안 = [room.name, room.shortName, room.project, room.root]
+          .concat((room.tabs || []).map(tab => tab.title));
+        return 안.some(value => String(value || "").toLowerCase().includes(q));
+      });
       if (!live.length) {
-        return '<div class="roomEmpty">아직 방이 없어요.<br />새 일감을 만들면 여기 나와요.</div>';
+        return q || projectId
+          ? '<div class="roomEmpty">찾는 게 없어요.</div>'
+          : '<div class="roomEmpty">아직 방이 없어요.<br />새 일감을 만들면 여기 나와요.</div>';
       }
+      // 모르는 상태는 **맨 뒤**다. indexOf 가 -1 이라 그냥 쓰면 문제 방보다 위로 올라간다 —
+      // 라벨은 "쉬는 중"으로 떨어뜨리면서 정렬만 최상단이면 앞뒤가 안 맞는다.
+      // 접어둔 방도 뒤로 보낸다. 치워둔 것이 첫 줄이 되면 접기의 뜻과 반대다.
+      const rankOf = room => {
+        const idx = ROOM_ORDER.indexOf(String(room.status || ""));
+        return (room.archived ? 100 : 0) + (idx < 0 ? ROOM_ORDER.length : idx);
+      };
       const sorted = live.slice().sort((a, b) => {
-        const rank = ROOM_ORDER.indexOf(a.status) - ROOM_ORDER.indexOf(b.status);
+        const rank = rankOf(a) - rankOf(b);
         return rank !== 0 ? rank : (b.lastAt || 0) - (a.lastAt || 0);
       });
       return sorted.map(room => {
         const tabs = room.tabs || [];
         // 대화가 하나면 개수를 말하지 않는다 — 방=대화 묶음이라는 건 여럿일 때만 뜻이 있다.
         const count = tabs.length > 1 ? " · 대화 " + tabs.length + "개" : "";
+        // 이름이 같은 방이 실제로 있다(실측: 'ZZe2e' 두 개). 프로젝트를 안 고른 동안에는
+        // 그게 유일한 구별 단서라 부제에 넣는다.
+        const where = (!projectId && room.project ? " · " + room.project : "")
+                    + (room.archived ? " · 접어둠" : "");
         const status = String(room.status || "대기");
         // 카드 몸통을 누르면 바로 대화로, ⋯ 를 누르면 방 안(다른 대화·이름·접기)으로.
         // 버튼 안에 버튼을 넣을 수 없어 형제로 두고 줄로 감싼다.
@@ -3477,7 +3512,7 @@ _MOBILE_HTML = r"""<!doctype html>
             <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
             <span class="roomBody">
               <span class="roomName">${esc(room.shortName || room.name || "")}</span>
-              <span class="roomMeta">${esc(roomStatusLabel(status) + count)}</span>
+              <span class="roomMeta">${esc(roomStatusLabel(status) + count + where)}</span>
             </span>
           </button>
           ${room.archived
@@ -3494,23 +3529,37 @@ _MOBILE_HTML = r"""<!doctype html>
     // 방을 여는 길이 둘인 이유: 방 대부분은 대화가 하나뿐이라(실측 28개 중 21개), 카드를
     // 누르면 바로 그 대화로 간다. 이름 고치기·접기·다른 대화는 ⋯ 로 이 패널을 열어서 한다.
     // 모두를 패널로 보내면 흔한 경우에 손가락이 한 번 더 든다.
-    function renderRoomTabs(room) {
+    function renderRoomTabs(room, sources) {
       const tabs = room.tabs || [];
+      // **새 대화를 시작할 길**이 여기 있어야 한다. 예전엔 세션 목록 안에만 있어서, 방 목록이
+      // 첫 화면이 된 순간 대화가 하나도 없는 방(실측 28개 중 14개)이 막다른 길이 됐다 —
+      // "대화를 시작해 보세요"라고 말해놓고 수단이 없었다.
+      const 시작 = (sources || []).map(item =>
+        `<button class="roomStart" type="button" data-room-launch="${esc(item.id)}">＋ ${esc(item.label)}</button>`
+      ).join("");
       const head = `<div class="roomHead">
         <span class="roomOpenTitle">${esc(room.name || room.shortName || "")}</span>
         <button class="iconBtn" type="button" data-rename="${esc(room.root)}" title="이름 바꾸기" aria-label="이름 바꾸기">✎</button>
         <button class="iconBtn" type="button" data-archive="${esc(room.root)}" title="접어두기" aria-label="접어두기">↓</button>
         <button class="iconBtn" type="button" data-room-close="1" title="닫기" aria-label="닫기">✕</button>
       </div>`;
+      const 시작줄 = 시작 ? `<div class="roomStartRow">${시작}</div>` : "";
       if (!tabs.length) {
-        return head + '<div class="roomEmpty">대화를 시작해 보세요.</div>';
+        return head + 시작줄 + '<div class="roomEmpty">아직 대화가 없어요.</div>';
       }
       const strip = tabs.map(tab => {
         const key = `${tab.source}:${tab.sid}`;
-        const cls = "roomTab" + (tab.primary ? " current" : "") + (tab.hidden ? " hidden" : "");
-        return `<button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>`;
+        const cls = "roomTab" + (tab.primary ? " current" : "") + (tab.hidden ? " off" : "")
+                  + (tab.stale ? " stale" : "");
+        // 숨긴 대화는 **되살릴 손잡이**를 같이 준다. 예전엔 세션 카드 롱프레스에만 있어서,
+        // 방 화면에서는 숨긴 것이 영영 잠겼다. 무엇 때문에 안 세는지도 글자로 말해준다 —
+        // 흐리기만 하면 "접힘"인지 "숨김"인지 구별이 안 된다.
+        const 꼬리 = tab.hidden
+          ? `<button class="roomTabUnhide" type="button" data-unhide="${esc(key)}">숨김 해제</button>`
+          : tab.stale ? '<span class="roomTabNote">오래됨</span>' : "";
+        return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
       }).join("");
-      return head + `<div class="roomTabs">${strip}</div>`;
+      return head + `<div class="roomTabs">${strip}</div>` + 시작줄;
     }
     // ROOM_TABS_END
 
@@ -5142,8 +5191,7 @@ _MOBILE_HTML = r"""<!doctype html>
       renderSessions();
       // 방 목록이 첫 화면이다(형 결정). 세션 목록은 지우지 않고 숨겨만 둔다 — 방 화면이
       // 이상하면 이 두 줄만 되돌리면 예전 화면으로 돌아간다.
-      roomList.innerHTML = renderRooms(state.rooms, Date.now() / 1000, showAll);
-      sessionList.hidden = true;
+      renderRoomList();
       renderInbox();
       const live = selectedSession();
       if (live) { heldSession = live; heldSessionAt = Date.now(); }
@@ -5465,6 +5513,7 @@ _MOBILE_HTML = r"""<!doctype html>
       renderProjectTabs();
       renderSourceTabs();
       renderSessions();
+      renderRoomList();     // 칩이 개수를 광고하는데 눌러도 목록이 그대로면 UI 가 거짓말이다
       loadServices(true);
     };
     sourceTabs.onclick = event => {
@@ -5724,6 +5773,32 @@ _MOBILE_HTML = r"""<!doctype html>
     // ROOM_ACTIONS_START  (테스트가 이 블록의 배선을 확인한다)
     let openRoomRoot = "";
 
+    // 방 목록 다시 그리기 — 폴·검색·필터가 모두 이 함수를 쓴다(규칙이 갈라지면 안 된다).
+    function renderRoomList() {
+      const 방들 = state.rooms || [];
+      roomList.innerHTML = renderRooms(방들, Date.now() / 1000, showAll,
+                                       sessionSearch.value, selectedProjectId);
+      // 방이 하나도 없으면 예전 세션 목록을 되살린다. 서버가 rooms 를 못 만들었을 때
+      // (옛 데몬·조립 실패) 빈 화면만 남으면 형은 앱이 고장난 줄 안다 — 목록이 안 뜨면
+      // 아무것도 못 하므로, 방은 부가정보고 세션 목록이 생명줄이다.
+      // 열어둔 패널도 같이 갱신한다 — 안 그러면 상태가 멈춘 화면을 보고 있게 되고,
+      // 그 사이 사라진 대화의 탭은 눌러도 아무 일이 안 난다.
+      if (openRoomRoot) {
+        const 열린방 = roomByRoot(openRoomRoot);
+        if (열린방) roomOpen.innerHTML = renderRoomTabs(열린방, launchSources());
+        else closeRoom();
+      }
+      const 방없음 = !방들.length;
+      sessionList.hidden = !방없음;
+      roomList.hidden = 방없음;
+      // 종류 탭(claude/codex/터미널)은 **세션** 개념이라 방 목록에는 안 먹는다. 보이기만 하고
+      // 아무 일도 안 하면 UI 가 거짓말을 하는 것이라, 방 목록일 때는 아예 숨긴다.
+      sourceTabs.hidden = !방없음;
+    }
+    function launchSources() {
+      const opts = state.agentOptions || {};
+      return Object.keys(opts).map(id => ({id, label: id === "claude" ? "Claude" : id === "codex" ? "Codex" : id}));
+    }
     function roomByRoot(root) {
       return (state.rooms || []).find(item => item.root === root) || null;
     }
@@ -5736,8 +5811,11 @@ _MOBILE_HTML = r"""<!doctype html>
       const room = roomByRoot(root);
       if (!room) return;
       openRoomRoot = root;
-      roomOpen.innerHTML = renderRoomTabs(room);
+      roomOpen.innerHTML = renderRoomTabs(room, launchSources());
       roomOpen.hidden = false;
+      // 패널은 목록 맨 위에 있다 — 아래쪽 방을 열면 화면 밖에서 열려서 "아무 일도 안 났다"로
+      // 보인다(실측: 목록을 1300px 내린 상태에서 열면 패널이 뷰포트 위 -1300px).
+      roomOpen.scrollIntoView({block: "nearest", behavior: "smooth"});
     }
     // 방 카드를 누르면 **바로 그 방의 대화로** 간다. 대부분의 방은 대화가 하나뿐이라,
     // 여기서 한 번 더 고르게 하면 흔한 경우에 손가락이 한 번 더 든다.
@@ -5757,9 +5835,18 @@ _MOBILE_HTML = r"""<!doctype html>
       chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
     });
     roomOpen.addEventListener("click", async event => {
-      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close]");
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide]");
       if (!target) return;
       if (target.hasAttribute("data-room-close")) { closeRoom(); return; }
+      if (target.hasAttribute("data-unhide")) {
+        const [source, sid] = String(target.getAttribute("data-unhide")).split(":");
+        await unhideSession(openRoomRoot, source, sid);
+        return;
+      }
+      if (target.hasAttribute("data-room-launch")) {
+        await launchAgent(openRoomRoot, target.getAttribute("data-room-launch"), target);
+        return;
+      }
       if (target.hasAttribute("data-rename")) { await renameRoom(target.getAttribute("data-rename")); return; }
       if (target.hasAttribute("data-archive")) { await archiveRoom(target.getAttribute("data-archive")); return; }
       const [source, sid] = String(target.getAttribute("data-tab") || "").split(":");
@@ -5781,6 +5868,20 @@ _MOBILE_HTML = r"""<!doctype html>
         await load({force: true});   // 접었는데 그대로 있으면 안 먹은 걸로 보인다
       } catch (error) {
         showToast(`접기 실패 · ${String(error)}`);
+      }
+    }
+
+    // 숨김 해제 — 세션 카드 롱프레스가 쓰던 표면과 같은 것을 쓴다(규칙이 갈라지지 않게).
+    async function unhideSession(root, source, sid) {
+      if (!root || !source || !sid) return;
+      try {
+        const r = await fetch("/mobile/api/hidden", {method: "POST", headers: headers(true),
+                                                     body: JSON.stringify({root, source, sid, hidden: false})});
+        if (!r.ok) throw new Error(await responseError(r));
+        await load({force: true});
+        if (openRoomRoot === root) openRoom(root);
+      } catch (error) {
+        showToast(`숨김 해제 실패 · ${String(error)}`);
       }
     }
 
@@ -6027,7 +6128,8 @@ _MOBILE_HTML = r"""<!doctype html>
     stopBtn.onclick = interruptCurrentTurn;
     rootSelect.onchange = () => { rememberRoot(); render(); };
     targetSelect.onchange = () => { rememberTarget(); render(); };
-    sessionSearch.oninput = renderSessions;
+    // 검색은 방 목록에도 먹어야 한다 — 안 그러면 입력해도 28개 그대로다.
+    sessionSearch.oninput = () => { renderSessions(); renderRoomList(); };
     turnsEl.addEventListener("scroll", () => {
       if (suppressScrollTracking) return;
       followLatest = atPageBottom();

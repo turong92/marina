@@ -85,6 +85,35 @@ assert.match(전체, /roomRow[^"]*archived/, "접힌 방이 눈으로 구분되�
 // ⑧ 방이 하나도 없으면 **빈 화면이 아니라 말을 한다**(고장으로 보이면 안 된다).
 assert.match(renderRooms([], 1000), /아직/);
 
+// ⑧-b 모르는 상태는 **맨 뒤**다. indexOf 가 -1 이라 그냥 쓰면 문제 방보다 위로 올라간다 —
+// 라벨은 "쉬는 중"으로 떨어뜨리면서 정렬만 최상단이면 앞뒤가 안 맞는다.
+const 섞임 = renderRooms([
+  {root: "/1", shortName: "모르는것", status: "wat", tabs: [], lastAt: 9, archived: false},
+  {root: "/2", shortName: "막힌것", status: "문제", tabs: [], lastAt: 1, archived: false},
+], 1000);
+assert.ok(섞임.indexOf("막힌것") < 섞임.indexOf("모르는것"), "모르는 상태가 문제 방보다 위에 있다");
+
+// ⑧-c 접어둔 방은 전체보기에서도 **맨 뒤**다. 치워둔 것이 첫 줄이면 접기의 뜻과 반대다.
+const 접힘섞임 = renderRooms([
+  {root: "/3", shortName: "접은급한것", status: "응답필요", tabs: [], lastAt: 9, archived: true},
+  {root: "/4", shortName: "살아있는것", status: "대기", tabs: [], lastAt: 1, archived: false},
+], 1000, true);
+assert.ok(접힘섞임.indexOf("살아있는것") < 접힘섞임.indexOf("접은급한것"), "접은 방이 맨 위에 있다");
+
+// ⑧-d 검색과 프로젝트 필터가 **방 목록에도 먹는다.** 화면에 그대로 보이는데 안 먹으면
+// UI 가 거짓말을 한다(칩이 개수를 광고하는데 눌러도 28개 그대로였다).
+const 둘 = [
+  {root: "/p1", shortName: "결제 정리", project: "mdc", projectId: "p1", status: "대기", tabs: [], lastAt: 2},
+  {root: "/p2", shortName: "슬랙 분석", project: "marina", projectId: "p2", status: "대기", tabs: [], lastAt: 1},
+];
+assert.doesNotMatch(renderRooms(둘, 1000, false, "슬랙"), /결제 정리/, "검색이 방 목록에 안 먹는다");
+assert.match(renderRooms(둘, 1000, false, "슬랙"), /슬랙 분석/);
+assert.doesNotMatch(renderRooms(둘, 1000, false, "", "p1"), /슬랙 분석/, "프로젝트 필터가 안 먹는다");
+assert.match(renderRooms(둘, 1000, false, "없는말"), /찾는 게 없어요/, "검색 결과 없음과 방 없음은 다른 말이다");
+
+// ⑧-e 이름이 같은 방이 실제로 있다(실측 'ZZe2e' 두 개) — 프로젝트가 유일한 구별 단서다.
+assert.match(renderRooms(둘, 1000), /mdc/);
+
 // ⑨ 이름에 태그가 들어 있어도 화면을 깨뜨리지 못한다 — 이름은 형이 친 프롬프트라 무엇이든 온다.
 const 위험 = renderRooms([{root: "/x", shortName: "<img src=x onerror=alert(1)>", status: "대기",
                            tabs: [], lastAt: 1, archived: false}], 1000);
@@ -139,15 +168,28 @@ assert.match(html, /data-archive="\/b"/);
 // ⑤ 방 안에서는 **원래 이름**을 보여준다(줄이는 건 목록에서만).
 assert.ok(html.includes("배포 파이프라인 통합 대시보드"), "방 안에서도 이름이 잘려 있다");
 
-// ⑥ 대화가 없는 방이면 말을 건다 — 빈 화면은 고장으로 보인다.
-assert.match(renderRoomTabs({root: "/z", name: "새방", tabs: []}), /대화를 시작/);
+// ⑥ 대화가 없는 방에는 **시작할 수단**이 있어야 한다. 예전엔 "대화를 시작해 보세요"라고
+// 말해놓고 버튼이 없었다 — 실측 28개 방 중 14개가 그런 막다른 길이었다.
+const 빈방 = renderRoomTabs({root: "/z", name: "새방", tabs: []}, [{id: "claude", label: "Claude"}]);
+assert.match(빈방, /data-room-launch="claude"/, "새 대화를 시작할 버튼이 없다");
+assert.match(빈방, /아직 대화가 없어요/);
+// 대화가 있는 방에서도 새로 시작할 수 있어야 한다(한 방에 여러 대화가 스펙의 전제다).
+assert.match(renderRoomTabs({root: "/y", name: "y", tabs: [
+  {source: "claude", sid: "s1", title: "A", status: "대기", primary: true},
+]}, [{id: "codex", label: "Codex"}]), /data-room-launch="codex"/);
 
-// ⑦ 숨긴 대화는 표시가 남는다(전체보기에서 꺼내 정리하라고).
+// ⑦ 숨긴 대화는 **되살릴 손잡이**를 같이 준다. 예전엔 세션 카드 롱프레스에만 있어서 방
+// 화면에서는 숨긴 것이 영영 잠겼다. 왜 안 세는지도 글자로 말한다 — 흐리기만 하면
+// "접힘"인지 "숨김"인지 구별이 안 된다.
 const 숨김낀 = renderRoomTabs({root: "/h", name: "h", tabs: [
   {source: "claude", sid: "a", title: "A", status: "대기", primary: true},
   {source: "claude", sid: "b", title: "B", status: "대기", hidden: true},
+  {source: "claude", sid: "c", title: "C", status: "대기", stale: true},
 ]});
-assert.match(숨김낀, /roomTab[^"]*hidden/);
+assert.match(숨김낀, /data-unhide="claude:b"/, "숨긴 대화를 되살릴 방법이 없다");
+assert.match(숨김낀, /숨김 해제/);
+assert.match(숨김낀, /오래됨/, "왜 안 세는지 말해주지 않는다");
+assert.doesNotMatch(숨김낀, /data-unhide="claude:c"/, "오래된 것은 숨긴 게 아니라 해제할 게 없다");
 console.log("ok 방 열기: 탭 전부·현재 표시·이름 바꾸기·접기");
 ''')
 PY

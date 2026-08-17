@@ -43,7 +43,26 @@ assert short_name("야") == "야"
 하나 = short_name("야 지금 결제 환불 정합성 고쳐줘")
 둘 = short_name("야 지금 결제 쿠폰 계산 고쳐줘")
 assert 하나 != 둘, (하나, 둘)
-print("ok 이름 줄이기: 첫 줄·군더더기 제거·단어 경계·별칭 보존")
+# ⑧ **URL·파일경로가 이름인 방이 실제로 있다.** 앞 22자만 남기면 앞이 같은 것들이 전부
+# 같은 이름이 된다 — 목록에서 구별이 안 된다. 뒤쪽(마지막 조각)이 실제 구별 정보다.
+u1 = short_name("https://github.com/anthropics/claude-code/issues/1234")
+u2 = short_name("https://github.com/anthropics/claude-code/pull/9999")
+assert u1 != u2, (u1, u2)
+p1 = short_name("@/Users/sumin/IdeaProjects/marina/plugin/scripts/a.py")
+p2 = short_name("@/Users/sumin/IdeaProjects/marina/plugin/tests/b.sh")
+assert p1 != p2, (p1, p2)
+
+# ⑨ 반면 **문장은 깨끗하게 자른다.** 끝 단어를 붙여 구별하는 방법도 해봤는데, 실제 프롬프트의
+# 마지막 낱말이 대개 의미 없는 조각이라("…서비스가… Or") 모든 긴 이름이 지저분해졌다.
+# 앞이 같은 문장 둘이 실제로 부딪히는 경우는 지금 데이터에 없고, 부딪히면 부제의 프로젝트
+# 이름과 ✎ 이름 바꾸기로 푼다 — 흔한 경우를 망치지 않는 쪽을 택했다.
+문장 = short_name("너는 CRABs 결제 도메인의 시니어 엔지니어다. 목표는 환불 정합성 개선")
+assert 문장.endswith("…") and " " not in 문장[-3:-1], 문장
+
+# ⑩ 그래도 목록 한 줄은 지킨다 — 길어지면 줄이는 뜻이 없어진다.
+for value in (u1, u2, p1, p2, 문장):
+    assert len(value) <= 30, (len(value), value)
+print("ok 이름 줄이기: 첫 줄·군더더기 제거·단어 경계·별칭 보존·충돌 회피")
 PY
 
 echo "PASS test-room-name"

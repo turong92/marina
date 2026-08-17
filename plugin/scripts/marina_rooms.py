@@ -181,9 +181,24 @@ def short_name(name: str, limit: int = 22) -> str:
     line = " ".join(words)
     if len(line) <= limit:
         return line
+    # **URL·파일경로는 앞이 거의 같다.** 앞 22자만 남기면 같은 저장소의 이슈와 PR 이,
+    # 같은 폴더의 두 파일이 똑같은 이름이 된다(실 데이터에 이미 그런 방이 있다).
+    # 이런 이름에서 구별 정보는 마지막 조각이다.
+    한덩어리 = " " not in line
+    if 한덩어리 and "/" in line:
+        머리, _, 꼬리 = line.partition("://")
+        조각 = (꼬리 or 머리).split("/")
+        끝 = next((part for part in reversed(조각) if part), "")
+        앞 = (조각[0] if 조각 else "")[:limit // 2]
+        if 끝 and 끝 != 앞:
+            return f"{앞}…/{끝}"[:limit + 8]
     cut = line[:limit]
     if " " in cut[1:]:
         cut = cut[:cut.rindex(" ")]
+    # 문장은 **깨끗하게** 자른다. 끝 단어를 붙여 구별하는 방법도 해봤는데, 실제 프롬프트의
+    # 마지막 낱말이 대개 의미 없는 조각이라("…서비스가… Or", "…시니어… 디렉터리:") 모든 긴
+    # 이름이 지저분해졌다. 앞이 같은 문장 둘이 실제로 부딪히는 경우는 지금 데이터에 없고,
+    # 부딪히면 부제의 프로젝트 이름과 ✎ 이름 바꾸기로 푼다 — 흔한 경우를 망치지 않는 쪽이다.
     return cut.rstrip() + "…"
 
 
