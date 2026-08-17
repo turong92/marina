@@ -124,9 +124,11 @@ assert one >= 3.0, one
 assert three > one, f"질문이 늘어도 상한이 그대로다: {one} → {three}"
 assert three >= one + 3.0, f"3개짜리에 여유가 너무 적다: {three}"
 assert mm._answer_confirm_timeout(0) == one, "질문 수가 0/1 이면 같은 상한"
-# 질문 사이 간격도 기본 입력 간격보다 넉넉해야 한다(다음 셀렉터가 그려질 틈).
-assert mm._ANSWER_NEXT_QUESTION_PAUSE_S > mm.AGENT_INPUT_SETTLE_S, \
-    "질문 사이 간격이 기본 입력 간격과 같다 — 다음 셀렉터가 그려지기 전에 키가 들어간다"
+# 질문 사이는 **자지 않는다** — 화면이 다시 그려지는 것을 보고 넘어간다
+# (test-answer-redraw-wait 가 실제 PTY 로 그 동작을 잠근다). 고정 sleep 으로 돌아가면 안 된다.
+assert not hasattr(mm, "_ANSWER_NEXT_QUESTION_PAUSE_S"), \
+    "질문 사이가 다시 고정 시간으로 돌아갔다 — 느린 화면에서 또 어긋난다"
+assert mm._ANSWER_REDRAW_TIMEOUT_S > 0, "다시 그리기를 기다리는 상한이 없다"
 print("ok 질문 수에 맞춰 기다린다")
 PY2
 

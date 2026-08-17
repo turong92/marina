@@ -509,6 +509,62 @@ def term_input(tid: str, data: str) -> dict[str, Any]:
     return {"ok": True}
 
 
+def term_output_mark(tid: str) -> int:
+    """지금까지 이 PTY 가 뱉은 총 바이트 수. 화면이 다시 그려졌는지 재는 기준점.
+
+    **관찰이 실패해도 예외를 던지지 않는다.** 화면을 못 본다고(만료·detached) 답 전송 자체가
+    깨지면 안 된다 — 그때는 못 기다릴 뿐 보내기는 해야 한다."""
+    try:
+        term = _get(tid)
+    except ValueError:
+        return -1
+    with term.cond:
+        return term.base + len(term.history)
+
+
+def term_await_redraw(tid: str, since: int, quiet: float = 0.12,
+                      timeout: float = 4.0, min_bytes: int = 32) -> bool:
+    """화면이 **다시 그려지고 잠잠해질 때까지** 기다린다.
+
+    왜 시계가 아니라 이걸 보나. 여러 질문짜리 폼은 답을 하나 확정할 때마다 다음 질문을 새로
+    그린다. 그 사이를 고정 시간으로 자면 느린 순간엔 그리기 전에 키가 들어가 어긋나고(실측
+    2026-08-17: 3개짜리 폼이 첫 시도에 실패), 빠른 순간엔 쓸데없이 기다린다. 출력이 오는 것이
+    곧 "그렸다"는 증거다 — 그걸 보고 움직인다.
+
+    quiet: 마지막 출력 이후 이만큼 조용하면 그리기가 끝난 것으로 본다(TUI 는 한 번에 여러
+    조각을 뱉는다).
+
+    min_bytes: **에코를 다시 그리기로 착각하지 않기 위한 문턱.** PTY 는 우리가 넣은 키를 그대로
+    되돌려준다(실측: Enter 를 넣자 0.22초 만에 출력이 왔는데 그건 에코였다). 선택지 한 판을 다시
+    그리면 수백 바이트가 오지만 에코는 한두 바이트다 — 그 차이로 가른다.
+
+    반환: 다시 그려지고 잠잠해졌으면 True, 상한까지 그만한 출력이 안 오면 False."""
+    if since < 0:
+        return False          # 기준점을 못 잡았다 = 관찰 불가. 기다리지 않고 진행한다.
+    try:
+        term = _get(tid)
+    except ValueError:
+        return False
+    deadline = time.monotonic() + timeout
+    start = since
+    saw_output = False
+    with term.cond:
+        while True:
+            current = term.base + len(term.history)
+            if current - start >= min_bytes:
+                saw_output = True
+                since = current
+                # 잠잠해질 때까지: 이 대기가 타임아웃으로 끝나면 더 온 게 없다는 뜻이다.
+                remaining = max(0.0, deadline - time.monotonic())
+                term.cond.wait(min(quiet, remaining))
+                if term.base + len(term.history) == since:
+                    return True
+                continue
+            if not term.alive or time.monotonic() >= deadline:
+                return saw_output
+            term.cond.wait(min(0.1, max(0.0, deadline - time.monotonic())))
+
+
 def term_resize(tid: str, cols: int, rows: int) -> dict[str, Any]:
     term = _get(tid)
     if term.alive and not term.detached:   # detached 는 실 fd 가 없어 ioctl 불가 — 무시(fail-graceful)

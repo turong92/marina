@@ -32,7 +32,8 @@ from marina_sessions import (
     worktree_labels,
 )
 from marina_state import MARINA_HOME, PORT
-from marina_term import _agent_cli, term_input, term_kill, term_list, term_open
+from marina_term import (_agent_cli, term_await_redraw, term_input, term_kill, term_list,
+                         term_open, term_output_mark)
 
 
 TOKEN_FILE = MARINA_HOME / "mobile-token"
@@ -1466,8 +1467,8 @@ def mobile_launch(body: dict[str, Any]) -> dict[str, Any]:
 _ANSWER_CONFIRM_BASE_S = 3.5
 _ANSWER_CONFIRM_PER_QUESTION_S = 2.0
 _ANSWER_CONFIRM_POLL_S = 0.15
-# 질문 사이 간격. 다음 셀렉터가 그려지기 전에 키를 넣으면 그 입력이 허공으로 간다.
-_ANSWER_NEXT_QUESTION_PAUSE_S = 0.45
+# 질문 사이는 **자지 않고** 화면이 다시 그려지길 기다린다(term_await_redraw).
+_ANSWER_REDRAW_TIMEOUT_S = 3.0     # 다음 질문이 그려지길 기다리는 상한
 
 
 def _answer_confirm_timeout(questions: int) -> float:
@@ -1649,13 +1650,17 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
     questions = pending.get("questions") or []
     # 계측: 다중선택이 "답이 아예 안 감" 으로 실패하는데 키·간격·정렬·훅데이터가 전부 정상으로 확인됐다.
     # 남은 미지는 구동 직전/직후의 실제 상태뿐이라, 어느 분기를 어떤 입력으로 탔는지 남긴다.
+    mark = term_output_mark(tid)      # -1 이면 관찰 불가 — 기다림 없이 진행한다(fail-open)
     _answer_log("drive: tid=%s answers=%r multi=%r before=%r" % (
         tid, answers, [bool(q.get("multiSelect")) if isinstance(q, dict) else None for q in questions], before))
     for position, picks in enumerate(answers):
         if position:
-            # 다음 질문의 셀렉터가 그려질 틈. 기본 입력 간격(0.16초)으로는 모자라서, 질문이
-            # 여러 개인 폼이 중간에 어긋났다(실측: 3개짜리가 첫 시도에 안 먹음).
-            time.sleep(_ANSWER_NEXT_QUESTION_PAUSE_S)
+            # **시계가 아니라 화면을 본다.** 답을 하나 확정하면 CLI 가 다음 질문을 새로 그린다 —
+            # 그 출력이 오고 잠잠해지는 것이 "그렸다"는 증거다. 고정 시간으로 자면 느린 순간엔
+            # 그리기 전에 키가 들어가 어긋나고(형이 본 그 오류), 빠른 순간엔 쓸데없이 기다린다.
+            # 못 기다려도 진행은 한다 — 여기서 멈추면 남은 질문에 아예 답을 못 한다.
+            term_await_redraw(tid, mark, timeout=_ANSWER_REDRAW_TIMEOUT_S)
+        mark = term_output_mark(tid)
         question = questions[position] if position < len(questions) else {}
         multi_select = bool(isinstance(question, dict) and question.get("multiSelect"))
         _drive_selector(tid, picks, multi_select)
