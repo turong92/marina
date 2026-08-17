@@ -87,6 +87,65 @@ console.log("ok 방 목록: 급한 순·한 줄 이름·사람 말·접힘 제�
 ''')
 PY
 
+# 방을 열면 그 안의 대화가 탭으로 뜬다(스펙 §2 "세션은 탭").
+python3 - "$SCR" <<'PY' | node
+import json
+import sys
+from pathlib import Path
+
+scripts = Path(sys.argv[1])
+src = (scripts / "marina_mobile.py").read_text(encoding="utf-8")
+chunk = src[src.find("// ROOM_TABS_START"):src.find("// ROOM_TABS_END")]
+if not chunk:
+    raise SystemExit("ROOM_TABS_START/END 경계가 없다")
+helpers = (scripts / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
+esc = helpers[helpers.find("// ESC_HELPERS_START"):helpers.find("// ESC_HELPERS_END")]
+print("const src = " + json.dumps(esc + chunk) + ";")
+print(r'''
+const vm = require("node:vm");
+const assert = require("node:assert/strict");
+const context = {};
+vm.createContext(context);
+vm.runInContext(`${src}
+this.renderRoomTabs = renderRoomTabs;`, context, {filename: "marina_mobile::roomtabs"});
+const {renderRoomTabs} = context;
+
+const room = {root: "/b", shortName: "배포", name: "배포 파이프라인 통합 대시보드", status: "응답필요",
+  tabs: [
+    {source: "claude", sid: "s1", title: "배포 파이프라인 통합", status: "응답필요", primary: true},
+    {source: "claude", sid: "s2", title: "환불 정합성", status: "완료", primary: false},
+  ]};
+const html = renderRoomTabs(room);
+
+// ① 탭이 **전부** 보인다 — 3개에서 자르면 4번째 대화에 갈 방법이 없다(1차에서 서버는 이미 안 자른다).
+assert.match(html, /data-tab="claude:s1"/);
+assert.match(html, /data-tab="claude:s2"/);
+
+// ② 어느 대화가 먼저 열리는지 표시된다.
+assert.match(html, /class="[^"]*roomTab[^"]*current/);
+
+// ③ 이름을 고칠 수 있다 — 자동으로 줄인 이름이 거슬릴 때의 출구다(형 결정).
+assert.match(html, /data-rename="\/b"/);
+
+// ④ 접을 수 있다 — 끝난 방을 치우는 유일한 길이다.
+assert.match(html, /data-archive="\/b"/);
+
+// ⑤ 방 안에서는 **원래 이름**을 보여준다(줄이는 건 목록에서만).
+assert.ok(html.includes("배포 파이프라인 통합 대시보드"), "방 안에서도 이름이 잘려 있다");
+
+// ⑥ 대화가 없는 방이면 말을 건다 — 빈 화면은 고장으로 보인다.
+assert.match(renderRoomTabs({root: "/z", name: "새방", tabs: []}), /대화를 시작/);
+
+// ⑦ 숨긴 대화는 표시가 남는다(전체보기에서 꺼내 정리하라고).
+const 숨김낀 = renderRoomTabs({root: "/h", name: "h", tabs: [
+  {source: "claude", sid: "a", title: "A", status: "대기", primary: true},
+  {source: "claude", sid: "b", title: "B", status: "대기", hidden: true},
+]});
+assert.match(숨김낀, /roomTab[^"]*hidden/);
+console.log("ok 방 열기: 탭 전부·현재 표시·이름 바꾸기·접기");
+''')
+PY
+
 # ⑩ 첫 화면에 방 목록 자리가 있고, 페이지가 안 깨지나.
 PYTHONPATH="$SCR" python3 - <<'PY'
 from marina_mobile import render_mobile_html
@@ -98,6 +157,33 @@ assert "ROOM_LIST_START" in html, "방 목록 렌더러가 화면에 안 실렸�
 assert ".roomCard" in html, "방 카드 스타일이 없다"
 assert ".roomName" in html, "이름 줄 스타일이 없다"
 print("ok 방 목록이 화면에 실려 있다")
+PY
+
+# 접기·이름 바꾸기가 **서버까지 간다** — 화면만 바뀌고 서버에 안 가면 다음 폴에 되돌아온다.
+PYTHONPATH="$SCR" python3 - <<'PY'
+from marina_mobile import render_mobile_html
+
+html = render_mobile_html()
+블록 = html[html.find("// ROOM_ACTIONS_START"):html.find("// ROOM_ACTIONS_END")]
+assert 블록, "방 동작 블록이 화면에 없다"
+
+# 접기는 1차에서 만든 표면을 쓴다(새로 만들지 않는다).
+assert "/mobile/api/archive" in 블록, "접기가 서버로 안 간다"
+assert "/mobile/api/rename" in 블록, "이름 바꾸기가 서버로 안 간다"
+
+# 서버에 보낸 뒤 목록을 **다시 받는다** — 안 그러면 접었는데 그대로 있는 것처럼 보인다.
+접기 = 블록[블록.find("async function archiveRoom"):]
+접기 = 접기[:접기.find("async function renameRoom")]
+assert "load({force: true})" in 접기, 접기
+
+# 실패하면 말한다 — 조용히 실패하면 형은 안 먹은 줄 모르고 또 누른다.
+assert "접기 실패" in 접기, 접기
+
+# 방 카드를 누르면 **바로 대화로** 간다(대부분의 방은 대화가 하나뿐이다).
+assert "chooseSession(" in 블록, "방을 눌러도 대화가 안 열린다"
+# 대화가 없는 방은 방 안을 연다 — 아무 반응이 없으면 고장으로 보인다.
+assert "openRoom(room.root)" in 블록, 블록[:400]
+print("ok 접기·이름 바꾸기가 서버로 가고 목록이 갱신된다")
 PY
 
 echo "PASS test-room-screen"

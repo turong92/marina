@@ -2106,10 +2106,26 @@ _MOBILE_HTML = r"""<!doctype html>
     .roomName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .roomMeta { font-size: 12px; opacity: .7; }
     /* 상태는 글자로도 말하지만, 색이 있어야 목록을 훑을 때 급한 것이 먼저 눈에 걸린다. */
-    .roomCard.st-문제 .roomIcon { color: #e5534b; }
-    .roomCard.st-응답필요 .roomIcon { color: #d29922; }
-    .roomCard.st-작업중 .roomIcon { color: #2f81f7; }
-    .roomCard.st-완료 .roomIcon { color: #3fb950; }
+    .roomRow { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); }
+    .roomRow .roomCard { border-bottom: 0; flex: 1 1 auto; min-width: 0; }
+    .roomMore { flex: 0 0 44px; border: 0; background: transparent; color: inherit;
+                font-size: 18px; opacity: .6; cursor: pointer; }
+    .roomRow.st-문제 .roomIcon { color: #e5534b; }
+    .roomRow.st-응답필요 .roomIcon { color: #d29922; }
+    .roomRow.st-작업중 .roomIcon { color: #2f81f7; }
+    .roomRow.st-완료 .roomIcon { color: #3fb950; }
+    /* 방 안 — 목록 위에 얹는다. 화면을 갈아끼우지 않으므로 닫으면 보던 자리로 돌아온다. */
+    .room-open { border: 1px solid var(--line); border-radius: 10px; margin: 8px 0 12px;
+                 background: var(--panel); }
+    .roomHead { display: flex; align-items: center; gap: 6px; padding: 10px 8px 10px 12px; }
+    .roomOpenTitle { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
+                     white-space: nowrap; font-weight: 600; }
+    .roomTabs { display: flex; flex-direction: column; padding: 0 8px 8px; gap: 6px; }
+    .roomTab { text-align: left; padding: 10px 12px; border: 1px solid var(--line);
+               border-radius: 8px; background: transparent; color: inherit; font: inherit;
+               overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+    .roomTab.current { border-color: #2f81f7; }
+    .roomTab.hidden { opacity: .55; }
     .roomEmpty { padding: 32px 16px; text-align: center; opacity: .7; line-height: 1.6; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
     /* 워크트리 = 단위. 헤더에서 바로 새 에이전트를 띄운다(웹 카드의 ＋CC/＋CX 와 같은 멘탈모델). */
@@ -2585,6 +2601,7 @@ _MOBILE_HTML = r"""<!doctype html>
         </div>
         <!-- 방 목록이 첫 화면이다(형 결정 2026-08-18). 세션 목록은 지우지 않고 숨겨만 둔다 —
              방 화면이 이상하면 한 줄로 되돌릴 수 있어야 한다. -->
+        <div class="room-open" id="roomOpen" hidden></div>
         <div class="room-list" id="roomList"></div>
         <div class="session-list" id="sessionList"></div>
       </section>
@@ -2757,6 +2774,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const sessionSearch = document.getElementById("sessionSearch");
     const sessionList = document.getElementById("sessionList");
     const roomList = document.getElementById("roomList");
+    const roomOpen = document.getElementById("roomOpen");
     const projectTabs = document.getElementById("projectTabs");
     const sourceTabs = document.getElementById("sourceTabs");
     const turnsEl = document.getElementById("turns");
@@ -3449,16 +3467,47 @@ _MOBILE_HTML = r"""<!doctype html>
         // 대화가 하나면 개수를 말하지 않는다 — 방=대화 묶음이라는 건 여럿일 때만 뜻이 있다.
         const count = tabs.length > 1 ? " · 대화 " + tabs.length + "개" : "";
         const status = String(room.status || "대기");
-        return `<button class="roomCard st-${esc(status)}" type="button" data-room="${esc(room.root)}">
-          <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
-          <span class="roomBody">
-            <span class="roomName">${esc(room.shortName || room.name || "")}</span>
-            <span class="roomMeta">${esc(roomStatusLabel(status) + count)}</span>
-          </span>
-        </button>`;
+        // 카드 몸통을 누르면 바로 대화로, ⋯ 를 누르면 방 안(다른 대화·이름·접기)으로.
+        // 버튼 안에 버튼을 넣을 수 없어 형제로 두고 줄로 감싼다.
+        return `<div class="roomRow st-${esc(status)}">
+          <button class="roomCard" type="button" data-room="${esc(room.root)}">
+            <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
+            <span class="roomBody">
+              <span class="roomName">${esc(room.shortName || room.name || "")}</span>
+              <span class="roomMeta">${esc(roomStatusLabel(status) + count)}</span>
+            </span>
+          </button>
+          <button class="roomMore" type="button" data-room-more="${esc(room.root)}" aria-label="방 메뉴">⋯</button>
+        </div>`;
       }).join("");
     }
     // ROOM_LIST_END
+
+    // ROOM_TABS_START  (테스트가 이 블록을 vm 에 싣는다)
+    // 방 안 — 대화들이 탭이다(스펙 §2). 탭을 고르면 기존 대화 화면이 그대로 열린다.
+    //
+    // 방을 여는 길이 둘인 이유: 방 대부분은 대화가 하나뿐이라(실측 28개 중 21개), 카드를
+    // 누르면 바로 그 대화로 간다. 이름 고치기·접기·다른 대화는 ⋯ 로 이 패널을 열어서 한다.
+    // 모두를 패널로 보내면 흔한 경우에 손가락이 한 번 더 든다.
+    function renderRoomTabs(room) {
+      const tabs = room.tabs || [];
+      const head = `<div class="roomHead">
+        <span class="roomOpenTitle">${esc(room.name || room.shortName || "")}</span>
+        <button class="iconBtn" type="button" data-rename="${esc(room.root)}" title="이름 바꾸기" aria-label="이름 바꾸기">✎</button>
+        <button class="iconBtn" type="button" data-archive="${esc(room.root)}" title="접어두기" aria-label="접어두기">↓</button>
+        <button class="iconBtn" type="button" data-room-close="1" title="닫기" aria-label="닫기">✕</button>
+      </div>`;
+      if (!tabs.length) {
+        return head + '<div class="roomEmpty">대화를 시작해 보세요.</div>';
+      }
+      const strip = tabs.map(tab => {
+        const key = `${tab.source}:${tab.sid}`;
+        const cls = "roomTab" + (tab.primary ? " current" : "") + (tab.hidden ? " hidden" : "");
+        return `<button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>`;
+      }).join("");
+      return head + `<div class="roomTabs">${strip}</div>`;
+    }
+    // ROOM_TABS_END
 
     function draftKey(sessionKey=selectedSessionKey) {
       return `marinaMobileDraft:${sessionKey || selectedRoot() || "new"}`;
@@ -5667,6 +5716,84 @@ _MOBILE_HTML = r"""<!doctype html>
     };
     applyDensity();
     // 핀 — 워크트리에 붙고 서버에 저장된다.
+    // ROOM_ACTIONS_START  (테스트가 이 블록의 배선을 확인한다)
+    let openRoomRoot = "";
+
+    function roomByRoot(root) {
+      return (state.rooms || []).find(item => item.root === root) || null;
+    }
+    function closeRoom() {
+      openRoomRoot = "";
+      roomOpen.hidden = true;
+      roomOpen.innerHTML = "";
+    }
+    function openRoom(root) {
+      const room = roomByRoot(root);
+      if (!room) return;
+      openRoomRoot = root;
+      roomOpen.innerHTML = renderRoomTabs(room);
+      roomOpen.hidden = false;
+    }
+    // 방 카드를 누르면 **바로 그 방의 대화로** 간다. 대부분의 방은 대화가 하나뿐이라,
+    // 여기서 한 번 더 고르게 하면 흔한 경우에 손가락이 한 번 더 든다.
+    roomList.addEventListener("click", event => {
+      const more = event.target.closest && event.target.closest("[data-room-more]");
+      if (more) { openRoom(more.getAttribute("data-room-more")); return; }
+      const card = event.target.closest && event.target.closest("[data-room]");
+      if (!card) return;
+      const room = roomByRoot(card.getAttribute("data-room"));
+      if (!room) return;
+      const tab = (room.tabs || []).find(item => item.primary) || (room.tabs || [])[0];
+      // 대화가 아직 없는 방은 고를 게 없으니 방 안을 연다 — 아무 반응이 없으면 고장으로 보인다.
+      if (!tab) { openRoom(room.root); return; }
+      closeRoom();
+      chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
+    });
+    roomOpen.addEventListener("click", async event => {
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close]");
+      if (!target) return;
+      if (target.hasAttribute("data-room-close")) { closeRoom(); return; }
+      if (target.hasAttribute("data-rename")) { await renameRoom(target.getAttribute("data-rename")); return; }
+      if (target.hasAttribute("data-archive")) { await archiveRoom(target.getAttribute("data-archive")); return; }
+      const [source, sid] = String(target.getAttribute("data-tab") || "").split(":");
+      const root = openRoomRoot;
+      closeRoom();
+      chooseSession(`agent:${source}:${sid}:${root}`);
+    });
+
+    // 접기 — 끝난 방을 목록에서 치운다. 서버가 "무엇으로 부르고 있었는지"를 같이 적어두므로,
+    // 새로 부를 일이 생기면 저절로 다시 올라온다(1차에서 만든 규칙).
+    async function archiveRoom(root) {
+      if (!root) return;
+      try {
+        const r = await fetch("/mobile/api/archive", {method: "POST", headers: headers(true),
+                                                      body: JSON.stringify({root, archived: true})});
+        if (!r.ok) throw new Error(await responseError(r));
+        closeRoom();
+        showToast("접어뒀어요 · 다시 부르면 올라와요");
+        await load({force: true});   // 접었는데 그대로 있으면 안 먹은 걸로 보인다
+      } catch (error) {
+        showToast(`접기 실패 · ${String(error)}`);
+      }
+    }
+
+    async function renameRoom(root) {
+      const room = roomByRoot(root);
+      if (!room) return;
+      const next = prompt("방 이름", room.name || "");
+      if (next === null) return;            // 취소
+      try {
+        const r = await fetch("/mobile/api/rename", {method: "POST", headers: headers(true),
+                                                     body: JSON.stringify({root, name: next})});
+        if (!r.ok) throw new Error(await responseError(r));
+        await load({force: true});
+        if (openRoomRoot === root) openRoom(root);   // 열어둔 패널의 제목도 새 이름으로
+      } catch (error) {
+        showToast(`이름 바꾸기 실패 · ${String(error)}`);
+      }
+    }
+    // ROOM_ACTIONS_END
+
     sessionList.addEventListener("click", event => {
       const more = event.target.closest && event.target.closest("[data-wt-more]");
       if (!more) return;
