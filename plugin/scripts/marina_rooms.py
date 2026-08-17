@@ -154,6 +154,39 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
     return result
 
 
+# 말 거는 군더더기 — 목록에서 이 단어들은 방을 구별해주지 않는다. 형이 말하듯 시키기 때문에
+# ("야 너 …", "야 지금 …") 첫 두어 단어가 거의 항상 같다.
+# 조사가 붙은 형태도 같이 넣는다 — "너는 …", "지금은 …" 이 실제로 자주 나온다(실측).
+_FILLER = ("야", "너", "너는", "우리", "우리는", "지금", "지금은", "좀", "이제", "그리고")
+
+
+def short_name(name: str, limit: int = 22) -> str:
+    """목록 한 줄에 들어갈 이름.
+
+    별칭을 안 붙인 방은 **형이 처음 친 말**이 통째로 이름이다(실측 2026-08-18). 그대로 쓰면
+    목록이 문장으로 가득 차 무엇이 무엇인지 안 보인다. 첫 줄만 남기고, 말 거는 군더더기를
+    떼고, 길면 단어 경계에서 자른다.
+
+    자르는 것뿐이라 원본은 그대로 남는다 — 방을 열면 원래 이름을 본다. 앞이 아니라 뒤를
+    자르는 이유: 같은 말로 시작하는 방이 많아서, 앞을 살려야 서로 구별된다."""
+    lines = str(name or "").strip().splitlines()
+    line = lines[0].strip() if lines else ""
+    if not line:
+        return ""
+    words = line.split()
+    # 전부 군더더기면 그대로 둔다 — 다 떼면 이름이 아예 사라진다.
+    if any(word not in _FILLER for word in words):
+        while words and words[0] in _FILLER:
+            words.pop(0)
+    line = " ".join(words)
+    if len(line) <= limit:
+        return line
+    cut = line[:limit]
+    if " " in cut[1:]:
+        cut = cut[:cut.rindex(" ")]
+    return cut.rstrip() + "…"
+
+
 def fold_status(tab_statuses: list[str]) -> str:
     """탭들의 상태를 방 상태 하나로. 사람 조치가 필요한 것이 위로 올라온다(스펙 §2).
 
@@ -252,6 +285,9 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
     return finalize_room({
         "id": str(labels.get("id") or ""),
         "name": name,
+        # 목록은 한 줄이고 폰은 좁다 — 줄인 이름은 여기서 만든다. 원본은 name 에 그대로 있고
+        # 방을 열면 그걸 보여준다.
+        "shortName": short_name(name),
         "project": str(labels.get("projectLabel") or ""),
         "projectId": str(labels.get("projectId") or ""),
         "root": str(root),
