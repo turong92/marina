@@ -42,12 +42,17 @@ from pathlib import Path
 import marina_rooms as rooms
 
 root = Path("/tmp/wt-a")
+_TTL_HALF = rooms._CHANGES_TTL_S / 2
 calls = []
 
 
 def fake_git(args, cwd):
     calls.append(tuple(args))
-    if args[:2] == ["status", "--porcelain"]:
+    if args[0] == "status":
+        # **-uno**: 추적 중인 파일만 본다. 서브레포를 품은 레포에서 `?? ai-api/` 같은
+        # untracked 디렉터리가 영구히 잡혀, 그 방들이 무슨 일을 하든 항상 "완료"로 떴다
+        # (실측 2026-08-17: 워크트리 28개 중 17개). 완료/대기 구분이 통째로 죽어 있었다.
+        assert "-uno" in args, f"untracked 를 세면 서브레포 레포가 영구 dirty 다: {args}"
         return fake_git.status
     if args[0] == "log":
         return fake_git.log
@@ -76,7 +81,7 @@ calls.clear()
 rooms.room_has_changes(root, runner=fake_git, now=100.0)
 first = len(calls)
 assert first > 0
-rooms.room_has_changes(root, runner=fake_git, now=100.0 + rooms._CHANGES_TTL_S / 2)
+rooms.room_has_changes(root, runner=fake_git, now=100.0 + _TTL_HALF)
 assert len(calls) == first, f"캐시 안인데 git 을 또 불렀다: {calls}"
 
 # ⑤ 수명이 지나면 다시 본다 — 커밋하고 나면 곧 반영돼야 한다.
@@ -90,8 +95,28 @@ def broken(args, cwd):
 
 rooms._changes_cache.clear()
 assert rooms.room_has_changes(root, runner=broken, now=200.0) is False
-# 실패는 캐시에 남기지 않는다 — 다음 기회에 다시 본다.
-assert str(root) not in rooms._changes_cache
+# 실패도 **더 긴 수명으로** 캐시한다. 안 하면 5초 타임아웃을 폴마다 다시 문다 — 깨진 워크트리
+# 둘이면 폰 응답이 10초다(git 아끼려고 만든 캐시가 정반대로 작동).
+assert str(root) in rooms._changes_cache
+calls.clear()
+rooms.room_has_changes(root, runner=broken, now=200.0 + _TTL_HALF)
+assert not calls, "실패 직후에 또 git 을 불렀다"
+rooms.room_has_changes(root, runner=fake_git, now=200.0 + rooms._CHANGES_FAIL_TTL_S + 1)
+assert calls, "실패 수명이 지났는데 영영 다시 안 본다"
+assert rooms._CHANGES_FAIL_TTL_S > rooms._CHANGES_TTL_S, "실패를 더 오래 쉬어야 비용이 준다"
+
+# ⑦ git 이 rc≠0 이면 **'변경 없음'과 구별**해야 한다 — 빈 stdout 을 정답으로 믿으면
+# "다 해놨는데 대기로 나온다"가 되고 그 오답이 캐시된다.
+import subprocess as sp
+
+real = sp.run(["git", "-C", "/tmp", "status", "--porcelain", "-uno"],
+              capture_output=True, text=True)
+assert real.returncode != 0 and not real.stdout, real   # 전제 확인: 실패인데 stdout 은 빈다
+try:
+    rooms._git(["status", "--porcelain", "-uno"], Path("/tmp"))
+    raise SystemExit("FAIL: git 실패를 성공으로 읽었다")
+except rooms.GitFailed:
+    pass
 
 # ⑦ 캐시가 무한히 크지 않는다 — 워크트리는 생겼다 사라지므로 죽은 경로가 계속 쌓인다.
 rooms._changes_cache.clear()
@@ -164,9 +189,14 @@ done = [{"source": "claude", "sid": "s1", "title": "A", "status": "completed", "
 assert build_room(Path("/wt"), labels, done, has_changes=True, questions=no_questions)["status"] == "완료"
 assert build_room(Path("/wt"), labels, done, has_changes=False, questions=no_questions)["status"] == "대기"
 
-# ⑧ 이름이 없으면 세션 제목 → id 순으로 떨어진다(빈 이름은 아무것도 못 고르게 만든다).
-noname = build_room(Path("/wt"), {**labels, "alias": ""}, [], has_changes=False, questions=no_questions)
-assert noname["name"] == "결제 플로우 정리", noname["name"]
+# ⑧ 별칭이 없으면 **첫 탭 제목** → id 순. labels["sessionTitle"] 은 쓰지 않는다 — 세션이
+# 없을 때 그 값이 HEAD 커밋 제목으로 떨어져, 빈 워크트리가 남의 커밋 작업을 하던 방처럼 보인다.
+noname = build_room(Path("/wt"), {**labels, "alias": ""},
+                    [{"source": "claude", "sid": "s1", "title": "대화 제목", "status": "idle", "ts": 1}],
+                    has_changes=False, questions=no_questions)
+assert noname["name"] == "대화 제목", noname["name"]
+empty = build_room(Path("/wt"), {**labels, "alias": ""}, [], has_changes=False, questions=no_questions)
+assert empty["name"] == "wt-1", empty["name"]
 bare = build_room(Path("/wt"), {"id": "wt-9"}, [], has_changes=False, questions=no_questions)
 assert bare["name"] == "wt-9", bare["name"]
 

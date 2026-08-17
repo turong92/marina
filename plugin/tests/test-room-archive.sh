@@ -10,6 +10,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 
 PYTHONPATH="$SCR" python3 - "$HERE" <<'PY'
+import json
 import sys
 from pathlib import Path
 
@@ -27,60 +28,89 @@ try:
 except ValueError:
     pass
 
-# ① 접으면 기록된다.
-out = mm.mobile_set_archived({"root": str(root), "archived": True})
+# ① 접으면 기록된다 — 접을 때의 상태까지 같이.
+out = mm.mobile_set_archived({"root": str(root), "archived": True, "status": "작업중"})
 assert out["ok"] is True and out["archived"] is True, out
 archive = mm.room_archive()
-assert str(root) in archive and archive[str(root)] > 0, archive
+assert archive[str(root)]["at"] > 0 and archive[str(root)]["status"] == "작업중", archive
 
-# ② 접은 뒤로 활동이 없으면 접힌 상태다.
-at = archive[str(root)]
-assert mm.room_archived(root, at - 10, archive) is True
+# ② 접은 뒤로 활동이 없으면 접힌 채다.
+at = archive[str(root)]["at"]
+assert mm.room_unarchives(root, at - 10, archive, "작업중") is False
 
-# ③ **형을 부를 일이 생기면 저절로 펴진다** — 접어둔 방의 질문을 놓치면 목록을 못 믿게 된다.
-assert mm.room_archived(root, at + 10, archive, "응답필요") is False
-assert mm.room_archived(root, at + 10, archive, "문제") is False
-assert mm.room_archived(root, at + 10, archive, "완료") is False
+# ③ **형을 부를 일이 생기면 펴진다** — 접어둔 방의 질문을 놓치면 목록을 못 믿게 된다.
+assert mm.room_unarchives(root, at + 10, archive, "응답필요") is True
+assert mm.room_unarchives(root, at + 10, archive, "문제") is True
 
 # ③-b 그러나 **아무 활동에나 펴지지는 않는다.** 작업 중인 방은 접는 순간에도 에이전트가
 # 계속 움직여 lastAt 이 갱신된다 — 활동만으로 펴면 접자마자 튀어나와 버튼이 고장 나 보인다.
-assert mm.room_archived(root, at + 10, archive, "작업중") is True
-assert mm.room_archived(root, at + 10, archive, "대기") is True
+assert mm.room_unarchives(root, at + 10, archive, "작업중") is False
+assert mm.room_unarchives(root, at + 10, archive, "대기") is False
+
+# ③-c 완료는 **접을 때 완료였나**로 갈린다. 완료인 채로 치운 방이 파일 mtime 한 번에 다시
+# 들이밀리면 접기가 무의미하다. 반대로 접어둔 뒤에 끝난 일은 보여줘야 한다.
+완료로접음 = {str(root): {"at": at, "status": "완료"}}
+assert mm.room_unarchives(root, at + 10, 완료로접음, "완료") is False
+assert mm.room_unarchives(root, at + 10, archive, "완료") is True     # 접을 땐 작업중이었다
 
 # ④ 다시 펴면 기록이 사라진다(접힘이 영원히 남으면 왜 안 보이는지 알 수 없다).
 mm.mobile_set_archived({"root": str(root), "archived": False})
 assert str(root) not in mm.room_archive()
 
 # ⑤ 모르는 워크트리는 접힌 적 없다.
-assert mm.room_archived(Path("/없는/워크트리"), 0, mm.room_archive()) is False
+assert mm.room_unarchives(Path("/없는/워크트리"), 0, mm.room_archive()) is False
 
-# ⑥ 파일은 형 것만 읽는다 — 알림·설정 파일과 같은 규칙(0600).
-mm.mobile_set_archived({"root": str(root), "archived": True})
+# ⑥ 옛 형식(숫자만)도 읽는다 — 배포 한 번에 형이 접어둔 방이 다 펴지면 안 된다.
+mm.ARCHIVE_FILE.write_text(json.dumps({str(root): 1000.0}), encoding="utf-8")
+옛것 = mm.room_archive()
+assert 옛것[str(root)] == {"at": 1000.0, "status": ""}, 옛것
+assert mm.room_unarchives(root, 999, 옛것, "작업중") is False
+
+# ⑦ 파일은 형 것만 읽는다 — 알림·설정 파일과 같은 규칙(0600).
+mm.mobile_set_archived({"root": str(root), "archived": True, "status": "완료"})
 assert oct(mm.ARCHIVE_FILE.stat().st_mode)[-3:] == "600"
 
-# ⑦ 방 목록에 접힘이 실려 나온다 — 화면이 접힌 방을 접어둘 수 있어야 한다.
+# ⑧ 방 목록에 접힘이 실려 나온다 — 화면이 접힌 방을 접어둘 수 있어야 한다.
 mm.discover_all_roots = lambda refresh=False: [root]
 mm.worktree_labels = lambda value: {"id": "wt-1", "alias": "접은방", "projectLabel": "p"}
-mm.agents_payload = lambda root_arg, refresh=False, include_all=False: []
+
+
+def agents(items):
+    mm.agents_payload = lambda root_arg, refresh=False, include_all=False, limit=None: list(items)
+
+
+agents([])
 mm.term_list = lambda: {"sessions": []}
 mm._live_agent_cwds = lambda refresh=False: set()
 room = mm.mobile_state()["rooms"][0]
 assert room["archived"] is True, room
 
-# ⑧ 활동이 생기면 목록에서도 펴져 있다(자동 복귀가 조립까지 이어지는지).
-mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [
-    {"source": "claude", "sid": "s1", "title": "A", "status": "blocked", "ts": 9_999_999_999},
-]
-room = mm.mobile_state()["rooms"][0]
-assert room["archived"] is False and room["status"] == "응답필요", room
-
-# ⑧-b 작업 중인 방은 접어두면 접힌 채로 있다 — 활동만으로 펴면 접기가 무용지물이다.
-mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [
-    {"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 9_999_999_999},
-]
+# ⑨ 작업 중인 방은 접어두면 접힌 채로 있다 — 활동만으로 펴면 접기가 무용지물이다.
+agents([{"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 9_999_999_999}])
 room = mm.mobile_state()["rooms"][0]
 assert room["archived"] is True and room["status"] == "작업중", room
-print("ok 아카이브: 기록·자동 복귀·해제·목록 반영")
+
+# ⑩ 질문이 뜨면 목록에서도 펴진다 — 그리고 **기록이 지워진다**(끈적한 복귀).
+agents([{"source": "claude", "sid": "s1", "title": "A", "status": "blocked", "ts": 9_999_999_999}])
+room = mm.mobile_state()["rooms"][0]
+assert room["archived"] is False and room["status"] == "응답필요", room
+assert str(root) not in mm.room_archive(), "펴놓고 기록을 남겼다"
+
+# ⑪ 질문은 15분이면 만료된다(pending 이 None 이 된다). 그때 방이 슬그머니 다시 접히면
+# 형은 그 질문을 못 본 채로 잃는다 — 기록을 지웠으니 계속 펴져 있어야 한다.
+agents([{"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 9_999_999_999}])
+room = mm.mobile_state()["rooms"][0]
+assert room["archived"] is False, "부르고 나서 저절로 다시 접혔다 — 형이 못 본 채로 사라진다"
+
+# ⑫ 숨긴 세션은 방 상태를 지배하지 못한다 — 목록에서 지운 세션 때문에 방이 영원히 "문제"로
+# 남고, 방 화면에선 그걸 뺄 방법이 없었다.
+agents([{"source": "claude", "sid": "숨김", "title": "A", "status": "failed", "ts": 100},
+        {"source": "claude", "sid": "s2", "title": "B", "status": "working", "ts": 90}])
+mm.mobile_hidden = lambda: ["claude:숨김"]
+room = mm.mobile_state()["rooms"][0]
+assert [t["sid"] for t in room["tabs"]] == ["s2"], room["tabs"]
+assert room["status"] == "작업중", room["status"]
+print("ok 아카이브: 기록·끈적한 복귀·해제·목록 반영·숨김")
 PY
 
 # ⑨ HTTP 표면이 실제로 붙어 있나 — 함수만 있고 배선이 없으면 폰에서는 아무 일도 안 난다.

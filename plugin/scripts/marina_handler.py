@@ -335,6 +335,24 @@ class Handler(BaseHTTPRequestHandler):
                     continue
             filtered.append(item)
         payload["sessions"] = filtered
+        # 방도 같은 잣대로 거른다. 방은 워크트리 하나이므로 허용된 root 만 남기고, 탭은
+        # 세션과 같은 자원 검사를 태운다. 이걸 빼먹으면 화면엔 안 보여도 응답 JSON 에는
+        # 남의 워크트리 경로·별칭·세션 제목이 통째로 실려 나간다(새 키를 더할 때 필터를
+        # 같이 안 고치는 실수 — 그래서 test-mobile-filter 가 payload 의 모든 목록 키를 본다).
+        rooms = []
+        for room in payload.get("rooms", []):
+            root = room.get("root")
+            if not root or canonical_root(root) not in allowed_roots:
+                continue
+            tabs = []
+            for tab in room.get("tabs", []):
+                key = canonical_agent(str(tab.get("source") or ""), str(tab.get("sid") or ""))
+                self._policy().inherit_from_root("agent", key, root)
+                if self._policy().can_resource(principal, "agent", key):
+                    tabs.append(tab)
+            room["tabs"] = tabs
+            rooms.append(room)
+        payload["rooms"] = rooms
         return payload
 
     # 미리보기 프록시 — 폰에서 워크트리 앱 화면을 열기 위한 유일한 문.

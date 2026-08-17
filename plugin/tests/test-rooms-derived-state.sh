@@ -21,7 +21,7 @@ mm.worktree_labels = lambda value: {
     "id": "wt-1", "alias": "결제정리", "projectId": "p1", "projectLabel": "mdc-main",
     "source": "registry", "sessionTitle": "결제 플로우 정리",
 }
-mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [
+mm.agents_payload = lambda root_arg, refresh=False, include_all=False, limit=None: [
     {"source": "claude", "sid": "s1", "title": "결제 플로우 정리", "status": "working",
      "ts": 100, "preview": "고치는 중"},
 ]
@@ -59,7 +59,7 @@ mm.room_has_changes = lambda root_arg, **kw: 불렀나.append(root_arg) or False
 mm.mobile_state()
 assert not 불렀나, "작업중인데 완료 판정하러 git 을 불렀다"
 
-mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [
+mm.agents_payload = lambda root_arg, refresh=False, include_all=False, limit=None: [
     {"source": "claude", "sid": "s1", "title": "A", "status": "completed", "ts": 100},
 ]
 mm.mobile_state()
@@ -75,6 +75,42 @@ state = mm.mobile_state()
 assert state["sessions"], "방 계산 실패가 세션 목록을 죽였다"
 assert state["rooms"] == [], state["rooms"]
 print("ok mobile_state 가 방에서 파생되고 기존 스키마가 그대로다")
+PY
+
+# **실물**을 태운다 — 손으로 쓴 스텁은 실제 agents_payload/worktree_labels 보다 착해서,
+# "탭 3개 컷"과 "이름이 커밋 제목으로 떨어짐" 같은 결함을 구조적으로 못 본다.
+PYTHONPATH="$SCR" python3 - <<'PY'
+import inspect
+
+import marina_rooms as rooms
+from marina_sessions import AGENTS_MAX_PER_ROOT, agents_payload, worktree_labels
+
+# ① 방은 탭을 **안 자른다**. 카드는 좁아 3개로 끊지만, 방에서 자르면 4번째 대화에 도달할
+# 방법이 없고 잘린 탭의 failed/blocked 가 방 상태에서 통째로 사라진다(스펙 §2 "세션은 탭").
+assert "limit" in inspect.signature(agents_payload).parameters, \
+    "방이 상한을 풀 방법이 없다 — 탭이 3개에서 잘린다"
+source = inspect.getsource(agents_payload)
+assert "entries[:AGENTS_MAX_PER_ROOT]" not in source, "상한이 여전히 고정이다"
+assert AGENTS_MAX_PER_ROOT == 3   # 카드 쪽 기본값은 그대로
+
+import marina_mobile as mm
+
+assert "limit=0" in inspect.getsource(mm.mobile_state), "방 조립이 상한을 안 풀었다"
+
+# ② 방 이름이 **HEAD 커밋 제목**으로 떨어지면 안 된다. worktree_labels 의 sessionTitle 은
+# 세션이 없을 때 repo_head_subject 로 폴백한다 — 그걸 그대로 쓰면 방금 만든 빈 워크트리가
+# 남의 커밋 작업을 하던 방처럼 보인다(세션 카드에서 이미 한 번 잡았던 오해다).
+labels = {"id": "wt-7", "alias": "", "sessionTitle": "fix(mobile): 어제 누가 남긴 커밋 제목"}
+빈방 = rooms.build_room(__import__("pathlib").Path("/wt"), labels, [],
+                        has_changes=False, questions=lambda source, sid: None)
+assert 빈방["name"] == "wt-7", f"방 이름이 커밋 제목으로 떨어졌다: {빈방['name']}"
+
+# 대화가 있으면 그 제목을 쓴다 — 커밋 제목이 아니라 형이 시킨 일이 이름이 돼야 한다.
+있는방 = rooms.build_room(__import__("pathlib").Path("/wt"), labels,
+                          [{"source": "claude", "sid": "s1", "title": "결제 정리", "status": "idle", "ts": 5}],
+                          has_changes=False, questions=lambda source, sid: None)
+assert 있는방["name"] == "결제 정리", 있는방["name"]
+print("ok 방은 탭을 안 자르고, 이름이 커밋 제목으로 떨어지지 않는다")
 PY
 
 echo "PASS test-rooms-derived-state"

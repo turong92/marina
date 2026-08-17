@@ -1096,8 +1096,12 @@ def resolve_session_liveness(
     return {"status": status, "reachable": reachable, "tid": tid, "reason": reason}
 
 
-def agents_payload(root: Path, refresh: bool = False, include_all: bool = False) -> list[dict[str, Any]]:
+def agents_payload(root: Path, refresh: bool = False, include_all: bool = False,
+                   limit: int | None = None) -> list[dict[str, Any]]:
     # 카드 AGENTS 섹션 — 워크트리당 최대 3개(ts 내림차순), Claude 만 preview(마지막 assistant 텍스트 80자) 부여.
+    # limit=0 이면 상한 없음 — **방(Room)은 탭을 안 자른다.** 카드는 좁아서 3개로 끊지만,
+    # 방에서 자르면 4번째 대화에 도달할 방법이 사라지고(스펙 §2 "세션은 탭"), 잘린 탭이
+    # failed/blocked 였으면 그 상태가 방 상태에 아예 안 잡힌다.
     # status 는 resolve_session_liveness 로 캐논화(S4 native + S5 event 병합 → D3 강등 → D4 승격 한 경로).
     claude_by_root = claude_agent_sessions(refresh, include_all)
     codex_by_root = codex_agent_sessions(refresh, include_all)
@@ -1109,7 +1113,8 @@ def agents_payload(root: Path, refresh: bool = False, include_all: bool = False)
     canonical_root = root.resolve()
     live_cwds = _live_agent_cwds(refresh)   # 정석: claude/codex 프로세스 cwd→root 로 liveness(프롬프트 파싱 없음)
     live_tids = _live_agent_tids(refresh)   # 마리나가 쥔 살아있는 PTY — (source,sid)→tid, 5s 캐시(루트 fan-out 억제)
-    for e in entries[:AGENTS_MAX_PER_ROOT]:
+    cap = AGENTS_MAX_PER_ROOT if limit is None else limit
+    for e in (entries if not cap else entries[:cap]):
         item: dict[str, Any] = {"source": e["source"], "title": e["title"], "ts": int(e["ts"])}
         sid = ""
         jpath: Path | None = None

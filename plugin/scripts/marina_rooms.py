@@ -46,7 +46,12 @@ def room_status(status: str, has_changes: bool) -> str:
 # 방 목록 경로에서 git 을 부르는 **유일한** 자리다. 그래서 캐시 뒤에 둔다 — 방 목록은 폴마다
 # 도는데 워크트리마다 git 을 돌리면 전에 잡은 "초당 git 40회"가 그대로 재현된다(스펙 미해결 3번).
 _CHANGES_TTL_S = 20.0
+# 실패는 **더 길게** 쉰다. git 이 5초 타임아웃으로 실패하는 상황(index.lock 장기 점유, 거대
+# 레포, 마운트 지연)에서 매번 다시 시도하면 폴마다 5초를 그대로 문다 — 깨진 워크트리 둘이면
+# 폰 응답이 10초다. git 을 아끼려고 만든 캐시가 정확히 반대로 작동한다.
+_CHANGES_FAIL_TTL_S = 60.0
 _CHANGES_CACHE_MAX = 200        # 워크트리 수(지금 28) 보다 넉넉히. 넘으면 만료된 것부터 버린다.
+# key → (만료 시각, 판정)
 _changes_cache: dict[str, tuple[float, bool]] = {}
 # 데몬은 요청마다 스레드다. dict 갱신 자체는 GIL 덕에 깨지지 않지만, 청소 중에 크기가
 # 바뀌면 순회가 터진다 — 청소만 잠근다(읽기·쓰기는 잠그지 않는다. 최악이 git 한 번 더다).
@@ -58,14 +63,22 @@ def _prune_changes_cache(current: float) -> None:
     with _changes_lock:
         if len(_changes_cache) <= _CHANGES_CACHE_MAX:
             return
-        for key in [k for k, (at, _) in list(_changes_cache.items())
-                    if current - at >= _CHANGES_TTL_S]:
+        for key in [k for k, (expires, _) in list(_changes_cache.items()) if current >= expires]:
             _changes_cache.pop(key, None)
+
+
+class GitFailed(Exception):
+    """git 이 답을 못 줬다 — '변경 없음'과 **구별**해야 한다.
+
+    예전엔 stdout 만 보고 rc 를 무시했다. index.lock 점유·dubious ownership·손상된 .git 이
+    전부 빈 stdout 을 내므로 "다 해놨는데 대기로 나오고" 그 오답이 20초 동안 캐시됐다."""
 
 
 def _git(args: list[str], cwd: Path) -> str:
     out = subprocess.run(["git", "-C", str(cwd), *args],
                          capture_output=True, text=True, timeout=5)
+    if out.returncode != 0:
+        raise GitFailed(f"rc={out.returncode} {(out.stderr or '').strip()[:120]}")
     return out.stdout
 
 
@@ -85,18 +98,28 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
     key = str(root)
     current = time.time() if now is None else now
     cached = _changes_cache.get(key)
-    if cached is not None and current - cached[0] < _CHANGES_TTL_S:
+    if cached is not None and current < cached[0]:
         return cached[1]
     run = runner or _git
     try:
-        dirty = bool(run(["status", "--porcelain"], root).strip())
+        # **-uno(추적 중인 파일만)** 인 이유: 서브레포를 품은 레포에서는 `?? ai-api/` 같은
+        # untracked 디렉터리가 영구히 잡힌다. 실측(2026-08-17) — 워크트리 28개 중 17개가
+        # 그 이유로 상수 dirty 였고, 그 방들은 무슨 일을 하든 항상 "완료"로 떴다. 즉 완료/대기
+        # 구분이 형이 제일 많이 쓰는 레포에서 통째로 죽어 있었다.
+        # 새 파일만 만들고 끝난 턴이 '대기'로 보이는 손해는 남지만, 방향이 반대다 —
+        # 아무 일도 안 했는데 완료라고 말하는 쪽이 카드를 못 믿게 만든다.
+        dirty = bool(run(["status", "--porcelain", "-uno"], root).strip())
         # 미커밋이 이미 있으면 커밋 쪽은 볼 필요가 없다 — git 한 번을 아낀다.
         ahead = dirty or bool(run(["log", "--oneline", "-1", "HEAD", "--not", "--remotes"],
                                   root).strip())
     except Exception:
-        return False        # 캐시에 넣지 않는다 — 다음 기회에 다시 본다
+        # 실패도 캐시한다(더 긴 수명으로). 안 하면 지속적 실패에서 폴마다 타임아웃을 다시 문다.
+        # 값은 False — "결과가 있다"고 잘못 말하느니 "아직 아니다" 쪽으로 틀린다.
+        _changes_cache[key] = (current + _CHANGES_FAIL_TTL_S, False)
+        _prune_changes_cache(current)
+        return False
     result = bool(dirty or ahead)
-    _changes_cache[key] = (current, result)
+    _changes_cache[key] = (current + _CHANGES_TTL_S, result)
     _prune_changes_cache(current)
     return result
 
@@ -132,8 +155,12 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
             "status": room_status(canon, has_changes),
             "primary": not tabs,
         })
+    # 이름: 별칭 → **첫 탭의 제목** → 워크트리 id.
+    # labels["sessionTitle"] 을 쓰지 않는 이유: 세션이 없으면 그 값이 HEAD 커밋 제목으로
+    # 떨어진다(worktree_labels 의 repo_head_subject 폴백). 그러면 방금 만든 빈 워크트리가
+    # 남의 커밋 작업을 하던 방처럼 보인다 — 세션 카드에서 이미 한 번 잡았던 그 오해다.
     name = (str(labels.get("alias") or "").strip()
-            or str(labels.get("sessionTitle") or "").strip()
+            or (str(tabs[0]["title"]).strip() if tabs else "")
             or str(labels.get("id") or "").strip())
     return {
         "id": str(labels.get("id") or ""),
