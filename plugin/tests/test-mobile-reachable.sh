@@ -80,7 +80,18 @@ assert 'data-project=""' in html, "'전체' 칩이 없어 다른 프로젝트의
 강제 = html[html.find("function renderProjectTabs"):][:700]
 assert "if (selectedProjectId && !projects.some" in 강제, \
     "'전체'(빈 값) 선택이 강제 선택에 덮인다 — 전체를 고를 수 없다"
-print("ok 첫 화면에서 닿는 동작: 새 대화·검색·프로젝트·전체·폴백·모든 탭")
+# ⑦ **전역 동작이 첫 화면에서 닿는다.** 받은 작업·새로고침·로그아웃은 워크트리별 기능이
+# 아닌데 서비스 시트(워크트리 시트로만 열린다) 안에 있었다 — 세션 목록이 진짜로 숨겨지자
+# 통째로 도달 불가가 됐다. 펀넬로 공개되는 화면에 로그아웃이 없는 건 특히 곤란하다.
+목록화면 = html[html.find('id="listView"'):html.find('id="chatView"')]
+for 표식 in ('id="logoutBtn"', 'id="inboxMenuBtn"', 'id="refreshBtn"'):
+    assert 표식 in 목록화면, f"전역 동작이 목록 화면에 없다: {표식}"
+
+# ⑧ '전체'로 본 상태가 **대화를 한 번 열었다고 풀리면 안 된다.** 예전엔 rememberProjectForRoot 가
+# 무조건 덮어써서, 전체를 골라도 다음 순간 방 21개가 다시 사라졌다.
+기억 = html[html.find("function rememberProjectForRoot"):][:400]
+assert "if (!selectedProjectId) return;" in 기억, f"'전체'가 대화 한 번에 풀린다: {기억}"
+print("ok 첫 화면에서 닿는 동작: 새 대화·검색·프로젝트·전체·전역동작·폴백·모든 탭")
 PY
 
 # ⑦ 실제 자료로 확인 — 방의 모든 탭이 세션 목록에 있나(눌러서 열리나).

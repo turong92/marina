@@ -2144,6 +2144,10 @@ _MOBILE_HTML = r"""<!doctype html>
     .roomStart { flex: 1 1 0; padding: 10px; border: 1px dashed var(--line); border-radius: 8px;
                  background: transparent; color: inherit; font: inherit; cursor: pointer; }
     .roomRow.archived { opacity: .55; }
+    .listUtilities { display: flex; gap: 8px; padding: 8px 12px 4px; }
+    .listUtilities button { flex: 1 1 0; padding: 8px; border: 1px solid var(--line);
+                            border-radius: 8px; background: transparent; color: inherit;
+                            font: inherit; font-size: 12px; cursor: pointer; }
     .roomEmpty { padding: 32px 16px; text-align: center; opacity: .7; line-height: 1.6; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
     /* 워크트리 = 단위. 헤더에서 바로 새 에이전트를 띄운다(웹 카드의 ＋CC/＋CX 와 같은 멘탈모델). */
@@ -2619,6 +2623,14 @@ _MOBILE_HTML = r"""<!doctype html>
         </div>
         <!-- 방 목록이 첫 화면이다(형 결정 2026-08-18). 세션 목록은 지우지 않고 숨겨만 둔다 —
              방 화면이 이상하면 한 줄로 되돌릴 수 있어야 한다. -->
+        <!-- 받은 작업·새로고침·로그아웃은 **전역** 동작인데 서비스 시트(워크트리별) 안에만
+             있었다. 세션 목록이 진짜로 숨겨지자 시트로 가는 길이 끊겨 통째로 도달 불가가 됐다 —
+             펀넬로 공개되는 화면에 로그아웃이 없는 건 특히 곤란하다. 목록 화면으로 꺼낸다. -->
+        <div class="listUtilities">
+          <button id="inboxMenuBtn" type="button">받은 작업 <span id="inboxCount">0</span></button>
+          <button id="refreshBtn" type="button">새로고침</button>
+          <button id="logoutBtn" type="button">로그아웃</button>
+        </div>
         <div class="room-open" id="roomOpen" hidden></div>
         <div class="room-list" id="roomList"></div>
         <div class="session-list" id="sessionList"></div>
@@ -2676,7 +2688,7 @@ _MOBILE_HTML = r"""<!doctype html>
     <div class="sheetBackdrop" id="servicesSheet" aria-hidden="true">
       <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="servicesSheetTitle">
         <div class="sheetHeader"><strong id="servicesSheetTitle">서비스</strong><button class="iconBtn sheetClose" id="servicesCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
-        <div class="serviceList"><div id="serviceList"></div><div class="serviceUtilities"><button id="inboxMenuBtn" type="button">받은 작업 <span id="inboxCount">0</span></button><button id="refreshBtn" type="button">새로고침</button><button id="logoutBtn" type="button">로그아웃</button></div></div>
+        <div class="serviceList"><div id="serviceList"></div></div>
       </section>
     </div>
     <!-- 로그·깃 (읽기 전용) — 밖에서 "빌드 깨졌나"를 확인하는 용도. 쓰기는 일부러 없다. -->
@@ -3649,6 +3661,10 @@ _MOBILE_HTML = r"""<!doctype html>
       return wt ? projectId(wt) : String((session && session.root) || "");
     }
     function rememberProjectForRoot(root) {
+      // **'전체'는 형이 고른 상태다 — 덮지 않는다.** 예전엔 대화를 한 번 열면 그 방의
+      // 프로젝트로 조용히 옮겨가, 전체를 골라도 다음 순간 방 21개가 다시 사라졌다.
+      // (그 프로젝트로 옮겨가는 건 대화 목록을 따라가라는 뜻이었지, 전체 보기를 끄라는 뜻이 아니다.)
+      if (!selectedProjectId) return;
       const wt = worktreeForRoot(root);
       if (!wt) return;
       selectedProjectId = projectId(wt);
@@ -3991,8 +4007,17 @@ _MOBILE_HTML = r"""<!doctype html>
       // **'전체' 칩이 있어야 한다.** 없으면 항상 한 프로젝트가 강제로 선택돼(바로 위 코드),
       // 방 목록이 그 프로젝트만 보여준다 — 실측으로 방 28개 중 21개가, 답을 기다리는 방
       // 4개 중 3개가 화면에서 사라졌다. 급한 방을 아래에 두는 것보다 안 보이게 하는 게 나쁘다.
-      const 전체칩 = `<button class="project-chip ${selectedProjectId ? "" : "active"}" type="button" data-project="" title="전체">전체<span class="project-count">${(state.rooms || []).length}</span></button>`;
-      const html = 전체칩 + projects.map(p => `<button class="project-chip ${p.id === selectedProjectId ? "active" : ""}" type="button" data-project="${esc(p.id)}" title="${esc(p.label)}">${esc(p.label)}<span class="project-count">${p.count}</span></button>`).join("");
+      // 숫자는 **방** 개수다 — 목록이 보여주는 게 방이라, 칩이 세션을 세면 합이 안 맞는다
+      // (실측: 전체 28 인데 칩 합 34). 방이 아직 없으면(폴백) 예전대로 세션을 센다.
+      const 방들 = state.rooms || [];
+      const 방수 = new Map();
+      방들.forEach(room => {
+        const key = String(room.projectId || "");
+        방수.set(key, (방수.get(key) || 0) + 1);
+      });
+      const 세기 = p => (방들.length ? (방수.get(p.id) || 0) : p.count);
+      const 전체칩 = `<button class="project-chip ${selectedProjectId ? "" : "active"}" type="button" data-project="" title="전체">전체<span class="project-count">${방들.length || projects.reduce((sum, p) => sum + p.count, 0)}</span></button>`;
+      const html = 전체칩 + projects.map(p => `<button class="project-chip ${p.id === selectedProjectId ? "active" : ""}" type="button" data-project="${esc(p.id)}" title="${esc(p.label)}">${esc(p.label)}<span class="project-count">${세기(p)}</span></button>`).join("");
       updateHtmlIfChanged(projectTabs, html);
     }
     function projectSessions() {
@@ -5519,7 +5544,9 @@ _MOBILE_HTML = r"""<!doctype html>
       servicesState = {root: "", running: 0, defined: 0, services: []};
       // 드로어에서 프로젝트를 바꾼 경우엔 대화를 떠나지 않는다 — 패널을 열어둔 채 목록만 갈아서
       // 형이 바로 다른 세션을 고를 수 있게. (selectedSession 은 key 로 찾으니 프로젝트 필터와 무관하다.)
-      if (!drawerOpen() && selectedSession() && sessionProjectId(selectedSession()) !== selectedProjectId) leaveChat(false);
+      // '전체'(빈 값)는 모든 대화를 포함하므로 떠날 이유가 없다.
+      if (selectedProjectId && !drawerOpen() && selectedSession()
+          && sessionProjectId(selectedSession()) !== selectedProjectId) leaveChat(false);
       renderProjectTabs();
       renderSourceTabs();
       renderSessions();
@@ -5993,7 +6020,11 @@ _MOBILE_HTML = r"""<!doctype html>
     // 워크트리 생성 — 프로젝트 단위라 진입점을 그룹 헤더와 층을 나눈다.
     newWorktreeBtn.onclick = async () => {
       // 서버가 projectId 로 등록된 프로젝트 root 를 찾는다(워크트리 payload 엔 projectRoot 가 없다).
-      if (!selectedProjectId) { showToast("프로젝트를 먼저 고르세요"); return; }
+      // '전체'가 기본값이라(새 폰) 여기서 막히면 버튼이 처음부터 죽어 있다.
+      // 고른 프로젝트가 없으면 **가장 최근 방**의 프로젝트를 쓴다 — 형이 방금 보던 맥락이다.
+      const 최근 = (state.rooms || []).slice().sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0))[0];
+      const 대상프로젝트 = selectedProjectId || String((최근 && 최근.projectId) || "");
+      if (!대상프로젝트) { showToast("프로젝트를 먼저 고르세요"); return; }
       const branch = (prompt("새 워크트리의 브랜치명") || "").trim();
       if (!branch) return;
       newWorktreeBtn.disabled = true;
@@ -6002,7 +6033,7 @@ _MOBILE_HTML = r"""<!doctype html>
       statusEl.textContent = "워크트리 만드는 중 — 서브레포가 있으면 몇 분 걸릴 수 있어요";
       try {
         const r = await fetch("/mobile/api/worktree-create", {method: "POST", headers: headers(true),
-                                                              body: JSON.stringify({projectId: selectedProjectId, branch})});
+                                                              body: JSON.stringify({projectId: 대상프로젝트, branch})});
         if (!r.ok) throw new Error(await responseError(r));
         const d = await r.json();
         showToast(`워크트리 만들었어요 · ${String(d.root || branch).split("/").pop()}`);

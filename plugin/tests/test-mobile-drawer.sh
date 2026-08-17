@@ -174,9 +174,15 @@ assert "wtActionUsed" not in html, "가용성을 추측하면 첫 세션을 못 
 for label in ("Claude 대화 추가", "Codex 대화 추가"):
     assert label in html, f"{label} 가 없다"
 
-# 드로어에서 프로젝트/종류를 바꿀 때는 대화를 떠나지 않는다(패널 열어둔 채 목록만 갈린다)
-assert "if (!drawerOpen() && selectedSession() && sessionProjectId(selectedSession()) !== selectedProjectId)" in html, \
-    "드로어에서 프로젝트를 바꾸면 목록 화면으로 튄다"
+# 드로어에서 프로젝트/종류를 바꿀 때는 대화를 떠나지 않는다(패널 열어둔 채 목록만 갈린다).
+# 조건문을 **글자 그대로** 비교하면 조건이 하나만 늘어도 기능은 멀쩡한데 테스트만 깨진다 —
+# 그래서 필요한 조각이 다 들어 있는지만 본다.
+프로젝트전환 = html[html.find("projectTabs.onclick"):][:1400]
+떠나기 = 프로젝트전환[프로젝트전환.find("leaveChat(false)") - 260:프로젝트전환.find("leaveChat(false)")]
+for 조각 in ("!drawerOpen()", "selectedSession()", "sessionProjectId(selectedSession()) !== selectedProjectId"):
+    assert 조각 in 떠나기, f"드로어에서 프로젝트를 바꾸면 목록 화면으로 튄다 — {조각} 가 없다: {떠나기}"
+# '전체'(빈 값)는 모든 대화를 포함하므로 떠날 이유가 없다 — 그때도 튕기면 안 된다.
+assert "selectedProjectId &&" in 떠나기, f"'전체'를 눌렀는데 대화에서 튕긴다: {떠나기}"
 assert "if (!drawerOpen() && selectedSession() && sourceFilter !== \"all\"" in html, \
     "드로어에서 종류를 바꾸면 목록 화면으로 튄다"
 
