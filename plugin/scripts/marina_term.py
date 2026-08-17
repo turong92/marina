@@ -509,6 +509,25 @@ def term_input(tid: str, data: str) -> dict[str, Any]:
     return {"ok": True}
 
 
+_ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\r")
+
+
+def term_tail(tid: str, limit: int = 1800) -> str:
+    """PTY 화면의 마지막 부분을 사람이 읽을 수 있게. **진단 전용.**
+
+    셀렉터가 실제로 어떻게 생겼는지 모르면 답 구동은 추측이 된다(실측: 질문 여러 개인 폼이
+    계속 실패했는데 화면을 본 적이 없었다). 색·커서 이동 시퀀스를 걷어내고 글자만 남긴다."""
+    try:
+        term = _get(tid)
+    except ValueError:
+        return ""
+    with term.cond:
+        raw = bytes(term.history[-limit * 4:])
+    text = _ANSI_RE.sub(b"", raw).decode("utf-8", errors="replace")
+    lines = [line.rstrip() for line in text.splitlines()]
+    return "\n".join([line for line in lines if line.strip()][-40:])[-limit:]
+
+
 def term_output_mark(tid: str) -> int:
     """지금까지 이 PTY 가 뱉은 총 바이트 수. 화면이 다시 그려졌는지 재는 기준점.
 

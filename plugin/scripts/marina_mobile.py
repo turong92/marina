@@ -33,7 +33,7 @@ from marina_sessions import (
 )
 from marina_state import MARINA_HOME, PORT
 from marina_term import (_agent_cli, term_await_redraw, term_input, term_kill, term_list,
-                         term_open, term_output_mark)
+                         term_open, term_output_mark, term_tail)
 
 
 TOKEN_FILE = MARINA_HOME / "mobile-token"
@@ -1666,6 +1666,11 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         _drive_selector(tid, picks, multi_select)
     settled = _await_answer_settled(sid, before, len(answers) or 1)
     _answer_log("drive done: settled=%r after=%r" % (settled, _question_state_token(sid)))
+    if not settled:
+        # **화면을 남긴다.** 질문 여러 개짜리 폼이 계속 실패하는데(단일 질문은 8/8 성공) 셀렉터가
+        # 어떻게 생겼는지 본 적이 없어 고치려면 추측이 된다. 실패했을 때만 남긴다 — 성공 경로에
+        # 큰 로그를 쌓을 이유가 없다.
+        _answer_log("실패 시점 화면 ↓↓↓\n%s\n↑↑↑ 화면 끝" % term_tail(tid))
     return {"ok": True, "tid": tid, "answers": answers,
             "optionIndex": answers[0][0], "settled": settled}
 
