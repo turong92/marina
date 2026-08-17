@@ -1459,8 +1459,19 @@ def mobile_launch(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "tid": str(result.get("tid") or ""), "source": source}
 
 
-_ANSWER_CONFIRM_TIMEOUT_S = 3.5   # PostToolUse 훅이 상태파일을 지울 때까지 기다리는 상한
+# PostToolUse 훅이 상태파일을 지울 때까지 기다리는 상한. **질문 수에 비례해야 한다** —
+# 질문이 여러 개면 셀렉터를 순서대로 확정하느라 그만큼 오래 걸린다. 고정 3.5초로 두었더니
+# 질문 3개짜리 폼이 첫 시도에서 settled=False 로 떨어졌다(실측 2026-08-17 13:52:58, 형이 본
+# 그 오류). 두 번째 시도는 같은 답으로 성공했다 — 실패가 아니라 **성급한 판정**이었다.
+_ANSWER_CONFIRM_BASE_S = 3.5
+_ANSWER_CONFIRM_PER_QUESTION_S = 2.0
 _ANSWER_CONFIRM_POLL_S = 0.15
+# 질문 사이 간격. 다음 셀렉터가 그려지기 전에 키를 넣으면 그 입력이 허공으로 간다.
+_ANSWER_NEXT_QUESTION_PAUSE_S = 0.45
+
+
+def _answer_confirm_timeout(questions: int) -> float:
+    return _ANSWER_CONFIRM_BASE_S + _ANSWER_CONFIRM_PER_QUESTION_S * max(0, int(questions) - 1)
 _ANSWER_LOG = MARINA_HOME / "answer-debug.log"
 
 
@@ -1475,14 +1486,14 @@ def _answer_log(message: str) -> None:
         pass
 
 
-def _await_answer_settled(sid: str, before: str) -> bool:
+def _await_answer_settled(sid: str, before: str, questions: int = 1) -> bool:
     """답이 실제로 셀렉터에 먹혔는지 확인. before 는 주입 직전의 상태파일 토큰.
 
     토큰이 사라지거나 바뀌면 그 AskUserQuestion 은 끝난 것(= 먹혔다). 상한까지 그대로면 안 먹힌
     것으로 보고한다 — 호출자(모바일)가 카드를 되살려 형이 다시 누를 수 있게."""
     if not before:
         return True     # 애초에 pending 질문이 없었다 — 확인할 근거가 없으니 판정하지 않는다
-    deadline = time.monotonic() + _ANSWER_CONFIRM_TIMEOUT_S
+    deadline = time.monotonic() + _answer_confirm_timeout(questions)
     while time.monotonic() < deadline:
         time.sleep(_ANSWER_CONFIRM_POLL_S)
         if _question_state_token(sid) != before:
@@ -1642,11 +1653,13 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         tid, answers, [bool(q.get("multiSelect")) if isinstance(q, dict) else None for q in questions], before))
     for position, picks in enumerate(answers):
         if position:
-            _agent_input_pause()   # 다음 질문의 셀렉터가 그려질 틈을 준다
+            # 다음 질문의 셀렉터가 그려질 틈. 기본 입력 간격(0.16초)으로는 모자라서, 질문이
+            # 여러 개인 폼이 중간에 어긋났다(실측: 3개짜리가 첫 시도에 안 먹음).
+            time.sleep(_ANSWER_NEXT_QUESTION_PAUSE_S)
         question = questions[position] if position < len(questions) else {}
         multi_select = bool(isinstance(question, dict) and question.get("multiSelect"))
         _drive_selector(tid, picks, multi_select)
-    settled = _await_answer_settled(sid, before)
+    settled = _await_answer_settled(sid, before, len(answers) or 1)
     _answer_log("drive done: settled=%r after=%r" % (settled, _question_state_token(sid)))
     return {"ok": True, "tid": tid, "answers": answers,
             "optionIndex": answers[0][0], "settled": settled}
@@ -2027,11 +2040,11 @@ _MOBILE_HTML = r"""<!doctype html>
        형이 질문 맥락을 못 읽는다(형: "질문 길어지면 위에 대화내용 못읽게 되는것도 문제야").
        화면의 45%까지만 쓰고 그 안에서 스크롤한다 — 작업 블록에서 쓴 것과 같은 처방. */
     .liveQuestion { margin-bottom: 2px; max-height: 45dvh; overflow-y: auto; overscroll-behavior: contain; }
-    .questionCard { align-self: stretch; display: flex; flex-direction: column; gap: 8px; padding: 11px 12px; border: 1px solid #b9d4f2; border-radius: 10px; background: #f2f8ff; }
+    .questionCard { align-self: stretch; max-width: 100%; min-width: 0; overflow-wrap: anywhere; display: flex; flex-direction: column; gap: 8px; padding: 11px 12px; border: 1px solid #b9d4f2; border-radius: 10px; background: #f2f8ff; }
     .questionHeader { color: #0b63ce; font-size: 9px; font-weight: 850; text-transform: uppercase; letter-spacing: .04em; }
-    .questionText { font-size: 13px; font-weight: 650; line-height: 1.45; }
-    .questionOpts { display: flex; flex-direction: column; gap: 6px; }
-    .questionOpt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; min-height: 40px; padding: 8px 11px; border: 1px solid #b9c6d8; border-radius: 8px; background: #fff; text-align: left; }
+    .questionText { min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 650; line-height: 1.45; }
+    .questionOpts { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+    .questionOpt { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; overflow-wrap: anywhere; white-space: normal; min-height: 40px; padding: 8px 11px; border: 1px solid #b9c6d8; border-radius: 8px; background: #fff; text-align: left; }
     .questionOpt:disabled { opacity: .45; background: #f2f4f8; cursor: not-allowed; }
     /* 우상단 사용량 게이지 — conic-gradient 로 채운 링. 안에 숫자를 겹쳐 한눈에 읽히게 한다.
        예전 아이콘은 고정 문자(◔)라 값이 안 변해 장식일 뿐이었다. */
@@ -2044,8 +2057,8 @@ _MOBILE_HTML = r"""<!doctype html>
     .usageRing[data-level="warn"] .usageRingNum { color: #a8571a; }
     .usageRing[data-level="critical"] .usageRingNum { color: #a02222; }
     .questionBlocked { padding: 7px 9px; border-radius: 7px; background: #f2f4f8; color: #4d5665; font-size: 11px; line-height: 1.45; }
-    .questionOptLabel { font-size: 12px; font-weight: 800; color: #1f2733; }
-    .questionOptDesc { font-size: 10px; color: #63708a; line-height: 1.4; }
+    .questionOptLabel { max-width: 100%; overflow-wrap: anywhere; font-size: 12px; font-weight: 800; color: #1f2733; }
+    .questionOptDesc { max-width: 100%; overflow-wrap: anywhere; font-size: 10px; color: #63708a; line-height: 1.4; }
     .questionMore { color: #63708a; font-size: 10px; }
     .questionBlock { display: flex; flex-direction: column; gap: 8px; }
     .questionBlock + .questionBlock { padding-top: 9px; border-top: 1px solid #cfe0f3; }
