@@ -8,6 +8,7 @@ import re
 import secrets
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -537,6 +538,20 @@ def mobile_set_pin(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "roots": roots}
 
 
+_ROOM_LOG_SEEN: set[str] = set()
+
+
+def _room_log_once(message: str) -> None:
+    """방 조립 실패를 **처음 한 번만** 남긴다.
+
+    방 조립은 폴마다 워크트리 수만큼 돈다 — 매번 찍으면 로그가 못 쓰게 되고, 아예 안 찍으면
+    방이 영영 안 보이는데 이유를 알 수 없다."""
+    if message in _ROOM_LOG_SEEN:
+        return
+    _ROOM_LOG_SEEN.add(message)
+    print(f"[marina] 방 조립 실패: {message}", file=sys.stderr, flush=True)
+
+
 # 아카이브 = 방을 접어둔다(스펙 §7). 모바일의 '숨김'을 여기로 흡수한다 — 비슷한 개념 둘을
 # 따로 둘 이유가 없고, 숨김은 세션 키 단위라 "방이 단위"라는 원칙과 어긋난다.
 ARCHIVE_FILE = MARINA_HOME / "archived-rooms.json"
@@ -548,13 +563,27 @@ def room_archive() -> dict[str, float]:
             if isinstance(value, (int, float))}
 
 
-def room_archived(root: Path, last_at: float, archive: dict[str, float]) -> bool:
-    """지금 접혀 있나. **접은 뒤에 활동이 생기면 저절로 펴진다.**
+# 접어둔 방을 도로 펴는 상태 — **사람을 부르는 것들만**이다.
+# 작업중은 여기 없다: 접는 순간에도 에이전트는 계속 움직여 lastAt 이 갱신되므로, 활동만으로
+# 펴면 작업 중인 방은 접자마자 튀어나온다(접기 버튼이 고장 난 것처럼 보인다).
+# "접어둠"의 뜻은 지금 안 본다는 것이지 멈추라는 게 아니다 — 형이 필요할 때만 부른다.
+_ROOM_ATTENTION = ("응답필요", "문제", "완료")
 
-    아카이브는 "지금 안 볼 것"이지 "죽은 것"이 아니다. 접어둔 방에서 에이전트가 다시 움직여
-    응답필요가 떴는데 목록에 없으면 그걸 놓친다 — 그 순간 목록을 못 믿게 된다."""
+
+def room_archived(root: Path, last_at: float, archive: dict[str, float], status: str = "") -> bool:
+    """지금 접혀 있나. **접은 뒤에 형을 부를 일이 생기면 저절로 펴진다.**
+
+    아카이브는 "지금 안 볼 것"이지 "죽은 것"이 아니다. 접어둔 방에서 질문이 떴는데 목록에
+    없으면 그걸 놓치고, 그 순간 목록 자체를 못 믿게 된다.
+
+    반대로 아무 활동에나 펴면 접기가 무용지물이다 — 그래서 '새 활동'이 아니라
+    '사람을 부르는 상태'를 조건으로 쓴다."""
     at = archive.get(str(root))
-    return at is not None and float(last_at or 0) <= at
+    if at is None:
+        return False
+    if float(last_at or 0) <= at:
+        return True
+    return str(status) not in _ROOM_ATTENTION
 
 
 def mobile_set_archived(body: dict[str, Any]) -> dict[str, Any]:
@@ -657,8 +686,11 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                            and room_has_changes(root))
                 rooms.append(build_room(root, info, agents, has_changes=changed,
                                         questions=mobile_pending_question))
-            except Exception:
-                pass
+            except Exception as exc:
+                # 조용히 넘기면 방이 **영원히 안 보이는데 이유를 알 수 없다**(오타 하나로 전
+                # 워크트리가 실패해도 화면은 멀쩡해 보인다). 같은 오류는 한 번만 남긴다 —
+                # 폴마다 찍으면 로그가 못 쓰게 된다.
+                _room_log_once(f"{type(exc).__name__}: {exc}")
             worktrees.append({
                 "id": info.get("id"),
                 "alias": info.get("alias") or "",
@@ -761,7 +793,8 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                     if f"{s.get('source')}:{s.get('sid')}" not in hide or s.get("kind") != "agent"]
     archive = room_archive()
     for room in rooms:
-        room["archived"] = room_archived(Path(room["root"]), room.get("lastAt") or 0, archive)
+        room["archived"] = room_archived(Path(room["root"]), room.get("lastAt") or 0, archive,
+                                         str(room.get("status") or ""))
     rooms.sort(key=lambda item: float(item.get("lastAt") or 0), reverse=True)
     return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "rooms": rooms,
             "pins": mobile_pins(),

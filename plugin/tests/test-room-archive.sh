@@ -37,8 +37,15 @@ assert str(root) in archive and archive[str(root)] > 0, archive
 at = archive[str(root)]
 assert mm.room_archived(root, at - 10, archive) is True
 
-# ③ **새 활동이 생기면 저절로 펴진다** — 접어둔 방에서 응답필요가 떠도 놓치지 않게.
-assert mm.room_archived(root, at + 10, archive) is False
+# ③ **형을 부를 일이 생기면 저절로 펴진다** — 접어둔 방의 질문을 놓치면 목록을 못 믿게 된다.
+assert mm.room_archived(root, at + 10, archive, "응답필요") is False
+assert mm.room_archived(root, at + 10, archive, "문제") is False
+assert mm.room_archived(root, at + 10, archive, "완료") is False
+
+# ③-b 그러나 **아무 활동에나 펴지지는 않는다.** 작업 중인 방은 접는 순간에도 에이전트가
+# 계속 움직여 lastAt 이 갱신된다 — 활동만으로 펴면 접자마자 튀어나와 버튼이 고장 나 보인다.
+assert mm.room_archived(root, at + 10, archive, "작업중") is True
+assert mm.room_archived(root, at + 10, archive, "대기") is True
 
 # ④ 다시 펴면 기록이 사라진다(접힘이 영원히 남으면 왜 안 보이는지 알 수 없다).
 mm.mobile_set_archived({"root": str(root), "archived": False})
@@ -66,6 +73,13 @@ mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [
 ]
 room = mm.mobile_state()["rooms"][0]
 assert room["archived"] is False and room["status"] == "응답필요", room
+
+# ⑧-b 작업 중인 방은 접어두면 접힌 채로 있다 — 활동만으로 펴면 접기가 무용지물이다.
+mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [
+    {"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 9_999_999_999},
+]
+room = mm.mobile_state()["rooms"][0]
+assert room["archived"] is True and room["status"] == "작업중", room
 print("ok 아카이브: 기록·자동 복귀·해제·목록 반영")
 PY
 

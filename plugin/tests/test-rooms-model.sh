@@ -92,6 +92,16 @@ rooms._changes_cache.clear()
 assert rooms.room_has_changes(root, runner=broken, now=200.0) is False
 # 실패는 캐시에 남기지 않는다 — 다음 기회에 다시 본다.
 assert str(root) not in rooms._changes_cache
+
+# ⑦ 캐시가 무한히 크지 않는다 — 워크트리는 생겼다 사라지므로 죽은 경로가 계속 쌓인다.
+rooms._changes_cache.clear()
+for i in range(rooms._CHANGES_CACHE_MAX + 50):
+    rooms.room_has_changes(Path(f"/tmp/wt-{i}"), runner=fake_git, now=1000.0)
+# 아직 다 살아 있는 항목은 안 버린다(버리면 방금 잰 것을 또 재게 된다).
+assert len(rooms._changes_cache) == rooms._CHANGES_CACHE_MAX + 50
+rooms.room_has_changes(Path("/tmp/새것"), runner=fake_git,
+                       now=1000.0 + rooms._CHANGES_TTL_S + 1)
+assert len(rooms._changes_cache) == 1, f"만료된 것을 안 버렸다: {len(rooms._changes_cache)}"
 print("ok 변경 판정: 미커밋·앞선 커밋·캐시·실패 내성")
 PY
 

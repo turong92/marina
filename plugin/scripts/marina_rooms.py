@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
@@ -45,7 +46,21 @@ def room_status(status: str, has_changes: bool) -> str:
 # 방 목록 경로에서 git 을 부르는 **유일한** 자리다. 그래서 캐시 뒤에 둔다 — 방 목록은 폴마다
 # 도는데 워크트리마다 git 을 돌리면 전에 잡은 "초당 git 40회"가 그대로 재현된다(스펙 미해결 3번).
 _CHANGES_TTL_S = 20.0
+_CHANGES_CACHE_MAX = 200        # 워크트리 수(지금 28) 보다 넉넉히. 넘으면 만료된 것부터 버린다.
 _changes_cache: dict[str, tuple[float, bool]] = {}
+# 데몬은 요청마다 스레드다. dict 갱신 자체는 GIL 덕에 깨지지 않지만, 청소 중에 크기가
+# 바뀌면 순회가 터진다 — 청소만 잠근다(읽기·쓰기는 잠그지 않는다. 최악이 git 한 번 더다).
+_changes_lock = threading.Lock()
+
+
+def _prune_changes_cache(current: float) -> None:
+    """만료된 항목을 버린다. 워크트리는 생겼다 사라지므로, 안 지우면 죽은 경로가 계속 쌓인다."""
+    with _changes_lock:
+        if len(_changes_cache) <= _CHANGES_CACHE_MAX:
+            return
+        for key in [k for k, (at, _) in list(_changes_cache.items())
+                    if current - at >= _CHANGES_TTL_S]:
+            _changes_cache.pop(key, None)
 
 
 def _git(args: list[str], cwd: Path) -> str:
@@ -82,6 +97,7 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
         return False        # 캐시에 넣지 않는다 — 다음 기회에 다시 본다
     result = bool(dirty or ahead)
     _changes_cache[key] = (current, result)
+    _prune_changes_cache(current)
     return result
 
 
