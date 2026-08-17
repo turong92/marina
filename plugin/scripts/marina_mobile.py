@@ -73,8 +73,12 @@ def mobile_pending_session_settings(root: Path, source: str, sid: str) -> dict[s
     return {"model": str(raw.get("model") or ""), "effort": str(raw.get("effort") or "")}
 
 
-def _settings_file_update(path: Path, key: str, value: dict[str, Any] | None) -> None:
-    """세션 설정 JSON 의 원자적 갱신 — value=None 이면 삭제. pending/applied 두 파일이 같이 쓴다."""
+def _settings_file_update(path: Path, key: str, value: Any) -> None:
+    """키 하나짜리 JSON 파일의 원자적 갱신 — value=None 이면 삭제.
+
+    pending/applied 세션 설정과 방 아카이브가 같이 쓴다(값은 dict 든 숫자든 상관없다).
+    직접 write 하지 않는 이유: 임시파일 → chmod 0600 → replace 를 락 안에서 해야 동시에
+    두 요청이 들어와도 파일이 반쪽으로 남지 않는다."""
     with _SESSION_SETTINGS_LOCK:
         payload = _read_json(path)
         if value is None:
@@ -533,6 +537,34 @@ def mobile_set_pin(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "roots": roots}
 
 
+# 아카이브 = 방을 접어둔다(스펙 §7). 모바일의 '숨김'을 여기로 흡수한다 — 비슷한 개념 둘을
+# 따로 둘 이유가 없고, 숨김은 세션 키 단위라 "방이 단위"라는 원칙과 어긋난다.
+ARCHIVE_FILE = MARINA_HOME / "archived-rooms.json"
+
+
+def room_archive() -> dict[str, float]:
+    """접어둔 방들 — 워크트리 경로 → 접은 시각."""
+    return {str(key): float(value) for key, value in _read_json(ARCHIVE_FILE).items()
+            if isinstance(value, (int, float))}
+
+
+def room_archived(root: Path, last_at: float, archive: dict[str, float]) -> bool:
+    """지금 접혀 있나. **접은 뒤에 활동이 생기면 저절로 펴진다.**
+
+    아카이브는 "지금 안 볼 것"이지 "죽은 것"이 아니다. 접어둔 방에서 에이전트가 다시 움직여
+    응답필요가 떴는데 목록에 없으면 그걸 놓친다 — 그 순간 목록을 못 믿게 된다."""
+    at = archive.get(str(root))
+    return at is not None and float(last_at or 0) <= at
+
+
+def mobile_set_archived(body: dict[str, Any]) -> dict[str, Any]:
+    """방을 접거나 편다. 펼 때는 기록을 지운다 — 남겨두면 왜 안 보이는지 알 수 없다."""
+    root = safe_root(str(body.get("root") or ""))
+    archived = bool(body.get("archived"))
+    _settings_file_update(ARCHIVE_FILE, str(root), time.time() if archived else None)
+    return {"ok": True, "archived": archived, "root": str(root)}
+
+
 HIDDEN_FILE = MARINA_HOME / "hidden-sessions.json"
 
 
@@ -727,6 +759,9 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
         hide = set(hidden)
         sessions = [s for s in sessions
                     if f"{s.get('source')}:{s.get('sid')}" not in hide or s.get("kind") != "agent"]
+    archive = room_archive()
+    for room in rooms:
+        room["archived"] = room_archived(Path(room["root"]), room.get("lastAt") or 0, archive)
     rooms.sort(key=lambda item: float(item.get("lastAt") or 0), reverse=True)
     return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "rooms": rooms,
             "pins": mobile_pins(),

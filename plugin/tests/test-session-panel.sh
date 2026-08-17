@@ -179,8 +179,12 @@ print("PASS 서버 핀 저장: 추가/중복방지/해제/최신우선 + 깨진 
 PY
 
 # ---------- 서버: 라우트가 모바일 표면에 있다 ----------
-grep -q '"/mobile/api/pins", "/mobile/api/hidden", "/mobile/api/worktree-create"' "$SCR/marina_handler.py" \
-  || { echo "FAIL: 모바일 라우트 미등록"; exit 1; }
+# 경로가 **각각** 있는지 본다. 예전엔 세 경로가 한 줄에 붙은 모양을 통째로 grep 했는데,
+# 경로가 하나 늘어 줄바꿈이 생기자 기능은 멀쩡한데 테스트만 깨졌다 — 배치가 아니라 사실을 본다.
+for route in /mobile/api/pins /mobile/api/hidden /mobile/api/worktree-create; do
+  grep -q "\"$route\"" "$SCR/marina_handler.py" \
+    || { echo "FAIL: 모바일 라우트 미등록 ($route)"; exit 1; }
+done
 grep -q 'def _worktree_create' "$SCR/marina_handler.py" \
   || { echo "FAIL: 워크트리 생성이 웹/모바일 공용 함수로 분리되지 않음"; exit 1; }
 grep -q 'self._worktree_create(controller, principal, body)' "$SCR/marina_handler.py" \
