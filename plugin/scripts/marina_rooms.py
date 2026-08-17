@@ -88,15 +88,27 @@ def _has_own_changes(status_text: str, root: Path) -> bool:
     중첩 git 레포(`?? sub/` 이면서 sub/.git 이 있는 것)는 뺀다. git 은 중첩 레포 안으로
     안 내려가므로 그 안에서 무슨 일이 있어도 여기엔 디렉터리 한 줄로만 나온다 — 즉 이 한 줄은
     "남의 레포가 거기 있다"는 사실일 뿐, 이 방이 뭘 했다는 증거가 아니다."""
-    for line in status_text.splitlines():
-        if not line.strip():
+    # **-z 출력**을 읽는다(NUL 구분). 기본 출력은 core.quotePath 때문에 비ASCII 이름을
+    # `"\355\225\234..."` 로 이스케이프해 버려, 한글 폴더가 중첩 레포여도 경로가 안 맞아
+    # "내 변경"으로 세어진다 — 형은 한글 이름을 쓴다. -z 는 인용 자체를 하지 않는다.
+    for record in status_text.split("\0"):
+        if not record.strip():
             continue
-        if line.startswith("?? "):
-            path = line[3:].strip().strip('"')
-            if path.endswith("/") and (root / path / ".git").exists():
+        if record.startswith("?? "):
+            path = record[3:]
+            if path.endswith("/") and _is_nested_repo(root / path):
                 continue
         return True
     return False
+
+
+def _is_nested_repo(path: Path) -> bool:
+    """이 디렉터리가 자기 git 레포인가. 권한이 막혀 있으면 판단을 포기한다 —
+    py3.9 의 Path.exists() 는 EACCES 를 삼키지 않고 던진다(그대로 두면 방 전체가 실패 캐시로 떨어진다)."""
+    try:
+        return (path / ".git").exists()
+    except OSError:
+        return False
 
 
 def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = None,
@@ -126,7 +138,7 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
         #   테스트 파일, 새 모듈이 그렇다. 이 Room API 의 계획 문서가 정확히 그 경우였다.
         # 버려야 할 건 "untracked 전부"가 아니라 "남의 레포"다. 중첩 레포는 자기 워크트리에서
         # 따로 관리되지 이 방의 작업물이 아니다.
-        dirty = _has_own_changes(run(["status", "--porcelain"], root), root)
+        dirty = _has_own_changes(run(["status", "--porcelain", "-z"], root), root)
         # 미커밋이 이미 있으면 커밋 쪽은 볼 필요가 없다 — git 한 번을 아낀다.
         ahead = dirty or bool(run(["log", "--oneline", "-1", "HEAD", "--not", "--remotes"],
                                   root).strip())
@@ -152,6 +164,30 @@ def fold_status(tab_statuses: list[str]) -> str:
     return "대기"
 
 
+def attention_mark(status: str, tabs: list[dict[str, Any]]) -> str:
+    """이 방이 **무엇으로** 형을 부르고 있나 — 접어둔 방을 다시 펼지 판단하는 지문.
+
+    상태 문자열만 비교하면 "같은 상태의 새 사건"을 못 본다. 질문 뜬 방을 '나중에' 하고
+    접었는데 에이전트가 더 급한 걸 물으면, 상태는 여전히 응답필요라 영영 안 펴진다 —
+    접기의 취지가 정확히 반대로 작동한다.
+
+    그래서 부르는 **내용**을 적는다: 질문은 그 표식(질문마다 다르다), 실패는 어느 세션이
+    실패했는지. 완료는 한 번뿐인 사건이라 고정값이다 — 완료인 채로 치운 방이 파일 시각이
+    갱신됐다고 다시 들이밀리면 안 되기 때문이다."""
+    if status == "응답필요":
+        # 질문 표식이 없는 경우도 있다(waiting — 프롬프트 앞에서 기다리는 중). 그때는 어느
+        # 세션이 기다리는지로 구별한다. 안 그러면 부르는 방들이 죄다 같은 지문이 된다.
+        return "q:" + ",".join(sorted(
+            f"{tab.get('sid') or ''}={tab.get('question') or ''}"
+            for tab in tabs if str(tab.get("status") or "") == "응답필요"))
+    if status == "문제":
+        return "f:" + ",".join(sorted(str(tab.get("sid") or "") for tab in tabs
+                                      if str(tab.get("status") or "") == "문제"))
+    if status == "완료":
+        return "done"
+    return ""
+
+
 def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]], *,
                has_changes: bool, questions: Callable[[str, str], Any]) -> dict[str, Any]:
     """방 하나를 조립한다 — 워크트리 1개 + 그 안의 세션들(탭).
@@ -165,7 +201,8 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
     # 마지막 활동이 최근인 것부터 — 맨 앞이 방을 열었을 때 먼저 열리는 탭이다.
     for agent in sorted(agents, key=lambda item: float(item.get("ts") or 0), reverse=True):
         source, sid = str(agent.get("source") or ""), str(agent.get("sid") or "")
-        canon = "blocked" if questions(source, sid) else str(agent.get("status") or "idle")
+        pending = questions(source, sid) or {}
+        canon = "blocked" if pending else str(agent.get("status") or "idle")
         tabs.append({
             "source": source,
             "sid": sid,
@@ -174,6 +211,9 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
             # 탭의 마지막 활동 시각. 화면 정렬에도 쓰지만, 권한 필터가 탭을 걸러낸 뒤 방의
             # lastAt 을 다시 계산하려면 탭이 자기 시각을 들고 있어야 한다.
             "ts": float(agent.get("ts") or 0),
+            # 지금 기다리는 질문의 표식. **질문마다 다르다** — 접어둔 방에 새 질문이 왔는지를
+            # 상태 문자열("응답필요")로는 알 수 없어서, 이 값으로 구별한다.
+            "question": str(pending.get("token") or "") if pending else "",
             "primary": not tabs,
         })
     # 이름: 별칭 → **첫 탭의 제목** → 워크트리 id.
@@ -183,13 +223,15 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
     name = (str(labels.get("alias") or "").strip()
             or (str(tabs[0]["title"]).strip() if tabs else "")
             or str(labels.get("id") or "").strip())
+    status = fold_status([tab["status"] for tab in tabs])
     return {
         "id": str(labels.get("id") or ""),
         "name": name,
         "project": str(labels.get("projectLabel") or ""),
         "projectId": str(labels.get("projectId") or ""),
         "root": str(root),
-        "status": fold_status([tab["status"] for tab in tabs]),
+        "status": status,
+        "mark": attention_mark(status, tabs),
         "tabs": tabs,
         "lastAt": max((float(item.get("ts") or 0) for item in agents), default=0),
         # 배포는 지금 만들지 않는다 — 자리만 잡아둔다(스펙 확장 지점).

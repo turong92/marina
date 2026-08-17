@@ -31,20 +31,24 @@ except ValueError:
 # ① 접으면 기록된다 — 접을 때의 상태까지 **서버가 직접 재서** 같이 적는다.
 # 폰이 보낸 값을 믿으면 규칙 전체가 클라이언트 손에 넘어간다(안 보내면 완료로 접은 방이
 # 다음 폴에 바로 펴지고, "완료"를 보내면 영원히 안 펴지는 방을 만들 수 있다).
-mm.current_room_status = lambda root_arg: "작업중"
+mm.current_room_mark = lambda root_arg: "q:tok-1"
 out = mm.mobile_set_archived({"root": str(root), "archived": True, "status": "완료(거짓말)"})
 assert out["ok"] is True and out["archived"] is True, out
 archive = mm.room_archive()
-assert archive[str(root)]["at"] > 0 and archive[str(root)]["status"] == "작업중", archive
+assert archive[str(root)]["at"] > 0 and archive[str(root)]["mark"] == "q:tok-1", archive
 
-# ② 상태가 그대로면 접힌 채다.
+# ② 부르는 내용이 그대로면 접힌 채다.
 at = archive[str(root)]["at"]
-assert mm.room_unarchives(root, archive, "작업중") is False
-assert mm.room_unarchives(root, archive, "대기") is False
+assert mm.room_unarchives(root, archive, "응답필요", "q:tok-1") is False
+assert mm.room_unarchives(root, archive, "작업중", "") is False
+assert mm.room_unarchives(root, archive, "대기", "") is False
 
-# ③ **형을 부를 일이 생기면 펴진다** — 접어둔 방의 질문을 놓치면 목록을 못 믿게 된다.
-assert mm.room_unarchives(root, archive, "응답필요") is True
-assert mm.room_unarchives(root, archive, "문제") is True
+# ③ **새로 부르면 펴진다** — 여기가 핵심이다. 상태 문자열만 비교하면 "질문 뜬 방을 접었는데
+# 더 급한 걸 새로 묻는" 경우가 통째로 사라진다(상태는 여전히 응답필요라 영영 안 펴진다).
+assert mm.room_unarchives(root, archive, "응답필요", "q:tok-2") is True, \
+    "같은 상태의 새 질문을 못 알아본다 — 접기가 형을 가두는 도구가 된다"
+assert mm.room_unarchives(root, archive, "문제", "f:s9") is True
+assert mm.room_unarchives(root, archive, "완료", "done") is True
 
 # ③-b **활동 시각을 보지 않는다.** 답을 기다리는 질문은 트랜스크립트에 안 써져서 세션 파일
 # mtime 이 안 움직인다(그래서 훅으로 따로 잡는다). 시각으로 관문을 만들면 질문이 떠도
@@ -56,9 +60,8 @@ assert "last_at" not in 소스, "활동 시각 관문이 다시 생겼다 — �
 
 # ③-c 완료는 **접을 때 완료였나**로 갈린다. 완료인 채로 치운 방이 다시 들이밀리면 접기가
 # 무의미하다. 반대로 접어둔 뒤에 끝난 일은 보여줘야 한다.
-완료로접음 = {str(root): {"at": at, "status": "완료"}}
-assert mm.room_unarchives(root, 완료로접음, "완료") is False
-assert mm.room_unarchives(root, archive, "완료") is True     # 접을 땐 작업중이었다
+완료로접음 = {str(root): {"at": at, "mark": "done"}}
+assert mm.room_unarchives(root, 완료로접음, "완료", "done") is False
 
 # ④ 다시 펴면 기록이 사라진다(접힘이 영원히 남으면 왜 안 보이는지 알 수 없다).
 mm.mobile_set_archived({"root": str(root), "archived": False})
@@ -70,11 +73,14 @@ assert mm.room_unarchives(Path("/없는/워크트리"), mm.room_archive()) is Fa
 # ⑥ 옛 형식(숫자만)도 읽는다 — 배포 한 번에 형이 접어둔 방이 다 펴지면 안 된다.
 mm.ARCHIVE_FILE.write_text(json.dumps({str(root): 1000.0}), encoding="utf-8")
 옛것 = mm.room_archive()
-assert 옛것[str(root)] == {"at": 1000.0, "status": ""}, 옛것
-assert mm.room_unarchives(root, 옛것, "작업중") is False
+assert 옛것[str(root)] == {"at": 1000.0, "mark": None}, 옛것
+# 무엇으로 접었는지 모르면 **부르는 것만** 편다 — 완료까지 펴면 접자마자 튀어나온다.
+assert mm.room_unarchives(root, 옛것, "작업중", "") is False
+assert mm.room_unarchives(root, 옛것, "완료", "done") is False
+assert mm.room_unarchives(root, 옛것, "응답필요", "q:x") is True
 
 # ⑦ 파일은 형 것만 읽는다 — 알림·설정 파일과 같은 규칙(0600).
-mm.current_room_status = lambda root_arg: "완료"
+mm.current_room_mark = lambda root_arg: "done"
 mm.mobile_set_archived({"root": str(root), "archived": True})
 assert oct(mm.ARCHIVE_FILE.stat().st_mode)[-3:] == "600"
 
@@ -122,8 +128,25 @@ assert room["status"] == "작업중", room["status"]
 # ⑬ 전체보기에서는 방에서도 꺼내진다 — 전체보기의 존재 이유가 "숨긴 걸 꺼내 정리하기"인데
 # 방에서만 계속 숨기면 방으로는 영영 못 꺼낸다(한 응답 안에 두 정책이 살면 안 된다).
 전체 = mm.mobile_state(include_all=True)
-assert {t["sid"] for t in 전체["rooms"][0]["tabs"]} == {"숨김", "s2"}, 전체["rooms"][0]["tabs"]
-print("ok 아카이브: 기록·끈적한 복귀·해제·목록 반영·숨김")
+전체방 = 전체["rooms"][0]
+assert {t["sid"] for t in 전체방["tabs"]} == {"숨김", "s2"}, 전체방["tabs"]
+# 다만 **상태·지문은 숨김을 뺀 기준 그대로**다. 보는 화면에 따라 달라지면 기록은 한 벌인데
+# 잣대가 두 벌이 되어, 전체보기에서 접은 방이 다음 폴에 바로 펴진다.
+assert 전체방["status"] == "작업중", 전체방["status"]
+assert 전체방["mark"] == mm.mobile_state()["rooms"][0]["mark"], "보는 화면에 따라 지문이 달라진다"
+assert [t["hidden"] for t in 전체방["tabs"] if t["sid"] == "숨김"] == [True]
+
+# ⑭ **전체보기에서 접었다 펴는 왕복** — 스텁이 아니라 진짜 current_room_mark 를 태운다.
+# 여기가 비어 있어서 "전체보기에선 접기 버튼이 안 먹는" 결함을 테스트가 못 봤다.
+mm.mobile_set_archived({"root": str(root), "archived": True})   # 서버가 직접 잰다
+접힌뒤 = mm.mobile_state(include_all=True)["rooms"][0]
+assert 접힌뒤["archived"] is True, "전체보기에서 접었는데 안 접힌다"
+assert mm.mobile_state()["rooms"][0]["archived"] is True, "일반 화면에서도 접혀 있어야 한다"
+
+# 새 질문이 오면 양쪽 다 펴진다.
+agents([{"source": "claude", "sid": "s2", "title": "B", "status": "blocked", "ts": 95}])
+assert mm.mobile_state()["rooms"][0]["archived"] is False, "새로 부르는데 접힌 채다"
+print("ok 아카이브: 기록·끈적한 복귀·해제·목록 반영·숨김·전체보기 왕복")
 PY
 
 # ⑨ HTTP 표면이 실제로 붙어 있나 — 함수만 있고 배선이 없으면 폰에서는 아무 일도 안 난다.

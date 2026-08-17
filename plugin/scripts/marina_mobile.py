@@ -565,9 +565,11 @@ def room_archive() -> dict[str, dict[str, Any]]:
     out: dict[str, dict[str, Any]] = {}
     for key, value in _read_json(ARCHIVE_FILE).items():
         if isinstance(value, (int, float)):
-            out[str(key)] = {"at": float(value), "status": ""}
+            out[str(key)] = {"at": float(value), "mark": None}
         elif isinstance(value, dict) and isinstance(value.get("at"), (int, float)):
-            out[str(key)] = {"at": float(value["at"]), "status": str(value.get("status") or "")}
+            mark = value.get("mark")
+            out[str(key)] = {"at": float(value["at"]),
+                             "mark": None if mark is None else str(mark)}
     return out
 
 
@@ -590,7 +592,8 @@ _ROOM_ATTENTION = ("응답필요", "문제")
 _ROOM_ATTENTION_OR_DONE = _ROOM_ATTENTION + ("완료",)
 
 
-def room_unarchives(root: Path, archive: dict[str, dict[str, Any]], status: str = "") -> bool:
+def room_unarchives(root: Path, archive: dict[str, dict[str, Any]], status: str = "",
+                    mark: str = "") -> bool:
     """접어둔 방을 지금 펴야 하나 — **접을 때와 상태가 달라져 형을 부르면** 편다.
 
     활동 시각(lastAt)을 안 보는 이유가 핵심이다. 시각은 세션 파일의 mtime 인데, 답을
@@ -598,8 +601,12 @@ def room_unarchives(root: Path, archive: dict[str, dict[str, Any]], status: str 
     따로 잡는다). 시각으로 관문을 만들면 질문이 떠도 통과를 못 하고, 형은 방이 안 보여서
     답을 못 하고, 답을 안 해서 시각이 안 움직이는 **교착**이 된다.
 
-    접을 때와 같은 상태면 접힌 채다 — 완료인 채로 치운 방을 파일이 한 번 갱신됐다고 다시
-    들이밀면 접기가 무의미하다. 반대로 접어둔 뒤에 질문이 뜨거나 일이 끝나면 보여준다.
+    상태 문자열이 아니라 **부르는 내용(mark)**을 비교한다. 상태만 보면 "질문 뜬 방을 접었는데
+    더 급한 걸 새로 묻는" 경우가 통째로 사라진다 — 상태는 여전히 응답필요라 영영 안 펴진다.
+    접기의 취지가 정확히 반대로 작동하는 셈이다.
+
+    접을 때와 같은 내용이면 접힌 채다 — 완료인 채로 치운 방을 파일이 한 번 갱신됐다고 다시
+    들이밀면 접기가 무의미하다.
 
     판정이 서면 호출자가 기록을 **지운다**(끈적한 복귀). 그래야 질문이 15분 뒤 만료돼 상태가
     내려가도 방이 슬그머니 다시 접히지 않는다 — 형이 못 본 채로 잃는 게 최악이다."""
@@ -607,14 +614,23 @@ def room_unarchives(root: Path, archive: dict[str, dict[str, Any]], status: str 
     if entry is None:
         return False
     text = str(status)
-    return text in _ROOM_ATTENTION_OR_DONE and text != entry["status"]
+    if text not in _ROOM_ATTENTION_OR_DONE:
+        return False
+    if entry["mark"] is None:
+        # 접을 때 무엇이었는지 못 적었다(옛 기록이거나 계산 실패). 그때는 **부르는 것만** 편다 —
+        # 완료까지 펴면 "접었는데 바로 튀어나온다"가 된다.
+        return text in _ROOM_ATTENTION
+    return str(mark) != entry["mark"]
 
 
-def current_room_status(root: Path) -> str:
-    """이 워크트리의 지금 방 상태. 접을 때 무엇이었는지를 서버가 스스로 적기 위한 것이다.
+def current_room_mark(root: Path) -> str | None:
+    """이 워크트리가 **지금 무엇으로 형을 부르고 있나** — 접을 때 그걸 적어둬야 나중에
+    "같은 것"과 "새로 온 것"을 구별한다.
 
-    방 하나만 조립하므로 목록 전체를 만드는 것보다 훨씬 싸다. 실패하면 빈 문자열 —
-    상태를 모르면 '접을 때와 달라졌다'가 항상 참이 되어, 형을 부를 일이 생기면 어차피 펴진다."""
+    방 하나만 조립하므로 목록 전체를 만드는 것보다 훨씬 싸다(실측 warm 1ms). 숨김은 항상
+    적용한다 — 목록 쪽 계산과 잣대가 같아야 전체보기에서 접은 방이 바로 펴지지 않는다.
+
+    실패하면 None: "모른다"는 뜻이고, 그때는 부르는 상태(질문·실패)에만 펴진다."""
     try:
         hide = set(mobile_hidden())
         agents = [item for item in agents_payload(root, False, False, limit=0)
@@ -622,9 +638,9 @@ def current_room_status(root: Path) -> str:
         changed = (any(str(a.get("status") or "") == "completed" for a in agents)
                    and room_has_changes(root))
         return str(build_room(root, worktree_labels(root), agents, has_changes=changed,
-                              questions=mobile_pending_question).get("status") or "")
+                              questions=mobile_pending_question).get("mark") or "")
     except Exception:
-        return ""
+        return None
 
 
 def mobile_set_archived(body: dict[str, Any]) -> dict[str, Any]:
@@ -637,7 +653,7 @@ def mobile_set_archived(body: dict[str, Any]) -> dict[str, Any]:
     # 상태는 **서버가 직접 잰다.** 폰이 보낸 값을 믿으면 규칙 전체가 클라이언트 손에 넘어간다 —
     # 안 보내면 ""가 되어 완료로 접은 방이 다음 폴에 바로 펴지고, "완료"를 보내면 영원히
     # 안 펴지는 방을 만들 수 있다. 서버는 이 순간 그 방의 상태를 계산할 수 있다.
-    value = {"at": time.time(), "status": current_room_status(root)} if archived else None
+    value = {"at": time.time(), "mark": current_room_mark(root)} if archived else None
     _settings_file_update(ARCHIVE_FILE, str(root), value)
     return {"ok": True, "archived": archived, "root": str(root)}
 
@@ -747,17 +763,32 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
             try:
                 # 방은 탭을 **안 자른다**. 카드는 좁아 3개로 끊지만, 방에서 자르면 4번째
                 # 대화에 도달할 방법이 없고 잘린 탭의 failed/blocked 가 방 상태에서 사라진다.
-                # 숨김은 세션 목록과 **같은 조건**으로 건다 — 전체보기는 숨긴 걸 꺼내 정리하는
-                # 화면인데 방에서만 계속 숨기면 방으로는 영영 못 꺼낸다.
+                #
+                # 숨김은 **전체보기여도 상태 계산에선 항상 뺀다.** 숨김의 뜻이 "이건 나를 부르지
+                # 마라"이기 때문이다. 그래야 방의 상태·지문이 보는 화면에 따라 달라지지 않는다 —
+                # 달라지면 전체보기에서 접은 방이 다음 폴에 바로 펴진다(기록은 한 벌인데 잣대가
+                # 두 벌이라서). 전체보기에서 숨긴 탭을 꺼내 보는 것은 아래에서 따로 붙인다.
                 room_agents = [item for item in all_agents
-                               if include_all
-                               or f"{item.get('source')}:{item.get('sid')}" not in hide]
+                               if f"{item.get('source')}:{item.get('sid')}" not in hide]
                 # git 은 completed 가 하나라도 있을 때만 부른다. 완료/대기를 가르는 데만
                 # 쓰이는 값이라, 나머지 워크트리에서 git 을 돌리는 건 순수한 낭비다.
                 changed = (any(str(a.get("status") or "") == "completed" for a in room_agents)
                            and room_has_changes(root))
-                rooms.append(build_room(root, info, room_agents, has_changes=changed,
-                                        questions=pending_question))
+                room = build_room(root, info, room_agents, has_changes=changed,
+                                  questions=pending_question)
+                if include_all and len(room_agents) < len(all_agents):
+                    # 전체보기에서는 숨긴 탭도 **보여만 준다**(꺼내서 정리하라고). 상태·지문은
+                    # 위에서 이미 정해졌고 여기서 바뀌지 않는다.
+                    shown = {(t["source"], t["sid"]) for t in room["tabs"]}
+                    extra = build_room(root, info,
+                                       [a for a in all_agents
+                                        if (str(a.get("source") or ""), str(a.get("sid") or "")) not in shown],
+                                       has_changes=changed, questions=pending_question)["tabs"]
+                    for tab in extra:
+                        tab["hidden"] = True
+                        tab["primary"] = False
+                    room["tabs"] = room["tabs"] + extra
+                rooms.append(room)
             except Exception as exc:
                 # 조용히 넘기면 방이 **영원히 안 보이는데 이유를 알 수 없다**(오타 하나로 전
                 # 워크트리가 실패해도 화면은 멀쩡해 보인다). 같은 오류는 한 번만 남긴다 —
@@ -872,7 +903,8 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
         if entry is None:
             room["archived"] = False
             continue
-        if not room_unarchives(Path(root_text), archive, str(room.get("status") or "")):
+        if not room_unarchives(Path(root_text), archive, str(room.get("status") or ""),
+                               str(room.get("mark") or "")):
             room["archived"] = True
             continue
         # **끈적한 복귀** — 기록을 지운다. 상태가 잠깐 형을 부르다 내려가도(질문은 15분 뒤

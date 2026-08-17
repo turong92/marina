@@ -49,9 +49,10 @@ calls = []
 def fake_git(args, cwd):
     calls.append(tuple(args))
     if args[0] == "status":
-        # **-uno**: 추적 중인 파일만 본다. 서브레포를 품은 레포에서 `?? ai-api/` 같은
-        # untracked 디렉터리가 영구히 잡혀, 그 방들이 무슨 일을 하든 항상 "완료"로 떴다
-        # (실측 2026-08-17: 워크트리 28개 중 17개). 완료/대기 구분이 통째로 죽어 있었다.
+        # **-z(NUL 구분)로 받아야 한다.** 기본 출력은 비ASCII 이름을 `"\355..."` 로
+        # 이스케이프해서, 한글 폴더가 중첩 레포여도 경로가 안 맞아 "내 변경"으로 세어진다 —
+        # 그 워크트리는 영구히 "완료"로 돌아간다(형은 한글 이름을 쓴다).
+        assert "-z" in args, f"인용된 출력을 읽고 있다: {args}"
         return fake_git.status
     if args[0] == "log":
         return fake_git.log
@@ -66,7 +67,7 @@ assert rooms.room_has_changes(root, runner=fake_git, now=100.0) is False
 
 # ② 미커밋 변경이 있으면 True
 rooms._changes_cache.clear()
-fake_git.status = " M plugin/scripts/marina_rooms.py\n?? new.txt"
+fake_git.status = " M plugin/scripts/marina_rooms.py\0?? new.txt\0"
 assert rooms.room_has_changes(root, runner=fake_git, now=100.0) is True
 
 # ③ 커밋까지 끝냈어도 True — base 보다 앞선 커밋이 있으면 "볼 만한 결과"가 있다.
@@ -107,21 +108,46 @@ assert rooms._CHANGES_FAIL_TTL_S > rooms._CHANGES_TTL_S, "실패를 더 오래 �
 # ⑦-a untracked 는 **세되 중첩 git 레포만 뺀다.** 둘 중 하나로 치우치면 각각 이렇게 틀린다:
 #   전부 세면  → 서브레포를 품은 레포가 영구 dirty(실측 28개 중 17개) → 늘 "완료"
 #   전부 빼면(-uno) → 새 파일만 만들고 끝낸 턴이 사라진다. 이 Room API 의 계획 문서가 그랬다.
+import subprocess
 import tempfile
 
 with tempfile.TemporaryDirectory() as tmp:
     wt = Path(tmp)
     (wt / "sub").mkdir()
     (wt / "sub" / ".git").mkdir()          # 중첩 레포 — 남의 것이다
-    assert rooms._has_own_changes("?? sub/\n", wt) is False
+    assert rooms._has_own_changes("?? sub/\0", wt) is False
     # 진짜 새 파일은 남는다 — 문서 하나 새로 쓴 세션도 결과가 있는 것이다.
-    assert rooms._has_own_changes("?? docs/plan.md\n", wt) is True
+    assert rooms._has_own_changes("?? docs/plan.md\0", wt) is True
     # 평범한 새 폴더(레포 아님)도 결과다.
     (wt / "plain").mkdir()
-    assert rooms._has_own_changes("?? plain/\n", wt) is True
-    # 추적 중인 파일 수정은 당연히 결과다.
-    assert rooms._has_own_changes(" M app.py\n?? sub/\n", wt) is True
+    assert rooms._has_own_changes("?? plain/\0", wt) is True
+    # 추적 중인 파일 수정·리네임·충돌은 당연히 결과다.
+    assert rooms._has_own_changes(" M app.py\0?? sub/\0", wt) is True
+    assert rooms._has_own_changes("R  new.py\0old.py\0", wt) is True
+    assert rooms._has_own_changes("UU merge.py\0", wt) is True
     assert rooms._has_own_changes("", wt) is False
+
+    # **한글 이름 중첩 레포** — 여기가 실제로 깨졌던 자리다. git 은 기본 설정에서 비ASCII 를
+    # `"\355\225\234..."` 로 이스케이프해 내보내, 경로가 안 맞아 "내 변경"으로 세어졌다.
+    # 형은 한글 이름을 쓴다 — 그런 폴더 하나면 그 워크트리가 영구히 "완료"로 돌아간다.
+    (wt / "한글레포").mkdir()
+    (wt / "한글레포" / ".git").mkdir()
+    (wt / "한글레포" / "안의파일.txt").write_text("x", encoding="utf-8")   # 빈 폴더는 git 이 안 센다
+    subprocess.run(["git", "-C", str(wt), "init", "-q"], check=True)
+    real = subprocess.run(["git", "-C", str(wt), "status", "--porcelain", "-z"],
+                          capture_output=True, text=True, check=True).stdout
+    assert "한글레포/" in real, f"전제 확인 실패(-z 인데 인용됐다): {real!r}"
+    assert rooms._has_own_changes(real, wt) is False, \
+        f"한글 이름 중첩 레포를 내 변경으로 셌다 — S1 오탐이 그대로 돌아온다: {real!r}"
+
+    # 권한이 막힌 폴더에서도 안 터진다 — py3.9 의 Path.exists() 는 EACCES 를 던진다.
+    막힌곳 = wt / "막힘"
+    막힌곳.mkdir()
+    막힌곳.chmod(0o000)
+    try:
+        assert rooms._has_own_changes("?? 막힘/\0", wt) is True   # 판단 포기 = 내 변경으로 센다
+    finally:
+        막힌곳.chmod(0o755)
 
 # ⑦ git 이 rc≠0 이면 **'변경 없음'과 구별**해야 한다 — 빈 stdout 을 정답으로 믿으면
 # "다 해놨는데 대기로 나온다"가 되고 그 오답이 캐시된다.
@@ -152,7 +178,7 @@ PY
 PYTHONPATH="$SCR" python3 - <<'PY'
 from pathlib import Path
 
-from marina_rooms import build_room, fold_status
+from marina_rooms import build_room, fold_status, room_status
 
 labels = {"id": "wt-1", "alias": "결제정리", "projectLabel": "mdc-main",
           "sessionTitle": "결제 플로우 정리", "projectId": "p1", "source": "registry"}
@@ -218,7 +244,39 @@ assert empty["name"] == "wt-1", empty["name"]
 bare = build_room(Path("/wt"), {"id": "wt-9"}, [], has_changes=False, questions=no_questions)
 assert bare["name"] == "wt-9", bare["name"]
 
-# ⑨ 접기 규칙 자체
+# ⑨ **부르는 지문(mark)** — 접어둔 방을 다시 펼지는 이 값으로 판단한다.
+# 상태 문자열만 비교하면 "같은 상태의 새 사건"을 못 본다: 질문 뜬 방을 접었는데 더 급한 걸
+# 새로 물으면, 상태는 여전히 응답필요라 영영 안 펴진다 — 접기가 형을 가두는 도구가 된다.
+질문방 = build_room(Path("/wt"), labels,
+                    [{"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 5}],
+                    has_changes=False, questions=lambda source, sid: {"token": "tok-1"})
+다른질문 = build_room(Path("/wt"), labels,
+                      [{"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 5}],
+                      has_changes=False, questions=lambda source, sid: {"token": "tok-2"})
+assert 질문방["mark"] and 질문방["mark"] != 다른질문["mark"], (질문방["mark"], 다른질문["mark"])
+
+# 실패는 **어느 세션이** 실패했는지로 구별한다(다른 세션이 새로 실패하면 다시 부른다).
+실패1 = build_room(Path("/wt"), labels,
+                   [{"source": "claude", "sid": "s1", "title": "A", "status": "failed", "ts": 5}],
+                   has_changes=False, questions=no_questions)
+실패2 = build_room(Path("/wt"), labels,
+                   [{"source": "claude", "sid": "s2", "title": "B", "status": "failed", "ts": 5}],
+                   has_changes=False, questions=no_questions)
+assert 실패1["mark"] != 실패2["mark"], (실패1["mark"], 실패2["mark"])
+
+# 완료는 한 번뿐인 사건이라 고정값 — 완료인 채로 치운 방이 파일 시각이 갱신됐다고 다시
+# 들이밀리면 안 된다(그게 접기를 무의미하게 만든 예전 결함이다).
+완료방 = build_room(Path("/wt"), labels, done, has_changes=True, questions=no_questions)
+늦은완료 = build_room(Path("/wt"), labels,
+                      [{**done[0], "ts": 999_999}], has_changes=True, questions=no_questions)
+assert 완료방["mark"] == 늦은완료["mark"] == "done", (완료방["mark"], 늦은완료["mark"])
+
+# 부르지 않는 상태엔 지문이 없다 — 작업중은 시각이 계속 변해도 접힌 채여야 한다.
+assert room_status and build_room(Path("/wt"), labels,
+    [{"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 1}],
+    has_changes=False, questions=no_questions)["mark"] == ""
+
+# ⑩ 접기 규칙 자체
 assert fold_status(["대기", "작업중"]) == "작업중"
 assert fold_status(["작업중", "문제"]) == "문제"
 assert fold_status([]) == "대기"

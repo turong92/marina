@@ -357,6 +357,9 @@ class Handler(BaseHTTPRequestHandler):
             room["status"] = fold_status([str(tab.get("status") or "") for tab in tabs])
             room["lastAt"] = max((float(tab.get("ts") or 0) for tab in tabs), default=0)
             rooms.append(room)
+        # 시각을 다시 계산했으면 **순서도 다시 매긴다.** 안 그러면 목록 순서는 안 보이는 탭
+        # 기준이고 화면에 뜬 시각은 보이는 탭 기준이라, 왜 그 자리에 있는지 설명이 안 된다.
+        rooms.sort(key=lambda item: float(item.get("lastAt") or 0), reverse=True)
         payload["rooms"] = rooms
         return payload
 
