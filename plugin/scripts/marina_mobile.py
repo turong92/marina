@@ -2093,6 +2093,24 @@ _MOBILE_HTML = r"""<!doctype html>
     .wt-flag.busy { background: #e6efe8; color: #2f6b45; }
     .session-group.pinned > .wt-group-head { background: rgba(11, 99, 206, .06); border-radius: 7px; }
     .session-list { display: flex; flex-direction: column; gap: 12px; }
+
+    /* 방 목록 — 첫 화면. 카드는 손가락으로 누르는 것이라 세로로 넉넉히 잡는다. */
+    .room-list { display: flex; flex-direction: column; }
+    .roomCard { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left;
+                padding: 14px 12px; border: 0; border-bottom: 1px solid var(--line);
+                background: transparent; color: inherit; font: inherit; cursor: pointer; }
+    .roomCard:active { background: var(--panel); }
+    .roomIcon { width: 22px; flex: 0 0 22px; text-align: center; font-weight: 700; }
+    .roomBody { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+    /* 이름은 한 줄 — 넘치면 말줄임. 서버가 이미 줄이지만 화면 폭은 기기마다 다르다. */
+    .roomName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .roomMeta { font-size: 12px; opacity: .7; }
+    /* 상태는 글자로도 말하지만, 색이 있어야 목록을 훑을 때 급한 것이 먼저 눈에 걸린다. */
+    .roomCard.st-문제 .roomIcon { color: #e5534b; }
+    .roomCard.st-응답필요 .roomIcon { color: #d29922; }
+    .roomCard.st-작업중 .roomIcon { color: #2f81f7; }
+    .roomCard.st-완료 .roomIcon { color: #3fb950; }
+    .roomEmpty { padding: 32px 16px; text-align: center; opacity: .7; line-height: 1.6; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
     /* 워크트리 = 단위. 헤더에서 바로 새 에이전트를 띄운다(웹 카드의 ＋CC/＋CX 와 같은 멘탈모델). */
     .wt-group { display: block; }
@@ -2565,6 +2583,9 @@ _MOBILE_HTML = r"""<!doctype html>
           <button class="iconBtn listToolBtn" id="showAllBtn" type="button" title="전체보기(오래된·숨긴 세션 포함)" aria-label="전체보기">&#8943;</button>
           <button class="listToolBtn newWtBtn" id="newWorktreeBtn" type="button" title="새 워크트리 만들기" aria-label="새 워크트리 만들기">＋WT</button>
         </div>
+        <!-- 방 목록이 첫 화면이다(형 결정 2026-08-18). 세션 목록은 지우지 않고 숨겨만 둔다 —
+             방 화면이 이상하면 한 줄로 되돌릴 수 있어야 한다. -->
+        <div class="room-list" id="roomList"></div>
         <div class="session-list" id="sessionList"></div>
       </section>
       <section id="chatView">
@@ -2735,6 +2756,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const promptInput = document.getElementById("prompt");
     const sessionSearch = document.getElementById("sessionSearch");
     const sessionList = document.getElementById("sessionList");
+    const roomList = document.getElementById("roomList");
     const projectTabs = document.getElementById("projectTabs");
     const sourceTabs = document.getElementById("sourceTabs");
     const turnsEl = document.getElementById("turns");
@@ -3393,6 +3415,51 @@ _MOBILE_HTML = r"""<!doctype html>
       ensureAnswerState: (questions, token) => ensureAnswerState(questions, token),
       displayModel: (model) => displayModel(model),
     });
+    // ROOM_LIST_START  (테스트가 이 블록을 vm 에 싣는다)
+    // 방 목록 — 폰을 열면 이게 첫 화면이다.
+    //
+    // 정렬이 **최근 순이 아니다.** 답을 기다리는 방이 목록 아래에 있으면 형은 그걸 놓치고,
+    // 그동안 일은 멈춰 있다. 그래서 급한 것부터 올린다(스펙 §2).
+    const ROOM_ORDER = ["문제", "응답필요", "작업중", "완료", "대기"];
+    // 화면에 개발 용어를 쓰지 않는다(스펙 §3). 형이 읽고 바로 아는 말로만.
+    const ROOM_LABEL = {
+      "문제": "막혔어요", "응답필요": "답을 기다려요", "작업중": "일하는 중",
+      "완료": "끝났어요", "대기": "쉬는 중",
+    };
+    const ROOM_ICON = {
+      "문제": "!", "응답필요": "?", "작업중": "▶", "완료": "✓", "대기": "·",
+    };
+
+    function roomStatusLabel(status) {
+      // 모르는 값에 빈 칸이 뜨면 고장으로 보인다 — 가장 순한 쪽으로 떨어뜨린다.
+      return ROOM_LABEL[status] || ROOM_LABEL["대기"];
+    }
+
+    function renderRooms(rooms, now) {
+      const live = (rooms || []).filter(room => !room.archived);
+      if (!live.length) {
+        return '<div class="roomEmpty">아직 방이 없어요.<br />새 일감을 만들면 여기 나와요.</div>';
+      }
+      const sorted = live.slice().sort((a, b) => {
+        const rank = ROOM_ORDER.indexOf(a.status) - ROOM_ORDER.indexOf(b.status);
+        return rank !== 0 ? rank : (b.lastAt || 0) - (a.lastAt || 0);
+      });
+      return sorted.map(room => {
+        const tabs = room.tabs || [];
+        // 대화가 하나면 개수를 말하지 않는다 — 방=대화 묶음이라는 건 여럿일 때만 뜻이 있다.
+        const count = tabs.length > 1 ? " · 대화 " + tabs.length + "개" : "";
+        const status = String(room.status || "대기");
+        return `<button class="roomCard st-${esc(status)}" type="button" data-room="${esc(room.root)}">
+          <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
+          <span class="roomBody">
+            <span class="roomName">${esc(room.shortName || room.name || "")}</span>
+            <span class="roomMeta">${esc(roomStatusLabel(status) + count)}</span>
+          </span>
+        </button>`;
+      }).join("");
+    }
+    // ROOM_LIST_END
+
     function draftKey(sessionKey=selectedSessionKey) {
       return `marinaMobileDraft:${sessionKey || selectedRoot() || "new"}`;
     }
@@ -5019,6 +5086,10 @@ _MOBILE_HTML = r"""<!doctype html>
       renderProjectTabs();
       renderSourceTabs();
       renderSessions();
+      // 방 목록이 첫 화면이다(형 결정). 세션 목록은 지우지 않고 숨겨만 둔다 — 방 화면이
+      // 이상하면 이 두 줄만 되돌리면 예전 화면으로 돌아간다.
+      roomList.innerHTML = renderRooms(state.rooms, Date.now() / 1000);
+      sessionList.hidden = true;
       renderInbox();
       const live = selectedSession();
       if (live) { heldSession = live; heldSessionAt = Date.now(); }
