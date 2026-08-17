@@ -175,10 +175,11 @@ def attention_mark(status: str, tabs: list[dict[str, Any]]) -> str:
     실패했는지. 완료는 한 번뿐인 사건이라 고정값이다 — 완료인 채로 치운 방이 파일 시각이
     갱신됐다고 다시 들이밀리면 안 되기 때문이다."""
     if status == "응답필요":
-        # 질문 표식이 없는 경우도 있다(waiting — 프롬프트 앞에서 기다리는 중). 그때는 어느
-        # 세션이 기다리는지로 구별한다. 안 그러면 부르는 방들이 죄다 같은 지문이 된다.
+        # 질문 표식이 없는 경우도 있다(waiting — 프롬프트 앞에서 기다리는 중, blocked — 권한
+        # 대기). 그때는 세션과 **마지막 활동 시각**으로 구별한다. sid 만 쓰면 그 세션이 살아
+        # 있는 한 지문이 영영 고정이라, 새 턴이 몇 번을 돌아도 접힌 방이 안 펴진다.
         return "q:" + ",".join(sorted(
-            f"{tab.get('sid') or ''}={tab.get('question') or ''}"
+            f"{tab.get('sid') or ''}={tab.get('question') or int(float(tab.get('ts') or 0))}"
             for tab in tabs if str(tab.get("status") or "") == "응답필요"))
     if status == "문제":
         return "f:" + ",".join(sorted(str(tab.get("sid") or "") for tab in tabs
@@ -186,6 +187,23 @@ def attention_mark(status: str, tabs: list[dict[str, Any]]) -> str:
     if status == "완료":
         return "done"
     return ""
+
+
+def finalize_room(room: dict[str, Any]) -> dict[str, Any]:
+    """방의 상태·지문·시각을 **탭에서 다시 계산한다.** 이 세 값을 정하는 유일한 자리다.
+
+    왜 함수로 뺐나: 탭을 건드리는 곳이 여럿이다(방 조립, 권한 필터, 전체보기의 숨김 탭
+    덧붙이기). 각자 필요한 값만 다시 재던 동안 같은 실수가 네 번 반복됐다 — 상태는 고쳤는데
+    지문은 안 고치고, 지문은 맞는데 시각이 옛것이고, 필터가 탭은 걸렀는데 지문엔 못 보는
+    세션의 sid 가 남는 식이다. 탭을 바꿨으면 이 함수를 부른다. 그러면 셋이 같이 움직인다.
+
+    **hidden 탭은 세지 않는다.** 숨김의 뜻이 "나를 부르지 마라"이므로, 보이기만 하고 상태에는
+    영향을 주지 않는다 — 그래야 보는 화면(전체보기/일반)에 따라 방 상태가 달라지지 않는다."""
+    counted = [tab for tab in room.get("tabs", []) if not tab.get("hidden")]
+    room["status"] = fold_status([str(tab.get("status") or "") for tab in counted])
+    room["mark"] = attention_mark(room["status"], counted)
+    room["lastAt"] = max((float(tab.get("ts") or 0) for tab in counted), default=0)
+    return room
 
 
 def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]], *,
@@ -223,17 +241,14 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
     name = (str(labels.get("alias") or "").strip()
             or (str(tabs[0]["title"]).strip() if tabs else "")
             or str(labels.get("id") or "").strip())
-    status = fold_status([tab["status"] for tab in tabs])
-    return {
+    # 상태·지문·시각은 finalize_room 이 정한다 — 여기서 따로 계산하면 그게 두 벌째가 된다.
+    return finalize_room({
         "id": str(labels.get("id") or ""),
         "name": name,
         "project": str(labels.get("projectLabel") or ""),
         "projectId": str(labels.get("projectId") or ""),
         "root": str(root),
-        "status": status,
-        "mark": attention_mark(status, tabs),
         "tabs": tabs,
-        "lastAt": max((float(item.get("ts") or 0) for item in agents), default=0),
         # 배포는 지금 만들지 않는다 — 자리만 잡아둔다(스펙 확장 지점).
         "canShip": False,
-    }
+    })

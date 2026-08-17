@@ -84,10 +84,23 @@ assert [t["sid"] for t in out["rooms"][0]["tabs"]] == ["s1"], out["rooms"][0]["t
     {"source": "claude", "sid": "s1", "status": "대기", "ts": 100},
     {"source": "claude", "sid": "숨김세션", "status": "문제", "ts": 999},
 ]}
+가려진방["mark"] = "f:숨김세션"     # 상태에서 파생된 값도 같이 정리돼야 한다
 정리됨 = 가짜핸들러()._filter_mobile({"worktrees": [{"root": MINE}], "rooms": [가려진방]})["rooms"][0]
 assert [t["sid"] for t in 정리됨["tabs"]] == ["s1"], 정리됨["tabs"]
 assert 정리됨["status"] == "대기", f"볼 수 있는 탭엔 없는 상태가 남았다: {정리됨['status']}"
 assert 정리됨["lastAt"] == 100, f"걸러진 탭의 활동 시각이 남았다: {정리됨['lastAt']}"
+# **지문에도 못 보는 세션이 남으면 안 된다** — 지문 내용이 `f:<sid>` / `q:<sid>=<질문id>` 라
+# 탭만 거르고 지문을 두면 거른 세션의 식별자가 그대로 나간다(권한 유출이 파생 필드로 재발).
+assert "숨김세션" not in 정리됨["mark"], f"거른 세션이 지문에 남았다: {정리됨['mark']}"
+
+# ③-c hidden 표시가 붙은 탭은 **상태 계산에서 빠진다** — 전체보기에서 보여주기만 하는 탭이
+# member 방 상태를 뒤집으면 안 된다(같은 방을 admin 과 member 가 다르게 보게 된다).
+숨김낀방 = {"root": MINE, "tabs": [
+    {"source": "claude", "sid": "s1", "status": "대기", "ts": 100},
+    {"source": "claude", "sid": "s3", "status": "문제", "ts": 900, "hidden": True},
+]}
+정리2 = 가짜핸들러()._filter_mobile({"worktrees": [{"root": MINE}], "rooms": [숨김낀방]})["rooms"][0]
+assert 정리2["status"] == "대기" and 정리2["lastAt"] == 100, 정리2
 
 # ④ admin 은 그대로 다 본다(어드민이 웹에서 전부 봐야 한다 — 스펙의 역할 구분).
 class 관리자(사용자):

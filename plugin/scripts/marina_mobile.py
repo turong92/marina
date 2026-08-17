@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
-from marina_rooms import build_room, room_has_changes
+from marina_rooms import build_room, finalize_room, room_has_changes
 from marina_agent_events import latest_agent_event
 from marina_sessions import (
     _live_agent_cwds,
@@ -623,6 +623,21 @@ def room_unarchives(root: Path, archive: dict[str, dict[str, Any]], status: str 
     return str(mark) != entry["mark"]
 
 
+def canonical_room_agents(root: Path, refresh: bool = False,
+                          hide: set[str] | None = None) -> list[dict[str, Any]]:
+    """**기준 방**을 이루는 세션들 — 방의 상태·지문은 언제나 이 집합으로 정한다.
+
+    정의를 한 곳에 못 박는 이유: 방 상태를 재는 자리가 둘(목록 조립, 접을 때 기록)인데 서로
+    다른 조건으로 재는 실수가 반복됐다. 한쪽은 숨김을 빼고 한쪽은 안 뺐고, 그다음엔 한쪽만
+    '7일 넘은 세션까지'를 봤다. 그때마다 증상은 같다 — 접기 버튼이 안 먹는다.
+
+    기준은 **전체보기 아님 + 숨김 제외**다. 전체보기는 더 보여주기만 할 뿐, 무엇이 형을
+    부르는지를 바꾸지 않는다."""
+    hidden = set(mobile_hidden()) if hide is None else hide
+    return [item for item in agents_payload(root, refresh, False, limit=0)
+            if f"{item.get('source')}:{item.get('sid')}" not in hidden]
+
+
 def current_room_mark(root: Path) -> str | None:
     """이 워크트리가 **지금 무엇으로 형을 부르고 있나** — 접을 때 그걸 적어둬야 나중에
     "같은 것"과 "새로 온 것"을 구별한다.
@@ -630,11 +645,10 @@ def current_room_mark(root: Path) -> str | None:
     방 하나만 조립하므로 목록 전체를 만드는 것보다 훨씬 싸다(실측 warm 1ms). 숨김은 항상
     적용한다 — 목록 쪽 계산과 잣대가 같아야 전체보기에서 접은 방이 바로 펴지지 않는다.
 
-    실패하면 None: "모른다"는 뜻이고, 그때는 부르는 상태(질문·실패)에만 펴진다."""
+    실패하면 None: "모른다"는 뜻이고, 그때는 부르는 상태(질문·실패)에만 펴진다 — 완료로 접은
+    방이 바로 튀어나오는 쪽보다, 부르는 방이 한 번 더 보이는 쪽으로 틀린다."""
     try:
-        hide = set(mobile_hidden())
-        agents = [item for item in agents_payload(root, False, False, limit=0)
-                  if f"{item.get('source')}:{item.get('sid')}" not in hide]
+        agents = canonical_room_agents(root)
         changed = (any(str(a.get("status") or "") == "completed" for a in agents)
                    and room_has_changes(root))
         return str(build_room(root, worktree_labels(root), agents, has_changes=changed,
@@ -764,30 +778,33 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                 # 방은 탭을 **안 자른다**. 카드는 좁아 3개로 끊지만, 방에서 자르면 4번째
                 # 대화에 도달할 방법이 없고 잘린 탭의 failed/blocked 가 방 상태에서 사라진다.
                 #
-                # 숨김은 **전체보기여도 상태 계산에선 항상 뺀다.** 숨김의 뜻이 "이건 나를 부르지
-                # 마라"이기 때문이다. 그래야 방의 상태·지문이 보는 화면에 따라 달라지지 않는다 —
-                # 달라지면 전체보기에서 접은 방이 다음 폴에 바로 펴진다(기록은 한 벌인데 잣대가
-                # 두 벌이라서). 전체보기에서 숨긴 탭을 꺼내 보는 것은 아래에서 따로 붙인다.
-                room_agents = [item for item in all_agents
-                               if f"{item.get('source')}:{item.get('sid')}" not in hide]
+                # 상태·지문은 **기준 방**(전체보기 아님 + 숨김 제외)으로만 정한다 —
+                # canonical_room_agents 가 그 정의고, 접을 때 기록하는 쪽도 같은 함수를 쓴다.
+                # 보는 화면에 따라 달라지면 기록은 한 벌인데 잣대가 두 벌이 되어, 전체보기에서
+                # 접은 방이 다음 폴에 바로 펴진다.
+                room_agents = (canonical_room_agents(root, refresh, hide) if include_all else
+                               [item for item in all_agents
+                                if f"{item.get('source')}:{item.get('sid')}" not in hide])
                 # git 은 completed 가 하나라도 있을 때만 부른다. 완료/대기를 가르는 데만
                 # 쓰이는 값이라, 나머지 워크트리에서 git 을 돌리는 건 순수한 낭비다.
                 changed = (any(str(a.get("status") or "") == "completed" for a in room_agents)
                            and room_has_changes(root))
                 room = build_room(root, info, room_agents, has_changes=changed,
                                   questions=pending_question)
-                if include_all and len(room_agents) < len(all_agents):
-                    # 전체보기에서는 숨긴 탭도 **보여만 준다**(꺼내서 정리하라고). 상태·지문은
-                    # 위에서 이미 정해졌고 여기서 바뀌지 않는다.
+                if include_all:
+                    # 전체보기에서는 나머지도 **보여만 준다**(꺼내서 정리하라고). hidden 표시가
+                    # 붙으므로 finalize_room 이 상태·지문·시각 계산에서 알아서 뺀다.
                     shown = {(t["source"], t["sid"]) for t in room["tabs"]}
-                    extra = build_room(root, info,
-                                       [a for a in all_agents
-                                        if (str(a.get("source") or ""), str(a.get("sid") or "")) not in shown],
-                                       has_changes=changed, questions=pending_question)["tabs"]
-                    for tab in extra:
-                        tab["hidden"] = True
-                        tab["primary"] = False
-                    room["tabs"] = room["tabs"] + extra
+                    rest = [a for a in all_agents
+                            if (str(a.get("source") or ""), str(a.get("sid") or "")) not in shown]
+                    if rest:
+                        extra = build_room(root, info, rest, has_changes=changed,
+                                           questions=pending_question)["tabs"]
+                        for tab in extra:
+                            tab["hidden"] = True
+                            tab["primary"] = False
+                        room["tabs"] = room["tabs"] + extra
+                        finalize_room(room)     # 탭을 건드렸으면 부른다(값 셋이 같이 움직인다)
                 rooms.append(room)
             except Exception as exc:
                 # 조용히 넘기면 방이 **영원히 안 보이는데 이유를 알 수 없다**(오타 하나로 전

@@ -146,6 +146,24 @@ assert mm.mobile_state()["rooms"][0]["archived"] is True, "일반 화면에서�
 # 새 질문이 오면 양쪽 다 펴진다.
 agents([{"source": "claude", "sid": "s2", "title": "B", "status": "blocked", "ts": 95}])
 assert mm.mobile_state()["rooms"][0]["archived"] is False, "새로 부르는데 접힌 채다"
+
+# ⑮ include_all 은 숨김뿐 아니라 **세션 기간(7일)**도 바꾼다. 방 상태를 재는 두 자리가 이
+# 인자를 서로 다르게 주면, 전체보기에서 접은 방이 다음 폴에 바로 펴진다 — 접기 버튼이
+# 안 먹는 것으로 보인다. 그래서 스텁도 include_all 을 **실제로 흉내낸다**(안 그러면 이 결함이
+# 테스트를 그냥 통과한다).
+옛세션 = {"source": "claude", "sid": "오래된", "title": "옛것", "status": "failed", "ts": 10}
+최근 = {"source": "claude", "sid": "s2", "title": "B", "status": "working", "ts": 95}
+mm.agents_payload = (lambda root_arg, refresh=False, include_all=False, limit=None:
+                     [최근, 옛세션] if include_all else [최근])
+mm.mobile_hidden = lambda: []
+mm.mobile_set_archived({"root": str(root), "archived": True})
+
+기본 = mm.mobile_state()["rooms"][0]
+전체 = mm.mobile_state(include_all=True)["rooms"][0]
+assert 기본["status"] == 전체["status"] == "작업중", (기본["status"], 전체["status"])
+assert 기본["mark"] == 전체["mark"], "보는 화면에 따라 지문이 달라진다 — 접기가 안 먹는다"
+assert 기본["archived"] is True and 전체["archived"] is True, (기본["archived"], 전체["archived"])
+assert {t["sid"] for t in 전체["tabs"]} == {"s2", "오래된"}, 전체["tabs"]
 print("ok 아카이브: 기록·끈적한 복귀·해제·목록 반영·숨김·전체보기 왕복")
 PY
 
