@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
+from marina_rooms import build_room, room_has_changes
 from marina_agent_events import latest_agent_event
 from marina_sessions import (
     _live_agent_cwds,
@@ -597,6 +598,7 @@ def mobile_watch_state(refresh: bool = False) -> dict[str, Any]:
 def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, Any]:
     worktrees: list[dict[str, Any]] = []
     sessions: list[dict[str, Any]] = []
+    rooms: list[dict[str, Any]] = []
     terms = term_list().get("sessions", [])
     live_cwds = _live_agent_cwds(refresh)   # S1 — root 별 externalActive 판정(ps command= 파싱 없음)
     for root in discover_all_roots(refresh):
@@ -613,6 +615,18 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
             agents = agents_payload(root, refresh, include_all)   # status/reachable/승격 다 resolve_session_liveness 경유(activate_agent_payloads 는 이제 이 경로엔 불필요)
             title = info.get("sessionTitle") or info.get("headSubject") or ""
             label = " · ".join(str(x) for x in (info.get("alias"), title, info.get("projectLabel"), info.get("id")) if x)
+            # **방**(스펙 §1) — 워크트리 하나 + 그 안의 세션들이 탭. 같은 자료에서 조립하므로
+            # 상태 판정이 두 벌로 갈라지지 않는다. 여기서 터져도 세션 목록은 살아야 한다 —
+            # 방은 아직 부가정보고, 목록이 안 뜨면 형은 아무것도 못 한다.
+            try:
+                # git 은 completed 가 하나라도 있을 때만 부른다. 완료/대기를 가르는 데만
+                # 쓰이는 값이라, 나머지 워크트리에서 git 을 돌리는 건 순수한 낭비다.
+                changed = (any(str(a.get("status") or "") == "completed" for a in agents)
+                           and room_has_changes(root))
+                rooms.append(build_room(root, info, agents, has_changes=changed,
+                                        questions=mobile_pending_question))
+            except Exception:
+                pass
             worktrees.append({
                 "id": info.get("id"),
                 "alias": info.get("alias") or "",
@@ -713,7 +727,9 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
         hide = set(hidden)
         sessions = [s for s in sessions
                     if f"{s.get('source')}:{s.get('sid')}" not in hide or s.get("kind") != "agent"]
-    return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "pins": mobile_pins(),
+    rooms.sort(key=lambda item: float(item.get("lastAt") or 0), reverse=True)
+    return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "rooms": rooms,
+            "pins": mobile_pins(),
             "hidden": hidden, "includeAll": bool(include_all),
             "agentOptions": mobile_agent_options(), "serverInstance": _SERVER_INSTANCE}
 
