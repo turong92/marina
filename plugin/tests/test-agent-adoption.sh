@@ -114,7 +114,7 @@ d = ap._dir(); d.mkdir(parents=True, exist_ok=True)
 
 mm.safe_root = lambda value: root
 mm.term_list = lambda: {"sessions": []}              # 조작 가능한 PTY 없음
-mm.agents_payload = lambda value, refresh=False, include_all=False: []
+mm.agents_payload = lambda value, refresh=False, include_all=False, limit=None: []
 opens = []
 mm.term_open = lambda *a, **k: opens.append(k) or {"tid": "resumed", "reused": False}
 

@@ -82,6 +82,23 @@ def _git(args: list[str], cwd: Path) -> str:
     return out.stdout
 
 
+def _has_own_changes(status_text: str, root: Path) -> bool:
+    """`git status --porcelain` 결과에 **이 워크트리의** 변경이 있나.
+
+    중첩 git 레포(`?? sub/` 이면서 sub/.git 이 있는 것)는 뺀다. git 은 중첩 레포 안으로
+    안 내려가므로 그 안에서 무슨 일이 있어도 여기엔 디렉터리 한 줄로만 나온다 — 즉 이 한 줄은
+    "남의 레포가 거기 있다"는 사실일 뿐, 이 방이 뭘 했다는 증거가 아니다."""
+    for line in status_text.splitlines():
+        if not line.strip():
+            continue
+        if line.startswith("?? "):
+            path = line[3:].strip().strip('"')
+            if path.endswith("/") and (root / path / ".git").exists():
+                continue
+        return True
+    return False
+
+
 def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = None,
                      now: float = None) -> bool:
     """이 워크트리에 **볼 만한 결과**가 있나 — 완료 판정의 재료(스펙 §4).
@@ -102,13 +119,14 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
         return cached[1]
     run = runner or _git
     try:
-        # **-uno(추적 중인 파일만)** 인 이유: 서브레포를 품은 레포에서는 `?? ai-api/` 같은
-        # untracked 디렉터리가 영구히 잡힌다. 실측(2026-08-17) — 워크트리 28개 중 17개가
-        # 그 이유로 상수 dirty 였고, 그 방들은 무슨 일을 하든 항상 "완료"로 떴다. 즉 완료/대기
-        # 구분이 형이 제일 많이 쓰는 레포에서 통째로 죽어 있었다.
-        # 새 파일만 만들고 끝난 턴이 '대기'로 보이는 손해는 남지만, 방향이 반대다 —
-        # 아무 일도 안 했는데 완료라고 말하는 쪽이 카드를 못 믿게 만든다.
-        dirty = bool(run(["status", "--porcelain", "-uno"], root).strip())
+        # untracked 를 **세되, 중첩 git 레포는 뺀다.**
+        # 그냥 세면: 서브레포를 품은 레포에서 `?? ai-api/` 가 영구히 잡혀 그 방들이 무슨 일을
+        #   하든 항상 "완료"였다(실측 2026-08-17: 워크트리 28개 중 17개).
+        # 아예 빼면(-uno): 새 파일만 만들고 끝난 턴이 통째로 사라진다 — 계획 문서 하나, 새
+        #   테스트 파일, 새 모듈이 그렇다. 이 Room API 의 계획 문서가 정확히 그 경우였다.
+        # 버려야 할 건 "untracked 전부"가 아니라 "남의 레포"다. 중첩 레포는 자기 워크트리에서
+        # 따로 관리되지 이 방의 작업물이 아니다.
+        dirty = _has_own_changes(run(["status", "--porcelain"], root), root)
         # 미커밋이 이미 있으면 커밋 쪽은 볼 필요가 없다 — git 한 번을 아낀다.
         ahead = dirty or bool(run(["log", "--oneline", "-1", "HEAD", "--not", "--remotes"],
                                   root).strip())
@@ -153,6 +171,9 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
             "sid": sid,
             "title": str(agent.get("title") or sid or source),
             "status": room_status(canon, has_changes),
+            # 탭의 마지막 활동 시각. 화면 정렬에도 쓰지만, 권한 필터가 탭을 걸러낸 뒤 방의
+            # lastAt 을 다시 계산하려면 탭이 자기 시각을 들고 있어야 한다.
+            "ts": float(agent.get("ts") or 0),
             "primary": not tabs,
         })
     # 이름: 별칭 → **첫 탭의 제목** → 워크트리 id.

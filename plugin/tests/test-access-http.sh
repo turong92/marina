@@ -62,7 +62,7 @@ marina_handler.mobile_send = lambda body: {"ok": True, "tid": "mobile-term"}
 marina_handler.agent_belongs_to_root = lambda root, source, sid: (
     Path(root).resolve() == alpha.resolve() and source == "codex" and sid == "agent-alpha"
 )
-marina_handler.agents_payload = lambda root, refresh=False, include_all=False: ([{
+marina_handler.agents_payload = lambda root, refresh=False, include_all=False, limit=None: ([{
     "source": "codex", "sid": "agent-reused", "root": str(reused.resolve()),
 }] if Path(root).resolve() == reused.resolve() else [])
 marina_handler._marina_cli = lambda target, *args, **kwargs: f"✓ 워크트리: {reused}\n"

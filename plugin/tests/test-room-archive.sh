@@ -28,46 +28,54 @@ try:
 except ValueError:
     pass
 
-# ① 접으면 기록된다 — 접을 때의 상태까지 같이.
-out = mm.mobile_set_archived({"root": str(root), "archived": True, "status": "작업중"})
+# ① 접으면 기록된다 — 접을 때의 상태까지 **서버가 직접 재서** 같이 적는다.
+# 폰이 보낸 값을 믿으면 규칙 전체가 클라이언트 손에 넘어간다(안 보내면 완료로 접은 방이
+# 다음 폴에 바로 펴지고, "완료"를 보내면 영원히 안 펴지는 방을 만들 수 있다).
+mm.current_room_status = lambda root_arg: "작업중"
+out = mm.mobile_set_archived({"root": str(root), "archived": True, "status": "완료(거짓말)"})
 assert out["ok"] is True and out["archived"] is True, out
 archive = mm.room_archive()
 assert archive[str(root)]["at"] > 0 and archive[str(root)]["status"] == "작업중", archive
 
-# ② 접은 뒤로 활동이 없으면 접힌 채다.
+# ② 상태가 그대로면 접힌 채다.
 at = archive[str(root)]["at"]
-assert mm.room_unarchives(root, at - 10, archive, "작업중") is False
+assert mm.room_unarchives(root, archive, "작업중") is False
+assert mm.room_unarchives(root, archive, "대기") is False
 
 # ③ **형을 부를 일이 생기면 펴진다** — 접어둔 방의 질문을 놓치면 목록을 못 믿게 된다.
-assert mm.room_unarchives(root, at + 10, archive, "응답필요") is True
-assert mm.room_unarchives(root, at + 10, archive, "문제") is True
+assert mm.room_unarchives(root, archive, "응답필요") is True
+assert mm.room_unarchives(root, archive, "문제") is True
 
-# ③-b 그러나 **아무 활동에나 펴지지는 않는다.** 작업 중인 방은 접는 순간에도 에이전트가
-# 계속 움직여 lastAt 이 갱신된다 — 활동만으로 펴면 접자마자 튀어나와 버튼이 고장 나 보인다.
-assert mm.room_unarchives(root, at + 10, archive, "작업중") is False
-assert mm.room_unarchives(root, at + 10, archive, "대기") is False
+# ③-b **활동 시각을 보지 않는다.** 답을 기다리는 질문은 트랜스크립트에 안 써져서 세션 파일
+# mtime 이 안 움직인다(그래서 훅으로 따로 잡는다). 시각으로 관문을 만들면 질문이 떠도
+# 통과를 못 하고, 형은 방이 안 보여 답을 못 하고, 답을 안 해서 시각이 안 움직이는 교착이 된다.
+import inspect
 
-# ③-c 완료는 **접을 때 완료였나**로 갈린다. 완료인 채로 치운 방이 파일 mtime 한 번에 다시
-# 들이밀리면 접기가 무의미하다. 반대로 접어둔 뒤에 끝난 일은 보여줘야 한다.
+소스 = inspect.getsource(mm.room_unarchives)
+assert "last_at" not in 소스, "활동 시각 관문이 다시 생겼다 — 질문이 뜬 방이 접힌 채로 남는다"
+
+# ③-c 완료는 **접을 때 완료였나**로 갈린다. 완료인 채로 치운 방이 다시 들이밀리면 접기가
+# 무의미하다. 반대로 접어둔 뒤에 끝난 일은 보여줘야 한다.
 완료로접음 = {str(root): {"at": at, "status": "완료"}}
-assert mm.room_unarchives(root, at + 10, 완료로접음, "완료") is False
-assert mm.room_unarchives(root, at + 10, archive, "완료") is True     # 접을 땐 작업중이었다
+assert mm.room_unarchives(root, 완료로접음, "완료") is False
+assert mm.room_unarchives(root, archive, "완료") is True     # 접을 땐 작업중이었다
 
 # ④ 다시 펴면 기록이 사라진다(접힘이 영원히 남으면 왜 안 보이는지 알 수 없다).
 mm.mobile_set_archived({"root": str(root), "archived": False})
 assert str(root) not in mm.room_archive()
 
 # ⑤ 모르는 워크트리는 접힌 적 없다.
-assert mm.room_unarchives(Path("/없는/워크트리"), 0, mm.room_archive()) is False
+assert mm.room_unarchives(Path("/없는/워크트리"), mm.room_archive()) is False
 
 # ⑥ 옛 형식(숫자만)도 읽는다 — 배포 한 번에 형이 접어둔 방이 다 펴지면 안 된다.
 mm.ARCHIVE_FILE.write_text(json.dumps({str(root): 1000.0}), encoding="utf-8")
 옛것 = mm.room_archive()
 assert 옛것[str(root)] == {"at": 1000.0, "status": ""}, 옛것
-assert mm.room_unarchives(root, 999, 옛것, "작업중") is False
+assert mm.room_unarchives(root, 옛것, "작업중") is False
 
 # ⑦ 파일은 형 것만 읽는다 — 알림·설정 파일과 같은 규칙(0600).
-mm.mobile_set_archived({"root": str(root), "archived": True, "status": "완료"})
+mm.current_room_status = lambda root_arg: "완료"
+mm.mobile_set_archived({"root": str(root), "archived": True})
 assert oct(mm.ARCHIVE_FILE.stat().st_mode)[-3:] == "600"
 
 # ⑧ 방 목록에 접힘이 실려 나온다 — 화면이 접힌 방을 접어둘 수 있어야 한다.
@@ -110,6 +118,11 @@ mm.mobile_hidden = lambda: ["claude:숨김"]
 room = mm.mobile_state()["rooms"][0]
 assert [t["sid"] for t in room["tabs"]] == ["s2"], room["tabs"]
 assert room["status"] == "작업중", room["status"]
+
+# ⑬ 전체보기에서는 방에서도 꺼내진다 — 전체보기의 존재 이유가 "숨긴 걸 꺼내 정리하기"인데
+# 방에서만 계속 숨기면 방으로는 영영 못 꺼낸다(한 응답 안에 두 정책이 살면 안 된다).
+전체 = mm.mobile_state(include_all=True)
+assert {t["sid"] for t in 전체["rooms"][0]["tabs"]} == {"숨김", "s2"}, 전체["rooms"][0]["tabs"]
 print("ok 아카이브: 기록·끈적한 복귀·해제·목록 반영·숨김")
 PY
 

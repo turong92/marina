@@ -78,6 +78,17 @@ assert len(out["worktrees"]) == 1 and len(out["sessions"]) == 1
 # ③ 방 안의 탭도 세션과 같은 자원 검사를 탄다 — 방만 통과시키고 탭을 안 보면 제목이 샌다.
 assert [t["sid"] for t in out["rooms"][0]["tabs"]] == ["s1"], out["rooms"][0]["tabs"]
 
+# ③-b 탭을 걸렀으면 **방 상태·시각도 다시 계산한다.** 안 그러면 "문제라는데 문제인 탭이
+# 없는" 방이 나온다 — 볼 수 없는 세션이 만든 상태가 남아 화면이 설명 불가능해진다.
+가려진방 = {"root": MINE, "name": "내방", "status": "문제", "lastAt": 999, "tabs": [
+    {"source": "claude", "sid": "s1", "status": "대기", "ts": 100},
+    {"source": "claude", "sid": "숨김세션", "status": "문제", "ts": 999},
+]}
+정리됨 = 가짜핸들러()._filter_mobile({"worktrees": [{"root": MINE}], "rooms": [가려진방]})["rooms"][0]
+assert [t["sid"] for t in 정리됨["tabs"]] == ["s1"], 정리됨["tabs"]
+assert 정리됨["status"] == "대기", f"볼 수 있는 탭엔 없는 상태가 남았다: {정리됨['status']}"
+assert 정리됨["lastAt"] == 100, f"걸러진 탭의 활동 시각이 남았다: {정리됨['lastAt']}"
+
 # ④ admin 은 그대로 다 본다(어드민이 웹에서 전부 봐야 한다 — 스펙의 역할 구분).
 class 관리자(사용자):
     role = "admin"

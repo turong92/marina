@@ -864,7 +864,7 @@ import marina_mobile as mm
 root = Path(sys.argv[1]).resolve()
 mm.discover_all_roots = lambda refresh=False: [root]
 mm.worktree_info = lambda root_arg, refresh=False: {"id": "proj", "projectLabel": "proj", "sessionTitle": "title"}
-mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [{
+mm.agents_payload = lambda root_arg, refresh=False, include_all=False, limit=None: [{
     "source": "codex",
     "sid": "sid0001",
     "title": "Agent",
@@ -904,7 +904,7 @@ import marina_mobile as mm
 root = Path(sys.argv[1]).resolve()
 mm.discover_all_roots = lambda refresh=False: [root]
 mm.worktree_info = lambda root_arg, refresh=False: {"id": "proj", "projectLabel": "proj", "sessionTitle": "title"}
-mm.agents_payload = lambda root_arg, refresh=False, include_all=False: [{
+mm.agents_payload = lambda root_arg, refresh=False, include_all=False, limit=None: [{
     "source": "codex",
     "sid": "sid0001",
     "title": "Agent",

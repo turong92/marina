@@ -26,6 +26,7 @@ from marina_sessions import (
     agent_runtime_settings,
     agent_transcript_path,
     agent_usage_from_path,
+    AGENTS_MAX_PER_ROOT,
     agents_payload,
     claude_model_catalog,
     resolve_session_liveness,
@@ -585,25 +586,45 @@ def _archive_entry(root: Path, archive: dict[str, dict[str, Any]]) -> dict[str, 
 # '활동이 있으면 편다'로 두면 작업 중인 방은 접자마자 튀어나온다(버튼이 고장 나 보인다).
 # "접어둠"은 지금 안 본다는 뜻이지 멈추라는 뜻이 아니다.
 _ROOM_ATTENTION = ("응답필요", "문제")
+# 완료도 "접어둔 뒤에 그렇게 됐다면" 보여준다 — 접어둘 때 이미 완료였다면 그대로 접힌 채다.
+_ROOM_ATTENTION_OR_DONE = _ROOM_ATTENTION + ("완료",)
 
 
-def room_unarchives(root: Path, last_at: float, archive: dict[str, dict[str, Any]],
-                    status: str = "") -> bool:
-    """접어둔 방을 지금 펴야 하나.
+def room_unarchives(root: Path, archive: dict[str, dict[str, Any]], status: str = "") -> bool:
+    """접어둔 방을 지금 펴야 하나 — **접을 때와 상태가 달라져 형을 부르면** 편다.
 
-    두 경우다:
-      · 형을 부르는 상태(질문·실패)가 됐다.
-      · 접을 때 완료가 **아니었는데** 지금 완료다 — 접어둔 뒤에 일이 끝난 것이라 보여줘야 한다.
-        반대로 완료인 채로 접은 방은 계속 접혀 있다. 이미 보고 치운 것을 파일 mtime 이
-        한 번 갱신됐다고 다시 들이밀면 접기가 무의미하다.
+    활동 시각(lastAt)을 안 보는 이유가 핵심이다. 시각은 세션 파일의 mtime 인데, 답을
+    기다리는 AskUserQuestion 은 **트랜스크립트에 안 써진다**(그래서 PreToolUse 훅으로
+    따로 잡는다). 시각으로 관문을 만들면 질문이 떠도 통과를 못 하고, 형은 방이 안 보여서
+    답을 못 하고, 답을 안 해서 시각이 안 움직이는 **교착**이 된다.
 
-    판정이 서면 호출자가 기록을 **지운다**(끈적한 복귀). 그래야 질문이 15분 뒤 만료돼
-    상태가 내려가도 방이 슬그머니 다시 접히지 않는다 — 형이 못 본 채로 사라지는 게 최악이다."""
+    접을 때와 같은 상태면 접힌 채다 — 완료인 채로 치운 방을 파일이 한 번 갱신됐다고 다시
+    들이밀면 접기가 무의미하다. 반대로 접어둔 뒤에 질문이 뜨거나 일이 끝나면 보여준다.
+
+    판정이 서면 호출자가 기록을 **지운다**(끈적한 복귀). 그래야 질문이 15분 뒤 만료돼 상태가
+    내려가도 방이 슬그머니 다시 접히지 않는다 — 형이 못 본 채로 잃는 게 최악이다."""
     entry = _archive_entry(root, archive)
-    if entry is None or float(last_at or 0) <= entry["at"]:
+    if entry is None:
         return False
     text = str(status)
-    return text in _ROOM_ATTENTION or (text == "완료" and entry["status"] != "완료")
+    return text in _ROOM_ATTENTION_OR_DONE and text != entry["status"]
+
+
+def current_room_status(root: Path) -> str:
+    """이 워크트리의 지금 방 상태. 접을 때 무엇이었는지를 서버가 스스로 적기 위한 것이다.
+
+    방 하나만 조립하므로 목록 전체를 만드는 것보다 훨씬 싸다. 실패하면 빈 문자열 —
+    상태를 모르면 '접을 때와 달라졌다'가 항상 참이 되어, 형을 부를 일이 생기면 어차피 펴진다."""
+    try:
+        hide = set(mobile_hidden())
+        agents = [item for item in agents_payload(root, False, False, limit=0)
+                  if f"{item.get('source')}:{item.get('sid')}" not in hide]
+        changed = (any(str(a.get("status") or "") == "completed" for a in agents)
+                   and room_has_changes(root))
+        return str(build_room(root, worktree_labels(root), agents, has_changes=changed,
+                              questions=mobile_pending_question).get("status") or "")
+    except Exception:
+        return ""
 
 
 def mobile_set_archived(body: dict[str, Any]) -> dict[str, Any]:
@@ -613,7 +634,10 @@ def mobile_set_archived(body: dict[str, Any]) -> dict[str, Any]:
     구별해야 하기 때문이다(전자는 계속 접힌 채, 후자는 펴진다)."""
     root = safe_root(str(body.get("root") or ""))
     archived = bool(body.get("archived"))
-    value = {"at": time.time(), "status": str(body.get("status") or "")} if archived else None
+    # 상태는 **서버가 직접 잰다.** 폰이 보낸 값을 믿으면 규칙 전체가 클라이언트 손에 넘어간다 —
+    # 안 보내면 ""가 되어 완료로 접은 방이 다음 폴에 바로 펴지고, "완료"를 보내면 영원히
+    # 안 펴지는 방을 만들 수 있다. 서버는 이 순간 그 방의 상태를 계산할 수 있다.
+    value = {"at": time.time(), "status": current_room_status(root)} if archived else None
     _settings_file_update(ARCHIVE_FILE, str(root), value)
     return {"ok": True, "archived": archived, "root": str(root)}
 
@@ -711,18 +735,23 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                 (str(t["agent"].get("source") or ""), str(t["agent"].get("sid") or "")): t
                 for t in root_terms if isinstance(t.get("agent"), dict) and bool(t.get("alive", True))
             }
-            agents = agents_payload(root, refresh, include_all)   # status/reachable/승격 다 resolve_session_liveness 경유(activate_agent_payloads 는 이제 이 경로엔 불필요)
+            # **한 번만** 부른다. 방은 전부 필요하고(탭을 안 자른다) 카드는 상위 3개만 쓰므로,
+            # 상한 없이 한 번 받아 잘라 쓴다. 두 번 부르면 세션 JSONL tail 파싱이 통째로 두 배다.
+            all_agents = agents_payload(root, refresh, include_all, limit=0)
+            agents = all_agents[:AGENTS_MAX_PER_ROOT]   # status/reachable/승격 다 resolve_session_liveness 경유
             title = info.get("sessionTitle") or info.get("headSubject") or ""
             label = " · ".join(str(x) for x in (info.get("alias"), title, info.get("projectLabel"), info.get("id")) if x)
             # **방**(스펙 §1) — 워크트리 하나 + 그 안의 세션들이 탭. 같은 자료에서 조립하므로
             # 상태 판정이 두 벌로 갈라지지 않는다. 여기서 터져도 세션 목록은 살아야 한다 —
             # 방은 아직 부가정보고, 목록이 안 뜨면 형은 아무것도 못 한다.
             try:
-                # 방은 탭을 **안 자른다**(limit=0). 카드는 좁아 3개로 끊지만, 방에서 자르면
-                # 4번째 대화에 도달할 방법이 없고 잘린 탭의 failed/blocked 가 방 상태에서
-                # 통째로 사라진다.
-                room_agents = [item for item in agents_payload(root, refresh, include_all, limit=0)
-                               if f"{item.get('source')}:{item.get('sid')}" not in hide]
+                # 방은 탭을 **안 자른다**. 카드는 좁아 3개로 끊지만, 방에서 자르면 4번째
+                # 대화에 도달할 방법이 없고 잘린 탭의 failed/blocked 가 방 상태에서 사라진다.
+                # 숨김은 세션 목록과 **같은 조건**으로 건다 — 전체보기는 숨긴 걸 꺼내 정리하는
+                # 화면인데 방에서만 계속 숨기면 방으로는 영영 못 꺼낸다.
+                room_agents = [item for item in all_agents
+                               if include_all
+                               or f"{item.get('source')}:{item.get('sid')}" not in hide]
                 # git 은 completed 가 하나라도 있을 때만 부른다. 완료/대기를 가르는 데만
                 # 쓰이는 값이라, 나머지 워크트리에서 git 을 돌리는 건 순수한 낭비다.
                 changed = (any(str(a.get("status") or "") == "completed" for a in room_agents)
@@ -827,6 +856,10 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                     "ts": 0,
                 })
         except Exception as exc:
+            # 워크트리 하나가 깨져도 나머지는 보여준다. 다만 **말은 하고 넘어간다** —
+            # 예전엔 조용히 삼켜서, 이름 하나 잘못 쓴 것 때문에 방이 전부 사라졌는데도
+            # 화면은 멀쩡해 보였다(테스트가 아니었으면 못 찾았다).
+            _room_log_once(f"{root.name} 조립 실패 {type(exc).__name__}: {exc}")
             worktrees.append({"root": str(root), "error": str(exc), "agents": []})
     sessions.sort(key=lambda s: int(float(s.get("ts") or 0)), reverse=True)
     if not include_all:      # 전체보기가 아니면 숨긴 세션은 목록에서 뺀다
@@ -839,16 +872,22 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
         if entry is None:
             room["archived"] = False
             continue
-        # 지울 때는 **저장된 키 그대로** 지운다(조회 키와 모양이 다를 수 있다).
-        stored_key = root_text if root_text in archive else str(Path(root_text).resolve())
-        if room_unarchives(Path(root_text), room.get("lastAt") or 0, archive,
-                           str(room.get("status") or "")):
-            # **끈적한 복귀** — 기록을 지운다. 상태가 잠깐 형을 부르다 내려가도(질문은 15분
-            # 뒤 만료된다) 방이 슬그머니 다시 접히면 형은 그걸 못 본 채로 잃는다.
-            room["archived"] = False
-            _settings_file_update(ARCHIVE_FILE, stored_key, None)
-        else:
+        if not room_unarchives(Path(root_text), archive, str(room.get("status") or "")):
             room["archived"] = True
+            continue
+        # **끈적한 복귀** — 기록을 지운다. 상태가 잠깐 형을 부르다 내려가도(질문은 15분 뒤
+        # 만료된다) 방이 슬그머니 다시 접히면 형은 그걸 못 본 채로 잃는다.
+        room["archived"] = False
+        try:
+            # 저장된 키를 **둘 다** 지운다(원본/resolve 두 모양이 다 들어 있을 수 있다).
+            # 한쪽만 지우면 다음 폴에 나머지가 잡혀 방이 도로 접힌다 — 끈적함이 깨진다.
+            for key in {root_text, str(Path(root_text).resolve())} & set(archive):
+                _settings_file_update(ARCHIVE_FILE, key, None)
+        except Exception as exc:
+            # 기록 청소 실패가 **목록 전체를 죽이면 안 된다.** 바로 위 방 조립이 정확히 이
+            # 이유로 감싸여 있다 — 디스크가 차거나 권한이 바뀌었다고 화면이 통째로 비면
+            # 형은 아무것도 못 한다. 화면상 펴진 것은 이미 정해졌고, 다음 폴에 다시 지운다.
+            _room_log_once(f"아카이브 청소 실패 {type(exc).__name__}: {exc}")
     rooms.sort(key=lambda item: float(item.get("lastAt") or 0), reverse=True)
     return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "rooms": rooms,
             "pins": mobile_pins(),

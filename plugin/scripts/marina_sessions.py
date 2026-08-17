@@ -1113,7 +1113,7 @@ def agents_payload(root: Path, refresh: bool = False, include_all: bool = False,
     canonical_root = root.resolve()
     live_cwds = _live_agent_cwds(refresh)   # 정석: claude/codex 프로세스 cwd→root 로 liveness(프롬프트 파싱 없음)
     live_tids = _live_agent_tids(refresh)   # 마리나가 쥔 살아있는 PTY — (source,sid)→tid, 5s 캐시(루트 fan-out 억제)
-    cap = AGENTS_MAX_PER_ROOT if limit is None else limit
+    cap = AGENTS_MAX_PER_ROOT if limit is None else max(0, int(limit))   # 음수는 상한 없음으로 — entries[:-1] 로 조용히 하나 잃는 함정을 막는다
     for e in (entries if not cap else entries[:cap]):
         item: dict[str, Any] = {"source": e["source"], "title": e["title"], "ts": int(e["ts"])}
         sid = ""

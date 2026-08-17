@@ -90,7 +90,7 @@ root = Path(sys.argv[1]) / "wt"; root.mkdir(parents=True, exist_ok=True)
 mm.discover_all_roots = lambda refresh=False: [root]
 mm.worktree_info = lambda r, refresh=False: {"id": "wt", "alias": "", "projectLabel": "p"}
 mm._live_agent_cwds = lambda refresh=False: set()
-mm.agents_payload = lambda r, refresh=False, include_all=False: [{"source": "claude", "sid": "sid-known-0001", "status": "idle"}]
+mm.agents_payload = lambda r, refresh=False, include_all=False, limit=None: [{"source": "claude", "sid": "sid-known-0001", "status": "idle"}]
 mm.term_list = lambda: {"sessions": [
     {"tid": "t-fresh", "root": str(root), "agent": {"source": "claude", "sid": ""}, "alive": True},
     {"tid": "t-known", "root": str(root), "agent": {"source": "claude", "sid": "sid-known-0001"}, "alive": True},

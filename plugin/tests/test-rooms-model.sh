@@ -52,7 +52,6 @@ def fake_git(args, cwd):
         # **-uno**: 추적 중인 파일만 본다. 서브레포를 품은 레포에서 `?? ai-api/` 같은
         # untracked 디렉터리가 영구히 잡혀, 그 방들이 무슨 일을 하든 항상 "완료"로 떴다
         # (실측 2026-08-17: 워크트리 28개 중 17개). 완료/대기 구분이 통째로 죽어 있었다.
-        assert "-uno" in args, f"untracked 를 세면 서브레포 레포가 영구 dirty 다: {args}"
         return fake_git.status
     if args[0] == "log":
         return fake_git.log
@@ -104,6 +103,25 @@ assert not calls, "실패 직후에 또 git 을 불렀다"
 rooms.room_has_changes(root, runner=fake_git, now=200.0 + rooms._CHANGES_FAIL_TTL_S + 1)
 assert calls, "실패 수명이 지났는데 영영 다시 안 본다"
 assert rooms._CHANGES_FAIL_TTL_S > rooms._CHANGES_TTL_S, "실패를 더 오래 쉬어야 비용이 준다"
+
+# ⑦-a untracked 는 **세되 중첩 git 레포만 뺀다.** 둘 중 하나로 치우치면 각각 이렇게 틀린다:
+#   전부 세면  → 서브레포를 품은 레포가 영구 dirty(실측 28개 중 17개) → 늘 "완료"
+#   전부 빼면(-uno) → 새 파일만 만들고 끝낸 턴이 사라진다. 이 Room API 의 계획 문서가 그랬다.
+import tempfile
+
+with tempfile.TemporaryDirectory() as tmp:
+    wt = Path(tmp)
+    (wt / "sub").mkdir()
+    (wt / "sub" / ".git").mkdir()          # 중첩 레포 — 남의 것이다
+    assert rooms._has_own_changes("?? sub/\n", wt) is False
+    # 진짜 새 파일은 남는다 — 문서 하나 새로 쓴 세션도 결과가 있는 것이다.
+    assert rooms._has_own_changes("?? docs/plan.md\n", wt) is True
+    # 평범한 새 폴더(레포 아님)도 결과다.
+    (wt / "plain").mkdir()
+    assert rooms._has_own_changes("?? plain/\n", wt) is True
+    # 추적 중인 파일 수정은 당연히 결과다.
+    assert rooms._has_own_changes(" M app.py\n?? sub/\n", wt) is True
+    assert rooms._has_own_changes("", wt) is False
 
 # ⑦ git 이 rc≠0 이면 **'변경 없음'과 구별**해야 한다 — 빈 stdout 을 정답으로 믿으면
 # "다 해놨는데 대기로 나온다"가 되고 그 오답이 캐시된다.

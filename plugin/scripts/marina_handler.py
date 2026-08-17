@@ -21,6 +21,7 @@ import importlib.util as _ilu
 from marina_state import CONTROL_SCRIPT, HOST, LOG_TAIL_BYTES, MARINA_HOME, PORT, _GATEWAY_ON, _GATEWAY_PORT, _PREVIEW_PORT, _PREVIEW_PUBLIC_PORT, _env, _gw, _mc, invalidate_registry_caches, json_bytes
 from marina_dockerfile import _compose_scaffold_service, _compose_scan, _detect_subrepos, _list_dockerfiles, _subrepo_compose, is_profile_var
 from marina_logtext import read_log_chunk, redact_text, scan_log_matches
+from marina_rooms import fold_status
 from marina_registry import containing_project_for, discover_all_roots, discover_roots, external_repos_for, is_source_checkout, load_projects, project_for, source_root_for, subrepos_of
 from marina_paths import selected_log, session_dir, session_id, write_config, write_meta
 from marina_cli import _marina_cli, run_marina, run_marina_registry
@@ -350,7 +351,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._policy().inherit_from_root("agent", key, root)
                 if self._policy().can_resource(principal, "agent", key):
                     tabs.append(tab)
+            # 탭을 걸렀으면 방 상태·시각도 **다시 계산한다.** 안 그러면 "문제라는데 문제인
+            # 탭이 없는" 방이 나온다 — 볼 수 없는 세션이 만든 상태가 남아 화면이 설명 불가능해진다.
             room["tabs"] = tabs
+            room["status"] = fold_status([str(tab.get("status") or "") for tab in tabs])
+            room["lastAt"] = max((float(tab.get("ts") or 0) for tab in tabs), default=0)
             rooms.append(room)
         payload["rooms"] = rooms
         return payload
