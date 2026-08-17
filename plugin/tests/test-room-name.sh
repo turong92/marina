@@ -59,8 +59,22 @@ assert p1 != p2, (p1, p2)
 문장 = short_name("너는 CRABs 결제 도메인의 시니어 엔지니어다. 목표는 환불 정합성 개선")
 assert 문장.endswith("…") and " " not in 문장[-3:-1], 문장
 
-# ⑩ 그래도 목록 한 줄은 지킨다 — 길어지면 줄이는 뜻이 없어진다.
-for value in (u1, u2, p1, p2, 문장):
+# ⑩ 경로는 **끝 두 조각**을 남긴다. 사람이 알아보는 건 파일명과 그 부모지 맨 앞의 홈
+# 디렉터리가 아니다. 앞이 다 같아도(둘 다 /Users/…) 뒤가 다르면 구별된다.
+a1 = short_name("/Users/sumin/IdeaProjects/marina/plugin/scripts/a.py")
+a2 = short_name("/Users/sumin/IdeaProjects/marina/plugin/tests/b.sh")
+assert a1 != a2, (a1, a2)
+assert a1.endswith("scripts/a.py"), a1
+# 끝까지 같은 경로는 부딪힌다 — 그건 ✎ 이름 바꾸기로 푼다(모든 경우를 이름으로 풀 수는 없다).
+
+# ⑪ 잘렸으면 **잘렸다고 표시한다.** 앞이 같고 뒤가 긴 한 덩어리(브랜치명)는 표시 없이 자르면
+# 잘린 줄도 모른 채 또 부딪힌다.
+b1 = short_name("feat/room-screen-redesign-second-pass-implementation")
+b2 = short_name("feat/room-screen-redesign-second-pass-security")
+assert b1.endswith("…") or b1 != b2, (b1, b2)
+
+# ⑫ 그래도 목록 한 줄은 지킨다 — 길어지면 줄이는 뜻이 없어진다.
+for value in (u1, u2, p1, p2, a1, a2, b1, b2, 문장):
     assert len(value) <= 30, (len(value), value)
 print("ok 이름 줄이기: 첫 줄·군더더기 제거·단어 경계·별칭 보존·충돌 회피")
 PY

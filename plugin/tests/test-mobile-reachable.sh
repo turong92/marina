@@ -57,6 +57,14 @@ assert re.search(r"sourceTabs\.hidden\s*=", html), "안 먹는 탭이 화면에 
 # ⑤ 방이 하나도 없으면 예전 목록으로 되돌아간다 — 서버가 rooms 를 못 주면 빈 화면만 남는다.
 assert re.search(r"sessionList\.hidden\s*=\s*!방없음", html), "방이 없을 때의 폴백이 없다"
 
+# ⑤-b **hidden 이 실제로 숨기나.** 여기가 이 테스트의 원래 구멍이었다 — `hidden = true` 라고
+# 적힌 걸 확인해놓고 화면에서는 계속 보였다. display 를 지정한 클래스가 UA 의
+# [hidden]{display:none} 을 이기기 때문이다(.session-list{display:flex}).
+# 실측이었다: hidden=true 인데 display=flex, 높이 363px — 방 목록 아래에 예전 목록이 통째로
+# 붙어 있었다. 전역 가드가 없으면 앞으로도 같은 착각을 한다.
+assert re.search(r"\[hidden\]\s*\{[^}]*display:\s*none\s*!important", html), \
+    "hidden 속성이 CSS 에 진다 — 숨겼다고 믿은 것들이 계속 보인다"
+
 # ⑥ 방의 모든 대화를 **열 수 있다.** 탭은 안 자르는데 세션 목록이 3개로 잘려 있으면,
 # 4번째 탭은 눌러도 아무 일도 안 난다(chooseSession 이 조용히 돌아간다).
 import marina_mobile as mm
@@ -65,7 +73,14 @@ import inspect
 조립 = inspect.getsource(mm.mobile_state)
 assert "for agent in all_agents:" in 조립, \
     "세션 목록이 카드용 상한(3개)으로 만들어진다 — 방의 4번째 대화를 열 수 없다"
-print("ok 첫 화면에서 닿는 동작: 새 대화·검색·프로젝트·폴백·모든 탭")
+# ⑥ **모든 방을 볼 수 있다.** 프로젝트 칩은 항상 하나를 강제 선택하므로, '전체' 칩이 없으면
+# 방 목록이 한 프로젝트만 보여준다 — 실측으로 방 28개 중 21개, 답을 기다리는 방 4개 중 3개가
+# 사라졌다. 급한 방을 아래에 두는 것보다 안 보이게 하는 게 나쁘다.
+assert 'data-project=""' in html, "'전체' 칩이 없어 다른 프로젝트의 방을 볼 수 없다"
+강제 = html[html.find("function renderProjectTabs"):][:700]
+assert "if (selectedProjectId && !projects.some" in 강제, \
+    "'전체'(빈 값) 선택이 강제 선택에 덮인다 — 전체를 고를 수 없다"
+print("ok 첫 화면에서 닿는 동작: 새 대화·검색·프로젝트·전체·폴백·모든 탭")
 PY
 
 # ⑦ 실제 자료로 확인 — 방의 모든 탭이 세션 목록에 있나(눌러서 열리나).

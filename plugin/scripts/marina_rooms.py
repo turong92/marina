@@ -187,11 +187,16 @@ def short_name(name: str, limit: int = 22) -> str:
     한덩어리 = " " not in line
     if 한덩어리 and "/" in line:
         머리, _, 꼬리 = line.partition("://")
-        조각 = (꼬리 or 머리).split("/")
-        끝 = next((part for part in reversed(조각) if part), "")
-        앞 = (조각[0] if 조각 else "")[:limit // 2]
-        if 끝 and 끝 != 앞:
-            return f"{앞}…/{끝}"[:limit + 8]
+        조각 = [part for part in (꼬리 or 머리).split("/") if part]
+        # **끝 두 조각**을 쓴다. 경로·URL 에서 사람이 알아보는 건 파일명과 그 부모(또는
+        # issues/1234 같은 마지막 쌍)이지 맨 앞의 호스트·홈 디렉터리가 아니다.
+        # 앞이 다 같아도(둘 다 /Users/…) 뒤가 다르면 구별되고, 뒤까지 같으면 그건 ✎ 로 푼다.
+        꼬리조각 = 조각[-2:] if len(조각) > 1 else 조각
+        if 꼬리조각:
+            줄임 = ("…/" if len(조각) > len(꼬리조각) else "") + "/".join(꼬리조각)
+            # 잘렸으면 **잘렸다고 표시한다.** 표시 없이 자르면(브랜치명처럼 앞이 같고 뒤가 긴
+            # 경우) 잘린 줄도 모른 채 서로 같은 이름이 된다.
+            return 줄임 if len(줄임) <= limit + 8 else 줄임[:limit + 7] + "…"
     cut = line[:limit]
     if " " in cut[1:]:
         cut = cut[:cut.rindex(" ")]

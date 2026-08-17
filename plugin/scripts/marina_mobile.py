@@ -1987,6 +1987,11 @@ _MOBILE_HTML = r"""<!doctype html>
        아이콘이 64px 파비콘으로 떨어진다. -->
   <link rel="icon" type="image/png" href="/web/favicon.png" />
   <style>
+    /* **hidden 속성은 언제나 이긴다.** display 를 지정한 클래스(.session-list{display:flex} 등)가
+       UA 의 [hidden]{display:none} 을 눌러버려서, 숨겼다고 믿은 것들이 계속 보였다 —
+       방 목록 아래에 예전 세션 목록이 통째로 붙어 있었는데 아무도 몰랐다(속성만 확인했다).
+       파일 곳곳에 클래스별 가드가 하나씩 붙어 있던 것도 같은 함정을 하나씩 만났다는 뜻이다. */
+    [hidden] { display: none !important; }
     :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
     body { margin: 0; overflow: hidden; background: #f4f6f9; color: #17191f; }
     #mobileApp { --app-height: 100dvh; height: var(--app-height); min-height: 0; display: none; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
@@ -3976,13 +3981,18 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function renderProjectTabs() {
       const projects = projectsWithCounts();
-      if (!projects.some(p => p.id === selectedProjectId)) {
+      // 빈 값("전체")은 유효한 선택이다 — 강제 선택으로 덮으면 '전체'를 고를 수 없다.
+      if (selectedProjectId && !projects.some(p => p.id === selectedProjectId)) {
         const current = selectedSession();
         const currentProject = current ? sessionProjectId(current) : "";
         selectedProjectId = projects.some(p => p.id === currentProject) ? currentProject : ((projects[0] && projects[0].id) || "");
         if (selectedProjectId) localStorage.setItem("marinaMobileProject", selectedProjectId);
       }
-      const html = projects.map(p => `<button class="project-chip ${p.id === selectedProjectId ? "active" : ""}" type="button" data-project="${esc(p.id)}" title="${esc(p.label)}">${esc(p.label)}<span class="project-count">${p.count}</span></button>`).join("");
+      // **'전체' 칩이 있어야 한다.** 없으면 항상 한 프로젝트가 강제로 선택돼(바로 위 코드),
+      // 방 목록이 그 프로젝트만 보여준다 — 실측으로 방 28개 중 21개가, 답을 기다리는 방
+      // 4개 중 3개가 화면에서 사라졌다. 급한 방을 아래에 두는 것보다 안 보이게 하는 게 나쁘다.
+      const 전체칩 = `<button class="project-chip ${selectedProjectId ? "" : "active"}" type="button" data-project="" title="전체">전체<span class="project-count">${(state.rooms || []).length}</span></button>`;
+      const html = 전체칩 + projects.map(p => `<button class="project-chip ${p.id === selectedProjectId ? "active" : ""}" type="button" data-project="${esc(p.id)}" title="${esc(p.label)}">${esc(p.label)}<span class="project-count">${p.count}</span></button>`).join("");
       updateHtmlIfChanged(projectTabs, html);
     }
     function projectSessions() {
@@ -5772,6 +5782,7 @@ _MOBILE_HTML = r"""<!doctype html>
     // 핀 — 워크트리에 붙고 서버에 저장된다.
     // ROOM_ACTIONS_START  (테스트가 이 블록의 배선을 확인한다)
     let openRoomRoot = "";
+    let roomBusy = false;      // 방 패널에서 뭔가 돌고 있다 — 그동안은 패널을 다시 안 그린다
 
     // 방 목록 다시 그리기 — 폴·검색·필터가 모두 이 함수를 쓴다(규칙이 갈라지면 안 된다).
     function renderRoomList() {
@@ -5785,7 +5796,10 @@ _MOBILE_HTML = r"""<!doctype html>
       // 그 사이 사라진 대화의 탭은 눌러도 아무 일이 안 난다.
       if (openRoomRoot) {
         const 열린방 = roomByRoot(openRoomRoot);
-        if (열린방) roomOpen.innerHTML = renderRoomTabs(열린방, launchSources());
+        // **동작 중에는 손대지 않는다.** 패널을 다시 그리면 눌러서 잠가둔 버튼이 새 노드로
+        // 갈리며 잠금이 풀린다 — 기동 중인데 다시 눌려서 세션이 둘 생긴다(실측: 폴 한 번 3초).
+        if (roomBusy) { /* 그대로 둔다 */ }
+        else if (열린방) roomOpen.innerHTML = renderRoomTabs(열린방, launchSources());
         else closeRoom();
       }
       const 방없음 = !방들.length;
@@ -5797,7 +5811,14 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     function launchSources() {
       const opts = state.agentOptions || {};
-      return Object.keys(opts).map(id => ({id, label: id === "claude" ? "Claude" : id === "codex" ? "Codex" : id}));
+      // 순서를 못 박는다 — 워크트리 시트도 claude·codex 순이라, 같은 동작이 화면마다 다른
+      // 자리에 있으면 손가락이 헷갈린다. Object.keys 는 순서를 약속하지 않는다.
+      const 순서 = ["claude", "codex"];
+      const ids = Object.keys(opts).sort((a, b) => {
+        const ia = 순서.indexOf(a), ib = 순서.indexOf(b);
+        return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib);
+      });
+      return ids.map(id => ({id, label: id === "claude" ? "Claude" : id === "codex" ? "Codex" : id}));
     }
     function roomByRoot(root) {
       return (state.rooms || []).find(item => item.root === root) || null;
@@ -5837,9 +5858,15 @@ _MOBILE_HTML = r"""<!doctype html>
     roomOpen.addEventListener("click", async event => {
       const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide]");
       if (!target) return;
+      roomBusy = true;
+      try { await handleRoomAction(target); } finally { roomBusy = false; }
+    });
+    async function handleRoomAction(target) {
       if (target.hasAttribute("data-room-close")) { closeRoom(); return; }
       if (target.hasAttribute("data-unhide")) {
-        const [source, sid] = String(target.getAttribute("data-unhide")).split(":");
+        const 값 = String(target.getAttribute("data-unhide"));
+        const source = 값.slice(0, 값.indexOf(":"));
+        const sid = 값.slice(값.indexOf(":") + 1);
         await unhideSession(openRoomRoot, source, sid);
         return;
       }
@@ -5849,11 +5876,13 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       if (target.hasAttribute("data-rename")) { await renameRoom(target.getAttribute("data-rename")); return; }
       if (target.hasAttribute("data-archive")) { await archiveRoom(target.getAttribute("data-archive")); return; }
-      const [source, sid] = String(target.getAttribute("data-tab") || "").split(":");
+      const 값 = String(target.getAttribute("data-tab") || "");
+      const source = 값.slice(0, 값.indexOf(":"));
+      const sid = 값.slice(값.indexOf(":") + 1);     // sid 에 ':' 가 있어도 안 깨지게
       const root = openRoomRoot;
       closeRoom();
       chooseSession(`agent:${source}:${sid}:${root}`);
-    });
+    }
 
     // 접기 — 끝난 방을 목록에서 치운다. 서버가 "무엇으로 부르고 있었는지"를 같이 적어두므로,
     // 새로 부를 일이 생기면 저절로 다시 올라온다(1차에서 만든 규칙).
