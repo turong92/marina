@@ -141,4 +141,34 @@ assert order.index("wait") < len(order) - 1, order
 print("ok 답 구동이 질문 사이마다 화면을 기다린다")
 PY
 
+# ⑤ 진단용 화면 캡처가 **실제로 동작**해야 한다. 실측(2026-08-17): 이 파일 아래쪽에 이미
+# `_ANSI_RE`(문자열 패턴)가 있어서 새로 만든 바이트 패턴을 덮었고, term_tail 이 TypeError 로
+# 죽으면서 답 응답까지 깨졌다. 진단이 본체를 망가뜨리면 안 된다.
+PYTHONPATH="$SCR" python3 - "$TMP" <<'PY2'
+import sys
+import time
+from pathlib import Path
+
+import marina_term as mt
+
+tmp = Path(sys.argv[1])
+mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="": [
+    sys.executable, "-c",
+    "import sys,time; sys.stdout.write('\\x1b[32m선택하세요\\x1b[0m\\r\\n  1) 예\\n'); "
+    "sys.stdout.flush(); time.sleep(5)"]
+opened = mt.term_open(tmp, 80, 24, agent_source="fake", agent_sid="tail-0001")
+tid = opened["tid"]
+try:
+    assert mt.term_await_redraw(tid, 0, timeout=8.0), "가짜 TUI 출력이 안 왔다"
+    text = mt.term_tail(tid)
+    assert "선택하세요" in text, f"화면 글자가 안 남았다: {text!r}"
+    assert "\x1b" not in text and "[32m" not in text, f"색 코드가 안 걷혔다: {text!r}"
+finally:
+    mt.term_kill(tid)
+
+# 없는 세션이면 빈 문자열 — **예외를 던지면 안 된다**(진단이 답 전송을 깨뜨린 실제 사고).
+assert mt.term_tail("없는tid") == ""
+print("ok 화면 캡처: 색 코드 제거 + 관찰 실패해도 안 터진다")
+PY2
+
 echo "PASS test-answer-redraw-wait"

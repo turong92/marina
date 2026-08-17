@@ -509,7 +509,9 @@ def term_input(tid: str, data: str) -> dict[str, Any]:
     return {"ok": True}
 
 
-_ANSI_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\r")
+# 이름을 _ANSI_RE 로 두면 안 된다 — 이 파일 아래쪽에 같은 이름의 **문자열** 패턴이 있어서
+# 나중 정의가 이걸 덮는다(실측 2026-08-17: 그래서 진단이 TypeError 로 죽고 응답까지 깨졌다).
+_ANSI_BYTES_RE = re.compile(rb"\x1b\[[0-9;?]*[a-zA-Z]|\x1b[()][A-Za-z0-9]|\x1b[=>]|\r")
 
 
 def term_tail(tid: str, limit: int = 1800) -> str:
@@ -523,7 +525,7 @@ def term_tail(tid: str, limit: int = 1800) -> str:
         return ""
     with term.cond:
         raw = bytes(term.history[-limit * 4:])
-    text = _ANSI_RE.sub(b"", raw).decode("utf-8", errors="replace")
+    text = _ANSI_BYTES_RE.sub(b"", raw).decode("utf-8", errors="replace")
     lines = [line.rstrip() for line in text.splitlines()]
     return "\n".join([line for line in lines if line.strip()][-40:])[-limit:]
 
