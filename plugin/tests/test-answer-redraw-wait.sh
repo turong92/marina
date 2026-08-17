@@ -134,7 +134,8 @@ mm.mobile_answer({"root": str(root), "target": {"type": "agent", "source": "clau
                   "answers": [[0], [0], [0]]})
 
 waits = [c for c in calls if c[0] == "wait"]
-assert len(waits) == 2, f"질문 3개인데 기다림이 {len(waits)}번 — 사이마다 화면을 봐야 한다"
+# 질문 사이 2번 + 제출 화면이 그려지길 기다리는 1번 = 3번.
+assert len(waits) == 3, f"질문 3개인데 기다림이 {len(waits)}번 — 사이마다, 그리고 제출 전에 본다"
 # 기다림은 **입력 사이**에 와야 한다(입력 전부 몰아친 뒤 기다리면 의미가 없다).
 order = [c[0] for c in calls]
 assert order.index("wait") < len(order) - 1, order
@@ -169,6 +170,48 @@ finally:
 # 없는 세션이면 빈 문자열 — **예외를 던지면 안 된다**(진단이 답 전송을 깨뜨린 실제 사고).
 assert mt.term_tail("없는tid") == ""
 print("ok 화면 캡처: 색 코드 제거 + 관찰 실패해도 안 터진다")
+PY2
+
+# ⑥ **여러 질문 폼은 마지막에 Submit 을 누른다.** 실측한 화면(2026-08-17):
+#     ← ☒방향 ☒범위 ✔ Submit →   Review your answers …   ❯ 1. Submit answers
+# 질문은 탭이고 끝에 Submit 탭이 따로 있다. 질문마다 답만 넣고 끝내면 제출이 안 돼 영영 안
+# 먹는다 — "질문 2~3개짜리만 실패, 재시도는 1초 만에 성공"의 정체였다(그 Enter 가 Submit).
+# 단일 질문은 Enter 하나로 선택+제출이라 이 단계가 **없어야** 한다.
+PYTHONPATH="$SCR" python3 - "$HERE" <<'PY2'
+import sys
+from pathlib import Path
+
+import marina_mobile as mm
+
+root = Path(sys.argv[1]).resolve()
+
+def drive(question_count):
+    keys = []
+    mm.term_output_mark = lambda tid: 0
+    mm.term_await_redraw = lambda tid, since, timeout=0: True
+    mm.term_input = lambda tid, text: keys.append(text)
+    mm._agent_input_pause = lambda: None
+    mm._question_state_token = lambda sid: ""
+    mm._await_answer_settled = lambda sid, before, questions=1: True
+    mm._live_agent_tid = lambda r, s, i: "tid-1"
+    mm.safe_root = lambda value: root
+    picks = [[0]] * question_count
+    mm.mobile_pending_question = lambda source, sid: {"questions": [
+        {"question": f"q{i}", "options": [{"label": "a"}]} for i in range(question_count)]}
+    mm._parse_answers = lambda body: picks
+    mm.mobile_answer({"root": str(root), "answers": picks,
+                      "target": {"type": "agent", "source": "claude", "sid": "s1"}})
+    return keys
+
+one = drive(1)
+assert one.count("\r") == 1, f"단일 질문에 Enter 가 {one.count(chr(13))}번 — 제출 화면이 없는데 더 쳤다"
+
+two = drive(2)
+assert two.count("\r") == 3, f"질문 2개면 확정 2번 + Submit 1번이어야 하는데 {two.count(chr(13))}번: {two}"
+
+three = drive(3)
+assert three.count("\r") == 4, f"질문 3개면 4번이어야 하는데 {three.count(chr(13))}번: {three}"
+print("ok 여러 질문 폼은 마지막에 Submit 을 누른다(단일 질문은 안 누른다)")
 PY2
 
 echo "PASS test-answer-redraw-wait"

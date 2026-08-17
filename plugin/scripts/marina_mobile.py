@@ -1664,6 +1664,26 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         question = questions[position] if position < len(questions) else {}
         multi_select = bool(isinstance(question, dict) and question.get("multiSelect"))
         _drive_selector(tid, picks, multi_select)
+    # **여러 질문 폼은 마지막에 제출 화면이 따로 뜬다.** 실측으로 확인한 화면(2026-08-17):
+    #
+    #     ← ☒방향  ☒범위  ✔ Submit →
+    #     Review your answers
+    #     ● 어떤 방향으로 진행할까요? → 옵션 A
+    #     ● 작업 범위는 어떻게 잡을까요? → 최소 범위
+    #     Ready to submit your answers?
+    #     ❯ 1. Submit answers
+    #
+    # 질문은 위쪽 **탭**이고 맨 끝에 Submit 탭이 있다. 질문마다 답만 넣고 끝내면 폼이 제출되지
+    # 않아 영영 안 먹는다 — 그게 "질문 2~3개짜리만 실패"의 정체였다(단일 질문은 Enter 하나로
+    # 선택과 제출이 같이 되므로 이 단계가 없어 8/8 성공했다).
+    #
+    # 마지막 질문을 확정하면 포커스가 "Submit answers" 에 가 있으므로 Enter 한 번이면 된다
+    # (재시도가 1초 만에 성공하던 것도 이것 때문이다 — 그 Enter 가 Submit 을 눌렀다).
+    if len(answers) > 1:
+        term_await_redraw(tid, mark, timeout=_ANSWER_REDRAW_TIMEOUT_S)
+        mark = term_output_mark(tid)
+        term_input(tid, "\r")
+
     settled = _await_answer_settled(sid, before, len(answers) or 1)
     _answer_log("drive done: settled=%r after=%r" % (settled, _question_state_token(sid)))
     if not settled:

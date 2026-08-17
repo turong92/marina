@@ -319,7 +319,10 @@ sent.clear()
 mm.term_input = consuming_input
 result = mm.mobile_answer({**body, "optionIndexes": [1, 0]})
 assert result["settled"] is True, result
-assert sent == ["\x1b[B", "\r", "\r"], sent          # 1번째=아래1칸+확정, 2번째=그대로 확정
+# 1번째=아래1칸+확정, 2번째=그대로 확정, **마지막 Enter=Submit**.
+# 여러 질문 폼은 질문이 탭이고 끝에 Submit 탭이 따로 있다(실측 2026-08-17: "Review your answers
+# / ❯ 1. Submit answers"). 답만 넣고 끝내면 제출이 안 돼 영영 안 먹었다.
+assert sent == ["\x1b[B", "\r", "\r", "\r"], sent
 assert result["answers"] == [[1], [0]], result   # 응답은 질문별 **목록**이다(multiSelect 때문)
 
 # ② 키를 써도 상태파일이 그대로면 settled False — 모바일이 카드를 되살릴 근거.
