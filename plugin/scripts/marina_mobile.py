@@ -2126,6 +2126,7 @@ _MOBILE_HTML = r"""<!doctype html>
                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
     .roomTab.current { border-color: #2f81f7; }
     .roomTab.hidden { opacity: .55; }
+    .roomRow.archived { opacity: .55; }
     .roomEmpty { padding: 32px 16px; text-align: center; opacity: .7; line-height: 1.6; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
     /* 워크트리 = 단위. 헤더에서 바로 새 에이전트를 띄운다(웹 카드의 ＋CC/＋CX 와 같은 멘탈모델). */
@@ -2596,7 +2597,7 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="listTools">
           <input class="search-input" id="sessionSearch" aria-label="세션 검색" placeholder="세션 검색" />
           <button class="iconBtn listToolBtn" id="densityBtn" type="button">&#9776;</button>
-          <button class="iconBtn listToolBtn" id="showAllBtn" type="button" title="전체보기(오래된·숨긴 세션 포함)" aria-label="전체보기">&#8943;</button>
+          <button class="iconBtn listToolBtn" id="showAllBtn" type="button" title="전체보기(오래된·숨긴·접은 것 포함)" aria-label="전체보기">&#8943;</button>
           <button class="listToolBtn newWtBtn" id="newWorktreeBtn" type="button" title="새 워크트리 만들기" aria-label="새 워크트리 만들기">＋WT</button>
         </div>
         <!-- 방 목록이 첫 화면이다(형 결정 2026-08-18). 세션 목록은 지우지 않고 숨겨만 둔다 —
@@ -3453,8 +3454,10 @@ _MOBILE_HTML = r"""<!doctype html>
       return ROOM_LABEL[status] || ROOM_LABEL["대기"];
     }
 
-    function renderRooms(rooms, now) {
-      const live = (rooms || []).filter(room => !room.archived);
+    // withArchived 는 "전체보기"에서 켜진다. 접은 방을 다시 볼 길이 없으면 접는 순간
+    // 잃어버린 것과 같다 — 접기는 치우는 것이지 버리는 게 아니다.
+    function renderRooms(rooms, now, withArchived) {
+      const live = (rooms || []).filter(room => withArchived || !room.archived);
       if (!live.length) {
         return '<div class="roomEmpty">아직 방이 없어요.<br />새 일감을 만들면 여기 나와요.</div>';
       }
@@ -3469,7 +3472,7 @@ _MOBILE_HTML = r"""<!doctype html>
         const status = String(room.status || "대기");
         // 카드 몸통을 누르면 바로 대화로, ⋯ 를 누르면 방 안(다른 대화·이름·접기)으로.
         // 버튼 안에 버튼을 넣을 수 없어 형제로 두고 줄로 감싼다.
-        return `<div class="roomRow st-${esc(status)}">
+        return `<div class="roomRow st-${esc(status)}${room.archived ? " archived" : ""}">
           <button class="roomCard" type="button" data-room="${esc(room.root)}">
             <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
             <span class="roomBody">
@@ -3477,7 +3480,9 @@ _MOBILE_HTML = r"""<!doctype html>
               <span class="roomMeta">${esc(roomStatusLabel(status) + count)}</span>
             </span>
           </button>
-          <button class="roomMore" type="button" data-room-more="${esc(room.root)}" aria-label="방 메뉴">⋯</button>
+          ${room.archived
+            ? `<button class="roomMore" type="button" data-room-unarchive="${esc(room.root)}" title="다시 꺼내기" aria-label="다시 꺼내기">↑</button>`
+            : `<button class="roomMore" type="button" data-room-more="${esc(room.root)}" aria-label="방 메뉴">⋯</button>`}
         </div>`;
       }).join("");
     }
@@ -5137,7 +5142,7 @@ _MOBILE_HTML = r"""<!doctype html>
       renderSessions();
       // 방 목록이 첫 화면이다(형 결정). 세션 목록은 지우지 않고 숨겨만 둔다 — 방 화면이
       // 이상하면 이 두 줄만 되돌리면 예전 화면으로 돌아간다.
-      roomList.innerHTML = renderRooms(state.rooms, Date.now() / 1000);
+      roomList.innerHTML = renderRooms(state.rooms, Date.now() / 1000, showAll);
       sessionList.hidden = true;
       renderInbox();
       const live = selectedSession();
@@ -5737,6 +5742,8 @@ _MOBILE_HTML = r"""<!doctype html>
     // 방 카드를 누르면 **바로 그 방의 대화로** 간다. 대부분의 방은 대화가 하나뿐이라,
     // 여기서 한 번 더 고르게 하면 흔한 경우에 손가락이 한 번 더 든다.
     roomList.addEventListener("click", event => {
+      const back = event.target.closest && event.target.closest("[data-room-unarchive]");
+      if (back) { unarchiveRoom(back.getAttribute("data-room-unarchive")); return; }
       const more = event.target.closest && event.target.closest("[data-room-more]");
       if (more) { openRoom(more.getAttribute("data-room-more")); return; }
       const card = event.target.closest && event.target.closest("[data-room]");
@@ -5774,6 +5781,19 @@ _MOBILE_HTML = r"""<!doctype html>
         await load({force: true});   // 접었는데 그대로 있으면 안 먹은 걸로 보인다
       } catch (error) {
         showToast(`접기 실패 · ${String(error)}`);
+      }
+    }
+
+    // 다시 꺼내기 — 접기와 같은 표면에 archived=false 를 보낸다(서버가 기록을 지운다).
+    async function unarchiveRoom(root) {
+      if (!root) return;
+      try {
+        const r = await fetch("/mobile/api/archive", {method: "POST", headers: headers(true),
+                                                      body: JSON.stringify({root, archived: false})});
+        if (!r.ok) throw new Error(await responseError(r));
+        await load({force: true});
+      } catch (error) {
+        showToast(`꺼내기 실패 · ${String(error)}`);
       }
     }
 
@@ -5868,7 +5888,7 @@ _MOBILE_HTML = r"""<!doctype html>
     // 전체보기 — 7일 넘어 목록에서 빠진 세션과 숨긴 세션까지 서버에서 받아온다.
     function applyShowAll() {
       showAllBtn.classList.toggle("on", showAll);
-      showAllBtn.title = showAll ? "전체보기 끄기" : "전체보기(오래된·숨긴 세션 포함)";
+      showAllBtn.title = showAll ? "전체보기 끄기" : "전체보기(오래된·숨긴·접은 것 포함)";
       sessionList.classList.toggle("show-all", showAll);
     }
     showAllBtn.onclick = () => {

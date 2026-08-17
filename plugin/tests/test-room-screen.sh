@@ -72,9 +72,15 @@ assert.equal(roomStatusLabel("대기"), "쉬는 중");
 assert.equal(roomStatusLabel("모르는값"), "쉬는 중", "모르는 상태에 빈 칸이 뜨면 고장으로 보인다");
 
 // ⑦ 접힌 방은 기본 목록에 없다 — 안 그러면 접는 의미가 없다.
-const 접힌것 = renderRooms([{root: "/c", shortName: "접은방", status: "대기", tabs: [],
-                             lastAt: 10, archived: true}], 1000);
-assert.doesNotMatch(접힌것, /접은방/, "접은 방이 그대로 목록에 있다");
+const 접힌방 = [{root: "/c", shortName: "접은방", status: "대기", tabs: [], lastAt: 10, archived: true}];
+assert.doesNotMatch(renderRooms(접힌방, 1000, false), /접은방/, "접은 방이 그대로 목록에 있다");
+
+// ⑦-b **전체보기에서는 다시 보인다.** 접은 방을 볼 길이 없으면 접는 순간 잃어버린 것과 같다 —
+// 접기는 치우는 것이지 버리는 게 아니다. 되돌릴 버튼도 있어야 한다.
+const 전체 = renderRooms(접힌방, 1000, true);
+assert.match(전체, /접은방/, "전체보기에서도 접은 방이 안 보인다");
+assert.match(전체, /data-room-unarchive="\/c"/, "다시 꺼낼 방법이 없다");
+assert.match(전체, /roomRow[^"]*archived/, "접힌 방이 눈으로 구분되지 않는다");
 
 // ⑧ 방이 하나도 없으면 **빈 화면이 아니라 말을 한다**(고장으로 보이면 안 된다).
 assert.match(renderRooms([], 1000), /아직/);
@@ -183,6 +189,8 @@ assert "접기 실패" in 접기, 접기
 assert "chooseSession(" in 블록, "방을 눌러도 대화가 안 열린다"
 # 대화가 없는 방은 방 안을 연다 — 아무 반응이 없으면 고장으로 보인다.
 assert "openRoom(room.root)" in 블록, 블록[:400]
+# 접은 방을 되돌리는 길이 있어야 한다 — 없으면 접기가 곧 버리기다.
+assert "unarchiveRoom" in 블록 and '"archived": false' in 블록.replace("archived: false", '"archived": false'), 블록[:400]
 print("ok 접기·이름 바꾸기가 서버로 가고 목록이 갱신된다")
 PY
 
