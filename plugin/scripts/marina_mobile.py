@@ -474,7 +474,13 @@ def mobile_request_ok(handler: Any, parsed: urllib.parse.ParseResult) -> bool:
 
 
 AGENT_QUESTIONS_DIR = MARINA_HOME / "agent-questions"
-_QUESTION_STALE_S = 900   # PostToolUse 로 지워지는 게 정상이나, 고아(세션 죽음 등) 방지용 상한
+# 질문 파일은 PostToolUse(답함)·UserPromptSubmit·Stop(중단) 때 훅이 지운다 — 그게 정상 경로다.
+# 이 상한은 그 신호가 **영영 안 오는 경우**(세션이 죽었다)를 위한 안전장치다.
+# 나이만 보고 내리면 안 된다: 형이 15분 안에 폰을 못 보면 살아 있는 질문이 사라지고, 터미널엔
+# 그대로 떠 있다(2026-08-18 형 지적: "ask UI 아예 안뜨고 터미널 가야 보였거든").
+# 그래서 **세션이 살아 있으면 상한을 적용하지 않는다** — 살아 있다면 그 질문은 여전히 형을
+# 기다리는 중이다.
+_QUESTION_STALE_S = 900
 
 
 def _question_state_token(sid: str) -> str:
@@ -504,10 +510,26 @@ def mobile_pending_question(source: str, sid: str) -> dict[str, Any] | None:
     questions = data.get("questions")
     if not isinstance(questions, list) or not questions:
         return None
-    if time.time() - float(data.get("ts") or 0) > _QUESTION_STALE_S:
+    나이 = time.time() - float(data.get("ts") or 0)
+    if 나이 > _QUESTION_STALE_S and not _agent_proc_lookup("claude", sid):
+        # 상한을 넘겼고 그 세션도 살아 있지 않다 = 답할 상대가 없는 카드. 눌러봐야 아무 일도
+        # 안 나므로 내린다. 반대로 살아 있으면 몇 시간이 지나도 보여준다.
         return None
     return {"questions": questions, "toolUseId": str(data.get("toolUseId") or ""),
             "token": f"{data.get('toolUseId') or ''}:{data.get('ts') or ''}"}
+
+
+def _agent_proc_lookup(source: str, sid: str) -> dict[str, Any] | None:
+    """그 세션이 지금 살아 있나(등록 기록 기준). 모르면 None.
+
+    함수로 감싼 이유는 둘이다: import 실패에도 질문 카드가 죽지 않게, 그리고 테스트가
+    살아있음/죽음을 갈아끼울 수 있게."""
+    try:
+        import marina_agent_procs
+
+        return marina_agent_procs.lookup(source, sid)
+    except Exception:
+        return None
 
 
 PINS_FILE = MARINA_HOME / "pinned-worktrees.json"
