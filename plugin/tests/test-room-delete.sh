@@ -199,7 +199,20 @@ assert 'tab["deleted"] = key in gone' in 조립, f"서버가 지운 탭에 표�
 assert "되살렸어요" in 대화지우기, 대화지우기[:400]
 # 지운 것과 숨긴 것은 다르게 말한다 — 되살리는 버튼이 다르다.
 assert "지움" in 탭 and "숨김 해제" in 탭, 탭[:400]
-print("ok 화면: 방·대화 지우기가 있고 한 번 묻는다")
+# 지운 대화는 **방 상태·지문·시각에서 빠진다.** 안 그러면 지워놓고도 방이 "문제"로 뜨고,
+# 접기 지문이 그 대화 것으로 바뀌어 접어둔 방이 다시 펴진다(실측으로 그랬다).
+from marina_rooms import finalize_room
+
+방 = {"tabs": [
+    {"source": "c", "sid": "살아있음", "status": "대기", "ts": 100},
+    {"source": "c", "sid": "지움", "status": "문제", "ts": 999,
+     "deleted": True, "hidden": False, "stale": False},
+]}
+finalize_room(방)
+assert 방["status"] == "대기", f"지운 대화가 방 상태를 지배한다: {방['status']}"
+assert "지움" not in 방["mark"], f"지운 대화가 접기 지문에 낀다: {방['mark']}"
+assert 방["lastAt"] == 100, f"지운 대화 시각이 목록 정렬을 올린다: {방['lastAt']}"
+print("ok 화면: 방·대화 지우기가 있고 한 번 묻는다 · 지운 대화는 상태에서 빠진다")
 PY4
 
 echo "PASS test-room-delete"

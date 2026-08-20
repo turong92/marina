@@ -234,21 +234,34 @@ def _nested_repos(root: Path) -> list[str]:
 def _undo_stash(repo: Path, branch: str) -> None:
     """보관을 되돌린다 — 커밋을 풀어 워킹트리를 원래대로 돌리고 보관 브랜치를 지운다.
 
-    여러 레포를 보관하다 하나가 실패했을 때 쓴다. 앞서 성공한 것을 그대로 두면 그 워킹트리만
-    깨끗해진 채 삭제는 거부되어, 형 눈엔 그 폴더의 작업이 사라진 것으로 보인다."""
-    def run(*args: str) -> None:
-        subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60)
+    **모든 단계의 반환코드를 확인한다.** 예전엔 무시했는데, 그러면 이런 일이 난다:
+    보관 브랜치로 checkout 이 실패하면(그 워크트리에서 CLI 가 파일을 다시 써서 거부되는 게
+    흔하다) HEAD 는 원래 브랜치에 그대로인데 다음 줄의 `reset --mixed HEAD~1` 이 **그 브랜치**를
+    한 커밋 되감는다 — 형이 어제 한 진짜 커밋이 사라지고, 보관 브랜치까지 지워져 사본도 없다.
+    실증했다. 게다가 롤백이 도는 상황이 바로 "다른 레포에서 git 이 실패했다"라, 필요한 순간에
+    정확히 이 경로를 밟는다.
 
-    # 보관 뒤에는 이미 원래 브랜치로 돌아와 있다. 되돌리려면 보관 브랜치로 갔다가 커밋을 풀고,
-    # 다시 원래 자리로 온 뒤에 그 브랜치를 지운다 — **서 있는 브랜치는 못 지운다.**
+    되돌리지 못하면 **아무것도 건드리지 않고 보관 브랜치를 남긴다.** 작업은 거기 있다."""
+    def run(*args: str) -> bool:
+        try:
+            out = subprocess.run(["git", "-C", str(repo), *args],
+                                 capture_output=True, text=True, timeout=60)
+            return out.returncode == 0
+        except Exception:
+            return False
+
     앞 = subprocess.run(["git", "-C", str(repo), "branch", "--show-current"],
                         capture_output=True, text=True).stdout.strip()
     돌아갈곳 = 앞 if 앞 and 앞 != branch else ""
-    run("checkout", "-q", branch)
-    run("reset", "-q", "--mixed", "HEAD~1")     # 커밋만 푼다 — 파일은 워킹트리에 되돌아온다
-    if 돌아갈곳:
-        run("checkout", "-q", 돌아갈곳)
-        run("branch", "-q", "-D", branch)       # 떠난 뒤에 지운다
+    if not run("checkout", "-q", branch):
+        return          # 못 갔으면 손대지 않는다 — 여기서 밀면 남의 브랜치를 되감는다
+    # 첫 커밋이면 HEAD~1 이 없다. 그때는 커밋을 못 풀지만 파일은 디스크에 그대로다.
+    if not run("rev-parse", "--verify", "-q", "HEAD~1") or not run("reset", "-q", "--mixed", "HEAD~1"):
+        return          # 보관 브랜치를 남겨둔다 — 작업은 거기 있다
+    if not 돌아갈곳:
+        return          # detached 였다 — 돌아갈 이름이 없으니 브랜치도 안 지운다
+    if run("checkout", "-q", 돌아갈곳):
+        run("branch", "-q", "-D", branch)     # 떠난 뒤에만 지운다
 
 
 def _stash_one(repo: Path, room_name: str, label: str = "") -> str:
@@ -343,7 +356,11 @@ def stash_before_delete(root: Path, room_name: str = "") -> dict[str, Any]:
         # 워킹트리가 깨끗해지는데 삭제는 거부되어, 형 눈엔 그 폴더의 작업만 증발한 것으로 보인다
         # (그 안에서 CLI 가 돌고 있었다면 발밑에서 파일이 바뀐다). 전부 되거나 전부 아니거나다.
         for repo_path, 브랜치 in reversed(성공한곳):
-            _undo_stash(repo_path, 브랜치)
+            try:
+                _undo_stash(repo_path, 브랜치)
+            except Exception:
+                # 되돌리다 실패해도 **나머지는 계속** 되돌리고, 원래 실패 원인을 덮지 않는다.
+                pass
         raise
     return {"branch": branch, "saved": bool(성공한곳), "subrepos": 보관}
 

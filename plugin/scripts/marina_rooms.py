@@ -52,7 +52,6 @@ _CHANGES_TTL_S = 20.0
 # 레포, 마운트 지연)에서 매번 다시 시도하면 폴마다 5초를 그대로 문다 — 깨진 워크트리 둘이면
 # 폰 응답이 10초다. git 을 아끼려고 만든 캐시가 정확히 반대로 작동한다.
 _CHANGES_FAIL_TTL_S = 60.0
-_CHANGES_CACHE_MAX = 200        # 워크트리 수(지금 28) 보다 넉넉히. 넘으면 만료된 것부터 버린다.
 # key → (만료 시각, 판정)
 _changes_cache: dict[str, tuple[float, bool]] = {}
 # 완료 카드용 요약 — **같은 git 호출의 출력**에서 뽑는다(또 부르면 순수한 낭비다).
@@ -344,11 +343,12 @@ def finalize_room(room: dict[str, Any]) -> dict[str, Any]:
 
     **hidden 탭은 세지 않는다.** 숨김의 뜻이 "나를 부르지 마라"이므로, 보이기만 하고 상태에는
     영향을 주지 않는다 — 그래야 보는 화면(전체보기/일반)에 따라 방 상태가 달라지지 않는다."""
-    # 안 세는 탭이 두 종류다. **뜻이 달라서 따로 둔다** — hidden 은 형이 직접 숨긴 것이고
-    # (해제할 수 있다), stale 은 기준 방 밖(오래된 대화)이라 볼 수만 있는 것이다. 하나로
-    # 뭉치면 숨긴 적 없는 대화에 "숨김" 배지가 붙고 해제를 눌러도 안 없어진다.
+    # 안 세는 탭이 세 종류다. **뜻이 달라서 따로 둔다** — hidden 은 형이 직접 숨긴 것,
+    # stale 은 기준 밖(오래된 대화), deleted 는 지운 것이다. 라벨과 되살리는 버튼이 다 다르다.
+    # 셋 다 상태·지문·시각에서 빼야 한다: 지운 대화가 끼면 지워놓고도 방이 "문제"로 뜨고,
+    # 접기 지문까지 그 대화 것으로 바뀌어 접어둔 방이 다시 펴진다(실측).
     counted = [tab for tab in room.get("tabs", [])
-               if not tab.get("hidden") and not tab.get("stale")]
+               if not tab.get("hidden") and not tab.get("stale") and not tab.get("deleted")]
     room["status"] = fold_status([str(tab.get("status") or "") for tab in counted])
     room["mark"] = attention_mark(room["status"], counted)
     room["lastAt"] = max((float(tab.get("ts") or 0) for tab in counted), default=0)

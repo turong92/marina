@@ -163,14 +163,19 @@ except rooms.GitFailed:
     pass
 
 # ⑦ 캐시가 무한히 크지 않는다 — 워크트리는 생겼다 사라지므로 죽은 경로가 계속 쌓인다.
+# **만료된 것은 크기와 무관하게 턴다.** 예전엔 상한(200) 안쪽에서만 청소해서, 워크트리
+# 28개인 실사용에서는 청소가 한 번도 안 돌았다(실측).
 rooms._changes_cache.clear()
-for i in range(rooms._CHANGES_CACHE_MAX + 50):
+rooms._summary_cache.clear()
+for i in range(28):
     rooms.room_has_changes(Path(f"/tmp/wt-{i}"), runner=fake_git, now=1000.0)
 # 아직 다 살아 있는 항목은 안 버린다(버리면 방금 잰 것을 또 재게 된다).
-assert len(rooms._changes_cache) == rooms._CHANGES_CACHE_MAX + 50
+assert len(rooms._changes_cache) == 28, len(rooms._changes_cache)
 rooms.room_has_changes(Path("/tmp/새것"), runner=fake_git,
                        now=1000.0 + rooms._CHANGES_TTL_S + 1)
 assert len(rooms._changes_cache) == 1, f"만료된 것을 안 버렸다: {len(rooms._changes_cache)}"
+# 요약 캐시도 같이 — 지운 방 요약이 데몬이 죽을 때까지 남으면 안 된다.
+assert len(rooms._summary_cache) <= 1, f"요약 캐시가 안 치워진다: {len(rooms._summary_cache)}"
 print("ok 변경 판정: 미커밋·앞선 커밋·캐시·실패 내성")
 PY
 
