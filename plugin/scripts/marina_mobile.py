@@ -2430,8 +2430,15 @@ _MOBILE_HTML = r"""<!doctype html>
                      border-radius: 8px; background: transparent; color: inherit;
                      font: inherit; font-size: 12px; cursor: pointer; }
     .roomTabNote { flex: 0 0 auto; align-self: center; font-size: 11px; opacity: .6; }
-    .doneCard { margin: 8px 12px; padding: 12px; border: 1px solid #3fb950; border-radius: 10px;
-                display: flex; flex-direction: column; gap: 6px; }
+    /* 대화 **위에 떠 있는** 카드다(#doneSlot 은 absolute). 바탕이 없으면 뒤 글자가 그대로
+       비쳐서 둘 다 못 읽는다 — 형: "문신처럼 안 사라지고 겹치네". 그림자로 떠 있음을 말한다. */
+    .doneCard { margin: 8px 12px; padding: 12px 40px 12px 12px; border: 1px solid #3fb950;
+                border-radius: 10px; background: #f2fbf5; box-shadow: 0 8px 22px rgb(0 0 0 / 16%);
+                display: flex; flex-direction: column; gap: 6px; position: relative; }
+    /* 닫을 길. 결과가 또 바뀌면 다시 뜬다(닫힘은 그때의 결과에 붙는다). */
+    .doneClose { position: absolute; top: 6px; right: 6px; width: 28px; min-height: 28px; padding: 0;
+                 border: 0; border-radius: 8px; background: transparent; color: inherit;
+                 font-size: 15px; line-height: 1; opacity: .55; }
     .doneTitle { font-weight: 600; }
     .doneNames { font-size: 12px; opacity: .75; overflow-wrap: anywhere; }
     .doneOpen { align-self: flex-start; padding: 8px 14px; border: 1px solid var(--line);
@@ -2833,6 +2840,7 @@ _MOBILE_HTML = r"""<!doctype html>
       .questionOpt:disabled { background: #161c26; }
       .galleryTab.active { background: #1c2431; color: #e8edf4; }
       .fileRow { background: #171d27; border-color: #303846; }
+      .doneCard { background: #17251c; border-color: #2ea043; }
       .wtAction { color: #e8edf4; }
       .fileThumb, .fileIcon { background: #222c3a; }
       .fileBadge { background: #1e3a2a; color: #7fd6a2; }
@@ -6267,6 +6275,7 @@ _MOBILE_HTML = r"""<!doctype html>
             ? `<button class="doneOpen" type="button" data-open-preview="${esc(url)}">화면 보기</button>`
             : `<button class="doneOpen" type="button" data-start-preview="${esc(room.root)}">화면 보기</button>`;
       return `<div class="doneCard">
+        <button class="doneClose" type="button" data-done-dismiss="${esc(room.root)}" title="닫기" aria-label="닫기">✕</button>
         <span class="doneTitle">끝났어요 · ${esc(무엇)}</span>
         ${names ? `<span class="doneNames">${esc(names)}${esc(더)}</span>` : ""}
         ${보기}
@@ -6278,6 +6287,8 @@ _MOBILE_HTML = r"""<!doctype html>
     // 완료 카드를 대화 화면에 얹는다. 서비스가 떠 있으면 그 주소로 "화면 보기"를 준다 —
     // 서비스 목록은 이미 방마다 불러오고 있어서 추가 요청이 없다.
     doneSlot.addEventListener("click", event => {
+      const 닫기 = event.target.closest && event.target.closest("[data-done-dismiss]");
+      if (닫기) { dismissDone(roomByRoot(닫기.getAttribute("data-done-dismiss"))); return; }
       const 켜기 = event.target.closest && event.target.closest("[data-start-preview]");
       if (켜기) { openPreview(켜기.getAttribute("data-start-preview")); return; }
       const open = event.target.closest && event.target.closest("[data-open-preview]");
@@ -6325,6 +6336,19 @@ _MOBILE_HTML = r"""<!doctype html>
       }
     }
 
+    // 닫아둔 완료 카드. 키는 방 + **그때의 결과**라, 형이 닫아도 새로 뭔가 끝나면 다시 뜬다.
+    // 영영 숨기면 다음 결과를 놓치고, 안 숨기면 대화 위에 계속 얹혀 있다(형: "안 사라지고 겹치네").
+    function doneKey(room) {
+      const d = (room && room.done) || {};
+      return `${room ? room.root : ""}|${d.files || 0}|${d.commits || 0}|${(d.names || []).join(",")}`;
+    }
+    let doneDismissed = "";
+    try { doneDismissed = localStorage.getItem("marinaMobileDoneDismissed") || ""; } catch (e) {}
+    function dismissDone(room) {
+      doneDismissed = doneKey(room);
+      try { localStorage.setItem("marinaMobileDoneDismissed", doneDismissed); } catch (e) {}
+      renderDoneSlot(selectedSession());
+    }
     function renderDoneSlot(session) {
       const room = session ? roomByRoot(String(session.root || "")) : null;
       // 서비스 목록은 방마다 비동기로 받아 캐시한다 — **지금 방 것인지 확인**하지 않으면
@@ -6336,7 +6360,9 @@ _MOBILE_HTML = r"""<!doctype html>
       const 이름 = 같은방 ? String(servicesState.preview || "") : "";
       const 도는것 = 이름
         ? (servicesState.services || []).find(item => item.service === 이름 && item.openUrl) : null;
-      const html = renderDoneCard(room, { service: 이름, url: 도는것 ? 도는것.openUrl : "" });
+      const html = room && doneKey(room) === doneDismissed
+        ? ""                                    // 형이 닫은 결과다 — 새 결과가 나오면 키가 바뀌어 다시 뜬다
+        : renderDoneCard(room, { service: 이름, url: 도는것 ? 도는것.openUrl : "" });
       if (doneSlot.innerHTML !== html) doneSlot.innerHTML = html;
       doneSlot.hidden = !html;
       // 카드가 대화 마지막 줄을 가리지 않게 자리를 비운다(생각중 표시와 같은 규칙).
