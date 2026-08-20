@@ -2734,7 +2734,7 @@ _MOBILE_HTML = r"""<!doctype html>
           <input class="search-input" id="sessionSearch" aria-label="세션 검색" placeholder="세션 검색" />
           <button class="iconBtn listToolBtn" id="densityBtn" type="button">&#9776;</button>
           <button class="iconBtn listToolBtn" id="showAllBtn" type="button" title="전체보기(오래된·숨긴·접은 것 포함)" aria-label="전체보기">&#8943;</button>
-          <button class="listToolBtn newWtBtn" id="newWorktreeBtn" type="button" title="새 워크트리 만들기" aria-label="새 워크트리 만들기">＋WT</button>
+          <button class="listToolBtn newWtBtn" id="newWorktreeBtn" type="button" title="새 일감 만들기" aria-label="새 일감 만들기">＋ 새 일감</button>
         </div>
         <!-- 방 목록이 첫 화면이다(형 결정 2026-08-18). 세션 목록은 지우지 않고 숨겨만 둔다 —
              방 화면이 이상하면 한 줄로 되돌릴 수 있어야 한다. -->
@@ -6291,34 +6291,49 @@ _MOBILE_HTML = r"""<!doctype html>
       toggleWorktreePin(group && group.getAttribute("data-wt-root"));
     }, true);
     // 워크트리 생성 — 프로젝트 단위라 진입점을 그룹 헤더와 층을 나눈다.
+    // NEW_TASK_START  (테스트가 이 블록을 확인한다)
+    // 새 일감 — 형은 **무슨 일을 할지만** 쓴다(스펙 §3 "브랜치명은 마리나가 첫 메시지에서
+    // 짓는다. 선택지를 프로젝트 하나로 줄이는 게 안전장치다").
+    //
+    // 예전엔 "새 워크트리의 브랜치명"을 물었다. 비개발자 화면에서 브랜치라는 말도, 그 이름
+    // 규칙(영문/숫자/-)도 형이 알 이유가 없다.
     newWorktreeBtn.onclick = async () => {
-      // 서버가 projectId 로 등록된 프로젝트 root 를 찾는다(워크트리 payload 엔 projectRoot 가 없다).
-      // '전체'가 기본값이라(새 폰) 여기서 막히면 버튼이 처음부터 죽어 있다.
-      // 고른 프로젝트가 없으면 **가장 최근 방**의 프로젝트를 쓴다 — 형이 방금 보던 맥락이다.
+      // 프로젝트: 고른 게 있으면 그것, '전체'면 방금 보던 방의 프로젝트.
       const 최근 = (state.rooms || []).slice().sort((a, b) => (b.lastAt || 0) - (a.lastAt || 0))[0];
       const 대상프로젝트 = selectedProjectId || String((최근 && 최근.projectId) || "");
       if (!대상프로젝트) { showToast("프로젝트를 먼저 고르세요"); return; }
-      const branch = (prompt("새 워크트리의 브랜치명") || "").trim();
-      if (!branch) return;
+      const 할일 = (prompt("무슨 일을 할까요?") || "").trim();
+      if (!할일) return;
+
       newWorktreeBtn.disabled = true;
       const previous = newWorktreeBtn.textContent;
-      newWorktreeBtn.textContent = "만드는 중...";
-      statusEl.textContent = "워크트리 만드는 중 — 서브레포가 있으면 몇 분 걸릴 수 있어요";
+      newWorktreeBtn.textContent = "만드는 중…";
+      statusEl.textContent = "일감 만드는 중 — 서브레포가 있으면 몇 분 걸릴 수 있어요";
       try {
         const r = await fetch("/mobile/api/worktree-create", {method: "POST", headers: headers(true),
-                                                              body: JSON.stringify({projectId: 대상프로젝트, branch})});
+          body: JSON.stringify({projectId: 대상프로젝트, task: 할일})});
         if (!r.ok) throw new Error(await responseError(r));
         const d = await r.json();
-        showToast(`워크트리 만들었어요 · ${String(d.root || branch).split("/").pop()}`);
-        await load({quiet: true}).catch(() => {});
+        const root = String(d.root || "");
+        // 형이 쓴 말을 **방 이름으로** 남긴다. 폴더 이름은 ASCII 로 안전하게 짓기 때문에
+        // (게이트웨이 도메인 라벨로도 쓰인다) 이걸 안 하면 목록에 work-4f2a1 같은 게 뜬다.
+        await fetch("/mobile/api/rename", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root, name: 할일})}).catch(() => {});
+        // 바로 일을 시작한다 — 만들어만 놓고 끝나면 형이 또 찾아 들어가야 한다.
+        await fetch("/mobile/api/launch", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root, source: "claude", prompt: 할일})}).catch(() => {});
+        showToast("새 일감을 시작했어요");
+        await load({force: true}).catch(() => {});
       } catch (error) {
-        showToast(`워크트리 생성 실패 · ${String(error)}`);
+        showToast(`새 일감 실패 · ${String(error)}`);
       } finally {
         newWorktreeBtn.disabled = false;
         newWorktreeBtn.textContent = previous;
         statusEl.textContent = "";
       }
     };
+    // NEW_TASK_END
+
     // 전체보기 — 7일 넘어 목록에서 빠진 세션과 숨긴 세션까지 서버에서 받아온다.
     function applyShowAll() {
       showAllBtn.classList.toggle("on", showAll);

@@ -265,7 +265,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._policy().can_project(principal, str(proj.get("id") or "")):
             self._forbidden()
             return
+        # 모바일은 브랜치명을 안 보낸다 — 형이 무슨 일을 할지만 쓰고(task) 이름은 마리나가
+        # 짓는다(스펙 §3). 웹은 예전처럼 branch 를 직접 보낸다.
         branch = str(body.get("branch", "")).strip()
+        if not branch and str(body.get("task", "")).strip():
+            from marina_rooms import branch_from_text
+            branch = branch_from_text(str(body.get("task", "")))
         if not re.fullmatch(r"[A-Za-z0-9._/-]+", branch) or ".." in branch:
             raise ValueError("브랜치명은 영문/숫자/./_/-(슬래시 포함)만 가능 — 공백·'..' 금지")
         try:

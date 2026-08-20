@@ -8,6 +8,8 @@
 """
 from __future__ import annotations
 
+import re
+import secrets
 import subprocess
 import threading
 import time
@@ -254,6 +256,31 @@ def change_summary(root: Path, *, runner: Callable[[list[str], Path], str] = Non
         room_has_changes(root, runner=runner, now=now)
         cached = _summary_cache.get(key)
     return dict(cached[1]) if cached else {"files": 0, "names": []}
+
+
+def branch_from_text(text: str, *, salt: str = "") -> str:
+    """첫 메시지에서 브랜치 이름을 짓는다(스펙 §3 "브랜치명은 마리나가 첫 메시지에서 짓는다").
+
+    비개발자 화면에서 "브랜치"라는 말도, 그 이름 규칙(영문/숫자/-)도 형이 알 이유가 없다.
+    그래서 형은 무슨 일을 할지만 쓰고, 이름은 여기서 만든다.
+
+    **브랜치 이름은 ASCII 로만 짓는다.** 한글로 시킨 일이라도 그렇다 — 이 이름이 디렉터리
+    이름이 되고 게이트웨이 도메인 라벨로도 쓰여서(gwDomainLabel), 한글이 들어가면 DNS 쪽이
+    깨진다. 대신 **형에게 보이는 이름은 별칭으로 따로 붙인다**(방 이름 바꾸기와 같은 자리) —
+    그래서 목록엔 "결제 환불 정합성"이 뜨고 폴더는 안전한 이름을 쓴다.
+
+    같은 말로 시작해도 **서로 다른 워크트리**여야 한다 — 안 그러면 두 번째 생성이 실패한다.
+    짧은 시각 기반 꼬리를 붙인다."""
+    # 영어는 눕힌다 — 브랜치명 관례이고, 대소문자만 다른 이름이 섞이면 파일시스템에서 부딪힌다.
+    raw = " ".join(str(text or "").split())[:60].lower()
+    # 서버가 받는 문자 집합(marina_handler 의 검사)과 **같은 규칙**으로 턴다.
+    # 경로 탈출(..)·명령 삽입(`;`, 백틱)은 여기서 통째로 사라진다.
+    safe = re.sub(r"[^0-9a-z]+", "-", raw).strip("-")
+    safe = re.sub(r"-{2,}", "-", safe)[:40].strip("-")
+    # 시각만 쓰면 같은 밀리초에 두 번 부를 때 겹친다(실측). 무작위를 섞어 확실히 가른다 —
+    # 겹치면 두 번째 워크트리 생성이 그냥 실패한다.
+    꼬리 = salt or f"{int(time.time()) % 0xFFFF:04x}{secrets.token_hex(2)}"
+    return f"{safe}-{꼬리}" if safe else f"work-{꼬리}"
 
 
 def fold_status(tab_statuses: list[str]) -> str:
