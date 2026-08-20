@@ -75,7 +75,69 @@ for 곳 in (repo, repo / "sub"):
 빈것 = stash_before_delete(repo, "빈 방")
 assert 빈것["branch"] == "" and not 빈것["subrepos"], 빈것
 assert 빈것["saved"] is False, 빈것
-print("ok 보관: wip 브랜치·untracked 포함·제자리 복귀·머지 안 됨·빈 방은 건너뜀")
+# ⑥ **하나가 실패하면 전부 되돌린다.** 앞서 보관한 레포는 커밋+체크아웃 백으로 워킹트리가
+# 깨끗해지는데 삭제는 거부되어, 형 눈엔 그 폴더의 작업만 증발한 것으로 보인다(실측 지적).
+# 두 번째 레포에 index.lock 을 걸어 실패를 만든다 — 그 워크트리에서 CLI 가 git 을 돌리면
+# 실제로 나는 상황이다.
+sub2 = repo / "sub2"
+subprocess.run(["git", "init", "-q", str(sub2)], check=True)
+for k, v in (("user.email", "t@t"), ("user.name", "t")):
+    subprocess.run(["git", "-C", str(sub2), "config", k, v], check=True)
+(sub2 / "b.py").write_text("v1", encoding="utf-8")
+subprocess.run(["git", "-C", str(sub2), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(sub2), "commit", "-qm", "init"], check=True)
+
+(repo / "sub" / "api.py").write_text("서브1 작업", encoding="utf-8")
+(sub2 / "b.py").write_text("서브2 작업", encoding="utf-8")
+(repo / "wip.txt").write_text("루트 작업", encoding="utf-8")
+(sub2 / ".git" / "index.lock").write_text("", encoding="utf-8")   # 두 번째를 막는다
+
+def wip목록(곳):
+    out = subprocess.run(["git", "-C", str(곳), "branch", "--list", "wip/*"],
+                         capture_output=True, text=True).stdout
+    return sorted(line.strip("* ").strip() for line in out.splitlines() if line.strip())
+
+
+앞서있던것 = wip목록(repo / "sub")     # ②에서 정상 보관한 것 — 이건 남아 있는 게 맞다
+try:
+    stash_before_delete(repo, "부분 실패")
+    raise SystemExit("FAIL: 실패했어야 한다")
+except ValueError:
+    pass
+finally:
+    (sub2 / ".git" / "index.lock").unlink(missing_ok=True)
+
+# 앞서 보관한 서브레포의 작업이 **워킹트리에 그대로** 있어야 한다.
+남은것 = subprocess.run(["git", "-C", str(repo / "sub"), "status", "--porcelain"],
+                        capture_output=True, text=True).stdout
+assert "api.py" in 남은것, f"앞 서브레포 작업이 워킹트리에서 사라졌다: {남은것!r}"
+assert (repo / "sub" / "api.py").read_text() == "서브1 작업", (repo / "sub" / "api.py").read_text()
+새로생긴것 = [이름 for 이름 in wip목록(repo / "sub") if 이름 not in 앞서있던것]
+assert not 새로생긴것, f"되돌렸는데 이번 보관 브랜치가 남았다: {새로생긴것}"
+
+# ⑦ **까다로운 파일 이름도 담긴다.** 경로를 인자로 주면 `:` 로 시작하는 이름이
+# pathspec magic 으로 읽혀 통째로 실패한다(실측) — 그러면 보관이 안 되고 삭제도 막힌다.
+import shutil
+
+tricky = repo.parent / "tricky"
+shutil.rmtree(tricky, ignore_errors=True)
+subprocess.run(["git", "init", "-q", str(tricky)], check=True)
+for k, v in (("user.email", "t@t"), ("user.name", "t")):
+    subprocess.run(["git", "-C", str(tricky), "config", k, v], check=True)
+(tricky / "base").write_text("b", encoding="utf-8")
+subprocess.run(["git", "-C", str(tricky), "add", "-A"], check=True)
+subprocess.run(["git", "-C", str(tricky), "commit", "-qm", "b"], check=True)
+for 이름 in (":colon.txt", "-leading.txt", "한글 파일.txt", "space name.txt"):
+    (tricky / 이름).write_text("x", encoding="utf-8")
+
+까다 = stash_before_delete(tricky, "까다로운 이름")
+담김 = subprocess.run(["git", "-C", str(tricky), "show", "--name-only", "--format=", 까다["branch"]],
+                      capture_output=True, text=True).stdout
+for 이름 in (":colon.txt", "-leading.txt", "space name.txt"):
+    assert 이름 in 담김, f"{이름} 이 안 담겼다: {담김}"
+assert "355\\225\\234" in 담김 or "한글" in 담김, 담김   # git 이 인용해서 내보낸다
+
+print("ok 보관: wip·untracked·제자리 복귀·머지 안 됨·빈 방·부분 실패 롤백·까다로운 이름")
 PY
 
 # ⑥ 모바일 표면 — 방 삭제와 대화 삭제가 붙어 있고 가드를 탄다.
@@ -126,6 +188,14 @@ assert "confirm(" in 대화지우기 and "/mobile/api/forget-chat" in 대화지�
 # **되살릴 길이 폰에 있어야 한다.** API 만 있고 버튼이 없으면 실수를 되돌릴 방법이 없다
 # (~/.marina/forgotten-chats.json 손편집은 비개발자 경로가 아니다).
 assert "data-restore" in 탭, f"지운 대화를 되살릴 버튼이 없다: {탭[:400]}"
+# 템플릿에 글자가 있는지만 보면 **죽은 코드를 잠근다** — 실제로 그랬다. 서버가 지운 탭에
+# deleted 를 안 붙여서 그 분기가 영영 안 잡혔고, 화면엔 "오래됨"과 "지우기"만 떴다.
+import inspect
+
+import marina_mobile as mm
+
+조립 = inspect.getsource(mm.mobile_state)
+assert 'tab["deleted"] = key in gone' in 조립, f"서버가 지운 탭에 표시를 안 붙인다: {조립[-1500:]}"
 assert "되살렸어요" in 대화지우기, 대화지우기[:400]
 # 지운 것과 숨긴 것은 다르게 말한다 — 되살리는 버튼이 다르다.
 assert "지움" in 탭 and "숨김 해제" in 탭, 탭[:400]

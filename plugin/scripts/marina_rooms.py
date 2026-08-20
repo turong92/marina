@@ -66,12 +66,11 @@ _changes_lock = threading.Lock()
 def _prune_changes_cache(current: float) -> None:
     """만료된 항목을 버린다. 워크트리는 생겼다 사라지므로, 안 지우면 죽은 경로가 계속 쌓인다."""
     with _changes_lock:
-        if len(_changes_cache) <= _CHANGES_CACHE_MAX:
-            return
+        # **만료된 것은 크기와 상관없이 턴다.** 예전엔 상한(200) 안쪽에만 청소가 있어서,
+        # 워크트리 28개인 실사용에서는 한 번도 안 돌았다 — 지운 방의 요약이 데몬이 죽을 때까지
+        # 남았다(실측). 상한은 "그래도 너무 크면" 을 위한 보조 장치다.
         for key in [k for k, (expires, _) in list(_changes_cache.items()) if current >= expires]:
             _changes_cache.pop(key, None)
-            _summary_cache.pop(key, None)      # 요약도 같이 — 지운 방 것이 데몬 끝까지 남았다
-        # 요약만 남는 경우도 턴다(판정은 실패 캐시로 갈리고 요약은 안 갈릴 수 있다).
         for key in [k for k, (expires, _) in list(_summary_cache.items()) if current >= expires]:
             _summary_cache.pop(key, None)
 

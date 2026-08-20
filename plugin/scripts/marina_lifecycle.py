@@ -216,7 +216,10 @@ def _nested_repos(root: Path) -> list[str]:
     names: list[str] = []
     try:
         for item in sorted(root.iterdir()):
-            if item.name.startswith(".") or not item.is_dir():
+            # **심링크는 따라가지 않는다.** Path.is_dir() 은 링크를 따르므로, 워크트리 안의
+            # 링크가 바깥 레포를 가리키면 거기서 checkout·commit 을 하게 된다 — 그 레포를 쓰는
+            # 다른 워크트리 발밑에서 브랜치가 바뀐다(marina_cache 도 같은 이유로 링크를 거른다).
+            if item.name.startswith(".") or item.is_symlink() or not item.is_dir():
                 continue
             if (item / ".git").exists():
                 names.append(item.name)
@@ -226,6 +229,26 @@ def _nested_repos(root: Path) -> list[str]:
         if repo not in names and (root / repo / ".git").exists():
             names.append(repo)
     return names
+
+
+def _undo_stash(repo: Path, branch: str) -> None:
+    """보관을 되돌린다 — 커밋을 풀어 워킹트리를 원래대로 돌리고 보관 브랜치를 지운다.
+
+    여러 레포를 보관하다 하나가 실패했을 때 쓴다. 앞서 성공한 것을 그대로 두면 그 워킹트리만
+    깨끗해진 채 삭제는 거부되어, 형 눈엔 그 폴더의 작업이 사라진 것으로 보인다."""
+    def run(*args: str) -> None:
+        subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=60)
+
+    # 보관 뒤에는 이미 원래 브랜치로 돌아와 있다. 되돌리려면 보관 브랜치로 갔다가 커밋을 풀고,
+    # 다시 원래 자리로 온 뒤에 그 브랜치를 지운다 — **서 있는 브랜치는 못 지운다.**
+    앞 = subprocess.run(["git", "-C", str(repo), "branch", "--show-current"],
+                        capture_output=True, text=True).stdout.strip()
+    돌아갈곳 = 앞 if 앞 and 앞 != branch else ""
+    run("checkout", "-q", branch)
+    run("reset", "-q", "--mixed", "HEAD~1")     # 커밋만 푼다 — 파일은 워킹트리에 되돌아온다
+    if 돌아갈곳:
+        run("checkout", "-q", 돌아갈곳)
+        run("branch", "-q", "-D", branch)       # 떠난 뒤에 지운다
 
 
 def _stash_one(repo: Path, room_name: str, label: str = "") -> str:
@@ -253,7 +276,19 @@ def _stash_one(repo: Path, room_name: str, label: str = "") -> str:
     try:
         # 바뀐 것만 담는다. `add -A` 로 싸잡으면 중첩 레포가 gitlink 한 줄로 딸려 들어와
         # 보관본이 지저분해진다(그 안의 진짜 작업은 서브레포별 보관이 따로 담는다).
-        git("add", "--", *변경)
+        #
+        # 경로를 **stdin 으로** 넘긴다(NUL 구분). 인자로 주면 두 가지가 터진다:
+        #   · `:` 로 시작하는 파일명 — `--` 는 옵션 파싱만 끝내고 pathspec magic 은 안 꺼서
+        #     `fatal: pathspec ':x.txt' did not match` (실측)
+        #   · 파일이 아주 많으면 argv 한계 — 실측 2만 개 근처에서 "Argument list too long"
+        # --literal-pathspecs: `:` 로 시작하는 이름을 pathspec magic 으로 읽지 않게 한다.
+        # (--pathspec-file-nul 만으로는 안 꺼진다 — 실측)
+        add = subprocess.run(["git", "-C", str(repo), "--literal-pathspecs",
+                              "add", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                             input="\0".join(변경).encode("utf-8"),
+                             capture_output=True, timeout=120)
+        if add.returncode != 0:
+            raise ValueError((add.stderr or b"").decode("utf-8", "replace").strip()[:300])
         # --no-verify: 훅(pre-commit/lint)이 1을 반환하면 영영 못 지운다. 여기 커밋은 형의
         # 작업물이 아니라 **보관본**이라 훅을 태울 이유가 없다.
         git("-c", "user.email=marina@local", "-c", "user.name=marina",
@@ -290,14 +325,27 @@ def stash_before_delete(root: Path, room_name: str = "") -> dict[str, Any]:
     보관이 살아남는 근거: remove_worktree 의 브랜치 정리는 delete_merged_branch 라 **머지 안 된
     브랜치는 지우지 않는다**. 폴더가 사라져도 작업은 브랜치에 남는다."""
     보관: dict[str, str] = {}
-    for repo in _nested_repos(root):
-        target = root / repo
-        if (target / ".git").exists():
-            이름 = _stash_one(target, room_name, label=re.sub(r"[^0-9A-Za-z]+", "-", repo).strip("-"))
-            if 이름:
-                보관[repo] = 이름
-    branch = _stash_one(root, room_name)
-    return {"branch": branch, "saved": bool(branch or 보관), "subrepos": 보관}
+    성공한곳: list[tuple[Path, str]] = []
+    try:
+        for repo in _nested_repos(root):
+            target = root / repo
+            if (target / ".git").exists():
+                이름 = _stash_one(target, room_name,
+                                  label=re.sub(r"[^0-9A-Za-z]+", "-", repo).strip("-"))
+                if 이름:
+                    보관[repo] = 이름
+                    성공한곳.append((target, 이름))
+        branch = _stash_one(root, room_name)
+        if branch:
+            성공한곳.append((root, branch))
+    except Exception:
+        # **하나라도 실패하면 전부 되돌린다.** 안 그러면 앞서 보관한 레포는 커밋+체크아웃 백으로
+        # 워킹트리가 깨끗해지는데 삭제는 거부되어, 형 눈엔 그 폴더의 작업만 증발한 것으로 보인다
+        # (그 안에서 CLI 가 돌고 있었다면 발밑에서 파일이 바뀐다). 전부 되거나 전부 아니거나다.
+        for repo_path, 브랜치 in reversed(성공한곳):
+            _undo_stash(repo_path, 브랜치)
+        raise
+    return {"branch": branch, "saved": bool(성공한곳), "subrepos": 보관}
 
 
 def remove_worktree(root: Path, force: bool = False) -> dict[str, Any]:

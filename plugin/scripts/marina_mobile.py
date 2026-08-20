@@ -740,9 +740,12 @@ def mobile_relogin(body: dict[str, Any]) -> dict[str, Any]:
     # 그대로 제출된다. 화면만으로는 판단이 안 선다(평범한 작업 화면은 아무 표식이 없다) —
     # 세션 상태를 본다.
     if step == "start":
-        상태 = next((str(item.get("status") or "")
-                     for item in agents_payload(root, False, False, limit=0)
-                     if str(item.get("sid") or "") == sid), "")
+        try:
+            상태 = next((str(item.get("status") or "")
+                         for item in agents_payload(root, False, False, limit=0)
+                         if str(item.get("sid") or "") == sid), "")
+        except Exception:
+            상태 = ""      # 못 물어봤다고 로그인을 막지는 않는다 — 이 기능의 목적과 반대다
         if 상태 == "working":
             raise ValueError("그 대화가 일하는 중이에요 — 끝나면 다시 해주세요")
 
@@ -913,11 +916,16 @@ def mobile_watch_state(refresh: bool = False) -> dict[str, Any]:
     감지에 필요한 건 세션의 상태·질문·마지막 활동뿐이다. 워크트리 별칭·브랜치·ahead 배지는
     화면이 그릴 때만 있으면 된다."""
     sessions: list[dict[str, Any]] = []
+    # 지운 대화는 감지에서도 뺀다 — 화면엔 없는 대화의 상태 변화·질문이 폰을 깨우면
+    # 형은 새로고침이 왜 걸렸는지 알 수 없다.
+    gone = set(forgotten_chats())
     for root in discover_all_roots(refresh):
         try:
             for agent in agents_payload(root, refresh, False):
                 source = str(agent.get("source") or "")
                 sid = str(agent.get("sid") or "")
+                if f"{source}:{sid}" in gone:
+                    continue
                 question = mobile_pending_question(source, sid)
                 sessions.append({
                     "kind": "agent",
@@ -1031,8 +1039,12 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                             # 있지만, 오래돼서 기준 밖인 것은 해제할 대상이 아니다 — 뭉쳐 놓으면
                             # 숨긴 적 없는 대화에 "숨김" 배지가 붙고 눌러도 안 없어진다.
                             key = f"{tab.get('source')}:{tab.get('sid')}"
-                            tab["hidden"] = key in hide
-                            tab["stale"] = key not in hide
+                            # 지운 것 · 숨긴 것 · 오래된 것은 **다 다르다** — 되살리는 버튼이
+                            # 다르고, 라벨도 달라야 한다. 예전엔 지운 대화가 "오래됨"으로 떠서
+                            # 되살리기 분기가 아예 안 잡혔다(테스트는 템플릿 글자만 봐서 통과).
+                            tab["deleted"] = key in gone
+                            tab["hidden"] = key in hide and key not in gone
+                            tab["stale"] = key not in hide and key not in gone
                             tab["primary"] = False
                         room["tabs"] = room["tabs"] + extra
                         finalize_room(room)     # 탭을 건드렸으면 부른다(값 셋이 같이 움직인다)
