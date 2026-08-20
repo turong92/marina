@@ -808,6 +808,21 @@ def mobile_remove_room(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "root": str(root), "stashed": 보관.get("branch") or ""}
 
 
+def mobile_close_chat(body: dict[str, Any]) -> dict[str, Any]:
+    """돌고 있는 대화 프로세스를 끈다 — 폰에서 띄웠으면 폰에서 끌 수 있어야 한다.
+
+    정지(interrupt)는 Esc 한 번이라 붙잡힌 CLI 에는 안 먹는다. 이건 PTY 자체를 닫는다.
+    대화 기록은 그대로다 — 다시 열면 이어서 할 수 있다."""
+    root = safe_root(str(body.get("root") or ""))
+    source = str(body.get("source") or "")
+    sid = str(body.get("sid") or "")
+    tid = _live_agent_tid(root, source, sid)
+    if not tid:
+        return {"ok": True, "closed": False}     # 이미 안 돈다 — 오류로 만들면 형이 헷갈린다
+    term_kill(tid)
+    return {"ok": True, "closed": True}
+
+
 def mobile_forget_chat(body: dict[str, Any]) -> dict[str, Any]:
     """대화를 마리나에서 치운다. **되돌릴 수 있다**(forget=false) — 원본이 남아 있으므로
     실수로 지웠을 때 되살릴 길이 있어야 한다."""
@@ -1120,7 +1135,8 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
     return {"worktrees": worktrees, "terms": terms, "sessions": sessions, "rooms": rooms,
             "pins": mobile_pins(),
             "hidden": hidden, "includeAll": bool(include_all),
-            "agentOptions": mobile_agent_options(), "serverInstance": _SERVER_INSTANCE}
+            "agentOptions": mobile_agent_options(), "uploads": upload_usage(),
+            "serverInstance": _SERVER_INSTANCE}
 
 
 def _input_payload(text: str) -> str:
@@ -1708,6 +1724,53 @@ def _apply_live_codex_settings(tid: str, model: str, effort: str) -> bool:
 
 
 MOBILE_UPLOADS_DIR = MARINA_HOME / "mobile-uploads"
+
+
+def upload_usage() -> dict[str, int]:
+    """폰에서 보낸 사진이 얼마나 쌓였나. 숫자 없이 "정리할까요?" 는 무서워서 못 누른다."""
+    files = 0
+    total = 0
+    try:
+        for item in MOBILE_UPLOADS_DIR.iterdir():
+            if item.is_file():
+                files += 1
+                total += item.stat().st_size
+    except OSError:
+        pass
+    return {"files": files, "bytes": total}
+
+
+def mobile_clear_uploads(body: dict[str, Any]) -> dict[str, Any]:
+    """폰에서 보낸 사진을 정리한다 — 폰에서 만들 수 있는데 지울 길이 없던 것(형 지적).
+
+    기본은 **오래된 것만**이다. 최근 사진은 대화에 붙어 있어서 지우면 그 메시지의 그림이
+    깨진다 — 전부 지우는 건 형이 명시할 때만.
+
+    업로드 폴더 밖은 절대 안 건드린다. 경로가 새면 정리가 무기가 된다."""
+    try:
+        days = max(0, int(body.get("olderThanDays") or 0))
+    except (TypeError, ValueError):
+        days = 0
+    cutoff = time.time() - days * 24 * 3600 if days else None
+    removed = 0
+    freed = 0
+    try:
+        base = MOBILE_UPLOADS_DIR.resolve()
+    except OSError:
+        return {"ok": True, "removed": 0, "freed": 0}
+    for item in list(MOBILE_UPLOADS_DIR.glob("*")) if MOBILE_UPLOADS_DIR.is_dir() else []:
+        try:
+            if not item.is_file() or item.resolve().parent != base:
+                continue        # 심링크로 밖을 가리키는 것도 여기서 걸린다
+            stat = item.stat()
+            if cutoff is not None and stat.st_mtime > cutoff:
+                continue
+            item.unlink()
+            removed += 1
+            freed += stat.st_size
+        except OSError:
+            continue
+    return {"ok": True, "removed": removed, "freed": freed}
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".heic", ".svg"}
 _UPLOAD_CONTENT_TYPES = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
@@ -2803,6 +2866,7 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="listUtilities">
           <button id="inboxMenuBtn" type="button">받은 작업 <span id="inboxCount">0</span></button>
           <button id="refreshBtn" type="button">새로고침</button>
+          <button id="clearUploadsBtn" type="button" data-clear-uploads="1">사진 정리</button>
           <button id="logoutBtn" type="button">로그아웃</button>
         </div>
         <div class="room-open" id="roomOpen" hidden></div>
@@ -3773,7 +3837,8 @@ _MOBILE_HTML = r"""<!doctype html>
         // 흐리기만 하면 "접힘"인지 "숨김"인지 구별이 안 된다.
         const 꼬리 = tab.hidden
           ? `<button class="roomTabUnhide" type="button" data-unhide="${esc(key)}">숨김 해제</button>`
-          : `<button class="roomTabUnhide" type="button" data-forget="${esc(key)}" title="이 대화 지우기">지우기</button>`
+          : `<button class="roomTabUnhide" type="button" data-close-chat="${esc(key)}" title="이 대화 끄기">끄기</button>`
+            + `<button class="roomTabUnhide" type="button" data-forget="${esc(key)}" title="이 대화 지우기">지우기</button>`
             + (tab.stale ? '<span class="roomTabNote">오래됨</span>' : "");
         return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
       }).join("");
@@ -5872,6 +5937,7 @@ _MOBILE_HTML = r"""<!doctype html>
       if (usagePanel.classList.contains("open") && !usagePanel.contains(event.target) && event.target !== usageBtn) closeUsagePanel();
     });
     document.getElementById("logoutBtn").onclick = () => { closeServices(); logout(); };
+    document.getElementById("clearUploadsBtn").onclick = clearUploads;
     sendBtn.onclick = () => send();
     retryBtn.onclick = () => {
       if (!failedSend || failedSend.sessionKey !== selectedSessionKey || failedSend.root !== sessionRoot()) { clearFailedSend(); return; }
@@ -6163,7 +6229,7 @@ _MOBILE_HTML = r"""<!doctype html>
       chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
     });
     roomOpen.addEventListener("click", async event => {
-      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget]");
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat]");
       if (!target) return;
       roomBusy = true;
       try { await handleRoomAction(target); } finally { roomBusy = false; }
@@ -6180,6 +6246,10 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       if (target.hasAttribute("data-room-delete")) {
         await deleteRoom(target.getAttribute("data-room-delete"));
+        return;
+      }
+      if (target.hasAttribute("data-close-chat")) {
+        await closeChatProcess(target.getAttribute("data-close-chat"));
         return;
       }
       if (target.hasAttribute("data-forget")) {
@@ -6284,6 +6354,40 @@ _MOBILE_HTML = r"""<!doctype html>
         await load({force: true});
       } catch (error) {
         showToast(`지우기 실패 · ${String(error)}`);
+      }
+    }
+    // 대화 끄기 — 돌고 있는 프로세스를 닫는다. 기록은 그대로라 다시 열면 이어서 한다.
+    // 정지(Esc)는 붙잡힌 CLI 에 안 먹어서, 아예 끄는 길이 따로 있어야 한다.
+    async function closeChatProcess(key) {
+      const source = key.slice(0, key.indexOf(":"));
+      const sid = key.slice(key.indexOf(":") + 1);
+      if (!confirm("이 대화를 끌까요?\n하던 일이 끊겨요. 기록은 남아요.")) return;
+      try {
+        const r = await fetch("/mobile/api/close-chat", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root: openRoomRoot, source, sid})});
+        if (!r.ok) throw new Error(await responseError(r));
+        showToast("껐어요");
+        await load({force: true});
+        if (openRoomRoot) openRoom(openRoomRoot);
+      } catch (error) {
+        showToast(`끄기 실패 · ${String(error)}`);
+      }
+    }
+    // 폰에서 보낸 사진 정리 — 폰에서 만들 수 있는데 지울 길이 없던 것(형 지적).
+    async function clearUploads() {
+      try {
+        const usage = state.uploads || {files: 0, bytes: 0};
+        if (!usage.files) { showToast("정리할 사진이 없어요"); return; }
+        const mb = (usage.bytes / 1048576).toFixed(1);
+        const 전부 = confirm(`사진 ${usage.files}개(${mb}MB)\n\n확인: 전부 지우기\n취소: 30일 지난 것만`);
+        const r = await fetch("/mobile/api/clear-uploads", {method: "POST", headers: headers(true),
+          body: JSON.stringify({olderThanDays: 전부 ? 0 : 30})});
+        if (!r.ok) throw new Error(await responseError(r));
+        const d = await r.json();
+        showToast(d.removed ? `사진 ${d.removed}개 지웠어요` : "지울 게 없었어요");
+        await load({force: true});
+      } catch (error) {
+        showToast(`사진 정리 실패 · ${String(error)}`);
       }
     }
     // 대화 지우기 — 마리나에서만 치운다(원본은 그대로). 워크트리는 안 건드린다.
