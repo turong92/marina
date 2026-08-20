@@ -53,6 +53,9 @@ _CHANGES_FAIL_TTL_S = 60.0
 _CHANGES_CACHE_MAX = 200        # 워크트리 수(지금 28) 보다 넉넉히. 넘으면 만료된 것부터 버린다.
 # key → (만료 시각, 판정)
 _changes_cache: dict[str, tuple[float, bool]] = {}
+# 완료 카드용 요약 — **같은 git 호출의 출력**에서 뽑는다(또 부르면 순수한 낭비다).
+_summary_cache: dict[str, tuple[float, dict[str, Any]]] = {}
+_SUMMARY_NAMES_MAX = 4      # 카드 한 장에 들어갈 만큼만
 # 데몬은 요청마다 스레드다. dict 갱신 자체는 GIL 덕에 깨지지 않지만, 청소 중에 크기가
 # 바뀌면 순회가 터진다 — 청소만 잠근다(읽기·쓰기는 잠그지 않는다. 최악이 git 한 번 더다).
 _changes_lock = threading.Lock()
@@ -82,6 +85,31 @@ def _git(args: list[str], cwd: Path) -> str:
     return out.stdout
 
 
+# 마리나가 워크트리 안에 자기 것을 쓰는 자리(별칭·메모 — marina_paths 의 .workspace/marina).
+# 이걸 형 작업물로 세면, 마리나가 파일 하나 건드린 것만으로 방이 "완료"가 된다(실측).
+_MARINA_OWN = (".workspace/", ".workspace")
+
+
+def own_changed_paths(status_text: str, root: Path) -> list[str]:
+    """`git status --porcelain -z` 에서 **이 워크트리의** 변경 경로만 골라낸다.
+
+    중첩 레포는 뺀다 — 완료 판정(_has_own_changes)과 **같은 규칙**을 써야 한다. 규칙이
+    갈라지면 "완료라는데 바뀐 파일이 없다"가 나온다."""
+    out: list[str] = []
+    for record in str(status_text or "").split("\0"):
+        if not record.strip():
+            continue
+        path = record[3:] if len(record) > 3 else ""
+        if path in _MARINA_OWN or path.startswith(".workspace/"):
+            continue        # 마리나가 쓴 것 — 형이 한 일이 아니다
+        if record.startswith("?? "):
+            if path.endswith("/") and _is_nested_repo(root / path):
+                continue
+        if path:
+            out.append(path)
+    return out
+
+
 def _has_own_changes(status_text: str, root: Path) -> bool:
     """`git status --porcelain` 결과에 **이 워크트리의** 변경이 있나.
 
@@ -91,15 +119,9 @@ def _has_own_changes(status_text: str, root: Path) -> bool:
     # **-z 출력**을 읽는다(NUL 구분). 기본 출력은 core.quotePath 때문에 비ASCII 이름을
     # `"\355\225\234..."` 로 이스케이프해 버려, 한글 폴더가 중첩 레포여도 경로가 안 맞아
     # "내 변경"으로 세어진다 — 형은 한글 이름을 쓴다. -z 는 인용 자체를 하지 않는다.
-    for record in status_text.split("\0"):
-        if not record.strip():
-            continue
-        if record.startswith("?? "):
-            path = record[3:]
-            if path.endswith("/") and _is_nested_repo(root / path):
-                continue
-        return True
-    return False
+    # own_changed_paths 와 **같은 규칙**을 쓴다(중첩 레포·마리나 자기 폴더 제외).
+    # 규칙이 갈라지면 "완료라는데 바뀐 파일이 없다"가 나온다 — 실제로 그렇게 어긋났다.
+    return bool(own_changed_paths(status_text, root))
 
 
 def _is_nested_repo(path: Path) -> bool:
@@ -138,10 +160,22 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
         #   테스트 파일, 새 모듈이 그렇다. 이 Room API 의 계획 문서가 정확히 그 경우였다.
         # 버려야 할 건 "untracked 전부"가 아니라 "남의 레포"다. 중첩 레포는 자기 워크트리에서
         # 따로 관리되지 이 방의 작업물이 아니다.
-        dirty = _has_own_changes(run(["status", "--porcelain", "-z"], root), root)
+        status_text = run(["status", "--porcelain", "-z"], root)
+        경로들 = own_changed_paths(status_text, root)
+        _summary_cache[key] = (current + _CHANGES_TTL_S, {
+            "files": len(경로들),
+            # 폰에서 전체 경로는 못 읽는다 — 파일명만 몇 개.
+            "names": [part.rstrip("/").split("/")[-1] for part in 경로들[:_SUMMARY_NAMES_MAX]],
+        })
+        dirty = bool(경로들)
         # 미커밋이 이미 있으면 커밋 쪽은 볼 필요가 없다 — git 한 번을 아낀다.
-        ahead = dirty or bool(run(["log", "--oneline", "-1", "HEAD", "--not", "--remotes"],
-                                  root).strip())
+        # 커밋 수까지 센다(상한을 둔다 — 카드에 쓸 숫자지 목록이 아니다). 미커밋이 있으면
+        # 굳이 안 센다: 그때는 파일 개수로 말하고, git 한 번을 아낀다.
+        커밋들 = "" if dirty else run(["log", "--oneline", "-20", "HEAD", "--not", "--remotes"], root)
+        commits = len([line for line in 커밋들.splitlines() if line.strip()])
+        _summary_cache[key] = (current + _CHANGES_TTL_S,
+                               {**_summary_cache[key][1], "commits": commits})
+        ahead = dirty or commits > 0
     except Exception:
         # 실패도 캐시한다(더 긴 수명으로). 안 하면 지속적 실패에서 폴마다 타임아웃을 다시 문다.
         # 값은 False — "결과가 있다"고 잘못 말하느니 "아직 아니다" 쪽으로 틀린다.
@@ -205,6 +239,21 @@ def short_name(name: str, limit: int = 22) -> str:
     # 이름이 지저분해졌다. 앞이 같은 문장 둘이 실제로 부딪히는 경우는 지금 데이터에 없고,
     # 부딪히면 부제의 프로젝트 이름과 ✎ 이름 바꾸기로 푼다 — 흔한 경우를 망치지 않는 쪽이다.
     return cut.rstrip() + "…"
+
+
+def change_summary(root: Path, *, runner: Callable[[list[str], Path], str] = None,
+                   now: float = None) -> dict[str, Any]:
+    """완료 카드에 쓸 요약 — 몇 개가 바뀌었고 이름이 무엇인가.
+
+    **git 을 새로 부르지 않는다.** 완료 판정이 이미 status 를 부르므로 그 출력에서 같이
+    뽑아 캐시에 담아둔다. 캐시가 비어 있으면 그때만 판정을 한 번 돌린다."""
+    key = str(root)
+    current = time.time() if now is None else now
+    cached = _summary_cache.get(key)
+    if cached is None or current >= cached[0]:
+        room_has_changes(root, runner=runner, now=now)
+        cached = _summary_cache.get(key)
+    return dict(cached[1]) if cached else {"files": 0, "names": []}
 
 
 def fold_status(tab_statuses: list[str]) -> str:

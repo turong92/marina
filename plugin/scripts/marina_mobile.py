@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
-from marina_rooms import build_room, finalize_room, room_has_changes
+from marina_rooms import build_room, change_summary, finalize_room, room_has_changes
 from marina_agent_events import latest_agent_event
 from marina_sessions import (
     _live_agent_cwds,
@@ -899,6 +899,11 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                         막힌사유 = 사유
                         break
                 room["blockedReason"] = 막힌사유
+                # 완료 카드 재료 — **끝난 방에만** 싣는다. 아직 도는 방에 "끝났어요"가 붙으면
+                # 카드 자체를 못 믿게 된다(스펙 §4 가 completed 오탐을 막으려던 것과 같은 이유).
+                # git 은 새로 안 부른다: 완료 판정이 방금 부른 출력에서 뽑아둔 요약을 쓴다.
+                if room.get("status") == "완료":
+                    room["done"] = change_summary(root)
                 if include_all:
                     # 전체보기에서는 나머지도 **보여만 준다**(꺼내서 정리하라고). hidden 표시가
                     # 붙으므로 finalize_room 이 상태·지문·시각 계산에서 알아서 뺀다.
@@ -2232,6 +2237,12 @@ _MOBILE_HTML = r"""<!doctype html>
                      border-radius: 8px; background: transparent; color: inherit;
                      font: inherit; font-size: 12px; cursor: pointer; }
     .roomTabNote { flex: 0 0 auto; align-self: center; font-size: 11px; opacity: .6; }
+    .doneCard { margin: 8px 12px; padding: 12px; border: 1px solid #3fb950; border-radius: 10px;
+                display: flex; flex-direction: column; gap: 6px; }
+    .doneTitle { font-weight: 600; }
+    .doneNames { font-size: 12px; opacity: .75; overflow-wrap: anywhere; }
+    .doneOpen { align-self: flex-start; padding: 8px 14px; border: 1px solid var(--line);
+                border-radius: 8px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
     .roomBlocked { margin: 0 8px 8px; padding: 10px 12px; border: 1px solid #d29922;
                    border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
     .reloginLink { color: #2f81f7; word-break: break-all; }
@@ -2505,6 +2516,11 @@ _MOBILE_HTML = r"""<!doctype html>
     #thinkingSlot { position: absolute; left: 9px; bottom: 6px; z-index: 2; }
     #thinkingSlot[hidden] { display: none; }
     #chatView.thinking .turns { padding-bottom: 42px; }
+    /* 완료 카드도 같은 함정에 걸린다 — 평범한 자식으로 넣으면 암묵 행으로 밀려 잘린다.
+       실측: 카드가 그려졌는데 offsetHeight 0 이었다(생각중 표시가 겪은 것과 같은 자리). */
+    #doneSlot { position: absolute; left: 9px; right: 9px; bottom: 6px; z-index: 2; }
+    #doneSlot[hidden] { display: none; }
+    #chatView.hasDone .turns { padding-bottom: 96px; }
     .thinkingBubble { display: inline-flex; gap: 8px; align-items: center; padding: 8px 11px; border: 1px solid #dde2ea; border-radius: 12px 12px 12px 3px; background: #fff; color: #5b6472; font-size: 12px; }
     .thinkingDots { display: inline-flex; gap: 3px; }
     .thinkingDots i { width: 5px; height: 5px; border-radius: 50%; background: #8b95a5; animation: thinkingPulse 1.2s ease-in-out infinite; }
@@ -2743,6 +2759,8 @@ _MOBILE_HTML = r"""<!doctype html>
         <!-- 답이 나올 자리에서 도는 표시. 대화 목록의 형제로 둔다 — 목록 안에 넣으면
              재조정기가 모르는 자식이라 렌더마다 지워진다. -->
         <div id="thinkingSlot" hidden></div>
+        <!-- 완료 카드 — 일이 끝나면 여기 떨어진다(스펙 §3). 대화와 입력창 사이라 눈에 걸린다. -->
+        <div id="doneSlot" hidden></div>
         <button class="newMessagesBtn" id="newMessagesBtn" type="button">새 메시지</button>
     <button class="updateBanner" id="updateBanner" type="button">새 버전 · 탭하여 새로고침</button>
     <button class="cliUpdateBanner" id="cliUpdateBanner" type="button" hidden></button>
@@ -3119,6 +3137,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const inboxList = document.getElementById("inboxList");
     const statusEl = document.getElementById("status");
     const thinkingSlot = document.getElementById("thinkingSlot");   // chatView 는 위에서 이미 잡았다
+    const doneSlot = document.getElementById("doneSlot");
     const servicesSheet = document.getElementById("servicesSheet");
     const serviceList = document.getElementById("serviceList");
     const servicesSheetTitle = document.getElementById("servicesSheetTitle");
@@ -5113,6 +5132,7 @@ _MOBILE_HTML = r"""<!doctype html>
       stopBtn.style.display = running ? "inline-block" : "none";
       if (!sending) statusEl.textContent = optimisticWorking ? "작업 중…" : sessionStatusText(session);
       renderThinkingSlot(session, optimisticWorking, runningActivities());   // 대화 안에서도 같은 사실을 보여준다
+      renderDoneSlot(session);
       renderLiveQuestion(session);
     }
     function sourceOptions(session) {
@@ -5948,6 +5968,49 @@ _MOBILE_HTML = r"""<!doctype html>
     // ROOM_ACTIONS_START  (테스트가 이 블록의 배선을 확인한다)
     let openRoomRoot = "";
     let roomBusy = false;      // 방 패널에서 뭔가 돌고 있다 — 그동안은 패널을 다시 안 그린다
+
+    // DONE_CARD_START  (테스트가 이 블록을 확인한다)
+    // 완료 카드 — 일이 끝나면 **뭐가 바뀌었는지** 말하고 화면을 열 수 있게 한다(스펙 §3·§4).
+    // 예전엔 방이 "끝났어요"라고만 해서, 형은 뭘 했는지 알려면 대화를 처음부터 읽어야 했다.
+    function renderDoneCard(room, openUrl) {
+      const done = room && room.done;
+      if (!room || room.status !== "완료" || !done) return "";
+      const files = Number(done.files || 0);
+      const commits = Number(done.commits || 0);
+      if (!files && !commits) return "";
+      // 커밋까지 끝낸 방은 바뀐 파일이 0 이다. 그때 카드를 안 그리면 목록엔 "끝났어요"인데
+      // 대화엔 아무것도 없는 어긋남이 생긴다(실측: 완료 방 3개 중 2개가 그랬다).
+      const 무엇 = files ? `파일 ${files}개 바뀜` : `커밋 ${commits}개`;
+      const names = (done.names || []).join(", ");
+      // 이름을 다 나열하지 않는다 — 카드 한 장이고, 자세한 건 방을 열어 보면 된다.
+      const 더 = done.files > (done.names || []).length ? " 외" : "";
+      const 보기 = openUrl
+        ? `<button class="doneOpen" type="button" data-open-preview="${esc(openUrl)}">화면 보기</button>` : "";
+      return `<div class="doneCard">
+        <span class="doneTitle">끝났어요 · ${esc(무엇)}</span>
+        ${names ? `<span class="doneNames">${esc(names)}${esc(더)}</span>` : ""}
+        ${보기}
+      </div>`;
+    }
+    // DONE_CARD_END
+
+    // 완료 카드를 대화 화면에 얹는다. 서비스가 떠 있으면 그 주소로 "화면 보기"를 준다 —
+    // 서비스 목록은 이미 방마다 불러오고 있어서 추가 요청이 없다.
+    doneSlot.addEventListener("click", event => {
+      const open = event.target.closest && event.target.closest("[data-open-preview]");
+      if (!open) return;
+      // 새 탭으로 — 이 화면을 떠나면 대화로 돌아오는 길이 한 단계 늘어난다.
+      window.open(open.getAttribute("data-open-preview"), "_blank", "noopener");
+    });
+    function renderDoneSlot(session) {
+      const room = session ? roomByRoot(String(session.root || "")) : null;
+      const running = (servicesState.services || []).find(item => item.running && item.openUrl);
+      const html = renderDoneCard(room, running ? running.openUrl : "");
+      if (doneSlot.innerHTML !== html) doneSlot.innerHTML = html;
+      doneSlot.hidden = !html;
+      // 카드가 대화 마지막 줄을 가리지 않게 자리를 비운다(생각중 표시와 같은 규칙).
+      if (chatView) chatView.classList.toggle("hasDone", Boolean(html));
+    }
 
     // ROOM_SIBLING_TABS_START  (테스트가 이 블록을 vm 에 싣는다)
     // 방 안에서 **다른 대화로 바로 넘어가게** 한다(스펙 §3 화면 그림의 `[기본] [디자인 손보기]`).
