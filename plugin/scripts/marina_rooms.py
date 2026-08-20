@@ -70,6 +70,10 @@ def _prune_changes_cache(current: float) -> None:
             return
         for key in [k for k, (expires, _) in list(_changes_cache.items()) if current >= expires]:
             _changes_cache.pop(key, None)
+            _summary_cache.pop(key, None)      # 요약도 같이 — 지운 방 것이 데몬 끝까지 남았다
+        # 요약만 남는 경우도 턴다(판정은 실패 캐시로 갈리고 요약은 안 갈릴 수 있다).
+        for key in [k for k, (expires, _) in list(_summary_cache.items()) if current >= expires]:
+            _summary_cache.pop(key, None)
 
 
 class GitFailed(Exception):
@@ -98,9 +102,15 @@ def own_changed_paths(status_text: str, root: Path) -> list[str]:
     중첩 레포는 뺀다 — 완료 판정(_has_own_changes)과 **같은 규칙**을 써야 한다. 규칙이
     갈라지면 "완료라는데 바뀐 파일이 없다"가 나온다."""
     out: list[str] = []
-    for record in str(status_text or "").split("\0"):
-        if not record.strip():
-            continue
+    records = [item for item in str(status_text or "").split("\0") if item.strip()]
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        # 리네임/복사는 레코드가 **둘**이다: `R  <새경로>\0<옛경로>\0`. 옛 경로에는 XY 접두사가
+        # 없는데도 앞 3글자를 자르면 이름이 뭉개지고(ab.py → "py") 개수도 하나 부푼다.
+        if record[:1] in ("R", "C"):
+            index += 1          # 옛 경로는 건너뛴다 — 한 번의 변경이다
         path = record[3:] if len(record) > 3 else ""
         if path in _MARINA_OWN or path.startswith(".workspace/"):
             continue        # 마리나가 쓴 것 — 형이 한 일이 아니다
@@ -255,7 +265,11 @@ def change_summary(root: Path, *, runner: Callable[[list[str], Path], str] = Non
     if cached is None or current >= cached[0]:
         room_has_changes(root, runner=runner, now=now)
         cached = _summary_cache.get(key)
-    return dict(cached[1]) if cached else {"files": 0, "names": []}
+        # git 이 계속 실패하면 판정만 갱신되고 요약은 낡은 채 남는다(실패 캐시가 더 길다).
+        # 낡은 숫자를 "지금 이만큼 바뀌었다"로 내놓느니 모른다고 하는 게 낫다.
+        if cached is not None and current >= cached[0]:
+            return {"files": 0, "names": [], "commits": 0}
+    return dict(cached[1]) if cached else {"files": 0, "names": [], "commits": 0}
 
 
 def branch_from_text(text: str, *, salt: str = "") -> str:
@@ -365,6 +379,11 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
             # 탭의 마지막 활동 시각. 화면 정렬에도 쓰지만, 권한 필터가 탭을 걸러낸 뒤 방의
             # lastAt 을 다시 계산하려면 탭이 자기 시각을 들고 있어야 한다.
             "ts": float(agent.get("ts") or 0),
+            # 왜 막혔는지 — 로그인이 풀린 대화가 어느 것인지 화면이 알아야 한다.
+            # 없으면 "가장 최근 클로드 대화"에 /login 을 쳐서, 작업 중인 대화에 그 글자가
+            # 프롬프트로 제출된다.
+            "reason": str(agent.get("statusReason") or ""),
+            "canon": str(agent.get("status") or ""),
             # 지금 기다리는 질문의 표식. **질문마다 다르다** — 접어둔 방에 새 질문이 왔는지를
             # 상태 문자열("응답필요")로는 알 수 없어서, 이 값으로 구별한다.
             "question": str(pending.get("token") or "") if pending else "",

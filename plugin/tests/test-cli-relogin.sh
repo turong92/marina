@@ -92,4 +92,23 @@ import marina_handler
 print("ok relogin HTTP 표면이 붙어 있다")
 PY3
 
+# 9) **일하는 중인 대화에는 /login 을 안 친다.** 그 입력은 프롬프트가 아니라 진행 중인
+# 대화에 들어가 그대로 제출된다. 화면만으로는 판단이 안 선다(평범한 작업 화면엔 표식이 없다).
+PYTHONPATH="$SCR" python3 - <<'PY4'
+import inspect
+
+import marina_mobile as mm
+
+소스 = inspect.getsource(mm.mobile_relogin)
+assert 'if 상태 == "working"' in 소스, f"작업 중인 대화에 /login 을 친다: {소스[:600]}"
+assert "agents_payload" in 소스, 소스[:400]
+
+# 화면도 **막힌 그 대화**를 고른다 — "가장 최근 클로드 대화"를 고르면 엉뚱한 데 들어간다.
+html = mm.render_mobile_html()
+고르기 = html[html.find("async function reloginRoom"):][:900]
+assert 'reason === "needs_login"' in 고르기, f"막힌 대화를 안 고른다: {고르기[:400]}"
+assert 'canon === "working"' in 고르기, 고르기[:400]
+print("ok 로그인은 막힌 대화에만, 일하는 중이면 안 친다")
+PY4
+
 echo "PASS test-cli-relogin"

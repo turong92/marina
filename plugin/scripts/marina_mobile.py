@@ -647,6 +647,17 @@ def room_unarchives(root: Path, archive: dict[str, dict[str, Any]], status: str 
     return str(mark) != entry["mark"]
 
 
+def is_source_root(root: Path) -> bool:
+    """원본(main) 체크아웃인가 — 지울 수 없는 자리다."""
+    try:
+        from marina_registry import is_source_checkout, project_for
+
+        project = project_for(root)
+        return bool((project and project["root"].resolve() == root.resolve()) or is_source_checkout(root))
+    except Exception:
+        return True     # 모르면 못 지우는 쪽으로 — 되돌릴 수 없는 동작이다
+
+
 def canonical_room_agents(root: Path, refresh: bool = False,
                           hide: set[str] | None = None) -> list[dict[str, Any]]:
     """**기준 방**을 이루는 세션들 — 방의 상태·지문은 언제나 이 집합으로 정한다.
@@ -658,8 +669,12 @@ def canonical_room_agents(root: Path, refresh: bool = False,
     기준은 **전체보기 아님 + 숨김 제외**다. 전체보기는 더 보여주기만 할 뿐, 무엇이 형을
     부르는지를 바꾸지 않는다."""
     hidden = set(mobile_hidden()) if hide is None else hide
+    # 지운 대화는 **기준에서도** 뺀다. 여기 남으면 방 상태·접기 지문이 지운 것에 끌려가고,
+    # 전체보기 경로가 이 함수를 다시 부르기 때문에 지운 대화가 탭으로 되살아난다(실측 지적).
+    gone = set(forgotten_chats())
     return [item for item in agents_payload(root, refresh, False, limit=0)
-            if f"{item.get('source')}:{item.get('sid')}" not in hidden]
+            if f"{item.get('source')}:{item.get('sid')}" not in hidden
+            and f"{item.get('source')}:{item.get('sid')}" not in gone]
 
 
 def current_room_mark(root: Path) -> str | None:
@@ -721,6 +736,15 @@ def mobile_relogin(body: dict[str, Any]) -> dict[str, Any]:
     if not tid:
         # 마리나가 쥔 PTY 가 없으면 화면을 못 읽는다 — 손으로 띄운 세션이 그렇다.
         raise ValueError("이 대화는 마리나가 쥐고 있지 않아 폰에서 로그인할 수 없어요")
+    # **일하는 중이면 안 친다.** 그 입력은 프롬프트가 아니라 진행 중인 대화에 들어가서
+    # 그대로 제출된다. 화면만으로는 판단이 안 선다(평범한 작업 화면은 아무 표식이 없다) —
+    # 세션 상태를 본다.
+    if step == "start":
+        상태 = next((str(item.get("status") or "")
+                     for item in agents_payload(root, False, False, limit=0)
+                     if str(item.get("sid") or "") == sid), "")
+        if 상태 == "working":
+            raise ValueError("그 대화가 일하는 중이에요 — 끝나면 다시 해주세요")
 
     def 화면() -> str:
         return term_tail(tid)
@@ -796,7 +820,15 @@ def mobile_remove_room(body: dict[str, Any]) -> dict[str, Any]:
     는 안심이 아니라 물음표를 남긴다 — 보관 사실은 wip/ 브랜치와 감사 로그에서 드러난다."""
     from marina_lifecycle import remove_worktree, stash_before_delete
 
+    from marina_registry import is_source_checkout, project_for
+
     root = safe_root(str(body.get("root") or ""))
+    # **원본(main) 검사를 보관보다 먼저** 한다. 예전엔 보관을 먼저 하고 remove_worktree 가
+    # 뒤늦게 거절해서, 형의 미커밋 작업이 wip 브랜치로 커밋되고 워킹트리가 깨끗해진 채
+    # "지우기 실패" 만 떴다 — 형 눈엔 하던 작업이 통째로 증발한 것으로 보인다.
+    project = project_for(root)
+    if (project and project["root"].resolve() == root.resolve()) or is_source_checkout(root):
+        raise ValueError("원본은 지울 수 없어요")
     name = str(body.get("name") or "")
     보관 = {"branch": "", "saved": False}
     try:
@@ -938,8 +970,12 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
             # **한 번만** 부른다. 방은 전부 필요하고(탭을 안 자른다) 카드는 상위 3개만 쓰므로,
             # 상한 없이 한 번 받아 잘라 쓴다. 두 번 부르면 세션 JSONL tail 파싱이 통째로 두 배다.
             # 지운 대화는 여기서 통째로 뺀다 — 방 탭에도, 세션 목록에도, 전체보기에도 안 나온다.
-            all_agents = [item for item in agents_payload(root, refresh, include_all, limit=0)
-                          if f"{item.get('source')}:{item.get('sid')}" not in gone]
+            raw_agents = agents_payload(root, refresh, include_all, limit=0)
+            # 지운 대화는 기본 화면에서 빠지고, **전체보기에서만** 되살리라고 보인다.
+            # 아예 안 보여주면 실수로 지웠을 때 폰에서 되돌릴 길이 없다.
+            all_agents = [item for item in raw_agents
+                          if include_all
+                          or f"{item.get('source')}:{item.get('sid')}" not in gone]
             agents = all_agents[:AGENTS_MAX_PER_ROOT]   # status/reachable/승격 다 resolve_session_liveness 경유
             title = info.get("sessionTitle") or info.get("headSubject") or ""
             label = " · ".join(str(x) for x in (info.get("alias"), title, info.get("projectLabel"), info.get("id")) if x)
@@ -956,7 +992,8 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                 # 접은 방이 다음 폴에 바로 펴진다.
                 room_agents = (canonical_room_agents(root, refresh, hide) if include_all else
                                [item for item in all_agents
-                                if f"{item.get('source')}:{item.get('sid')}" not in hide])
+                                if f"{item.get('source')}:{item.get('sid')}" not in hide
+                                and f"{item.get('source')}:{item.get('sid')}" not in gone])
                 # git 은 completed 가 하나라도 있을 때만 부른다. 완료/대기를 가르는 데만
                 # 쓰이는 값이라, 나머지 워크트리에서 git 을 돌리는 건 순수한 낭비다.
                 changed = (any(str(a.get("status") or "") == "completed" for a in room_agents)
@@ -972,6 +1009,9 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                         막힌사유 = 사유
                         break
                 room["blockedReason"] = 막힌사유
+                # 원본(main)은 지울 수 없다 — 버튼을 아예 안 그린다. 누를 수 있게 두면
+                # 눌러보고 나서야 거절당하고, 그 사이 보관이 형 작업을 커밋해 버린다.
+                room["removable"] = not is_source_root(root)
                 # 완료 카드 재료 — **끝난 방에만** 싣는다. 아직 도는 방에 "끝났어요"가 붙으면
                 # 카드 자체를 못 믿게 된다(스펙 §4 가 completed 오탐을 막으려던 것과 같은 이유).
                 # git 은 새로 안 부른다: 완료 판정이 방금 부른 출력에서 뽑아둔 요약을 쓴다.
@@ -1747,10 +1787,13 @@ def mobile_clear_uploads(body: dict[str, Any]) -> dict[str, Any]:
     깨진다 — 전부 지우는 건 형이 명시할 때만.
 
     업로드 폴더 밖은 절대 안 건드린다. 경로가 새면 정리가 무기가 된다."""
+    # 기본값은 **보수적으로** 30일이다. 예전엔 값이 없거나 깨지면 0(=전부 삭제)이었다 —
+    # 되돌릴 수 없는 동작의 기본이 "전부"면 안 된다.
+    raw = body.get("olderThanDays")
     try:
-        days = max(0, int(body.get("olderThanDays") or 0))
+        days = 30 if raw is None else max(0, int(raw))
     except (TypeError, ValueError):
-        days = 0
+        days = 30
     cutoff = time.time() - days * 24 * 3600 if days else None
     removed = 0
     freed = 0
@@ -1923,8 +1966,13 @@ def mobile_launch(body: dict[str, Any]) -> dict[str, Any]:
     source = str(body.get("source") or "")
     if source not in ("claude", "codex"):
         raise ValueError("source 는 claude 또는 codex")
+    # **첫 메시지를 같이 넘긴다.** 안 넘기면 빈 세션만 뜨고 아무 일도 안 한다 — 새 일감이
+    # "무슨 일을 할까요?"를 물어놓고 그 말을 버리는 셈이었다(term_open 은 원래 받는다).
     result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24),
-                       agent_source=source, agent_sid="")
+                       agent_source=source, agent_sid="",
+                       agent_prompt=str(body.get("prompt") or ""),
+                       agent_model=str(body.get("model") or ""),
+                       agent_effort=str(body.get("effort") or ""))
     return {"ok": True, "tid": str(result.get("tid") or ""), "source": source}
 
 
@@ -3813,7 +3861,8 @@ _MOBILE_HTML = r"""<!doctype html>
         <span class="roomOpenTitle">${esc(room.name || room.shortName || "")}</span>
         <button class="iconBtn" type="button" data-rename="${esc(room.root)}" title="이름 바꾸기" aria-label="이름 바꾸기">✎</button>
         <button class="iconBtn" type="button" data-archive="${esc(room.root)}" title="접어두기" aria-label="접어두기">↓</button>
-        <button class="iconBtn danger" type="button" data-room-delete="${esc(room.root)}" title="방 지우기" aria-label="방 지우기">🗑</button>
+        ${room.removable === false ? "" :
+          `<button class="iconBtn danger" type="button" data-room-delete="${esc(room.root)}" title="방 지우기" aria-label="방 지우기">🗑</button>`}
         <button class="iconBtn" type="button" data-room-close="1" title="닫기" aria-label="닫기">✕</button>
       </div>`;
       // 로그인이 풀린 방에는 **여기서 푸는 길**을 준다. 예전엔 맥에 가야만 했다 —
@@ -3830,12 +3879,14 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       const strip = tabs.map(tab => {
         const key = `${tab.source}:${tab.sid}`;
-        const cls = "roomTab" + (tab.primary ? " current" : "") + (tab.hidden ? " off" : "")
-                  + (tab.stale ? " stale" : "");
+        const cls = "roomTab" + (tab.primary ? " current" : "")
+                  + (tab.hidden || tab.deleted ? " off" : "") + (tab.stale ? " stale" : "");
         // 숨긴 대화는 **되살릴 손잡이**를 같이 준다. 예전엔 세션 카드 롱프레스에만 있어서,
         // 방 화면에서는 숨긴 것이 영영 잠겼다. 무엇 때문에 안 세는지도 글자로 말해준다 —
         // 흐리기만 하면 "접힘"인지 "숨김"인지 구별이 안 된다.
-        const 꼬리 = tab.hidden
+        const 꼬리 = tab.deleted
+          ? `<button class="roomTabUnhide" type="button" data-restore="${esc(key)}">되살리기</button><span class="roomTabNote">지움</span>`
+          : tab.hidden
           ? `<button class="roomTabUnhide" type="button" data-unhide="${esc(key)}">숨김 해제</button>`
           : `<button class="roomTabUnhide" type="button" data-close-chat="${esc(key)}" title="이 대화 끄기">끄기</button>`
             + `<button class="roomTabUnhide" type="button" data-forget="${esc(key)}" title="이 대화 지우기">지우기</button>`
@@ -6131,7 +6182,12 @@ _MOBILE_HTML = r"""<!doctype html>
     });
     function renderDoneSlot(session) {
       const room = session ? roomByRoot(String(session.root || "")) : null;
-      const running = (servicesState.services || []).find(item => item.running && item.openUrl);
+      // 서비스 목록은 방마다 비동기로 받아 캐시한다 — **지금 방 것인지 확인**하지 않으면
+      // 방 A→B 로 넘어간 직후 A 의 주소로 "화면 보기"가 뜬다. 다른 일감의 앱이 열리는 건
+      // 비개발자에게 진단 불가능한 고장이다.
+      const 같은방 = room && String(servicesState.root || "") === String(room.root || "");
+      const running = 같은방
+        ? (servicesState.services || []).find(item => item.running && item.openUrl) : null;
       const html = renderDoneCard(room, running ? running.openUrl : "");
       if (doneSlot.innerHTML !== html) doneSlot.innerHTML = html;
       doneSlot.hidden = !html;
@@ -6229,7 +6285,7 @@ _MOBILE_HTML = r"""<!doctype html>
       chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
     });
     roomOpen.addEventListener("click", async event => {
-      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat]");
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restore]");
       if (!target) return;
       roomBusy = true;
       try { await handleRoomAction(target); } finally { roomBusy = false; }
@@ -6246,6 +6302,10 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       if (target.hasAttribute("data-room-delete")) {
         await deleteRoom(target.getAttribute("data-room-delete"));
+        return;
+      }
+      if (target.hasAttribute("data-restore")) {
+        await forgetChat(target.getAttribute("data-restore"), false);
         return;
       }
       if (target.hasAttribute("data-close-chat")) {
@@ -6300,8 +6360,15 @@ _MOBILE_HTML = r"""<!doctype html>
     async function reloginRoom(root, btn) {
       const room = roomByRoot(root);
       if (!room) return;
-      const tab = (room.tabs || []).find(item => item.source === "claude") || (room.tabs || [])[0];
+      // **로그인이 풀린 그 대화**를 고른다. 예전엔 "가장 최근 클로드 대화"를 골라서,
+      // 옆에서 작업 중인 대화에 /login 이 프롬프트로 들어갈 수 있었다.
+      const tabs = (room.tabs || []).filter(item => item.source === "claude");
+      const tab = tabs.find(item => item.reason === "needs_login") || tabs[0];
       if (!tab) { showToast("로그인할 대화가 없어요"); return; }
+      if (tab.canon === "working") {
+        showToast("그 대화가 일하는 중이에요 — 끝나면 다시 눌러주세요");
+        return;
+      }
       if (btn) { btn.disabled = true; btn.textContent = "여는 중…"; }
       try {
         const r = await fetch("/mobile/api/relogin", {method: "POST", headers: headers(true),
@@ -6331,7 +6398,10 @@ _MOBILE_HTML = r"""<!doctype html>
         const r = await fetch("/mobile/api/relogin", {method: "POST", headers: headers(true),
           body: JSON.stringify({root, source: (tab || {}).source || "claude", sid: (tab || {}).sid || "", step: "code", code})});
         if (!r.ok) throw new Error(await responseError(r));
-        showToast("코드를 보냈어요");
+        const d = await r.json();
+        showToast(d.stage === "done" ? "로그인됐어요"
+                  : d.stage === "logged_out" ? "코드가 안 먹었어요 — 다시 해주세요"
+                  : "코드를 보냈어요");
         closeRoom();
         await load({force: true});
       } catch (error) {
@@ -6366,7 +6436,10 @@ _MOBILE_HTML = r"""<!doctype html>
         const r = await fetch("/mobile/api/close-chat", {method: "POST", headers: headers(true),
           body: JSON.stringify({root: openRoomRoot, source, sid})});
         if (!r.ok) throw new Error(await responseError(r));
-        showToast("껐어요");
+        const d = await r.json();
+        // 서버가 못 껐다고 하면 그대로 말한다. 데몬 재시작 뒤(마스터 fd 를 잃은 세션)엔
+        // 끌 tid 가 없다 — 폭주 CLI 를 끄려던 순간에 "껐어요"는 거짓말이 된다.
+        showToast(d.closed ? "껐어요" : "이미 안 돌고 있어요");
         await load({force: true});
         if (openRoomRoot) openRoom(openRoomRoot);
       } catch (error) {
@@ -6379,9 +6452,11 @@ _MOBILE_HTML = r"""<!doctype html>
         const usage = state.uploads || {files: 0, bytes: 0};
         if (!usage.files) { showToast("정리할 사진이 없어요"); return; }
         const mb = (usage.bytes / 1048576).toFixed(1);
-        const 전부 = confirm(`사진 ${usage.files}개(${mb}MB)\n\n확인: 전부 지우기\n취소: 30일 지난 것만`);
+        // **취소는 취소여야 한다.** 예전엔 확인/취소를 두 갈래 선택지로 썼는데, 놀라서 취소를
+        // 누르면 30일 지난 사진이 지워졌다 — 되돌릴 수 없는 동작에 빠져나올 문이 없었다.
+        if (!confirm(`30일 지난 사진을 정리할까요?\n지금 ${usage.files}개(${mb}MB) 있어요.`)) return;
         const r = await fetch("/mobile/api/clear-uploads", {method: "POST", headers: headers(true),
-          body: JSON.stringify({olderThanDays: 전부 ? 0 : 30})});
+          body: JSON.stringify({olderThanDays: 30})});
         if (!r.ok) throw new Error(await responseError(r));
         const d = await r.json();
         showToast(d.removed ? `사진 ${d.removed}개 지웠어요` : "지울 게 없었어요");
@@ -6391,15 +6466,17 @@ _MOBILE_HTML = r"""<!doctype html>
       }
     }
     // 대화 지우기 — 마리나에서만 치운다(원본은 그대로). 워크트리는 안 건드린다.
-    async function forgetChat(key) {
+    // forget=false 면 되살린다 — 실수로 지웠을 때 폰에서 되돌릴 길이 있어야 한다.
+    // (지운 대화는 전체보기에서만 "지움" 으로 보이고, 거기서 이 버튼을 누른다.)
+    async function forgetChat(key, forget = true) {
       const source = key.slice(0, key.indexOf(":"));
       const sid = key.slice(key.indexOf(":") + 1);
-      if (!confirm("이 대화를 목록에서 지울까요?")) return;
+      if (forget && !confirm("이 대화를 목록에서 지울까요?")) return;
       try {
         const r = await fetch("/mobile/api/forget-chat", {method: "POST", headers: headers(true),
-          body: JSON.stringify({source, sid, forget: true})});
+          body: JSON.stringify({source, sid, forget})});
         if (!r.ok) throw new Error(await responseError(r));
-        showToast("지웠어요");
+        showToast(forget ? "지웠어요" : "되살렸어요");
         await load({force: true});
         if (openRoomRoot) openRoom(openRoomRoot);
       } catch (error) {
@@ -6524,11 +6601,15 @@ _MOBILE_HTML = r"""<!doctype html>
         const root = String(d.root || "");
         // 형이 쓴 말을 **방 이름으로** 남긴다. 폴더 이름은 ASCII 로 안전하게 짓기 때문에
         // (게이트웨이 도메인 라벨로도 쓰인다) 이걸 안 하면 목록에 work-4f2a1 같은 게 뜬다.
-        await fetch("/mobile/api/rename", {method: "POST", headers: headers(true),
-          body: JSON.stringify({root, name: 할일})}).catch(() => {});
+        // fetch 는 4xx 에 reject 하지 않는다 — .catch 만 붙이면 403/400 이 조용히 지나가고
+        // 반쪽 상태(폴더는 있고 이름·대화는 없음)가 "성공"으로 보고된다.
+        const 이름응답 = await fetch("/mobile/api/rename", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root, name: 할일})});
+        if (!이름응답.ok) showToast("이름은 못 붙였어요 — 방에서 ✎ 로 바꿔주세요");
         // 바로 일을 시작한다 — 만들어만 놓고 끝나면 형이 또 찾아 들어가야 한다.
-        await fetch("/mobile/api/launch", {method: "POST", headers: headers(true),
-          body: JSON.stringify({root, source: "claude", prompt: 할일})}).catch(() => {});
+        const 시작응답 = await fetch("/mobile/api/launch", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root, source: "claude", prompt: 할일})});
+        if (!시작응답.ok) throw new Error(await responseError(시작응답));
         showToast("새 일감을 시작했어요");
         await load({force: true}).catch(() => {});
       } catch (error) {

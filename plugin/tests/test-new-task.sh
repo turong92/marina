@@ -70,6 +70,9 @@ assert "무슨 일" in 블록, 블록[:300]
 # work-4f2a1 같은 게 뜬다.
 assert "/mobile/api/rename" in 블록, f"형이 쓴 말이 방 이름으로 안 남는다: {블록[:400]}"
 assert "/mobile/api/worktree-create" in 블록 and "/mobile/api/launch" in 블록, 블록[:400]
+# **중간 실패를 삼키면 안 된다.** fetch 는 4xx 에 reject 하지 않으므로 .catch 만으로는
+# 403/400 이 조용히 지나가고, 반쪽 상태(폴더는 있고 이름·대화는 없음)가 "성공"으로 보고된다.
+assert "실패" in 블록, 블록[:500]
 print("ok 새 일감: 프로젝트만 고르고 첫 메시지로 시작한다")
 PY2
 
@@ -84,7 +87,15 @@ assert "branch_from_text" in 블록, f"서버가 첫 메시지로 이름을 안 
 # 웹은 예전처럼 branch 를 직접 보낸다 — 그 길을 막으면 대시보드가 깨진다.
 assert 'body.get("branch"' in 블록, 블록[:400]
 import marina_handler
-print("ok 서버가 첫 메시지로 이름을 짓는다")
+# 첫 메시지가 **실제로 전달돼야** 한다. 예전엔 클라이언트가 prompt 를 보내는데 서버가
+# 안 읽어서, 방에 들어가면 빈 세션만 떠 있고 아무 일도 안 했다(토스트는 "시작했어요").
+import inspect
+
+import marina_mobile as mm
+
+런치 = inspect.getsource(mm.mobile_launch)
+assert "agent_prompt" in 런치, f"첫 메시지가 버려진다: {런치}"
+print("ok 서버가 첫 메시지로 이름을 짓고 그 말을 전달한다")
 PY3
 
 echo "PASS test-new-task"

@@ -38,16 +38,17 @@ print("ok 로그인 만료를 잠깐 먹통과 구별한다")
 PY
 
 # ④ 그 사유가 세션 상태에 실려 폰까지 간다 — 감지만 하고 안 보여주면 소용없다.
-PYTHONPATH="$SCR" python3 - "$HERE" <<'PY'
+PYTHONPATH="$SCR" python3 - <<'PY'
 import json
-import sys
+import tempfile
 import time
 from pathlib import Path
 
 import marina_sessions as ms
 
-tmp = Path(sys.argv[1]) / ".login-detect-fixture"
-tmp.mkdir(exist_ok=True)
+# **레포 안에 쓰지 않는다.** 예전엔 plugin/tests/ 아래에 픽스처를 만들어, 돌릴 때마다 워킹트리가
+# 더러워지고 그 파일이 커밋마다 딸려 들어갔다(harness.sh 는 ~/.marina 만 격리한다).
+tmp = Path(tempfile.mkdtemp())
 path = tmp / "session.jsonl"
 now = time.time()
 rows = [

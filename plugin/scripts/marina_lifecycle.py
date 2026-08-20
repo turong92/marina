@@ -207,6 +207,73 @@ def remove_git_worktree(source_repo: Path, target: Path, force: bool = False) ->
                 return {"removed": str(target), "orphanCleanup": True}
         return {"error": exc.output.strip() or str(exc), "path": str(target)}
 
+def _nested_repos(root: Path) -> list[str]:
+    """이 워크트리 안의 중첩 git 레포 이름들.
+
+    등록된 서브레포(subrepos_of)만 보면 부족하다 — 등록 안 된 중첩 레포도 워크트리를 지울 때
+    폴더째 사라지므로 똑같이 보관해야 한다. 그래서 **파일시스템에서 직접** 찾는다(한 겹만:
+    마리나 레이아웃에서 서브레포는 워크트리 바로 아래에 있다)."""
+    names: list[str] = []
+    try:
+        for item in sorted(root.iterdir()):
+            if item.name.startswith(".") or not item.is_dir():
+                continue
+            if (item / ".git").exists():
+                names.append(item.name)
+    except OSError:
+        pass
+    for repo in subrepos_of(root):        # 등록분도 합친다(중복은 뺀다)
+        if repo not in names and (root / repo / ".git").exists():
+            names.append(repo)
+    return names
+
+
+def _stash_one(repo: Path, room_name: str, label: str = "") -> str:
+    """레포 하나를 wip 브랜치로 보관한다. 담을 게 없으면 빈 문자열."""
+    def git(*args: str) -> str:
+        out = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, timeout=120)
+        if out.returncode != 0:
+            raise ValueError((out.stderr or out.stdout or "").strip()[:300])
+        return out.stdout
+
+    # "지울 게 있나"는 **방 상태 판정과 같은 규칙**으로 본다(marina_rooms.own_changed_paths):
+    # 중첩 레포(`?? sub/`)와 마리나 자기 폴더(.workspace)는 이 레포의 작업이 아니다.
+    # 그냥 status 를 보면 중첩 레포가 있는 워크트리는 **영원히 "지울 게 있음"** 이라,
+    # 아무것도 안 바꿨는데 gitlink 한 줄짜리 빈 보관 브랜치가 쌓인다.
+    from marina_rooms import own_changed_paths
+
+    변경 = own_changed_paths(git("status", "--porcelain", "-z"), repo)
+    if not 변경:
+        return ""
+    현재 = git("branch", "--show-current").strip()
+    슬러그 = re.sub(r"[^0-9A-Za-z가-힣]+", "-", str(room_name or "")).strip("-")[:24] or "room"
+    꼬리 = f"-{label}" if label else ""
+    이름 = f"wip/{슬러그}{꼬리}-{time.strftime('%Y%m%d-%H%M%S')}"
+    git("checkout", "-q", "-b", 이름)
+    try:
+        # 바뀐 것만 담는다. `add -A` 로 싸잡으면 중첩 레포가 gitlink 한 줄로 딸려 들어와
+        # 보관본이 지저분해진다(그 안의 진짜 작업은 서브레포별 보관이 따로 담는다).
+        git("add", "--", *변경)
+        # --no-verify: 훅(pre-commit/lint)이 1을 반환하면 영영 못 지운다. 여기 커밋은 형의
+        # 작업물이 아니라 **보관본**이라 훅을 태울 이유가 없다.
+        git("-c", "user.email=marina@local", "-c", "user.name=marina",
+            "commit", "-q", "--no-verify", "-m", f"wip: {room_name or '보관'} (지우기 전 자동 보관)")
+    except Exception:
+        # 실패하면 흔적을 남기지 않는다 — 스테이징된 채 두면 그 워크트리에서 돌던 CLI 가
+        # 다음 커밋에 마리나가 올려둔 것까지 같이 담는다(실측 지적).
+        subprocess.run(["git", "-C", str(repo), "reset", "-q"], capture_output=True, text=True)
+        if 현재:
+            subprocess.run(["git", "-C", str(repo), "checkout", "-q", 현재], capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo), "branch", "-q", "-D", 이름], capture_output=True, text=True)
+        raise
+    finally:
+        # 원래 자리로 돌려놓는다. detached HEAD 면 현재가 빈 문자열이라 되돌릴 이름이 없다 —
+        # 그때는 아까 그 커밋으로 detach 해서 원래와 같은 상태로 만든다.
+        if 현재:
+            subprocess.run(["git", "-C", str(repo), "checkout", "-q", 현재], capture_output=True, text=True)
+    return 이름
+
+
 def stash_before_delete(root: Path, room_name: str = "") -> dict[str, Any]:
     """지우기 전에 **잃을 게 없는 상태로 만든다** — 미커밋 변경을 wip 브랜치로 보관한다(스펙 §7).
 
@@ -215,35 +282,22 @@ def stash_before_delete(root: Path, room_name: str = "") -> dict[str, Any]:
     목표는 "삭제를 막는 것"이 아니라 **"작업을 잃지 않는 것"** 이라, 지우기 전에 커밋 한 번을
     끼운다.
 
+    **중첩 레포도 각각 보관한다.** 부모에서 `git add -A` 를 하면 중첩 git 레포는 gitlink
+    한 줄로만 담기고 그 안의 미커밋 작업은 어디에도 안 남는다(실증). 그런데 remove_worktree 는
+    서브레포마다 `worktree remove --force` 로 지운다 — 즉 부모만 보관하면 mdc-main 계열
+    (중첩 레포 4개)에서는 정작 일한 내용이 통째로 사라진다.
+
     보관이 살아남는 근거: remove_worktree 의 브랜치 정리는 delete_merged_branch 라 **머지 안 된
-    브랜치는 지우지 않는다**. 폴더가 사라져도 작업은 브랜치에 남는다.
-
-    `wip/` 전용 브랜치로 뺀다(형 결정) — 원래 브랜치에 얹으면 그 이력에 '치우다 만 상태'가
-    섞인다. 이름에 방 이름과 날짜가 들어가 보관본이라는 게 이름에서 드러난다."""
-    def git(*args: str) -> str:
-        out = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=60)
-        if out.returncode != 0:
-            raise ValueError((out.stderr or out.stdout or "").strip()[:300])
-        return out.stdout
-
-    # 지울 게 없으면 아무것도 안 만든다 — 빈 보관 브랜치가 쌓이면 목록만 더러워진다.
-    if not git("status", "--porcelain").strip():
-        return {"branch": "", "saved": False}
-
-    현재 = git("branch", "--show-current").strip()
-    슬러그 = re.sub(r"[^0-9A-Za-z가-힣]+", "-", str(room_name or "")).strip("-")[:24] or "room"
-    이름 = f"wip/{슬러그}-{time.strftime('%Y%m%d-%H%M%S')}"
-    git("checkout", "-q", "-b", 이름)
-    try:
-        git("add", "-A")            # untracked 까지 — 새로 만든 파일이 제일 잃기 쉽다
-        git("-c", "user.email=marina@local", "-c", "user.name=marina",
-            "commit", "-q", "-m", f"wip: {room_name or '보관'} (지우기 전 자동 보관)")
-    finally:
-        # 원래 자리로 돌려놓는다 — 보관하느라 남의 브랜치를 옮겨두면 안 된다.
-        if 현재:
-            subprocess.run(["git", "-C", str(root), "checkout", "-q", 현재],
-                           capture_output=True, text=True)
-    return {"branch": 이름, "saved": True}
+    브랜치는 지우지 않는다**. 폴더가 사라져도 작업은 브랜치에 남는다."""
+    보관: dict[str, str] = {}
+    for repo in _nested_repos(root):
+        target = root / repo
+        if (target / ".git").exists():
+            이름 = _stash_one(target, room_name, label=re.sub(r"[^0-9A-Za-z]+", "-", repo).strip("-"))
+            if 이름:
+                보관[repo] = 이름
+    branch = _stash_one(root, room_name)
+    return {"branch": branch, "saved": bool(branch or 보관), "subrepos": 보관}
 
 
 def remove_worktree(root: Path, force: bool = False) -> dict[str, Any]:

@@ -71,7 +71,14 @@ rooms._changes_cache.clear()
 커밋만 = rooms.change_summary(wt, now=600.0, runner=lambda a, c:
                               "" if a[0] == "status" else "a1 첫 커밋\nb2 두번째\n")
 assert 커밋만["files"] == 0 and 커밋만["commits"] == 2, 커밋만
-print("ok 완료 요약: 개수·이름·추가 git 없음·중첩 레포·마리나 폴더 제외·커밋 수")
+# ⑦ **리네임은 한 번의 변경**이다. -z 출력에서 리네임은 레코드가 둘(`R  새\0옛\0`)인데,
+# 옛 경로엔 XY 접두사가 없어서 앞 3글자를 자르면 이름이 뭉개지고(ab.py → "py") 개수도 부푼다.
+rooms._changes_cache.clear()
+리네임 = rooms.change_summary(wt, now=700.0, runner=lambda a, c:
+                              "R  src/renamed.py\0src/original.py\0 M app.py\0" if a[0] == "status" else "")
+assert 리네임["files"] == 2, 리네임
+assert "original.py" not in 리네임["names"] and "renamed.py" in 리네임["names"], 리네임
+print("ok 완료 요약: 개수·이름·추가 git 없음·중첩 레포·마리나 폴더 제외·커밋 수·리네임")
 PY
 
 # ⑤ 완료된 방에만 실린다 — 아직 도는 방에 "끝났어요 카드"가 뜨면 못 믿는다.
