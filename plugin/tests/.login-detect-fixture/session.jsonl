@@ -1,0 +1,2 @@
+{"type": "user", "timestamp": 1787192559.559259}
+{"type": "system", "subtype": "api_error", "timestamp": 1787192569.559259, "error": {"message": "Not logged in \u00b7 Please run /login", "status": 401}}

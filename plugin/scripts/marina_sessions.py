@@ -585,6 +585,35 @@ _STATUS_CANDIDATE_CACHE: dict[str, tuple[tuple[int, int, int], list[tuple[str, f
 _STATUS_CANDIDATE_CACHE_MAX = 256
 
 
+# CLI 바이너리에서 직접 뽑은 문구(2026-08-18, v2.1.237). 실행으로도 확인:
+#   CLAUDE_CONFIG_DIR=<빈 폴더> claude -p hi → "Not logged in · Please run /login"
+_LOGIN_MARKERS = ("please run /login", "not logged in", "invalid api key",
+                  "run /login", "authentication_error")
+# 한도 소진도 형이 손대야 풀리지만 **조치가 다르다** — 섞으면 엉뚱한 걸 시키게 된다.
+_CREDIT_MARKERS = ("credit balance too low", "usage limit reached")
+
+
+def api_error_reason(error: Any) -> str:
+    """api_error 가 **형이 손대야 낫는 것**인지 가려낸다.
+
+    예전엔 전부 "api_error" 한 덩어리라, 잠깐 먹통(529·타임아웃 — CLI 가 알아서 재시도한다)과
+    로그인 만료(맥에서 /login 하기 전엔 영영 안 풀린다)가 같은 얼굴이었다. 폰에서는 둘 다
+    그냥 "문제"로만 보여서, 형은 왜 안 되는지 알 방법이 없었다."""
+    payload = error if isinstance(error, dict) else {}
+    text = str(payload.get("message") or "").lower()
+    status = payload.get("status")
+    if any(marker in text for marker in _CREDIT_MARKERS):
+        return "needs_credit"
+    if any(marker in text for marker in _LOGIN_MARKERS):
+        return "needs_login"
+    try:
+        if int(status) == 401:
+            return "needs_login"
+    except (TypeError, ValueError):
+        pass
+    return "api_error"
+
+
 def _agent_status_candidates(path: Path, source: str) -> tuple[list[tuple[str, float, str | None]], float]:
     """트랜스크립트 꼬리에서 턴 경계 후보 (status, ts, reason) 를 순서대로 뽑는다(시계 무관)."""
     key = f"{source}\n{path}"
@@ -621,7 +650,7 @@ def _agent_status_candidates(path: Path, source: str) -> tuple[list[tuple[str, f
             typ = obj.get("type")
             ts = _agent_event_ts(obj, mtime)
             if typ == "system" and obj.get("subtype") == "api_error":
-                offer("failed", ts, "api_error")
+                offer("failed", ts, api_error_reason(obj.get("error")))
             elif typ == "system" and obj.get("subtype") == "stop_hook_summary":
                 errors = obj.get("hookErrors") if isinstance(obj.get("hookErrors"), list) else []
                 if errors:

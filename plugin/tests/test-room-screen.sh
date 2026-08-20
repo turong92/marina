@@ -21,7 +21,9 @@ if start < 0 or end < 0:
 # esc 는 공유 렌더러에서 온다 — 방 블록만 떼어 실으면 없으므로 같이 싣는다(질문 카드 테스트와 같은 방식).
 helpers = (scripts / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 esc = helpers[helpers.find("// ESC_HELPERS_START"):helpers.find("// ESC_HELPERS_END")]
-print("const src = " + json.dumps(esc + src[start:end]) + ";")
+# 방 목록은 상태 사유 문구(STATUS_REASON)도 쓴다 — 그 블록은 대화 화면과 공유하므로 따로 산다.
+사유 = src[src.find("// STATUS_REASON_START"):src.find("// STATUS_REASON_END")]
+print("const src = " + json.dumps(esc + 사유 + src[start:end]) + ";")
 print(r'''
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
@@ -118,7 +120,13 @@ assert.match(renderRooms(둘, 1000), /mdc/);
 const 위험 = renderRooms([{root: "/x", shortName: "<img src=x onerror=alert(1)>", status: "대기",
                            tabs: [], lastAt: 1, archived: false}], 1000);
 assert.doesNotMatch(위험, /<img/, "이름의 태그가 그대로 화면에 들어갔다");
-console.log("ok 방 목록: 급한 순·한 줄 이름·사람 말·접힘 제외·이스케이프");
+// ⑩ 손대야 낫는 사유는 **상태 대신 그것부터** 말한다 — "쉬는 중"으로 보이면 형은 기다리기만
+// 하는데, 실제로는 형이 맥에서 뭘 해야 풀리는 상태다.
+const 막힌방 = renderRooms([{root: "/m", shortName: "막힌방", status: "대기", tabs: [],
+                             lastAt: 5, blockedReason: "needs_login"}], 1000);
+assert.match(막힌방, /클로드 로그인이 풀렸어요/, "로그인이 풀렸는데 '쉬는 중' 으로 보인다");
+assert.doesNotMatch(막힌방, /쉬는 중/);
+console.log("ok 방 목록: 급한 순·한 줄 이름·사람 말·접힘 제외·이스케이프·막힌 사유");
 ''')
 PY
 

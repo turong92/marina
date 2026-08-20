@@ -829,6 +829,15 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                            and room_has_changes(root))
                 room = build_room(root, info, room_agents, has_changes=changed,
                                   questions=pending_question)
+                # 손대야 낫는 사유(로그인 만료·한도)는 방까지 올린다 — 방 목록이 첫 화면이라
+                # 여기서 안 보이면 형은 대화를 열어보기 전엔 이유를 모른다.
+                막힌사유 = ""
+                for agent in room_agents:
+                    사유 = str(agent.get("statusReason") or "")
+                    if 사유 in ("needs_login", "needs_credit"):
+                        막힌사유 = 사유
+                        break
+                room["blockedReason"] = 막힌사유
                 if include_all:
                     # 전체보기에서는 나머지도 **보여만 준다**(꺼내서 정리하라고). hidden 표시가
                     # 붙으므로 finalize_room 이 상태·지문·시각 계산에서 알아서 뺀다.
@@ -3120,6 +3129,17 @@ _MOBILE_HTML = r"""<!doctype html>
       idle:      {dot: "stop", label: "유휴"},
     };
     function agentStatusMeta(status) { return AGENT_STATUS_META[status] || AGENT_STATUS_META.idle; }
+
+    // STATUS_REASON_START  (테스트가 이 블록을 확인한다)
+    // "실패" 만으로는 형이 뭘 해야 할지 알 수 없다. 잠깐 먹통(CLI 가 알아서 재시도한다)과
+    // 손을 대야 낫는 것(로그인 만료·한도 소진)은 조치가 완전히 다르다 — 후자는 그냥 두면
+    // 영영 안 풀리는데 화면엔 똑같이 "실패"로만 보였다(형: 왜 안 되는지 알 수가 없다).
+    const STATUS_REASON_TEXT = {
+      needs_login: "클로드 로그인이 풀렸어요",
+      needs_credit: "클로드 사용 한도에 걸렸어요",
+    };
+    function statusReasonText(reason) { return STATUS_REASON_TEXT[String(reason || "")] || ""; }
+    // STATUS_REASON_END
     // 이 상태들은 압축 모드에서도 **글자로** 보여준다 — 점 색만으론 놓친다.
     const NOTABLE_STATUS = new Set(["blocked", "working", "failed"]);
     function showLogin(message="") {
@@ -3543,6 +3563,9 @@ _MOBILE_HTML = r"""<!doctype html>
         // 그게 유일한 구별 단서라 부제에 넣는다.
         const where = (!projectId && room.project ? " · " + room.project : "")
                     + (room.archived ? " · 접어둠" : "");
+        // 손대야 낫는 사유는 상태 대신 **그것부터** 말한다 — "쉬는 중"으로 보이면 형은
+        // 기다리기만 하는데, 실제로는 형이 뭘 해야 풀리는 상태다.
+        const 막힘 = statusReasonText(room.blockedReason);
         const status = String(room.status || "대기");
         // 카드 몸통을 누르면 바로 대화로, ⋯ 를 누르면 방 안(다른 대화·이름·접기)으로.
         // 버튼 안에 버튼을 넣을 수 없어 형제로 두고 줄로 감싼다.
@@ -3551,7 +3574,7 @@ _MOBILE_HTML = r"""<!doctype html>
             <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
             <span class="roomBody">
               <span class="roomName">${esc(room.shortName || room.name || "")}</span>
-              <span class="roomMeta">${esc(roomStatusLabel(status) + count + where)}</span>
+              <span class="roomMeta">${esc(막힘 ? 막힘 + count : roomStatusLabel(status) + count + where)}</span>
             </span>
           </button>
           ${room.archived
