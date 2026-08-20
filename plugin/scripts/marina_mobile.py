@@ -34,6 +34,7 @@ from marina_sessions import (
     worktree_info,
     worktree_labels,
 )
+from marina_login import extract_login_url, login_stage
 from marina_paths import write_meta
 from marina_state import MARINA_HOME, PORT
 from marina_term import (_agent_cli, term_await_redraw, term_input, term_kill, term_list,
@@ -693,6 +694,66 @@ def mobile_set_archived(body: dict[str, Any]) -> dict[str, Any]:
     value = {"at": time.time(), "mark": current_room_mark(root)} if archived else None
     _settings_file_update(ARCHIVE_FILE, str(root), value)
     return {"ok": True, "archived": archived, "root": str(root)}
+
+
+_RELOGIN_STEP_TIMEOUT_S = 12.0     # 브라우저를 열어보고 URL 을 그리기까지 — 실측 5~8초
+
+
+def mobile_relogin(body: dict[str, Any]) -> dict[str, Any]:
+    """폰에서 클로드 로그인을 끝낸다.
+
+    예전엔 로그인이 풀리면 맥에 가야만 했다 — 모바일에 터미널 화면이 없어서 CLI 가 띄우는
+    로그인 URL 을 볼 방법이 아예 없었기 때문이다. 여기서 그 화면을 대신 읽어 URL 만 건네주면,
+    형은 폰에서 링크를 열고 받은 코드를 입력창에 붙여넣으면 된다.
+
+    step="start" → /login 을 치고 방식을 고른 뒤 URL 을 돌려준다.
+    step="code"  → 형이 받은 코드를 그 화면에 넣는다.
+
+    **화면을 보고 넘어간다**(고정 sleep 이 아니라) — 느린 화면에서 어긋나면 엉뚱한 키가
+    엉뚱한 자리에 들어간다. 질문 응답 경로에서 같은 실수를 이미 했다."""
+    root = safe_root(str(body.get("root") or ""))
+    source = str(body.get("source") or "claude")
+    sid = str(body.get("sid") or "")
+    step = str(body.get("step") or "start")
+    if source != "claude":
+        raise ValueError("클로드 세션만 지원해요")
+    tid = _live_agent_tid(root, source, sid)
+    if not tid:
+        # 마리나가 쥔 PTY 가 없으면 화면을 못 읽는다 — 손으로 띄운 세션이 그렇다.
+        raise ValueError("이 대화는 마리나가 쥐고 있지 않아 폰에서 로그인할 수 없어요")
+
+    def 화면() -> str:
+        return term_tail(tid)
+
+    def 기다린다(원하는: tuple[str, ...]) -> str:
+        마감 = time.time() + _RELOGIN_STEP_TIMEOUT_S
+        상태 = ""
+        while time.time() < 마감:
+            상태 = login_stage(화면())
+            if 상태 in 원하는:
+                return 상태
+            time.sleep(0.4)
+        return 상태
+
+    if step == "code":
+        code = " ".join(str(body.get("code") or "").split())
+        if not code:
+            raise ValueError("코드를 넣어주세요")
+        term_input(tid, code + "\r")
+        상태 = 기다린다(("done", "logged_out", ""))
+        return {"ok": True, "stage": 상태 or "unknown"}
+
+    term_input(tid, "/login\r")
+    상태 = 기다린다(("method", "url"))
+    if 상태 == "method":
+        # 기본 선택이 1번(구독 계정)이다 — 실측으로 ❯ 가 거기 있다.
+        term_input(tid, "\r")
+        상태 = 기다린다(("url",))
+    url = extract_login_url(화면())
+    if not url:
+        _room_log_once("relogin: URL 을 못 읽었다 ↓↓↓\n%s" % 화면()[-800:])
+        raise ValueError("로그인 화면을 읽지 못했어요. 맥에서 /login 해주세요")
+    return {"ok": True, "stage": "url", "url": url}
 
 
 def mobile_rename_room(body: dict[str, Any]) -> dict[str, Any]:
@@ -2171,6 +2232,13 @@ _MOBILE_HTML = r"""<!doctype html>
                      border-radius: 8px; background: transparent; color: inherit;
                      font: inherit; font-size: 12px; cursor: pointer; }
     .roomTabNote { flex: 0 0 auto; align-self: center; font-size: 11px; opacity: .6; }
+    .roomBlocked { margin: 0 8px 8px; padding: 10px 12px; border: 1px solid #d29922;
+                   border-radius: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .reloginLink { color: #2f81f7; word-break: break-all; }
+    .reloginHint { font-size: 12px; opacity: .75; }
+    .reloginRow { display: flex; gap: 6px; }
+    .reloginCode { flex: 1 1 auto; min-width: 0; padding: 8px; border: 1px solid var(--line);
+                   border-radius: 8px; background: transparent; color: inherit; font: inherit; }
     .roomStartRow { display: flex; gap: 8px; padding: 0 8px 10px; }
     .roomStart { flex: 1 1 0; padding: 10px; border: 1px dashed var(--line); border-radius: 8px;
                  background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -3605,7 +3673,15 @@ _MOBILE_HTML = r"""<!doctype html>
         <button class="iconBtn" type="button" data-archive="${esc(room.root)}" title="접어두기" aria-label="접어두기">↓</button>
         <button class="iconBtn" type="button" data-room-close="1" title="닫기" aria-label="닫기">✕</button>
       </div>`;
-      const 시작줄 = 시작 ? `<div class="roomStartRow">${시작}</div>` : "";
+      // 로그인이 풀린 방에는 **여기서 푸는 길**을 준다. 예전엔 맥에 가야만 했다 —
+      // 폰엔 터미널 화면이 없어서 CLI 가 띄우는 로그인 URL 을 볼 방법이 아예 없었다.
+      const 막힘글 = statusReasonText(room.blockedReason);
+      const 로그인줄 = room.blockedReason === "needs_login"
+        ? `<div class="roomBlocked">${esc(막힘글)}
+             <button class="roomStart" type="button" data-room-relogin="${esc(room.root)}">로그인 하기</button>
+           </div>`
+        : 막힘글 ? `<div class="roomBlocked">${esc(막힘글)}</div>` : "";
+      const 시작줄 = (로그인줄 || "") + (시작 ? `<div class="roomStartRow">${시작}</div>` : "");
       if (!tabs.length) {
         return head + 시작줄 + '<div class="roomEmpty">아직 대화가 없어요.</div>';
       }
@@ -5928,13 +6004,21 @@ _MOBILE_HTML = r"""<!doctype html>
       chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
     });
     roomOpen.addEventListener("click", async event => {
-      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide]");
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code]");
       if (!target) return;
       roomBusy = true;
       try { await handleRoomAction(target); } finally { roomBusy = false; }
     });
     async function handleRoomAction(target) {
       if (target.hasAttribute("data-room-close")) { closeRoom(); return; }
+      if (target.hasAttribute("data-room-code")) {
+        await sendReloginCode(target.getAttribute("data-room-code"));
+        return;
+      }
+      if (target.hasAttribute("data-room-relogin")) {
+        await reloginRoom(target.getAttribute("data-room-relogin"), target);
+        return;
+      }
       if (target.hasAttribute("data-unhide")) {
         const 값 = String(target.getAttribute("data-unhide"));
         const source = 값.slice(0, 값.indexOf(":"));
@@ -5969,6 +6053,50 @@ _MOBILE_HTML = r"""<!doctype html>
         await load({force: true});   // 접었는데 그대로 있으면 안 먹은 걸로 보인다
       } catch (error) {
         showToast(`접기 실패 · ${String(error)}`);
+      }
+    }
+
+    // 클로드 로그인 — 폰에서 끝낸다. 서버가 PTY 에 /login 을 쳐서 URL 을 읽어다 주면,
+    // 형은 그 링크를 열고 받은 코드를 여기 붙여넣는다.
+    async function reloginRoom(root, btn) {
+      const room = roomByRoot(root);
+      if (!room) return;
+      const tab = (room.tabs || []).find(item => item.source === "claude") || (room.tabs || [])[0];
+      if (!tab) { showToast("로그인할 대화가 없어요"); return; }
+      if (btn) { btn.disabled = true; btn.textContent = "여는 중…"; }
+      try {
+        const r = await fetch("/mobile/api/relogin", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root, source: tab.source, sid: tab.sid, step: "start"})});
+        if (!r.ok) throw new Error(await responseError(r));
+        const data = await r.json();
+        // 링크는 **새 탭**으로 연다 — 이 화면을 떠나면 코드를 붙여넣을 자리가 사라진다.
+        roomOpen.querySelector(".roomBlocked").innerHTML =
+          `<a class="reloginLink" href="${esc(data.url || "")}" target="_blank" rel="noopener">클로드 로그인 열기</a>
+           <div class="reloginHint">로그인하면 코드가 나와요. 그걸 여기 붙여넣어 주세요.</div>
+           <div class="reloginRow">
+             <input class="reloginCode" id="reloginCode" placeholder="코드 붙여넣기" autocapitalize="none" spellcheck="false" />
+             <button class="roomStart" type="button" data-room-code="${esc(root)}">보내기</button>
+           </div>`;
+      } catch (error) {
+        showToast(`로그인 열기 실패 · ${String(error)}`);
+        if (btn) { btn.disabled = false; btn.textContent = "로그인 하기"; }
+      }
+    }
+    async function sendReloginCode(root) {
+      const input = document.getElementById("reloginCode");
+      const code = input ? input.value.trim() : "";
+      if (!code) { showToast("코드를 넣어주세요"); return; }
+      const room = roomByRoot(root);
+      const tab = room && ((room.tabs || []).find(item => item.source === "claude") || (room.tabs || [])[0]);
+      try {
+        const r = await fetch("/mobile/api/relogin", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root, source: (tab || {}).source || "claude", sid: (tab || {}).sid || "", step: "code", code})});
+        if (!r.ok) throw new Error(await responseError(r));
+        showToast("코드를 보냈어요");
+        closeRoom();
+        await load({force: true});
+      } catch (error) {
+        showToast(`코드 전송 실패 · ${String(error)}`);
       }
     }
 

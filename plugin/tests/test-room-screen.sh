@@ -143,7 +143,8 @@ if not chunk:
     raise SystemExit("ROOM_TABS_START/END 경계가 없다")
 helpers = (scripts / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 esc = helpers[helpers.find("// ESC_HELPERS_START"):helpers.find("// ESC_HELPERS_END")]
-print("const src = " + json.dumps(esc + chunk) + ";")
+사유 = src[src.find("// STATUS_REASON_START"):src.find("// STATUS_REASON_END")]
+print("const src = " + json.dumps(esc + 사유 + chunk) + ";")
 print(r'''
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
@@ -198,7 +199,13 @@ assert.match(숨김낀, /data-unhide="claude:b"/, "숨긴 대화를 되살릴 �
 assert.match(숨김낀, /숨김 해제/);
 assert.match(숨김낀, /오래됨/, "왜 안 세는지 말해주지 않는다");
 assert.doesNotMatch(숨김낀, /data-unhide="claude:c"/, "오래된 것은 숨긴 게 아니라 해제할 게 없다");
-console.log("ok 방 열기: 탭 전부·현재 표시·이름 바꾸기·접기");
+// 8) 로그인이 풀린 방에는 **여기서 푸는 길**이 있다 — 예전엔 맥에 가야만 했다.
+const 막힌 = renderRoomTabs({root: "/L", name: "막힌방", blockedReason: "needs_login", tabs: [
+  {source: "claude", sid: "s1", title: "A", status: "대기", primary: true},
+]}, []);
+assert.match(막힌, /data-room-relogin="\/L"/, "로그인을 풀 버튼이 없다");
+assert.match(막힌, /클로드 로그인이 풀렸어요/);
+console.log("ok 방 열기: 탭 전부·현재 표시·이름 바꾸기·접기·로그인 복구");
 ''')
 PY
 
