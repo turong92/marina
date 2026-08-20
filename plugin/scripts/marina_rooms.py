@@ -295,6 +295,41 @@ def branch_from_text(text: str, *, salt: str = "") -> str:
     return f"{safe}-{꼬리}" if safe else f"work-{꼬리}"
 
 
+# 형이 "확인"할 화면을 가진 서비스 이름들 — 앞쪽이 우선이다.
+_PREVIEW_NAMES = ("web", "app", "frontend", "front", "ui", "site", "docs", "storybook")
+# 화면이 없는 것들. 도는 중이어도 여기로 보내면 형은 빈 페이지나 접속 거부만 본다.
+_INFRA_NAMES = ("mysql", "mariadb", "postgres", "postgresql", "db", "redis", "kafka",
+                "zookeeper", "rabbitmq", "elasticsearch", "opensearch", "mongo",
+                "mongodb", "minio", "localstack")
+
+
+def preview_service(services: list[dict[str, Any]]) -> str:
+    """완료 카드의 [화면 보기] 가 열어야 할 서비스.
+
+    일이 끝난 방은 대개 서버가 꺼져 있다(실측: 완료 방 4개 중 3개가 도는 서비스 0개).
+    그래서 "도는 것만 연다"로 보면 정작 결과를 볼 순간에 버튼이 없다 — 켤 대상을 여기서 고른다.
+
+    **앱이 먼저다.** index-api 가 돌고 web 이 꺼져 있다고 index-api 를 열면 형은 JSON 을 본다.
+    앱처럼 생긴 게 없으면 도는 것 중 화면이 있을 만한 걸 주고, 그마저 없으면 **아무것도 안
+    켠다** — 형이 볼 게 없는데 mysql 만 켜지면 기다린 보람도 없다."""
+    items = [item for item in services or [] if isinstance(item, dict)]
+
+    def 이름(item: dict[str, Any]) -> str:
+        return str(item.get("service") or "")
+
+    앱들 = [item for item in items if 이름(item).lower() in _PREVIEW_NAMES]
+    if 앱들:
+        # 같은 앱이 이미 돌고 있으면 그걸 쓴다(켜고 기다릴 이유가 없다), 아니면 이름 우선순위대로.
+        도는앱 = [item for item in 앱들 if item.get("running")]
+        고름 = min(도는앱 or 앱들, key=lambda item: _PREVIEW_NAMES.index(이름(item).lower()))
+        return 이름(고름)
+    for item in items:
+        # 포트가 안 열린 서비스는 열어도 볼 게 없다(배치·워커). 화면이 있는 것만 준다.
+        if item.get("running") and item.get("port") and 이름(item).lower() not in _INFRA_NAMES:
+            return 이름(item)
+    return ""
+
+
 def fold_status(tab_statuses: list[str]) -> str:
     """탭들의 상태를 방 상태 하나로. 사람 조치가 필요한 것이 위로 올라온다(스펙 §2).
 

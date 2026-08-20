@@ -44,6 +44,7 @@ from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_acce
 from marina_sessions import agent_activity, agent_belongs_to_root, agent_session_file_bytes, agent_session_files, agent_transcript, agent_transcript_image, agent_transcript_images, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
+from marina_rooms import preview_service as _preview_service
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 from marina_auth_http import AUTH_DENIED, auth_controller
 from marina_access import AccessPolicy, canonical_agent, canonical_root
@@ -295,6 +296,41 @@ class Handler(BaseHTTPRequestHandler):
                 "worktree.create", "ok", principal.user.id, "worktree", owner_root
             )
         self.send_json({"ok": True, "root": new_root, "output": out.strip()[-2000:]})
+
+    def _service_open_urls(self, root: Path, session: dict[str, Any] = None) -> dict[str, str]:
+        """이 워크트리의 서비스별 "열어볼 주소".
+
+        서비스 목록과 완료 카드의 [화면 보기]가 **같은 계산**을 쓰게 한다 — 두 벌로 갈라지면
+        한쪽만 폰에서 안 열리는 주소를 준다."""
+        session = session_payload(root) if session is None else session
+        open_urls: dict[str, str] = {}
+        if not _GATEWAY_ON:
+            return open_urls
+        snapshot = next(
+            (item for item in _gateway_snapshot()
+             if item.get("id") == session.get("id") and item.get("projectId") == session.get("projectId")),
+            None,
+        )
+        if not snapshot:
+            return open_urls
+        # 게이트웨이 주소(<wt>.<proj>.localhost:3902)는 **이 맥에서만** 열린다.
+        # 폰이나 다른 기기로 접속했으면 그 주소를 줘도 이름 해석이 안 돼 아무 일도
+        # 안 일어난다. 그때는 미리보기 문(전용 포트)을 거치는 주소를 준다 —
+        # 형이 접속에 쓴 호스트를 그대로 쓰므로 별도 설정이 필요 없다.
+        remote_host = str(self.headers.get("host") or "").split(":")[0]
+        is_local = remote_host in ("localhost", "127.0.0.1", "::1", "")
+        for route in _gw().summarize_gateway([snapshot], _GATEWAY_PORT):
+            name = str(route.get("service") or "")
+            domain = str(route.get("domain") or "")
+            if is_local:
+                open_urls[name] = f"http://{domain}/"
+            else:
+                label = domain.split(":")[0]
+                if label.endswith(".localhost"):
+                    label = label[: -len(".localhost")]
+                open_urls[name] = (f"https://{remote_host}:{_PREVIEW_PUBLIC_PORT}"
+                                   f"/__room?label={urllib.parse.quote(label)}")
+        return open_urls
 
     def _require_root_access(self, root: Path) -> bool:
         if self._policy().can_root(getattr(self, "auth_principal", None), root):
@@ -704,31 +740,7 @@ class Handler(BaseHTTPRequestHandler):
                 if not self._require_root_access(root):
                     return
                 session = session_payload(root)
-                open_urls: dict[str, str] = {}
-                if _GATEWAY_ON:
-                    snapshot = next(
-                        (item for item in _gateway_snapshot()
-                         if item.get("id") == session.get("id") and item.get("projectId") == session.get("projectId")),
-                        None,
-                    )
-                    if snapshot:
-                        # 게이트웨이 주소(<wt>.<proj>.localhost:3902)는 **이 맥에서만** 열린다.
-                        # 폰이나 다른 기기로 접속했으면 그 주소를 줘도 이름 해석이 안 돼 아무 일도
-                        # 안 일어난다. 그때는 미리보기 문(전용 포트)을 거치는 주소를 준다 —
-                        # 형이 접속에 쓴 호스트를 그대로 쓰므로 별도 설정이 필요 없다.
-                        remote_host = str(self.headers.get("host") or "").split(":")[0]
-                        is_local = remote_host in ("localhost", "127.0.0.1", "::1", "")
-                        for route in _gw().summarize_gateway([snapshot], _GATEWAY_PORT):
-                            name = str(route.get("service") or "")
-                            domain = str(route.get("domain") or "")
-                            if is_local:
-                                open_urls[name] = f"http://{domain}/"
-                            else:
-                                label = domain.split(":")[0]
-                                if label.endswith(".localhost"):
-                                    label = label[: -len(".localhost")]
-                                open_urls[name] = (f"https://{remote_host}:{_PREVIEW_PUBLIC_PORT}"
-                                                   f"/__room?label={urllib.parse.quote(label)}")
+                open_urls = self._service_open_urls(root, session)
                 services = [{
                     "service": str(item.get("service") or ""),
                     "running": bool(item.get("running")),
@@ -745,6 +757,9 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({
                     "root": str(root), "running": sum(1 for item in services if item["running"]),
                     "defined": len(services), "services": services,
+                    # 완료 카드가 열 서비스 — 고르는 규칙은 **여기 하나**다(화면에서 또 고르면
+                    # 두 벌이 갈라져 한쪽만 엉뚱한 걸 켠다).
+                    "preview": _preview_service(services),
                 })
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
@@ -1814,6 +1829,43 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return
+            if parsed.path == "/mobile/api/open-preview":
+                # 완료 카드의 [화면 보기] — 일이 끝난 방은 대개 서버가 꺼져 있다(실측: 완료
+                # 방 4개 중 3개). 그래서 "도는 것만 연다"로는 정작 결과를 볼 순간에 아무것도
+                # 못 준다. 꺼져 있으면 **켜고**, 주소가 나올 때까지 기다렸다 준다.
+                if not self._agent_api_ok(parsed, principal):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    mobile_body = self.read_json()
+                    root = safe_root(str(mobile_body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    services = (session_payload(root) or {}).get("services") or []
+                    service = _preview_service(services)
+                    if not service:
+                        raise ValueError("이 방엔 열어볼 화면이 없어요")
+                    if not any(item.get("running") for item in services
+                               if str(item.get("service") or "") == service):
+                        start_service(root, service)
+                    # 컨테이너가 뜨고 게이트웨이에 주소가 붙기까지 걸린다. 잠깐은 여기서
+                    # 기다려 주되(대개 그 안에 뜬다), **못 기다렸다고 실패로 만들지 않는다** —
+                    # 빌드까지 도는 서비스는 1분도 걸린다. 그때는 "켜는 중"으로 답하고 화면이
+                    # 주소가 뜰 때까지 지켜본다. 여기서 400 을 내면 형은 이미 켜진 서비스를
+                    # 두고 "안 열려요"만 본다(실측: web 은 25초 안에 안 떴다).
+                    마감 = time.time() + 12.0
+                    url = ""
+                    while time.time() < 마감:
+                        url = str(self._service_open_urls(root).get(service) or "")
+                        if url:
+                            break
+                        time.sleep(1.0)
+                    self.send_json({"ok": True, "service": service, "url": url,
+                                    "starting": not url})
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
+
             if parsed.path == "/mobile/api/services/action":
                 if not self._agent_api_ok(parsed, principal):
                     self.send_json({"error": "mobile disabled or invalid token"}, 403)
@@ -2809,7 +2861,7 @@ def main() -> None:
                 mobile_settings_drain()   # 미뤄둔 모델·강도 예약도 유휴 순간 회수(같은 장치)
             except Exception:
                 pass
-            _time.sleep(max(2, int(_env("OUTBOX_POLL", "3") or "3")))
+            time.sleep(max(2, int(_env("OUTBOX_POLL", "3") or "3")))
 
     _threading.Thread(target=_outbox_loop, daemon=True, name="mobile-outbox").start()
 
@@ -2858,7 +2910,7 @@ def main() -> None:
         if not is_primary_notifier(PORT):
             return
         marks = (getattr(_WATCHER, "_previous", None) or {}).get("sessions") or {}
-        now = _time.time()
+        now = time.time()
         alerts = [e for e in events
                   if should_notify(e, engaged=is_engaged(e, marks, now),
                                    hidden=False, now=now)]

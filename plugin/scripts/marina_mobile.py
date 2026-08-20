@@ -5035,8 +5035,12 @@ _MOBILE_HTML = r"""<!doctype html>
       }).join("");
       updateHtmlIfChanged(serviceList, html || '<div class="empty-state">이 워크트리에 정의된 서비스가 없습니다.</div>');
     }
-    async function loadServices(force=false) {
-      const root = servicesRoot || sessionRoot();
+    async function loadServices(force=false, rootOverride="") {
+      // 시트가 열려 있으면 시트가 주인이다(형이 보고 있는 워크트리를 대화 쪽에서 갈아치우면
+      // 목록이 눈앞에서 바뀐다). 닫혀 있으면 **지금 보는 대화의 워크트리**를 읽는다 —
+      // 안 그러면 예전에 시트로 열었던 방의 root 가 남아 완료 카드의 [화면 보기]가 안 뜬다.
+      const 시트열림 = servicesSheet.classList.contains("open");
+      const root = 시트열림 ? (servicesRoot || sessionRoot()) : (rootOverride || servicesRoot || sessionRoot());
       if (!root || serviceLoading) return;
       if (!force && servicesState.root === root && Date.now() - serviceLoadedAt < 8000) {
         renderServiceState();
@@ -5050,6 +5054,9 @@ _MOBILE_HTML = r"""<!doctype html>
         servicesState = await response.json();
         serviceLoadedAt = Date.now();
         renderServiceState();
+        // 완료 카드의 [화면 보기]는 이 응답(preview)이 있어야 그릴 수 있다. 여기서 다시
+        // 안 그리면 다음 폴까지 버튼이 없다 — 형은 그동안 "안 뜬다"고 본다.
+        renderDoneSlot(selectedSession());
       } catch (error) {
         if (servicesSheet.classList.contains("open")) {
           serviceList.innerHTML = `<div class="empty-state">서비스 상태를 불러오지 못했습니다.<br>${esc(String(error))}</div>`;
@@ -5626,7 +5633,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const source = sessionSource(session);
       promptInput.placeholder = source === "claude" ? "Claude에 메시지" : source === "codex" ? "Codex에 메시지" : "터미널에 입력";
       if (document.activeElement === promptInput) renderSuggestions();
-      loadServices(false);
+      loadServices(false, sessionRoot());
       loadAgentUsage(session);
     }
     async function load(options={}) {
@@ -6217,10 +6224,12 @@ _MOBILE_HTML = r"""<!doctype html>
     let openRoomRoot = "";
     let roomBusy = false;      // 방 패널에서 뭔가 돌고 있다 — 그동안은 패널을 다시 안 그린다
 
+    // 미리보기 켜는 중 상태 — 카드 밖에 둔다(아래 openPreview 설명).
+    let previewState = {root: "", stage: "", url: ""};
     // DONE_CARD_START  (테스트가 이 블록을 확인한다)
     // 완료 카드 — 일이 끝나면 **뭐가 바뀌었는지** 말하고 화면을 열 수 있게 한다(스펙 §3·§4).
     // 예전엔 방이 "끝났어요"라고만 해서, 형은 뭘 했는지 알려면 대화를 처음부터 읽어야 했다.
-    function renderDoneCard(room, openUrl) {
+    function renderDoneCard(room, preview) {
       const done = room && room.done;
       if (!room || room.status !== "완료" || !done) return "";
       const files = Number(done.files || 0);
@@ -6232,33 +6241,92 @@ _MOBILE_HTML = r"""<!doctype html>
       const names = (done.names || []).join(", ");
       // 이름을 다 나열하지 않는다 — 카드 한 장이고, 자세한 건 방을 열어 보면 된다.
       const 더 = done.files > (done.names || []).length ? " 외" : "";
-      const 보기 = openUrl
-        ? `<button class="doneOpen" type="button" data-open-preview="${esc(openUrl)}">화면 보기</button>` : "";
+      // **꺼져 있어도 버튼을 준다.** 일이 끝난 방은 대개 서버도 꺼져 있어서(실측: 완료 방
+      // 4개 중 3개가 도는 서비스 0개) "도는 것만 열기"로는 정작 확인할 순간에 버튼이 없었다.
+      // 켜야 하면 눌렀을 때 켠다 — 형이 서비스 탭까지 찾아 들어갈 일이 아니다.
+      const canPreview = preview && preview.service;
+      // **"켜는 중"이라는 사실은 카드가 아니라 previewState 에 있다.** 방 화면은 폴마다 다시
+      // 그려지는데, 버튼 안에만 상태를 두면 1초 뒤 재렌더가 "켜는 중…"을 지워 형은 눌러도
+      // 아무 일도 안 일어난다고 본다(실측).
+      const 켜는중 = previewState.root === room.root && previewState.stage === "starting";
+      const url = preview.url || (previewState.root === room.root ? previewState.url : "");
+      const 보기 = !canPreview ? ""
+        : 켜는중
+          ? `<button class="doneOpen" type="button" disabled>켜는 중…</button>`
+          : url
+            ? `<button class="doneOpen" type="button" data-open-preview="${esc(url)}">화면 보기</button>`
+            : `<button class="doneOpen" type="button" data-start-preview="${esc(room.root)}">화면 보기</button>`;
       return `<div class="doneCard">
         <span class="doneTitle">끝났어요 · ${esc(무엇)}</span>
         ${names ? `<span class="doneNames">${esc(names)}${esc(더)}</span>` : ""}
         ${보기}
       </div>`;
     }
+
     // DONE_CARD_END
 
     // 완료 카드를 대화 화면에 얹는다. 서비스가 떠 있으면 그 주소로 "화면 보기"를 준다 —
     // 서비스 목록은 이미 방마다 불러오고 있어서 추가 요청이 없다.
     doneSlot.addEventListener("click", event => {
+      const 켜기 = event.target.closest && event.target.closest("[data-start-preview]");
+      if (켜기) { openPreview(켜기.getAttribute("data-start-preview")); return; }
       const open = event.target.closest && event.target.closest("[data-open-preview]");
       if (!open) return;
       // 새 탭으로 — 이 화면을 떠나면 대화로 돌아오는 길이 한 단계 늘어난다.
       window.open(open.getAttribute("data-open-preview"), "_blank", "noopener");
     });
+
+    // 꺼진 서버를 켜서 주소까지 받아온다. 켜는 데 1분 넘게 걸리기도 해서(빌드까지 도는
+    // 서비스) **기다리는 상태를 화면 밖에 둔다** — 폴 재렌더가 버튼을 다시 그려도 유지된다.
+    async function openPreview(root) {
+      if (!root || previewState.stage === "starting") return;
+      previewState = {root, stage: "starting", url: ""};
+      renderDoneSlot(selectedSession());
+      try {
+        const response = await fetch("/mobile/api/open-preview", {
+          method: "POST", headers: headers(true), body: JSON.stringify({root}),
+        });
+        const res = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(String((res && res.error) || "화면을 못 열었어요"));
+        let url = String((res && res.url) || "");
+        // 아직 안 떴으면 **여기서 지켜본다.** 형에게 "다시 눌러보세요"라고 하는 건 답이 아니다.
+        const 서비스 = String((res && res.service) || "");
+        for (let i = 0; !url && i < 40; i++) {
+          await new Promise(done => setTimeout(done, 3000));
+          if (previewState.root !== root) return;      // 다른 방으로 넘어갔다 — 조용히 그만둔다
+          const params = new URLSearchParams({root});
+          const r2 = await fetch(`/mobile/api/services?${params}`, {headers: headers()});
+          if (!r2.ok) continue;
+          const st = await r2.json().catch(() => ({}));
+          const hit = (st.services || []).find(item => item.service === 서비스 && item.openUrl);
+          if (hit) url = String(hit.openUrl || "");
+        }
+        if (!url) throw new Error("아직 화면이 안 떴어요 — 잠시 뒤 다시 눌러주세요");
+        previewState = {root, stage: "ready", url};
+        serviceLoadedAt = 0;               // 방금 켰다 — 서비스 목록도 다음에 새로 읽는다
+        renderDoneSlot(selectedSession());
+        // 누른 지 한참 지난 뒤라 여기서 새 창을 열면 대개 팝업 차단에 막힌다. 대신 버튼을
+        // 주소가 담긴 버튼으로 바꿔 두고 알린다 — 한 번 더 누르면 열린다.
+        showToast("화면 준비됐어요 · [화면 보기]를 누르세요");
+      } catch (err) {
+        previewState = {root: "", stage: "", url: ""};
+        renderDoneSlot(selectedSession());
+        showToast(String((err && err.message) || err));
+      }
+    }
+
     function renderDoneSlot(session) {
       const room = session ? roomByRoot(String(session.root || "")) : null;
       // 서비스 목록은 방마다 비동기로 받아 캐시한다 — **지금 방 것인지 확인**하지 않으면
       // 방 A→B 로 넘어간 직후 A 의 주소로 "화면 보기"가 뜬다. 다른 일감의 앱이 열리는 건
       // 비개발자에게 진단 불가능한 고장이다.
       const 같은방 = room && String(servicesState.root || "") === String(room.root || "");
-      const running = 같은방
-        ? (servicesState.services || []).find(item => item.running && item.openUrl) : null;
-      const html = renderDoneCard(room, running ? running.openUrl : "");
+      // 열 서비스는 **서버가 고른다**(marina_rooms.preview_service) — 여기서 이름 규칙을 또
+      // 쓰면 두 벌이 갈라져 한쪽만 엉뚱한 걸 켠다.
+      const 이름 = 같은방 ? String(servicesState.preview || "") : "";
+      const 도는것 = 이름
+        ? (servicesState.services || []).find(item => item.service === 이름 && item.openUrl) : null;
+      const html = renderDoneCard(room, { service: 이름, url: 도는것 ? 도는것.openUrl : "" });
       if (doneSlot.innerHTML !== html) doneSlot.innerHTML = html;
       doneSlot.hidden = !html;
       // 카드가 대화 마지막 줄을 가리지 않게 자리를 비운다(생각중 표시와 같은 규칙).
