@@ -416,6 +416,38 @@
       return [`작업 ${items.length}`, ...categories, ...skillNames].join(" · ");
     }
     // ACTIVITY_IDENTITY_END
+
+    // PROGRESS_LINE_START
+    // 지금 뭘 하고 있는지 **한 줄, 사람말로**(스펙 §3). 도구 이름·명령어·경로는 한 글자도
+    // 내보내지 않는다 — 그게 이 화면을 비개발자용으로 만드는 선이다.
+    //
+    // 왜 필요한가: 예전엔 무슨 일이 돌든 "생각 중" 하나뿐이라 뭘 하는지도, 멈춘 건지도
+    // 알 수 없었다. 반대로 활동 항목을 그대로 보여주면 Edit(marina_mobile.py) 가 튀어나온다.
+    const PROGRESS_WORDS = {
+      command: "실행하는 중",
+      agent: "다른 일꾼에게 맡기는 중",
+      skill: "방법을 찾아보는 중",
+      progress: "정리하는 중",
+      tool: "이것저것 해보는 중",
+    };
+
+    function progressLine(items) {
+      const running = (items || []).filter(item => item && item.status === "running");
+      if (!running.length) return "";
+      // 파일 고치기가 섞여 있으면 그걸 말한다 — 형이 제일 궁금해하는 게 "뭘 건드리고 있나" 다.
+      const 파일 = running.filter(item => ["file", "diff"].includes(item.activityType || ""));
+      if (파일.length) {
+        // 같은 파일을 여러 번 건드려도 하나로 센다 — 숫자가 부풀면 못 믿는다.
+        const 수 = new Set(파일.map((item, index) => String(item.path || `#${index}`))).size;
+        return `파일 ${수}개 고치는 중`;
+      }
+      // 나머지는 **가장 뚜렷한 것 하나**만. 한 줄이 계약이라 붙여 쓰지 않는다.
+      for (const key of ["command", "agent", "skill", "progress", "tool"]) {
+        if (running.some(item => (item.activityType || "tool") === key)) return PROGRESS_WORDS[key];
+      }
+      return PROGRESS_WORDS.tool;
+    }
+    // PROGRESS_LINE_END
     function renderActivityItem(item, index) {
       const type = item.activityType || "tool";
       const status = ["running", "failed"].includes(item.status) ? item.status : "completed";
@@ -732,7 +764,7 @@
     mergeTimelineItems, exchangeSections, exchangeRuns, exchangeRuntime, renderTurnMeta,
     renderLiveAction, extractAttachments, renderTurnAttachments, renderTimelineImages,
     renderTimelineMessage, timelineDetailAttrs, activityItemKey, activityItemFingerprint,
-    activityGroupSummary, renderActivityItem, renderActivityGroup, reconcileActivityList,
+    activityGroupSummary, progressLine, renderActivityItem, renderActivityGroup, reconcileActivityList,
     renderTimelineSequence, questionsFromActivity, pendingQuestionActivity,
     questionFallbackText, renderQuestionCard, renderAnsweredQuestion, renderConversationSequence, pendingKeyPart,
     timelineItemKeyParts, exchangeRenderKey,

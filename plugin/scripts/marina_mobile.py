@@ -3558,7 +3558,7 @@ _MOBILE_HTML = r"""<!doctype html>
       mergeTimelineItems, exchangeSections, exchangeRuns, exchangeRuntime, renderTurnMeta,
       renderLiveAction, extractAttachments, renderTurnAttachments, renderTimelineImages,
       renderTimelineMessage, timelineDetailAttrs, activityItemKey, activityItemFingerprint,
-      activityGroupSummary, renderActivityItem, renderActivityGroup, reconcileActivityList,
+      activityGroupSummary, progressLine, renderActivityItem, renderActivityGroup, reconcileActivityList,
       renderTimelineSequence, questionsFromActivity, pendingQuestionActivity,
       questionFallbackText, renderQuestionCard, renderAnsweredQuestion, renderConversationSequence, pendingKeyPart,
       timelineItemKeyParts, exchangeRenderKey,
@@ -4622,16 +4622,33 @@ _MOBILE_HTML = r"""<!doctype html>
     //  · 에이전트 대화일 때만(터미널·셸엔 '생각'이 없다)
     //  · 서버가 working 이거나, 방금 보내서 아직 서버가 못 따라잡았을 때(낙관적)
     //  · 답을 기다리는 질문이 떠 있으면 **안 보인다** — 그건 내가 아니라 형 차례다
-    function thinkingLabelFor(session, optimisticWorking, now) {
+    function thinkingLabelFor(session, optimisticWorking, now, running) {
       if (!session || session.kind !== "agent") return "";
       const status = String(session.status || "");
       if (session.pendingQuestion) return "";
-      if (status === "working") return "생각 중";
-      if (optimisticWorking) return "생각 중";
-      return "";
+      if (status !== "working" && !optimisticWorking) return "";
+      // 지금 도는 일을 **한 줄 사람말로**(스펙 §3). 못 알아내면 "생각 중" 으로 떨어뜨린다 —
+      // 빈 칸이 뜨면 멈춘 것처럼 보이고, 도구 이름을 그대로 쓰면 개발 화면이 된다.
+      return progressLine(running) || "생각 중";
     }
-    function renderThinkingSlot(session, optimisticWorking) {
-      const label = thinkingLabelFor(session, optimisticWorking, Date.now());
+    // 지금 **도는 중인** 활동만 — 진행 표시 한 줄이 이걸 사람말로 옮긴다.
+    // 마지막 턴만 본다: 앞 턴의 활동은 이미 끝났고, 화면에 남아 있어도 지금 하는 일이 아니다.
+    function runningActivities() {
+      const session = selectedSession();
+      const history = sessionHistory(session);
+      const timeline = (history && history.timeline) || (session && session.timeline) || [];
+      const out = [];
+      for (let i = timeline.length - 1; i >= 0 && out.length < 40; i -= 1) {
+        const item = timeline[i];
+        if (!item) continue;
+        if (item.kind === "message" && item.role === "user") break;   // 이번 턴의 시작
+        if (item.status === "running") out.push(item);
+      }
+      return out;
+    }
+    // running 을 **인자로 받는다** — 안에서 화면 전역을 부르면 이 함수만 떼어 시험할 수 없다.
+    function renderThinkingSlot(session, optimisticWorking, running) {
+      const label = thinkingLabelFor(session, optimisticWorking, Date.now(), running);
       if (!label) {
         if (!thinkingSlot.hidden) {
           thinkingSlot.hidden = true;
@@ -5095,7 +5112,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const running = isAgent && session.controllable && session.status === "working";
       stopBtn.style.display = running ? "inline-block" : "none";
       if (!sending) statusEl.textContent = optimisticWorking ? "작업 중…" : sessionStatusText(session);
-      renderThinkingSlot(session, optimisticWorking);   // 대화 안에서도 같은 사실을 보여준다
+      renderThinkingSlot(session, optimisticWorking, runningActivities());   // 대화 안에서도 같은 사실을 보여준다
       renderLiveQuestion(session);
     }
     function sourceOptions(session) {

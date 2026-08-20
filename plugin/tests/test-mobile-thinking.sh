@@ -96,8 +96,10 @@ esc_start, esc_end = js.find("// ESC_HELPERS_START"), js.find("// ESC_HELPERS_EN
 think_start, think_end = js.find("// THINKING_BUBBLE_START"), js.find("// THINKING_BUBBLE_END")
 if think_start < 0:
     raise SystemExit("THINKING_BUBBLE 경계가 없다")
+# 진행 표시 한 줄(progressLine)도 같이 싣는다 — thinkingLabelFor 가 그걸 쓴다(스펙 §3).
+진행 = js[js.find("// PROGRESS_LINE_START"):js.find("// PROGRESS_LINE_END")]
 print("const src = " + json.dumps(js[esc_start:esc_end] + js[think_start:think_end]
-                                 + mobile[start:end]) + ";")
+                                 + 진행 + mobile[start:end]) + ";")
 print(r'''
 const vm = require("node:vm");
 const assert = require("node:assert/strict");
