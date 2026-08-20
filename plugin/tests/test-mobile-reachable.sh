@@ -91,7 +91,24 @@ for 표식 in ('id="logoutBtn"', 'id="inboxMenuBtn"', 'id="refreshBtn"'):
 # 무조건 덮어써서, 전체를 골라도 다음 순간 방 21개가 다시 사라졌다.
 기억 = html[html.find("function rememberProjectForRoot"):][:400]
 assert "if (!selectedProjectId) return;" in 기억, f"'전체'가 대화 한 번에 풀린다: {기억}"
-print("ok 첫 화면에서 닿는 동작: 새 대화·검색·프로젝트·전체·전역동작·폴백·모든 탭")
+# ⑨ **첫 화면의 줄들이 찌그러지지 않는다.** #listView 는 세로 flex 라 자식이 기본으로 줄어든다 —
+# 방 목록이 길어지자 프로젝트 칩 줄이 높이 2px 로 눌려, 화면엔 잘린 조각만 보였다(형 스크린샷).
+# 채팅 뷰에는 같은 수정이 이미 있었는데 목록 뷰만 빠져 있었다.
+칩규칙 = re.search(r"\.project-strip \{[^}]*\}", html)
+assert 칩규칙 and "flex: none" in 칩규칙.group(0), f"칩 줄이 목록에 밀려 찌그러진다: {칩규칙}"
+for 클래스 in (".listTools", ".room-list"):
+    규칙 = re.search(re.escape(클래스) + r" \{[^}]*\}", html)
+    assert 규칙 and "flex: none" in 규칙.group(0), f"{클래스} 가 줄어들 수 있다: {규칙}"
+
+# ⑩ **헤더가 비어 있으면 고장처럼 보인다.** 예전엔 프로젝트 칩이 헤더에 있었는데 목록 안으로
+# 내려가면서 점 하나와 종만 남았다. 목록에서도 제목을 보여준다.
+assert re.search(r'data-view="list"\]\s*\.chatNavTitle', html), "목록 화면에서 헤더 제목이 숨겨진다"
+
+# ⑪ 더보기 항목은 **글자로** 말한다 — 도형만 있으면 뭔지 모른다(전엔 ☰ 하나가 떠 있었다).
+메뉴규칙 = re.search(r"\.moreMenu button \{[^}]*\}", html)
+assert 메뉴규칙 and "text-align: left" in 메뉴규칙.group(0), f"메뉴 항목이 아이콘처럼 보인다: {메뉴규칙}"
+
+print("ok 첫 화면: 닿는 동작 + 줄 안 찌그러짐 + 헤더 아이콘 + 방 말투 받은작업")
 PY
 
 # ⑦ 실제 자료로 확인 — 방의 모든 탭이 세션 목록에 있나(눌러서 열리나).

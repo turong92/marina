@@ -2306,7 +2306,10 @@ _MOBILE_HTML = r"""<!doctype html>
     #listView { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow-y: auto; overscroll-behavior: contain; }
     #chatView { position: relative; display: none; min-height: 0; grid-template-rows: auto minmax(0, 1fr); gap: 5px; overflow: hidden; }
     .hiddenSelect { display: none !important; }
-    .project-strip { display: flex; min-width: 0; gap: 5px; padding: 1px 0; overflow-x: auto; scrollbar-width: none; }
+    /* **줄어들지 않는다.** #listView 는 세로 flex 라, flex 자식은 기본으로 줄어들 수 있다 —
+       방 목록이 길어지자 칩 줄이 높이 2px 로 찌그러져 화면엔 잘린 조각만 보였다(실측).
+       채팅 뷰에는 같은 수정이 이미 있었는데(아래 data-view="chat" 규칙) 목록 뷰만 빠져 있었다. */
+    .project-strip { display: flex; flex: none; min-width: 0; gap: 5px; padding: 1px 0; overflow-x: auto; scrollbar-width: none; }
     .project-strip::-webkit-scrollbar { display: none; }
     .project-chip { flex: 0 0 auto; width: auto; max-width: 150px; min-height: 32px; padding: 0 10px; border-radius: 8px; color: #596070; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .project-chip.active { background: #17191f; border-color: #17191f; color: #fff; }
@@ -2327,7 +2330,10 @@ _MOBILE_HTML = r"""<!doctype html>
     #mobileApp[data-view="list"] .shellActions { margin-left: auto; }
     /* 드로어는 좁다 — 프로젝트 칩은 가로 스크롤(기본), 종류 탭은 줄바꿈 없이 4칸 유지. */
     #mobileApp[data-view="chat"] #listView .project-strip { flex: none; }
-    #mobileApp[data-view="chat"] .chatNavTitle { display: block; }
+    /* 목록에서도 보여준다. 예전엔 헤더에 프로젝트 칩이 있어서 채울 게 있었는데, 그게 목록
+       안으로 내려가면서 헤더가 점 하나와 종만 남았다 — 화면이 고장난 것처럼 보인다. */
+    #mobileApp[data-view="chat"] .chatNavTitle,
+    #mobileApp[data-view="list"] .chatNavTitle { display: block; }
     #mobileApp[data-view="chat"] .usageBtn.available { display: inline-flex; align-items: center; justify-content: center; }
     #mobileApp[data-view="chat"] main { padding: 6px 10px; }
     .search-input { min-height: 40px; }
@@ -2344,7 +2350,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .drawerBackdrop { position: fixed; inset: 0; z-index: 8; display: none; background: rgb(10 14 20 / 38%); }
     #mobileApp[data-view="chat"][data-drawer="open"] .drawerBackdrop { display: block; }
     @media (prefers-reduced-motion: reduce) { #mobileApp[data-view="chat"] #listView { transition: none; } }
-    .listTools { display: flex; flex: none; gap: 5px; align-items: center; }
+    .listTools { flex: none; display: flex; flex: none; gap: 5px; align-items: center; }
     .listTools .search-input { flex: 1; min-width: 0; }
     .session-card.hidden-session { opacity: .45; }
     .session-list:not(.show-all) .session-card.hidden-session { display: none; }
@@ -2381,7 +2387,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .session-list { display: flex; flex-direction: column; gap: 12px; }
 
     /* 방 목록 — 첫 화면. 카드는 손가락으로 누르는 것이라 세로로 넉넉히 잡는다. */
-    .room-list { display: flex; flex-direction: column; }
+    .room-list { display: flex; flex-direction: column; flex: none; }
     .roomCard { display: flex; gap: 10px; align-items: center; width: 100%; text-align: left;
                 padding: 14px 12px; border: 0; border-bottom: 1px solid var(--line);
                 background: transparent; color: inherit; font: inherit; cursor: pointer; }
@@ -2436,10 +2442,19 @@ _MOBILE_HTML = r"""<!doctype html>
     .roomStart { flex: 1 1 0; padding: 10px; border: 1px dashed var(--line); border-radius: 8px;
                  background: transparent; color: inherit; font: inherit; cursor: pointer; }
     .roomRow.archived { opacity: .55; }
-    .listUtilities { display: flex; gap: 8px; padding: 8px 12px 4px; }
-    .listUtilities button { flex: 1 1 0; padding: 8px; border: 1px solid var(--line);
-                            border-radius: 8px; background: transparent; color: inherit;
-                            font: inherit; font-size: 12px; cursor: pointer; }
+    /* 목록 화면에서만 보이는 헤더 아이콘(＋·검색·더보기). */
+    .listOnly { display: none; }
+    #mobileApp[data-view="list"] .listOnly { display: inline-flex; }
+    /* 더보기 — 헤더 아래 우측에 뜬다. 자주 안 쓰는 것들이라 목록을 밀어내지 않게 얹는다. */
+    .moreMenu { position: absolute; right: 8px; top: 46px; z-index: 30; display: flex;
+                flex-direction: column; align-items: stretch; gap: 2px; padding: 6px;
+                border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+                box-shadow: 0 8px 24px rgba(0,0,0,.28); min-width: 160px; }
+    .moreMenu button { width: 100%; min-height: 38px; padding: 0 10px; border: 0; border-radius: 8px;
+                       background: transparent; color: inherit; font: inherit; font-size: 13px;
+                       text-align: left; cursor: pointer; }
+    .moreMenu button:active { background: var(--line); }
+
     .roomEmpty { padding: 32px 16px; text-align: center; opacity: .7; line-height: 1.6; }
     .session-group { display: flex; flex-direction: column; gap: 6px; }
     /* 워크트리 = 단위. 헤더에서 바로 새 에이전트를 띄운다(웹 카드의 ＋CC/＋CX 와 같은 멘탈모델). */
@@ -2765,8 +2780,6 @@ _MOBILE_HTML = r"""<!doctype html>
     .serviceState { margin-top: 2px; color: #747d8b; font-size: 10px; }
     .serviceActions { display: flex; gap: 4px; }
     .serviceActions button { width: 32px; min-height: 32px; padding: 0; font-size: 14px; }
-    .serviceUtilities { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; padding-top: 10px; }
-    .serviceUtilities button { min-width: 0; min-height: 34px; padding: 0 5px; font-size: 10px; }
     .settingsBody { display: flex; flex-direction: column; gap: 12px; }
     .settingsBody select, .settingsBody input { min-height: 40px; }
     .inboxList { max-height: calc(78vh - 49px); overflow-y: auto; padding-bottom: max(14px, env(safe-area-inset-bottom)); }
@@ -2881,6 +2894,11 @@ _MOBILE_HTML = r"""<!doctype html>
         <div class="shellActions">
           <!-- 살아있음 표시. 폴링이 조용히 돌던 시절엔 화면이 멈춘 건지 알 길이 없었다
                (형: "폴링중인게 보이지도 않으니 멈춘 것 같고"). 점 하나로 연결 상태를 늘 보여준다. -->
+          <!-- 목록 화면의 도구는 **헤더 아이콘으로** 녹인다(형 지적 2026-08-20). 예전엔 검색·
+               도구·전역동작이 각각 한 줄씩 먹어서, 방을 보러 온 화면의 절반이 도구였다. -->
+          <button class="usageBtn listOnly" id="newWorktreeBtn" type="button" title="새 일감 만들기" aria-label="새 일감 만들기">＋</button>
+          <button class="usageBtn listOnly" id="searchBtn" type="button" title="검색" aria-label="검색">&#128269;</button>
+          <button class="usageBtn listOnly" id="moreBtn" type="button" title="더보기" aria-label="더보기">&#8943;</button>
           <span class="liveDot" id="liveDot" title="실시간 연결" aria-hidden="true"></span>
           <button class="usageBtn notifyBtn" id="notifyBtn" type="button" title="알림" aria-label="알림">&#128276;</button>
           <button class="usageBtn" id="galleryBtn" type="button" title="이미지 모아보기" aria-label="이미지 모아보기" style="display:none">&#9635;</button>
@@ -2912,23 +2930,22 @@ _MOBILE_HTML = r"""<!doctype html>
              현재 프로젝트 세션만 보이고 다른 프로젝트로 갈 방법이 없었다(형 지적). -->
         <div class="project-strip" id="projectTabs" aria-label="프로젝트"></div>
         <div class="source-tabs" id="sourceTabs" aria-label="세션 종류"></div>
-        <div class="listTools">
-          <input class="search-input" id="sessionSearch" aria-label="세션 검색" placeholder="세션 검색" />
-          <button class="iconBtn listToolBtn" id="densityBtn" type="button">&#9776;</button>
-          <button class="iconBtn listToolBtn" id="showAllBtn" type="button" title="전체보기(오래된·숨긴·접은 것 포함)" aria-label="전체보기">&#8943;</button>
-          <button class="listToolBtn newWtBtn" id="newWorktreeBtn" type="button" title="새 일감 만들기" aria-label="새 일감 만들기">＋ 새 일감</button>
+        <!-- 검색은 **누를 때만** 나온다. 늘 띄워두면 한 줄을 통째로 먹는데, 방 29개를 훑는
+             화면에서 그 줄은 대개 안 쓴다. -->
+        <div class="listTools" id="listTools" hidden>
+          <input class="search-input" id="sessionSearch" aria-label="방 검색" placeholder="방 검색" />
         </div>
-        <!-- 방 목록이 첫 화면이다(형 결정 2026-08-18). 세션 목록은 지우지 않고 숨겨만 둔다 —
-             방 화면이 이상하면 한 줄로 되돌릴 수 있어야 한다. -->
-        <!-- 받은 작업·새로고침·로그아웃은 **전역** 동작인데 서비스 시트(워크트리별) 안에만
-             있었다. 세션 목록이 진짜로 숨겨지자 시트로 가는 길이 끊겨 통째로 도달 불가가 됐다 —
-             펀넬로 공개되는 화면에 로그아웃이 없는 건 특히 곤란하다. 목록 화면으로 꺼낸다. -->
-        <div class="listUtilities">
+        <!-- 더보기 — 자주 안 쓰는 것들. 헤더 ⋯ 로 연다. -->
+        <div class="moreMenu" id="moreMenu" hidden>
+          <button id="showAllBtn" type="button" title="전체보기(오래된·숨긴·접은 것 포함)">전체보기</button>
           <button id="inboxMenuBtn" type="button">받은 작업 <span id="inboxCount">0</span></button>
+          <button id="densityBtn" type="button">보기 바꾸기</button>
           <button id="refreshBtn" type="button">새로고침</button>
           <button id="clearUploadsBtn" type="button" data-clear-uploads="1">사진 정리</button>
           <button id="logoutBtn" type="button">로그아웃</button>
         </div>
+        <!-- 방 목록이 첫 화면이다(형 결정 2026-08-18). 세션 목록은 지우지 않고 숨겨만 둔다 —
+             방 화면이 이상하면 한 줄로 되돌릴 수 있어야 한다. -->
         <div class="room-open" id="roomOpen" hidden></div>
         <div class="room-list" id="roomList"></div>
         <div class="session-list" id="sessionList"></div>
@@ -3790,6 +3807,11 @@ _MOBILE_HTML = r"""<!doctype html>
       "문제": "!", "응답필요": "?", "작업중": "▶", "완료": "✓", "대기": "·",
     };
 
+    // 서버(marina_rooms.room_status)와 **같은 표**다 — 한쪽만 고치면 말이 갈라진다.
+    const CANON_TO_ROOM = {working: "작업중", idle: "대기", failed: "문제",
+                           blocked: "응답필요", waiting: "응답필요", completed: "완료"};
+    function roomStatusFromCanon(canon) { return CANON_TO_ROOM[canon] || "대기"; }
+
     function roomStatusLabel(status) {
       // 모르는 값에 빈 칸이 뜨면 고장으로 보인다 — 가장 순한 쪽으로 떨어뜨린다.
       return ROOM_LABEL[status] || ROOM_LABEL["대기"];
@@ -4323,6 +4345,10 @@ _MOBILE_HTML = r"""<!doctype html>
         if (item) item.count += 1;
       });
       return projects;
+    }
+    function projectLabelOf(id) {
+      const found = projectsWithCounts().find(item => item.id === id);
+      return (found && found.label) || "마리나";
     }
     function renderProjectTabs() {
       const projects = projectsWithCounts();
@@ -5419,25 +5445,32 @@ _MOBILE_HTML = r"""<!doctype html>
     function persistInboxRead() {
       localStorage.setItem(inboxReadKey, JSON.stringify([...inboxRead].slice(-300)));
     }
+    // 받은 작업도 **방과 같은 상태 어휘**를 쓴다 — 목록에서 "답을 기다려요" 인 것이 여기서
+    // "응답 필요" 로 보이면 같은 것을 두 이름으로 부르는 셈이다.
+    function roomStatusOf(session) {
+      const canon = session && session.pendingQuestion ? "blocked" : String((session || {}).status || "idle");
+      return roomStatusFromCanon(canon);
+    }
     function renderInbox() {
       const items = inboxSessions();
       const unread = items.filter(item => !inboxRead.has(item.eventId)).length;
       inboxCount.textContent = unread > 99 ? "99+" : String(unread);
       inboxMenuBtn.title = unread ? `새 작업 ${unread}개` : "확인할 새 작업 없음";
       if (!inboxSheet.classList.contains("open")) return;
-      const statusLabel = {blocked: "응답 필요", waiting: "응답 대기", completed: "완료", failed: "실패"};
-      let previousProject = "";
+      // **방 말투로 그린다.** 예전엔 CC/CX 배지에 "응답 필요"·sid 라, 방 목록에서 넘어오면
+      // 같은 것을 다른 말로 부르는 화면이 됐다(형 지적: "채팅방이랑 직관적이지 않다").
+      // 목록과 같은 아이콘·같은 문장을 쓰고, 어느 방의 대화인지 밝힌다.
       const html = items.map(item => {
-        const wt = worktreeForRoot(item.root);
-        const project = wt ? projectName(wt) : (item.subtitle || "Project");
-        const group = project !== previousProject ? `<div class="inboxGroup">${esc(project)}</div>` : "";
-        previousProject = project;
-        const source = sessionSource(item);
-        const meta = sourceMeta[source];
-        return `${group}<button class="inboxItem ${inboxRead.has(item.eventId) ? "read" : "unread"}" type="button" data-inbox-id="${esc(item.eventId)}">
-          <span class="source-badge ${source}">${meta.badge}</span>
-          <span class="inboxItemCopy"><strong>${esc(item.title || item.sid)}</strong><small>${esc(item.preview || item.subtitle || "")}</small></span>
-          <span class="inboxState">${esc(statusLabel[item.status] || item.status)} · ${esc(inboxRelativeTime(item.statusTs || item.ts))}</span>
+        const room = roomByRoot(String(item.root || ""));
+        const 방이름 = (room && (room.shortName || room.name)) || wtName(String(item.root || ""));
+        const status = roomStatusOf(item);
+        return `<button class="inboxItem ${inboxRead.has(item.eventId) ? "read" : "unread"}" type="button" data-inbox-id="${esc(item.eventId)}">
+          <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
+          <span class="inboxItemCopy"><strong>${esc(방이름)}</strong>${
+            String(item.title || "") && String(item.title) !== 방이름
+              ? `<small>${esc(item.title)}</small>` : ""   // 방 이름과 같으면 두 번 쓰지 않는다
+          }</span>
+          <span class="inboxState">${esc(roomStatusLabel(status))} · ${esc(inboxRelativeTime(item.statusTs || item.ts))}</span>
         </button>`;
       }).join("");
       updateHtmlIfChanged(inboxList, html || '<div class="empty-state">확인할 에이전트 작업이 없습니다.</div>');
@@ -5580,7 +5613,10 @@ _MOBILE_HTML = r"""<!doctype html>
       const session = holdSession(live, heldSession, heldSessionAt, selectedSessionKey, Date.now(), SESSION_HOLD_MS);
       if (session) showChat();
       else showList();
-      chatNavTitle.textContent = session ? (session.title || "세션") : "";
+      // 방 목록에서도 헤더에 **뭔가는 있어야 한다.** 예전엔 프로젝트 칩이 헤더에 있었는데
+      // 목록 안으로 내려가면서 헤더가 통째로 비었다 — 점 하나와 종만 남아 고장처럼 보인다.
+      chatNavTitle.textContent = session ? (session.title || "세션")
+                                 : (selectedProjectId ? projectLabelOf(selectedProjectId) : "마리나");
       renderSessionTabs();
       renderAgentUsage(session);
       restoreDraft();
@@ -6000,7 +6036,28 @@ _MOBILE_HTML = r"""<!doctype html>
       if (usagePanel.classList.contains("open") && !usagePanel.contains(event.target) && event.target !== usageBtn) closeUsagePanel();
     });
     document.getElementById("logoutBtn").onclick = () => { closeServices(); logout(); };
-    document.getElementById("clearUploadsBtn").onclick = clearUploads;
+    document.getElementById("clearUploadsBtn").onclick = () => { closeMoreMenu(); clearUploads(); };
+    // 검색은 누를 때만 펼친다 — 펼치면 바로 커서를 준다(한 번 더 누르게 하면 화만 난다).
+    const listTools = document.getElementById("listTools");
+    const moreMenu = document.getElementById("moreMenu");
+    document.getElementById("searchBtn").onclick = () => {
+      listTools.hidden = !listTools.hidden;
+      if (!listTools.hidden) sessionSearch.focus();
+      else if (sessionSearch.value) { sessionSearch.value = ""; renderSessions(); renderRoomList(); }
+    };
+    function closeMoreMenu() { moreMenu.hidden = true; }
+    document.getElementById("moreBtn").onclick = event => {
+      event.stopPropagation();
+      moreMenu.hidden = !moreMenu.hidden;
+    };
+    // 바깥을 누르면 닫힌다 — 메뉴가 떠 있는 채로 방을 누르려다 두 번 누르게 되면 안 된다.
+    document.addEventListener("click", event => {
+      if (moreMenu.hidden) return;
+      if (!moreMenu.contains(event.target)) closeMoreMenu();
+    });
+    moreMenu.addEventListener("click", event => {
+      if (event.target.closest("button")) closeMoreMenu();
+    });
     sendBtn.onclick = () => send();
     retryBtn.onclick = () => {
       if (!failedSend || failedSend.sessionKey !== selectedSessionKey || failedSend.root !== sessionRoot()) { clearFailedSend(); return; }
@@ -6144,8 +6201,9 @@ _MOBILE_HTML = r"""<!doctype html>
     // 밀도: CSS 로만 가린다 — 토글이 재렌더를 부르지 않아 스크롤/펼침이 안 튄다.
     function applyDensity() {
       sessionList.classList.toggle("density-detail", listDensity === "detail");
-      densityBtn.textContent = listDensity === "detail" ? "\u2637" : "\u2630";
-      densityBtn.title = listDensity === "detail" ? "간단히 보기" : "자세히 보기";
+      // 이제 아이콘이 아니라 **메뉴 항목**이다 — 글자로 말한다(도형만 있으면 뭔지 모른다).
+      densityBtn.textContent = listDensity === "detail" ? "간단히 보기" : "자세히 보기";
+      densityBtn.title = densityBtn.textContent;
       densityBtn.setAttribute("aria-label", densityBtn.title);
     }
     densityBtn.onclick = () => {

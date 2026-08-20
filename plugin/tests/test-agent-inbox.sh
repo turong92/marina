@@ -466,7 +466,9 @@ assert.ok(blockedMarkup, `blocked Inbox item missing: ${rendered}`);
 assert.match(blockedMarkup[0], /class="inboxItem read"/);
 const label = blockedMarkup[0].match(/<span class="inboxState">([^<]+)<\/span>/);
 assert.ok(label, blockedMarkup[0]);
-assert.equal(label[1].split(" · ", 1)[0], "응답 필요");
+// **방 목록과 같은 말**을 쓴다. 예전엔 여기만 "응답 필요" 라, 목록에서 "답을 기다려요" 로
+// 본 것이 받은 작업에선 다른 이름이 됐다 — 같은 것을 두 이름으로 부르는 화면이었다.
+assert.equal(label[1].split(" · ", 1)[0], "답을 기다려요");
 
 context.mobileTest.inboxList.onclick({
   target: {closest: () => ({getAttribute: () => blockedEventId})},
