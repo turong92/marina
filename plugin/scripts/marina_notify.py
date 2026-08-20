@@ -27,6 +27,41 @@ ALERT_KEEP_S = 300.0             # 서비스워커가 깨서 가져갈 때까지
 ALERT_MAX = 20
 _LOCK = threading.Lock()
 _last_fired: dict[str, float] = {}
+# 중복 억제는 **재시작을 넘겨야** 한다. 메모리에만 두면 데몬이 새로 뜰 때마다 초기화되어
+# 같은 알림이 다시 간다 — 배포·재시작이 잦은 만큼 형 폰엔 같은 말이 반복해서 뜬다.
+FIRED_FILE_NAME = "notify-fired.json"
+
+
+def _fired_file() -> Path:
+    return ALERTS_FILE.parent / FIRED_FILE_NAME
+
+
+def _load_fired() -> dict[str, float]:
+    if _last_fired:
+        return _last_fired
+    try:
+        raw = json.loads(_fired_file().read_text(encoding="utf-8"))
+        if isinstance(raw, dict):
+            _last_fired.update({str(k): float(v) for k, v in raw.items()
+                                if isinstance(v, (int, float))})
+    except Exception:
+        pass
+    return _last_fired
+
+
+def _save_fired(fired: dict[str, float], now: float) -> None:
+    # 오래된 것은 버린다 — 중복 억제 구간을 넘긴 기록은 판정에 쓸모가 없다.
+    산것 = {k: v for k, v in fired.items() if now - float(v) < DEDUPE_S * 20}
+    fired.clear()
+    fired.update(산것)
+    try:
+        path = _fired_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(산것), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 _TITLES = {
     "question": "물어볼 게 있어요",
@@ -57,11 +92,36 @@ def should_notify(event: dict[str, Any], *, engaged: bool, hidden: bool,
         return False
     if kind != "service" and not engaged:
         return False          # 서비스는 세션과 무관하게 형이 띄운 것이므로 항상 알린다
-    fired = _last_fired if last_fired is None else last_fired
+    fired = _load_fired() if last_fired is None else last_fired
     key = f"{event.get('session') or event.get('root')}\n{kind}"
     if now - float(fired.get(key) or 0) < DEDUPE_S:
         return False
     fired[key] = now
+    if last_fired is None:
+        _save_fired(fired, now)
+    return True
+
+
+def is_primary_notifier(port: int) -> bool:
+    """지금 이 프로세스가 **폰을 울려도 되는 그 데몬**인가.
+
+    왜 필요한가(형 지적 2026-08-20 "푸시가 스팸일 수 있다고 뜬다"): 마리나 프로세스가 둘 이상
+    돌면 각자 감지 루프를 돌려 **같은 사건으로 각각 푸시를 쏜다**. 중복 억제(_last_fired)는
+    프로세스 안에만 있어서 서로를 모르고, 두 번째 인스턴스를 다시 띄울 때마다 초기화된다.
+    실측 흔적: 같은 세션·같은 종류의 알림이 5초 간격으로, 심지어 같은 초에 두 번.
+    그렇게 쌓인 무의미한 알림이 브라우저의 스팸 판정을 부른다.
+
+    판정 기준은 **데몬이 기록해둔 포트**다(dashboard-bind.env). 개발용·프리뷰 인스턴스는 다른
+    포트로 뜨므로 여기서 걸린다. 기록이 없거나 깨졌으면 막지 않는다 — 알림이 통째로 죽는 쪽이
+    더 나쁘다."""
+    path = ALERTS_FILE.parent / "dashboard-bind.env"
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "MARINA_CONTROL_PORT":
+                return int(value.strip()) == int(port)
+    except (OSError, ValueError):
+        return True
     return True
 
 

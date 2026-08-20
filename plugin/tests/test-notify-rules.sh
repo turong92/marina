@@ -54,7 +54,14 @@ assert nf.is_engaged(event("idle"), marks, now) is True
 assert nf.is_engaged(event("idle", session="agent:claude:old:/wt"), marks, now) is False
 assert nf.is_engaged(event("idle", session="agent:claude:없음:/wt"), marks, now) is False
 
-print("ok 규칙: 네 순간만·중복 억제·지금 쓰는 세션만")
+# ⑤ **중복 억제는 재시작을 넘겨야 한다.** 메모리에만 두면 데몬이 새로 뜰 때마다 초기화되어
+# 같은 알림이 다시 간다 — 형 폰엔 같은 말이 반복해서 뜨고, 그게 쌓이면 브라우저가 스팸으로 본다.
+nf._last_fired.clear()
+assert nf.should_notify(event("idle"), engaged=True, hidden=False, now=now, last_fired=None)
+nf._last_fired.clear()          # 프로세스가 죽었다 다시 뜬 셈
+assert not nf.should_notify(event("idle"), engaged=True, hidden=False, now=now + 5, last_fired=None), \
+    "재시작하면 같은 알림이 또 간다"
+print("ok 규칙: 네 순간만·중복 억제(재시작 넘김)·지금 쓰는 세션만")
 
 # ⑤ 알림 문구에 **대화 내용을 싣지 않는다** — 잠금화면에 남고, 열면 어차피 보인다.
 title, body = nf.alert_text(event("question", preview="비밀번호는 hunter2 야"))

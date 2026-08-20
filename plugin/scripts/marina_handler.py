@@ -2848,9 +2848,15 @@ def main() -> None:
 
     def _on_events(events: list) -> None:
         from marina_events import _WATCHER
-        from marina_notify import is_engaged, record_alerts, should_notify
+        from marina_notify import is_engaged, is_primary_notifier, record_alerts, should_notify
         from marina_push import broadcast, subscriptions
 
+        # **폰을 울리는 건 데몬 하나뿐이다.** 프로세스가 둘이면 같은 사건으로 각자 쏘고,
+        # 중복 억제는 프로세스 안에만 있어서 서로를 모른다 — 형 폰에 같은 알림이 두 번씩 가고
+        # 브라우저가 그걸 스팸으로 본다(실측). 기록도 여기서 막는다: 둘이 같은 파일에 쓰면
+        # 서비스워커가 가져갈 목록도 두 배가 된다.
+        if not is_primary_notifier(PORT):
+            return
         marks = (getattr(_WATCHER, "_previous", None) or {}).get("sessions") or {}
         now = _time.time()
         alerts = [e for e in events
