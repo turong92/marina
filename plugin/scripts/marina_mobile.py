@@ -5949,6 +5949,23 @@ _MOBILE_HTML = r"""<!doctype html>
     let openRoomRoot = "";
     let roomBusy = false;      // 방 패널에서 뭔가 돌고 있다 — 그동안은 패널을 다시 안 그린다
 
+    // ROOM_SIBLING_TABS_START  (테스트가 이 블록을 vm 에 싣는다)
+    // 방 안에서 **다른 대화로 바로 넘어가게** 한다(스펙 §3 화면 그림의 `[기본] [디자인 손보기]`).
+    // 예전엔 대화 화면의 탭 줄이 "형이 연 탭" 기준이라, 방 카드로 들어가면 탭이 하나뿐이라
+    // 줄이 안 떴다 — 같은 방의 다른 대화로 가려면 목록으로 나갔다 다시 들어가야 했다.
+    function roomSiblingKeys(room) {
+      if (!room) return [];
+      // 숨긴·오래된 대화는 뺀다 — 목록에서 치운 것이 탭 줄로 되살아나면 숨김이 무의미하다.
+      return (room.tabs || [])
+        .filter(tab => tab && !tab.hidden && !tab.stale)
+        .map(tab => `agent:${tab.source}:${tab.sid}:${room.root}`);
+    }
+    // 기존 멀티탭(다른 방 대화를 함께 띄우는 것)은 **없애지 않고 얹기만** 한다.
+    function addRoomTabs(room) {
+      roomSiblingKeys(room).forEach(key => addTab(key));
+    }
+    // ROOM_SIBLING_TABS_END
+
     // 방 목록 다시 그리기 — 폴·검색·필터가 모두 이 함수를 쓴다(규칙이 갈라지면 안 된다).
     function renderRoomList() {
       const 방들 = state.rooms || [];
@@ -6018,6 +6035,7 @@ _MOBILE_HTML = r"""<!doctype html>
       // 대화가 아직 없는 방은 고를 게 없으니 방 안을 연다 — 아무 반응이 없으면 고장으로 보인다.
       if (!tab) { openRoom(room.root); return; }
       closeRoom();
+      addRoomTabs(room);      // 같은 방의 다른 대화로 바로 넘어갈 수 있게
       chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
     });
     roomOpen.addEventListener("click", async event => {
@@ -6053,7 +6071,9 @@ _MOBILE_HTML = r"""<!doctype html>
       const source = 값.slice(0, 값.indexOf(":"));
       const sid = 값.slice(값.indexOf(":") + 1);     // sid 에 ':' 가 있어도 안 깨지게
       const root = openRoomRoot;
+      const 방 = roomByRoot(root);
       closeRoom();
+      addRoomTabs(방);
       chooseSession(`agent:${source}:${sid}:${root}`);
     }
 
