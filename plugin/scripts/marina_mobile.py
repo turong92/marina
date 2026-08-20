@@ -2019,7 +2019,6 @@ _MOBILE_HTML = r"""<!doctype html>
     #mobileApp { --app-height: 100dvh; height: var(--app-height); min-height: 0; display: none; grid-template-rows: auto minmax(0, 1fr) auto; overflow: hidden; }
     #mobileLogin { min-height: 100vh; display: none; align-items: stretch; justify-content: center; flex-direction: column; padding: 24px; box-sizing: border-box; gap: 14px; }
     #mobileLogin form { display: flex; flex-direction: column; gap: 10px; }
-    .loginAlt { display: block; text-align: center; padding: 10px; color: inherit; opacity: .8; }
     /* 홈 화면 앱으로 열면 주소창이 없어 화면이 상태바 밑까지 온다 — 노치를 피해 앉힌다.
        브라우저 탭에서는 inset 이 0 이라 지금과 똑같이 보인다. */
     header { position: relative; z-index: 4; display: grid; gap: 4px; padding: max(4px, env(safe-area-inset-top)) 8px 6px; box-sizing: border-box; background: #fff; border-bottom: 1px solid #dde2ea; }
@@ -2597,10 +2596,6 @@ _MOBILE_HTML = r"""<!doctype html>
       <label>Mobile token<input id="tokenInput" autocomplete="current-password" autocapitalize="none" spellcheck="false" /></label>
       <button class="primary" type="submit">로그인</button>
     </form>
-    <!-- 마리나 로그인은 두 겹이다: 계정 세션(비밀번호)과 이 폰의 모바일 토큰.
-         계정 세션이 만료되면 토큰을 아무리 넣어도 안 풀리는데, 설치형(PWA)엔 주소창이 없어
-         /login 으로 갈 방법이 아예 없었다(형: "여기서 다시 로긴 할 방법이 없다"). -->
-    <a class="loginAlt" href="/login?next=%2Fmobile">계정으로 로그인</a>
     <div class="status" id="loginStatus"></div>
   </section>
   <div id="mobileApp">
@@ -5273,29 +5268,6 @@ _MOBILE_HTML = r"""<!doctype html>
       loadServices(false);
       loadAgentUsage(session);
     }
-    // AUTH_GUARD_START
-    // **인증이 풀리면 어느 요청에서든 로그인으로 보낸다.**
-    // 예전엔 load() 하나만 401 을 처리해서, 대화를 보거나 답을 보내는 중에 세션이 풀리면
-    // "전송 실패 … 401" 같은 말만 뜨고 형은 아무 데도 못 갔다(설치형엔 주소창도 없다).
-    // 403(토큰이 틀림)은 여기서 안 다룬다 — 그건 이 폰의 토큰 문제라 토큰 화면이 맞다.
-    (function guardAuth() {
-      const 원래 = window.fetch;
-      let 이동중 = false;
-      window.fetch = async (input, init) => {
-        const response = await 원래(input, init);
-        try {
-          const url = String((input && input.url) || input || "");
-          const 마리나 = url.startsWith("/mobile/") || url.includes("/mobile/api/");
-          if (response.status === 401 && 마리나 && !이동중) {
-            이동중 = true;   // 폴이 여러 개면 여러 번 튄다
-            location.replace("/login?next=%2Fmobile");
-          }
-        } catch (e) { /* 판정 실패가 응답을 삼키면 안 된다 */ }
-        return response;
-      };
-    })();
-    // AUTH_GUARD_END
-
     async function load(options={}) {
       if (!cookieAuth && !token()) {
         showLogin("mobile token을 입력하세요.");
