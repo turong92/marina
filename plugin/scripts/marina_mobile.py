@@ -2294,7 +2294,12 @@ _MOBILE_HTML = r"""<!doctype html>
     p { margin: 0; color: #596070; line-height: 1.45; }
     main { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow: hidden; padding: 10px 12px; }
     label { display: flex; flex-direction: column; gap: 6px; font-size: 12px; font-weight: 700; color: #596070; }
-    select, textarea, input, button { width: 100%; box-sizing: border-box; border: 1px solid #ccd3dd; border-radius: 8px; background: #fff; color: #17191f; font: inherit; }
+    select, textarea, input, button { box-sizing: border-box; border: 1px solid #ccd3dd; border-radius: 8px; background: #fff; color: #17191f; font: inherit; }
+    /* 폭 100%는 **입력칸만**이다. 버튼까지 묶어놨더니 flex 줄에 놓인 버튼이 전부 줄 전체
+       너비를 flex-basis 로 들고 와서, 옆칸을 밀어내고 정작 제목은 24px 로 찌그러졌다
+       (실측: 방 패널의 끄기·지우기가 각각 309px). 헤더 버튼이 334px 로 부풀었던 것도 같은
+       뿌리다. 줄 전체를 채워야 하는 버튼은 자기 클래스에서 width:100% 를 말한다. */
+    select, textarea, input { width: 100%; }
     input { min-height: 42px; padding: 0 11px; }
     select, button { min-height: 42px; padding: 0 11px; }
     textarea { min-height: 92px; padding: 11px; resize: vertical; line-height: 1.45; }
@@ -2477,7 +2482,11 @@ _MOBILE_HTML = r"""<!doctype html>
     .session-card.active { border-color: #0b63ce; box-shadow: 0 0 0 1px #0b63ce inset; }
     .session-card-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
     .session-title { display: block; min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 850; line-height: 1.25; }
-    :root { --st-run: #1f9d6b; --st-boot: #c07f14; --st-err: #d13438; --st-stop: #8a8f98; --st-ask: #0b63ce; }
+    :root { --st-run: #1f9d6b; --st-boot: #c07f14; --st-err: #d13438; --st-stop: #8a8f98; --st-ask: #0b63ce;
+            /* 방 화면이 쓰는 토큰. **정의가 없으면 그 선언 전체가 무효**가 되어 테두리·배경이
+               통째로 사라진다(형: "카드 아름답게 깨진다") — 실측으로 방 패널의 탭·버튼·상자
+               테두리가 전부 0px none 이었다. 색은 이미 쓰던 값과 같다. */
+            --line: #e3e7ed; --panel: #f4f7fb; }
     .session-status { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
     .session-status-label { font-size: 10px; font-weight: 850; color: #747d8b; white-space: nowrap; }
     .wt-dot { flex: none; width: 13px; height: 13px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; line-height: 1; box-sizing: border-box; }
@@ -2631,7 +2640,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .activityImages { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
     /* 접힘 밖으로 끌어올린 결과 그림 — 대화를 그냥 읽어도 보여야 한다(형 요청) */
     .activityImages.hoisted { margin: 6px 0 2px; }
-    .activityOpen { flex: none; margin-left: 6px; padding: 1px 7px; border: 1px solid #ccd3dd; border-radius: 999px; background: transparent; color: #5b6678; font-size: 10.5px; }
+    .activityOpen { flex: none; min-width: 40px; margin-left: 6px; padding: 1px 7px; border: 1px solid #ccd3dd; border-radius: 999px; background: transparent; color: #5b6678; font-size: 10.5px; }
     .galleryBody { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 8px; padding: 10px 12px calc(14px + env(safe-area-inset-bottom)); overflow-y: auto; overscroll-behavior: contain; }
     .galleryStatus { color: #63708a; font-size: 11px; }
     .galleryGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 6px; }
@@ -2784,7 +2793,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .settingsBody select, .settingsBody input { min-height: 40px; }
     .inboxList { max-height: calc(78vh - 49px); overflow-y: auto; padding-bottom: max(14px, env(safe-area-inset-bottom)); }
     .inboxGroup { position: sticky; top: 0; z-index: 1; padding: 8px 12px 6px; border-bottom: 1px solid #e3e7ed; background: #fff; color: #747d8b; font-size: 10px; font-weight: 900; text-transform: uppercase; }
-    .inboxItem { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; align-items: center; min-height: 62px; padding: 9px 12px; border: 0; border-bottom: 1px solid #e3e7ed; border-radius: 0; color: inherit; text-align: left; }
+    .inboxItem { display: grid; width: 100%; grid-template-columns: auto minmax(0, 1fr) auto; gap: 9px; align-items: center; min-height: 62px; padding: 9px 12px; border: 0; border-bottom: 1px solid #e3e7ed; border-radius: 0; color: inherit; text-align: left; }
     .inboxItem.read { opacity: .62; }
     .inboxItemCopy { min-width: 0; }
     .inboxItemCopy strong, .inboxItemCopy small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -2803,7 +2812,8 @@ _MOBILE_HTML = r"""<!doctype html>
     .toast { position: fixed; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); z-index: 20; display: none; width: max-content; max-width: calc(100vw - 32px); padding: 9px 12px; transform: translateX(-50%); border-radius: 8px; background: #17191f; color: #fff; font-size: 12px; box-shadow: 0 8px 24px rgb(0 0 0 / 24%); }
     .toast.show { display: block; }
     @media (prefers-color-scheme: dark) {
-      :root { --st-run: #34c98e; --st-boot: #f0a132; --st-err: #e5484d; --st-stop: #5a5f6a; }
+      :root { --st-run: #34c98e; --st-boot: #f0a132; --st-err: #e5484d; --st-stop: #5a5f6a;
+              --line: #303846; --panel: #171d27; }
       body { background: #11151c; color: #f4f6f9; }
       header, select, textarea, input, button { background: #171d27; color: #f4f6f9; border-color: #303846; }
       label, p, .status { color: #a5adba; }
