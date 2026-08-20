@@ -207,6 +207,45 @@ def remove_git_worktree(source_repo: Path, target: Path, force: bool = False) ->
                 return {"removed": str(target), "orphanCleanup": True}
         return {"error": exc.output.strip() or str(exc), "path": str(target)}
 
+def stash_before_delete(root: Path, room_name: str = "") -> dict[str, Any]:
+    """지우기 전에 **잃을 게 없는 상태로 만든다** — 미커밋 변경을 wip 브랜치로 보관한다(스펙 §7).
+
+    막지 않고 보관하는 이유(형 지적 "내가 무조건 보는것도 아닐거같은데"): 차단은 사람의
+    주의력에 기대는 설계다. 형이 안 보면 그 방은 영영 안 치워지고 멤버는 할 수 있는 게 없다.
+    목표는 "삭제를 막는 것"이 아니라 **"작업을 잃지 않는 것"** 이라, 지우기 전에 커밋 한 번을
+    끼운다.
+
+    보관이 살아남는 근거: remove_worktree 의 브랜치 정리는 delete_merged_branch 라 **머지 안 된
+    브랜치는 지우지 않는다**. 폴더가 사라져도 작업은 브랜치에 남는다.
+
+    `wip/` 전용 브랜치로 뺀다(형 결정) — 원래 브랜치에 얹으면 그 이력에 '치우다 만 상태'가
+    섞인다. 이름에 방 이름과 날짜가 들어가 보관본이라는 게 이름에서 드러난다."""
+    def git(*args: str) -> str:
+        out = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=60)
+        if out.returncode != 0:
+            raise ValueError((out.stderr or out.stdout or "").strip()[:300])
+        return out.stdout
+
+    # 지울 게 없으면 아무것도 안 만든다 — 빈 보관 브랜치가 쌓이면 목록만 더러워진다.
+    if not git("status", "--porcelain").strip():
+        return {"branch": "", "saved": False}
+
+    현재 = git("branch", "--show-current").strip()
+    슬러그 = re.sub(r"[^0-9A-Za-z가-힣]+", "-", str(room_name or "")).strip("-")[:24] or "room"
+    이름 = f"wip/{슬러그}-{time.strftime('%Y%m%d-%H%M%S')}"
+    git("checkout", "-q", "-b", 이름)
+    try:
+        git("add", "-A")            # untracked 까지 — 새로 만든 파일이 제일 잃기 쉽다
+        git("-c", "user.email=marina@local", "-c", "user.name=marina",
+            "commit", "-q", "-m", f"wip: {room_name or '보관'} (지우기 전 자동 보관)")
+    finally:
+        # 원래 자리로 돌려놓는다 — 보관하느라 남의 브랜치를 옮겨두면 안 된다.
+        if 현재:
+            subprocess.run(["git", "-C", str(root), "checkout", "-q", 현재],
+                           capture_output=True, text=True)
+    return {"branch": 이름, "saved": True}
+
+
 def remove_worktree(root: Path, force: bool = False) -> dict[str, Any]:
     # 전역 대시보드는 프로젝트 worktree 밖(marina 레포)에서 돌므로 "자기 세션 삭제" 가드 불요.
     # 원본(main) 보호 — 레지스트리 root 일치(subrepos=[] 단일레포도 커버) 또는 서브레포 .git 존재.

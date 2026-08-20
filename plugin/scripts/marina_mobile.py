@@ -771,6 +771,59 @@ def mobile_rename_room(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "root": str(root), "name": str(saved.get("alias") or "")}
 
 
+# 대화 삭제 = **마리나에서만 치우기**. 원본은 그대로 둔다(스펙 §7) — 마리나가 남의 도구
+# 데이터를 지우면 사용량·재개·감사 근거가 통째로 없어진다. CLI 로 resume 하면 그대로 이어진다.
+#
+# 함정: 마리나는 세션을 **파일 스캔으로 발견한다**. 그래서 "목록에서 뺀다"는 잊는 걸로는 안 되고
+# **묘비를 저장해야** 한다 — 안 그러면 다음 폴에 되살아난다.
+FORGOTTEN_FILE = MARINA_HOME / "forgotten-chats.json"
+
+
+def forgotten_chats() -> list[str]:
+    """지운 대화 키("source:sid"). 서버 저장 — 폰에서 지운 게 웹에도 반영돼야 한다."""
+    raw = _read_json(FORGOTTEN_FILE)
+    keys = raw.get("keys") if isinstance(raw, dict) else None
+    return [str(item) for item in keys or [] if isinstance(item, str) and item.strip()]
+
+
+def mobile_remove_room(body: dict[str, Any]) -> dict[str, Any]:
+    """방을 지운다 — **먼저 보관하고** 지운다(스펙 §7, 형 결정 "1. 따로 빼 2. 지웠다고 해").
+
+    막지 않는 이유: 차단은 사람의 주의력에 기대는 설계라, 형이 안 보면 그 방은 영영 안 치워진다.
+    목표는 삭제를 막는 게 아니라 **작업을 잃지 않는 것**이다.
+
+    돌려주는 말에 보관 얘기는 **안 담는다**(형 결정). 멤버는 git 을 모르므로 "따로 저장해뒀어요"
+    는 안심이 아니라 물음표를 남긴다 — 보관 사실은 wip/ 브랜치와 감사 로그에서 드러난다."""
+    from marina_lifecycle import remove_worktree, stash_before_delete
+
+    root = safe_root(str(body.get("root") or ""))
+    name = str(body.get("name") or "")
+    보관 = {"branch": "", "saved": False}
+    try:
+        보관 = stash_before_delete(root, name)
+    except Exception as exc:
+        # 보관에 실패하면 **지우지 않는다.** 여기서 밀고 나가면 작업이 사라진다.
+        raise ValueError(f"보관하지 못해 지우지 않았어요 · {exc}")
+    remove_worktree(root, force=True)   # 보관했으므로 폐기해도 잃을 게 없다
+    return {"ok": True, "root": str(root), "stashed": 보관.get("branch") or ""}
+
+
+def mobile_forget_chat(body: dict[str, Any]) -> dict[str, Any]:
+    """대화를 마리나에서 치운다. **되돌릴 수 있다**(forget=false) — 원본이 남아 있으므로
+    실수로 지웠을 때 되살릴 길이 있어야 한다."""
+    source = str(body.get("source") or "")
+    sid = str(body.get("sid") or "")
+    if source not in ("claude", "codex") or not sid:
+        raise ValueError("source/sid 필요")
+    key = f"{source}:{sid}"
+    forget = body.get("forget")
+    keys = [item for item in forgotten_chats() if item != key]
+    if forget is None or bool(forget):
+        keys.insert(0, key)
+    _settings_file_update(FORGOTTEN_FILE, "keys", keys[:1000])
+    return {"ok": True, "keys": keys[:1000]}
+
+
 HIDDEN_FILE = MARINA_HOME / "hidden-sessions.json"
 
 
@@ -843,6 +896,9 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
     # (숨긴 failed 세션 하나 때문에 방이 영원히 "문제"로 남고, 방 화면에선 뺄 방법이 없다).
     hidden = mobile_hidden()
     hide = set(hidden)
+    # 지운 대화는 **전체보기에서도** 안 나온다 — 숨김("잠깐 접어둠")과 뜻이 다르다.
+    # 전체보기에서 되살아나면 지운 의미가 없다.
+    gone = set(forgotten_chats())
     # 질문 상태는 한 폴 안에서 **한 번만** 읽는다. 방 조립과 세션 목록이 따로 읽으면 워크트리
     # 28개 × 에이전트 수만큼 파일 열기가 두 배가 된다 — git 은 아끼면서 이걸 늘릴 이유가 없다.
     question_cache: dict[tuple[str, str], Any] = {}
@@ -866,7 +922,9 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
             }
             # **한 번만** 부른다. 방은 전부 필요하고(탭을 안 자른다) 카드는 상위 3개만 쓰므로,
             # 상한 없이 한 번 받아 잘라 쓴다. 두 번 부르면 세션 JSONL tail 파싱이 통째로 두 배다.
-            all_agents = agents_payload(root, refresh, include_all, limit=0)
+            # 지운 대화는 여기서 통째로 뺀다 — 방 탭에도, 세션 목록에도, 전체보기에도 안 나온다.
+            all_agents = [item for item in agents_payload(root, refresh, include_all, limit=0)
+                          if f"{item.get('source')}:{item.get('sid')}" not in gone]
             agents = all_agents[:AGENTS_MAX_PER_ROOT]   # status/reachable/승격 다 resolve_session_liveness 경유
             title = info.get("sessionTitle") or info.get("headSubject") or ""
             label = " · ".join(str(x) for x in (info.get("alias"), title, info.get("projectLabel"), info.get("id")) if x)
@@ -2233,6 +2291,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .roomTabRow { display: flex; gap: 6px; align-items: stretch; }
     .roomTabRow .roomTab { flex: 1 1 auto; min-width: 0; }
     .roomTab.off, .roomTab.stale { opacity: .55; }
+    .iconBtn.danger { color: #e5534b; }
     .roomTabUnhide { flex: 0 0 auto; padding: 0 10px; border: 1px solid var(--line);
                      border-radius: 8px; background: transparent; color: inherit;
                      font: inherit; font-size: 12px; cursor: pointer; }
@@ -3690,6 +3749,7 @@ _MOBILE_HTML = r"""<!doctype html>
         <span class="roomOpenTitle">${esc(room.name || room.shortName || "")}</span>
         <button class="iconBtn" type="button" data-rename="${esc(room.root)}" title="이름 바꾸기" aria-label="이름 바꾸기">✎</button>
         <button class="iconBtn" type="button" data-archive="${esc(room.root)}" title="접어두기" aria-label="접어두기">↓</button>
+        <button class="iconBtn danger" type="button" data-room-delete="${esc(room.root)}" title="방 지우기" aria-label="방 지우기">🗑</button>
         <button class="iconBtn" type="button" data-room-close="1" title="닫기" aria-label="닫기">✕</button>
       </div>`;
       // 로그인이 풀린 방에는 **여기서 푸는 길**을 준다. 예전엔 맥에 가야만 했다 —
@@ -3713,7 +3773,8 @@ _MOBILE_HTML = r"""<!doctype html>
         // 흐리기만 하면 "접힘"인지 "숨김"인지 구별이 안 된다.
         const 꼬리 = tab.hidden
           ? `<button class="roomTabUnhide" type="button" data-unhide="${esc(key)}">숨김 해제</button>`
-          : tab.stale ? '<span class="roomTabNote">오래됨</span>' : "";
+          : `<button class="roomTabUnhide" type="button" data-forget="${esc(key)}" title="이 대화 지우기">지우기</button>`
+            + (tab.stale ? '<span class="roomTabNote">오래됨</span>' : "");
         return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
       }).join("");
       return head + `<div class="roomTabs">${strip}</div>` + 시작줄;
@@ -6102,7 +6163,7 @@ _MOBILE_HTML = r"""<!doctype html>
       chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
     });
     roomOpen.addEventListener("click", async event => {
-      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code]");
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget]");
       if (!target) return;
       roomBusy = true;
       try { await handleRoomAction(target); } finally { roomBusy = false; }
@@ -6115,6 +6176,14 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       if (target.hasAttribute("data-room-relogin")) {
         await reloginRoom(target.getAttribute("data-room-relogin"), target);
+        return;
+      }
+      if (target.hasAttribute("data-room-delete")) {
+        await deleteRoom(target.getAttribute("data-room-delete"));
+        return;
+      }
+      if (target.hasAttribute("data-forget")) {
+        await forgetChat(target.getAttribute("data-forget"));
         return;
       }
       if (target.hasAttribute("data-unhide")) {
@@ -6197,6 +6266,40 @@ _MOBILE_HTML = r"""<!doctype html>
         await load({force: true});
       } catch (error) {
         showToast(`코드 전송 실패 · ${String(error)}`);
+      }
+    }
+
+    // 방 지우기 — 되돌릴 수 없으므로 한 번 묻는다. 미커밋 변경은 서버가 **먼저 보관**하고
+    // 지우므로 여기서 막지 않는다(스펙 §7). 보관 얘기는 형에게 안 한다 — 멤버에겐 물음표만 남는다.
+    async function deleteRoom(root) {
+      const room = roomByRoot(root);
+      if (!room) return;
+      if (!confirm(`"${room.name || room.shortName}" 을 지울까요?\n되돌릴 수 없어요.`)) return;
+      try {
+        const r = await fetch("/mobile/api/remove-room", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root, name: room.name || room.shortName || ""})});
+        if (!r.ok) throw new Error(await responseError(r));
+        closeRoom();
+        showToast("지웠어요");
+        await load({force: true});
+      } catch (error) {
+        showToast(`지우기 실패 · ${String(error)}`);
+      }
+    }
+    // 대화 지우기 — 마리나에서만 치운다(원본은 그대로). 워크트리는 안 건드린다.
+    async function forgetChat(key) {
+      const source = key.slice(0, key.indexOf(":"));
+      const sid = key.slice(key.indexOf(":") + 1);
+      if (!confirm("이 대화를 목록에서 지울까요?")) return;
+      try {
+        const r = await fetch("/mobile/api/forget-chat", {method: "POST", headers: headers(true),
+          body: JSON.stringify({source, sid, forget: true})});
+        if (!r.ok) throw new Error(await responseError(r));
+        showToast("지웠어요");
+        await load({force: true});
+        if (openRoomRoot) openRoom(openRoomRoot);
+      } catch (error) {
+        showToast(`지우기 실패 · ${String(error)}`);
       }
     }
 
