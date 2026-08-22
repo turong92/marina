@@ -2097,9 +2097,6 @@ def _drive_selector(tid: str, picks: Any, multi_select: bool, options: int = 0) 
     제출은 하지 않았다** — 형이 본 "첫 항목만 선택된 채 안 감"이 정확히 이 상태다(로그에도
     settled=False 로 남았다). 제출은 목록 안이 아니라 **오른쪽 Submit 창**에 있다.
     """
-    if isinstance(picks, dict) and picks.get("text") and multi_select:
-        # 위와 같은 이유. 이 경로로도 들어오면 안 된다 — 반쯤 채운 폼이 남는다.
-        raise ValueError("여러 개 고르는 질문이라 직접 입력은 안 돼요 — 골라서 답해주세요")
     if isinstance(picks, dict) and picks.get("text"):
         # 자유 입력 줄은 **옵션 다음 줄**이다(실물 관찰):
         #     단일: ❯ 1. 빨강  2. 파랑  3. 초록  4. Type something.
@@ -2112,9 +2109,16 @@ def _drive_selector(tid: str, picks: Any, multi_select: bool, options: int = 0) 
         term_input(tid, str(picks["text"])[:2000])
         _agent_input_pause()
         if multi_select:
-            # 다중선택에서는 친 순간 [✔] 로 체크된다 — 목록 안 Enter 는 확정이 아니라 토글이고,
-            # 제출은 오른쪽 Submit 창이다(기존 다중선택 계약과 같다).
-            term_input(tid, "\x1b[C")
+            # 다중선택은 친 순간 [✔] 로 체크되지만 **제출이 한 단계 더 있다.** 화면을 키마다
+            # 찍어 확인한 순서(2026-08-22):
+            #     Tab      → 포커스가 `❯Submit` 으로 (화살표는 입력칸이 먹으므로 Tab 이어야 한다)
+            #     Enter    → `Ready to submit your answers?` 확인 화면
+            #     Enter    → 제출 (`✓ AskUserQuestion ×1`)
+            # 트랜스크립트로 끝까지 확인했다: 쓴 문장이 그대로 답으로 기록된다.
+            term_input(tid, "\t")
+            _agent_input_pause()
+            term_input(tid, "\r")
+            _agent_input_pause()
         term_input(tid, "\r")
         return
     if not multi_select:
@@ -2217,12 +2221,6 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         pending = mobile_pending_question(source, sid) or {}
         questions = pending.get("questions") or []
         first = questions[0] if questions and isinstance(questions[0], dict) else {}
-        if first.get("multiSelect"):
-            # 여러 개 고르는 질문에는 글로 답할 수가 없다. 자유 입력 줄에 글자를 넣는 것까지는
-            # 되는데 **입력칸을 빠져나와 Submit 으로 가는 키가 없다** — 실 CLI 로 네 가지
-            # 순서를 다 돌려봤다(→/Tab/Enter 는 제출 안 됨, ↑ 는 "답 안 함"으로 닫힘).
-            # 반쯤 채워두고 성공했다고 답하느니 여기서 멈춘다.
-            raise ValueError("여러 개 고르는 질문이라 직접 입력은 안 돼요 — 골라서 답해주세요")
         options = first.get("options") if isinstance(first.get("options"), list) else None
         if not options:
             # 옵션 수를 모르면 **몇 칸 내려가야 하는지 모른다.** 찍어서 내려가면 엉뚱한 옵션

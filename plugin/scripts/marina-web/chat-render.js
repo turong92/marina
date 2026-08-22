@@ -631,15 +631,9 @@
         // 되는 선택지가 마리나에서만 사라진다 — 형: "모든 질문에 기타입력 있어야 하는거 아니니?".
         // 상태는 **질문별(qi)** 로 갖는다. 폼 전체에 하나면 질문이 여러 개일 때 어느 질문의 기타인지
         // 표현할 수가 없어서, 예전엔 그 김에 다중선택·복수질문을 통째로 막아뒀었다.
-        // **여러 개 고르는 질문에서는 직접 입력을 못 준다.** 실증(2026-08-22): 자유 입력 줄에
-        // 글자를 넣는 것까지는 되는데, 그 뒤 입력칸을 빠져나와 Submit 으로 가는 키가 없다.
-        // 네 가지 순서를 실제 CLI 로 다 돌려봤다 — 제출이 안 되거나(→/Tab/Enter), 아예
-        // "답 안 함"으로 닫힌다(↑). 될 것처럼 칸만 띄워두면 형은 썼는데 안 가는 걸 또 겪는다.
-        const 다중 = Boolean(q && q.multiSelect);
         const otherOpen = Boolean(state && state.otherOpen && state.otherOpen[qi]);
         const otherText = (state && state.otherText && state.otherText[qi]) || "";
-        const other = 다중 ? `<span class="questionOtherOff">직접 입력은 이 질문에선 안 돼요 — 골라서 답해주세요</span>`
-          : !(interactive && !locked) ? ""
+        const other = !(interactive && !locked) ? ""
           : otherOpen
           ? `<div class="questionOtherRow" data-question-other-row><input class="questionOtherInput" type="text" data-answer-other-input data-answer-q="${qi}" placeholder="직접 입력..." value="${esc(otherText)}" enterkeyhint="send" autocomplete="off" /><button class="primary questionOtherSend" type="button" data-answer-other-send data-answer-q="${qi}">보내기</button></div>`
           : `<button class="questionOpt questionOther" type="button" data-answer-other data-answer-q="${qi}">&#9998; 기타 (직접 입력)</button>`;

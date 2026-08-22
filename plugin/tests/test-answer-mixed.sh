@@ -38,38 +38,23 @@ mm._agent_input_pause = lambda: None
 mm._drive_selector("t", {"text": "노랑"}, False, 3)
 assert "".join(키) == "\x1b[B" * 3 + "노랑" + "\r", 키
 
-# ③ **다중선택에는 글로 답할 수 없다.** 자유 입력 줄에 글자를 넣는 것까지는 되는데 입력칸을
-#    빠져나와 Submit 으로 가는 키가 없다 — 실 CLI 로 네 순서를 다 돌렸다(→/Tab/Enter 는 제출
-#    안 됨, ↑ 는 "답 안 함"으로 닫힘). 반쯤 채운 폼을 남기느니 거절한다.
+# ③ 다중선택 자유 입력 = ↓×(옵션 수) → 타이핑 → **Tab → Enter → Enter**.
+#    화면을 키마다 찍어 확인한 순서다(2026-08-22): 화살표는 입력칸이 먹으므로 Tab 이라야
+#    포커스가 `❯Submit` 으로 가고, 첫 Enter 는 "Ready to submit your answers?" 확인 화면,
+#    두 번째 Enter 가 제출이다. 트랜스크립트로 끝까지 확인:
+#      The user answered: "좋아하는 색 다 골라"="형광 노랑이 제일 좋아(다중)"
 키.clear()
-try:
-    mm._drive_selector("t", {"text": "노랑"}, True, 3)
-    raise AssertionError("다중선택에 글을 밀어넣는다 — 폼이 반쯤 채워진 채 남는다")
-except ValueError:
-    pass
-assert not 키, f"거절하면서 키를 보냈다: {키}"
+mm._drive_selector("t", {"text": "노랑"}, True, 3)
+assert "".join(키) == "\x1b[B" * 3 + "노랑" + "\t" + "\r" + "\r", 키
 
 # ④ 고르는 경우는 예전 그대로다.
 키.clear()
 mm._drive_selector("t", [2], False, 3)
 assert "".join(키) == "\x1b[B\x1b[B" + "\r", 키
-print("ok 질문별로 골라도 되고 써도 된다 · 다중선택 글답은 거절")
+print("ok 질문별로 골라도 되고 써도 된다 · 단일/다중 각각의 확정 키")
 PY
 
-# ⑤ 화면: 다중선택 질문에는 기타 입력칸을 아예 안 준다 — 될 것처럼 띄워두면 형은 썼는데
-#    안 가는 걸 또 겪는다.
-PYTHONPATH="$SCR" python3 - "$SCR" <<'PY3'
-import sys
-from pathlib import Path
-
-렌더 = (Path(sys.argv[1]) / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
-블록 = 렌더[렌더.find("const otherOpen"):][:900]
-assert "multiSelect" in 렌더[렌더.find("const 다중"):렌더.find("const otherOpen")], "다중선택 판정이 없다"
-assert "questionOtherOff" in 블록 or "questionOtherOff" in 렌더, "다중선택에서 기타 칸을 그대로 준다"
-print("ok 화면: 다중선택엔 직접 입력칸을 안 준다")
-PY3
-
-# ⑥ 화면: 질문별 기타 입력이 폼 전체를 덮어쓰지 않는다.
+# ⑤ 화면: 질문별 기타 입력이 폼 전체를 덮어쓰지 않는다.
 PYTHONPATH="$SCR" python3 - <<'PY2'
 from marina_mobile import render_mobile_html
 
