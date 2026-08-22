@@ -651,6 +651,12 @@
       const submit = interactive && needsSubmit
         ? `<div class="questionSubmitRow"><button class="primary questionSubmit" type="button" data-answer-submit${answered === questions.length && !locked ? "" : " disabled"}>${submitLabel}</button></div>`
         : "";
+      // **접는 길.** 예전엔 답하거나 방치하거나 둘뿐이라, 답하기 싫은 질문이 뜨면 에이전트가
+      // 계속 기다렸다(형: "질문 취소는? 취소버튼 이런것도 없잖아"). CLI 셀렉터 맨 끝의
+      // `Chat about this` 줄이 그 길이고, 고르면 "이 질문 말고 얘기하고 싶어한다"로 전달된다.
+      const dismiss = interactive && !locked
+        ? `<div class="questionDismissRow"><button class="questionDismiss" type="button" data-answer-dismiss>질문 접고 그냥 얘기할래</button></div>`
+        : "";
       const busy = sending && !needsSubmit ? `<div class="questionMore">보내는 중...</div>`
         : submitted && !needsSubmit ? `<div class="questionMore">보냈어요 · 반영을 기다리는 중</div>` : "";
       const failed = state && state.failed
@@ -661,7 +667,7 @@
             ? `<div class="questionBlocked">이 세션 터미널을 marina 가 쥐고 있지 않아, 고르면 세션을 이어받아 답을 전달해요${"\u0020"}(작업 중이면 끝난 뒤에)</div>`
             : "")
         : `<div class="questionBlocked">${esc((state && state.reason) || "여기서는 답할 수 없어요")}</div>`;
-      return `<div class="questionCard${submitted ? " submitted" : ""}">${blocks}${submit}${busy}${failed}${note}</div>`;
+      return `<div class="questionCard${submitted ? " submitted" : ""}">${blocks}${submit}${dismiss}${busy}${failed}${note}</div>`;
     }
     // THINKING_BUBBLE_START
     // 답이 나올 자리에서 도는 표시. 헤더의 "작업 중…" 은 대화와 떨어져 있어 와닿지 않는다

@@ -2190,6 +2190,7 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
     if source != "claude":
         raise ValueError("이 질문 응답은 Claude 세션만 지원해요")
     answer_text = str(body.get("text") or "")
+    dismiss = bool(body.get("dismiss"))
     tid = _live_agent_tid(root, source, sid)
     if not tid:
         # 셀렉터를 쥔 PTY 가 없다 = 그 프로세스는 죽었거나 marina 밖에서 돈다. 예전엔 여기서 막았는데,
@@ -2206,6 +2207,25 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         return {**result, "viaResume": True, "settled": True,
                 "delivery": result.get("delivery") or "resume"}
     before = _question_state_token(sid)
+    if dismiss:
+        # **질문 접기.** 셀렉터 맨 끝에 그 길이 있다(실물 확인 2026-08-22):
+        #     ❯ 1. 빨강  2. 파랑  3. 초록  4. Type something.  5. Chat about this
+        # 마지막 줄을 고르면 질문이 닫히고 에이전트는 "이 질문 말고 얘기하고 싶어한다"로 받는다.
+        # 예전엔 접을 길이 아예 없어서, 답하기 싫은 질문이 뜨면 방치하는 수밖에 없었고
+        # 그동안 에이전트는 계속 기다렸다(형 지적).
+        pending = mobile_pending_question(source, sid) or {}
+        questions = pending.get("questions") or []
+        first = questions[0] if questions and isinstance(questions[0], dict) else {}
+        options = first.get("options") if isinstance(first.get("options"), list) else None
+        if not options:
+            # 몇 칸 내려가야 할지 모르면 누르지 않는다 — 엉뚱한 줄에서 Enter 는 오답이 된다.
+            raise ValueError("이 질문은 여기서 접을 수 없어요 — 골라서 답해주세요")
+        _answer_log("dismiss: 옵션 %d개 → ↓%d(Chat about this)" % (len(options), len(options) + 1))
+        term_input(tid, "\x1b[B" * (len(options) + 1))
+        _agent_input_pause()
+        term_input(tid, "\r")
+        settled = _await_answer_settled(sid, before)
+        return {"ok": True, "tid": tid, "dismissed": True, "settled": settled}
     if answer_text:
         # **직접 쓴 답은 목록 맨 끝의 자유 입력 줄에서 친다.**
         #
@@ -2839,6 +2859,9 @@ _MOBILE_HTML = r"""<!doctype html>
     .questionCard.submitted { opacity: .62; border-style: dashed; }
     .questionOpt.answered { min-height: 0; cursor: default; }
     .questionOtherOff { padding: 6px 2px; font-size: 11px; color: #63708a; }
+    .questionDismissRow { display: flex; justify-content: center; padding-top: 2px; }
+    .questionDismiss { width: auto; min-height: 32px; padding: 0 12px; border: 0; background: transparent;
+                       color: #63708a; font-size: 11px; text-decoration: underline; }
     .questionSubmitRow { display: flex; }
     .questionSubmit { width: 100%; min-height: 40px; }
     .questionFailed { padding: 7px 9px; border-radius: 7px; background: #fdecec; color: #a02222; font-size: 11px; line-height: 1.45; }
@@ -3368,6 +3391,8 @@ _MOBILE_HTML = r"""<!doctype html>
         if (chosen.every(list => list.length)) submitLiveAnswer();
         return;
       }
+      const 접기 = event.target.closest && event.target.closest("[data-answer-dismiss]");
+      if (접기) { dismissLiveQuestion(); return; }
       const otherBtn = event.target.closest && event.target.closest("[data-answer-other]");
       if (otherBtn) {
         liveAnswer.otherOpen[answerQIndex(otherBtn)] = true;   // 상태로 열어서 템플릿이 그린다(imperative style 금지)
@@ -3386,6 +3411,20 @@ _MOBILE_HTML = r"""<!doctype html>
     function answerQIndex(el) {
       const raw = parseInt((el && el.getAttribute("data-answer-q")) || "0", 10);
       return Number.isNaN(raw) ? 0 : raw;
+    }
+    // 질문 접기 — 답 대신 "그냥 얘기하자"로 닫는다. 서버가 셀렉터의 `Chat about this` 줄을 고른다.
+    async function dismissLiveQuestion() {
+      if (liveAnswer.sending || liveAnswer.submitted) return;
+      markAnswerSubmitted(true, Date.now());
+      repaintLiveQuestion();
+      const result = await answerQuestion({dismiss: true});
+      if (!result || result.settled === false) {
+        markAnswerSubmitted(false, Date.now());
+        repaintLiveQuestion();
+        showToast("질문을 못 접었어요 — 다시 눌러보세요");
+        return;
+      }
+      showToast("질문을 접었어요 — 그냥 말하면 돼요");
     }
     function sendLiveOther(qi) {
       const input = liveQuestionEl.querySelector(`[data-answer-other-input][data-answer-q="${qi}"]`)
@@ -6205,7 +6244,8 @@ _MOBILE_HTML = r"""<!doctype html>
       statusEl.textContent = "응답 전송 중...";
       try {
         const body = {root: sessionRoot(), target: {type: "agent", source, sid}};
-        if (payload && payload.text != null) body.text = payload.text;
+        if (payload && payload.dismiss) body.dismiss = true;
+        else if (payload && payload.text != null) body.text = payload.text;
         else if (Array.isArray(payload && payload.answers)) body.answers = payload.answers;
         else if (Array.isArray(payload && payload.optionIndexes)) body.optionIndexes = payload.optionIndexes;
         else body.optionIndex = (payload && payload.optionIndex) || 0;
