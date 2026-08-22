@@ -2030,10 +2030,14 @@ def _await_answer_settled(sid: str, before: str, questions: int = 1) -> bool:
     return False
 
 
-def _parse_answers(body: dict[str, Any]) -> list[list[int]]:
-    """질문별 선택지. 질문 하나당 **여러 개**일 수 있다(multiSelect).
+def _parse_answers(body: dict[str, Any]) -> list[Any]:
+    """질문별 답. 질문 하나당 **여러 개**일 수 있고(multiSelect), **직접 쓴 글**일 수도 있다.
 
-    받는 형태 셋 — 새 것부터: answers=[[0,2],[1]] · optionIndexes=[0,1] · optionIndex=0.
+    받는 형태 — 새 것부터:
+        answers=[[0,2], {"text": "직접 쓴 답"}, [1]] · optionIndexes=[0,1] · optionIndex=0
+
+    질문별 텍스트가 필요한 이유: 예전엔 자유 입력이 "폼 전체에 텍스트 하나"였다. 질문 3개짜리
+    폼에서 2번만 직접 쓰면 나머지 두 질문의 선택이 통째로 버려졌다.
     """
     raw = body.get("answers")
     if raw is None:
@@ -2045,8 +2049,17 @@ def _parse_answers(body: dict[str, Any]) -> list[list[int]]:
         raise ValueError("optionIndex 필요")
     if len(raw) > 20:
         raise ValueError("질문이 너무 많아요")
-    answers: list[list[int]] = []
+    answers: list[Any] = []
     for entry in raw:
+        # 직접 쓴 답 — {"text": "…"} 또는 그냥 문자열.
+        글 = entry.get("text") if isinstance(entry, dict) else (entry if isinstance(entry, str) else None)
+        if 글 is not None:
+            글 = str(글).strip()
+            if not 글:
+                # 빈 칸을 답으로 받아주면 셀렉터에서 조용히 1번이 확정된다 — 그게 이 버그였다.
+                raise ValueError("답을 쓰거나 하나 골라주세요")
+            answers.append({"text": 글[:2000]})
+            continue
         values = entry if isinstance(entry, list) else [entry]
         if not values:
             raise ValueError("질문마다 최소 하나는 골라야 해요")
@@ -2066,7 +2079,7 @@ def _parse_answers(body: dict[str, Any]) -> list[list[int]]:
     return answers
 
 
-def _drive_selector(tid: str, picks: list[int], multi_select: bool) -> None:
+def _drive_selector(tid: str, picks: Any, multi_select: bool, options: int = 0) -> None:
     """셀렉터 한 개를 구동한다. 커서는 첫 옵션에서 시작한다고 가정.
 
     단일선택: 아래로 N칸 → Enter.
@@ -2084,6 +2097,23 @@ def _drive_selector(tid: str, picks: list[int], multi_select: bool) -> None:
     제출은 하지 않았다** — 형이 본 "첫 항목만 선택된 채 안 감"이 정확히 이 상태다(로그에도
     settled=False 로 남았다). 제출은 목록 안이 아니라 **오른쪽 Submit 창**에 있다.
     """
+    if isinstance(picks, dict) and picks.get("text"):
+        # 자유 입력 줄은 **옵션 다음 줄**이다(실물 관찰):
+        #     단일: ❯ 1. 빨강  2. 파랑  3. 초록  4. Type something.
+        #     다중: ❯ 1. [ ] 빨강  2. [ ] 파랑  3. [ ] 초록  4. [ ] Type something
+        # 그 줄로 내려가면 거기서 입력칸이 열리고, 친 글자가 그 줄에 찍힌다.
+        # 커서를 안 옮기고 그냥 치면 글자는 버려지고 Enter 가 1번 옵션을 확정한다(형이 겪은 그 일).
+        if options > 0:
+            term_input(tid, "\x1b[B" * options)
+            _agent_input_pause()
+        term_input(tid, str(picks["text"])[:2000])
+        _agent_input_pause()
+        if multi_select:
+            # 다중선택에서는 친 순간 [✔] 로 체크된다 — 목록 안 Enter 는 확정이 아니라 토글이고,
+            # 제출은 오른쪽 Submit 창이다(기존 다중선택 계약과 같다).
+            term_input(tid, "\x1b[C")
+        term_input(tid, "\r")
+        return
     if not multi_select:
         target = picks[0] if picks else 0
         if target:
@@ -2113,6 +2143,11 @@ def _answer_as_text(questions: list[Any], answers: list[list[int]]) -> str:
         question = questions[position] if position < len(questions) else {}
         question = question if isinstance(question, dict) else {}
         options = question.get("options") if isinstance(question.get("options"), list) else []
+        title = str(question.get("header") or question.get("question") or f"질문 {position + 1}").strip()
+        if isinstance(picks, dict):
+            # 직접 쓴 답 — 라벨로 옮길 게 없으니 형이 쓴 문장을 그대로 싣는다.
+            lines.append(f"{title}: {str(picks.get('text') or '').strip()}")
+            continue
         labels: list[str] = []
         for index in picks:
             option = options[index] if index < len(options) else None
@@ -2120,7 +2155,6 @@ def _answer_as_text(questions: list[Any], answers: list[list[int]]) -> str:
                 labels.append(str(option.get("label") or option.get("value") or f"옵션 {index + 1}"))
             else:
                 labels.append(f"옵션 {index + 1}")
-        title = str(question.get("header") or question.get("question") or f"질문 {position + 1}").strip()
         lines.append(f"{title}: {', '.join(labels)}" if labels else title)
     return "[모바일에서 선택]\n" + "\n".join(lines)
 
@@ -2219,7 +2253,8 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         mark = term_output_mark(tid)
         question = questions[position] if position < len(questions) else {}
         multi_select = bool(isinstance(question, dict) and question.get("multiSelect"))
-        _drive_selector(tid, picks, multi_select)
+        옵션수 = len(question.get("options") or []) if isinstance(question, dict) else 0
+        _drive_selector(tid, picks, multi_select, 옵션수)
     # **여러 질문 폼은 마지막에 제출 화면이 따로 뜬다.** 실측으로 확인한 화면(2026-08-17):
     #
     #     ← ☒방향  ☒범위  ✔ Submit →
@@ -3350,10 +3385,18 @@ _MOBILE_HTML = r"""<!doctype html>
       const text = (input ? input.value : liveAnswer.otherText[qi] || "").trim();
       if (!text) { if (input) input.focus(); return; }
       liveAnswer.otherText[qi] = text;
-      // 지금 서버 계약은 자유입력을 **폼 단위 텍스트 하나**로만 받는다(_parse_answers 는 정수 배열만).
-      // 그래서 여기서 질문별로 섞어 보내는 형식을 지어내면 서버가 못 읽는다 — 질문별 기타 혼합은
-      // 서버 계약을 넓힌 뒤(2단계) 붙인다. 지금은 어느 질문에서 눌렀든 그 텍스트로 답한다.
-      submitLiveAnswer({text});
+      // **질문별로** 보낸다. 예전엔 어느 질문에서 눌렀든 폼 전체를 그 텍스트 하나로 답했고,
+      // 그래서 질문 3개짜리에서 2번만 직접 쓰면 나머지 두 질문의 선택이 통째로 버려졌다.
+      // 서버 계약(_parse_answers)이 [정수…] 와 {text} 를 섞어 받는다.
+      const answers = Array.from({length: liveAnswer.total}, (_, i) => {
+        const 글 = (liveAnswer.otherText[i] || "").trim();
+        if (i === qi || (글 && !(liveAnswer.choices[i] || []).length)) return {text: i === qi ? text : 글};
+        return liveAnswer.choices[i] || [];
+      });
+      // 아직 답하지 않은 질문이 있으면 보내지 않는다 — 빈 칸으로 보내면 셀렉터에서 1번이 확정된다.
+      const 빈질문 = answers.findIndex(a => Array.isArray(a) ? !a.length : !(a.text || "").trim());
+      if (빈질문 >= 0) { showToast(`${빈질문 + 1}번 질문에 아직 답을 안 했어요`); return; }
+      submitLiveAnswer({answers});
     }
     // 입력값을 state 에 계속 보관 — 재렌더가 일어나도 값이 살아남는다.
     liveQuestionEl.addEventListener("input", event => {

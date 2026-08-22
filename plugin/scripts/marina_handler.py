@@ -44,7 +44,7 @@ from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_acce
 from marina_sessions import agent_activity, agent_belongs_to_root, agent_session_file_bytes, agent_session_files, agent_transcript, agent_transcript_image, agent_transcript_images, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
-from marina_rooms import preview_service as _preview_service
+from marina_rooms import change_summary as _change_summary, preview_service as _preview_service
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 from marina_auth_http import AUTH_DENIED, auth_controller
 from marina_access import AccessPolicy, canonical_agent, canonical_root
@@ -85,6 +85,20 @@ def render_index_html() -> str:
     """marina-web/index.html 을 읽어 빌드 SHA 토큰을 치환해 반환 (프론트엔드는 marina-web/ 로 분리)."""
     html = (_WEB_DIR / "index.html").read_text(encoding="utf-8")
     return html.replace("{{MARINA_BUILD}}", _serving_sha() or "dev")
+
+def _changed_paths(root: Path) -> list[str] | None:
+    """이 워크트리에서 바뀐 파일 경로. 완료 판정이 이미 뽑아 캐시에 담아둔 것을 그대로 쓴다
+    (git 을 새로 부르지 않는다).
+
+    **비어 있으면 None 이다 — "아무것도 안 건드렸다"가 아니라 "모른다".** 커밋까지 끝낸 방은
+    미커밋 경로가 0 이라 여기서 빈 목록이 나오는데, 그걸 "앱을 안 건드렸다"로 읽으면 멀쩡한
+    방에서 [화면 보기]가 사라진다(실측: 배포 파이프라인 방). 모를 때는 막지 않는다."""
+    try:
+        경로들 = list((_change_summary(root) or {}).get("paths") or [])
+    except Exception:
+        return None
+    return 경로들 or None
+
 
 class Handler(BaseHTTPRequestHandler):
     def _remote_controller(self) -> RemoteController:
@@ -759,7 +773,10 @@ class Handler(BaseHTTPRequestHandler):
                     "defined": len(services), "services": services,
                     # 완료 카드가 열 서비스 — 고르는 규칙은 **여기 하나**다(화면에서 또 고르면
                     # 두 벌이 갈라져 한쪽만 엉뚱한 걸 켠다).
-                    "preview": _preview_service(services),
+                    # 바뀐 파일까지 넘긴다 — 앱을 안 건드린 방(문서만 고친 방)에서는
+                    # [화면 보기]가 뜨면 안 된다(헛걸음 + 서버 1분 기다림).
+                    "preview": _preview_service(session.get("services") or [],
+                                                changed=_changed_paths(root)),
                 })
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
@@ -1842,7 +1859,7 @@ class Handler(BaseHTTPRequestHandler):
                     if not self._require_root_access(root):
                         return
                     services = (session_payload(root) or {}).get("services") or []
-                    service = _preview_service(services)
+                    service = _preview_service(services, changed=_changed_paths(root))
                     if not service:
                         raise ValueError("이 방엔 열어볼 화면이 없어요")
                     if not any(item.get("running") for item in services

@@ -57,6 +57,7 @@ _changes_cache: dict[str, tuple[float, bool]] = {}
 # 완료 카드용 요약 — **같은 git 호출의 출력**에서 뽑는다(또 부르면 순수한 낭비다).
 _summary_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _SUMMARY_NAMES_MAX = 4      # 카드 한 장에 들어갈 만큼만
+_SUMMARY_PATHS_MAX = 200    # "앱을 건드렸나" 판단용 — 목록이 아니라 표본이다
 # 데몬은 요청마다 스레드다. dict 갱신 자체는 GIL 덕에 깨지지 않지만, 청소 중에 크기가
 # 바뀌면 순회가 터진다 — 청소만 잠근다(읽기·쓰기는 잠그지 않는다. 최악이 git 한 번 더다).
 _changes_lock = threading.Lock()
@@ -176,6 +177,9 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
             "files": len(경로들),
             # 폰에서 전체 경로는 못 읽는다 — 파일명만 몇 개.
             "names": [part.rstrip("/").split("/")[-1] for part in 경로들[:_SUMMARY_NAMES_MAX]],
+            # **경로는 따로 담는다.** 화면에 쓰는 게 아니라, 이 방이 앱을 건드렸는지 판단하는
+            # 재료다(preview_service). 카드 이름과 달리 앞뒤 폴더가 있어야 판단이 된다.
+            "paths": 경로들[:_SUMMARY_PATHS_MAX],
         })
         dirty = bool(경로들)
         # 미커밋이 이미 있으면 커밋 쪽은 볼 필요가 없다 — git 한 번을 아낀다.
@@ -266,8 +270,8 @@ def change_summary(root: Path, *, runner: Callable[[list[str], Path], str] = Non
         # git 이 계속 실패하면 판정만 갱신되고 요약은 낡은 채 남는다(실패 캐시가 더 길다).
         # 낡은 숫자를 "지금 이만큼 바뀌었다"로 내놓느니 모른다고 하는 게 낫다.
         if cached is not None and current >= cached[0]:
-            return {"files": 0, "names": [], "commits": 0}
-    return dict(cached[1]) if cached else {"files": 0, "names": [], "commits": 0}
+            return {"files": 0, "names": [], "commits": 0, "paths": []}
+    return dict(cached[1]) if cached else {"files": 0, "names": [], "commits": 0, "paths": []}
 
 
 def branch_from_text(text: str, *, salt: str = "") -> str:
@@ -303,7 +307,19 @@ _INFRA_NAMES = ("mysql", "mariadb", "postgres", "postgresql", "db", "redis", "ka
                 "mongodb", "minio", "localstack")
 
 
-def preview_service(services: list[dict[str, Any]]) -> str:
+def _touched(service: dict[str, Any], changed: list[str]) -> bool:
+    """이 서비스의 폴더 안에서 뭔가 바뀌었나.
+
+    compose 빌드 컨텍스트(subrepo)가 그 서비스의 소스 폴더다. 매핑이 없으면 **판단하지
+    않는다**(True) — 몰라서 숨기면 멀쩡한 미리보기 길을 막는다."""
+    폴더 = str(service.get("subrepo") or "").strip("/")
+    if not 폴더:
+        return True
+    return any(str(path).strip("/").startswith(폴더 + "/") or str(path).strip("/") == 폴더
+               for path in changed)
+
+
+def preview_service(services: list[dict[str, Any]], changed: list[str] = None) -> str:
     """완료 카드의 [화면 보기] 가 열어야 할 서비스.
 
     일이 끝난 방은 대개 서버가 꺼져 있다(실측: 완료 방 4개 중 3개가 도는 서비스 0개).
@@ -318,6 +334,17 @@ def preview_service(services: list[dict[str, Any]]) -> str:
         return str(item.get("service") or "")
 
     앱들 = [item for item in items if 이름(item).lower() in _PREVIEW_NAMES]
+    # **이 방이 앱을 건드렸나.** 문서만 바꾼 방에서 앱을 켜봐야 형이 볼 것은 없다(실측:
+    # tasks/…/README.md 하나 바꾼 방에 [화면 보기]가 떠서 web 을 1분 켜고 기다렸다).
+    # 단 이미 도는 앱은 그대로 둔다 — 켜져 있는 걸 숨길 이유가 없다.
+    # 서비스 폴더를 하나도 모르면(모두 subrepo 없음) 이 판단 자체를 건너뛴다.
+    if changed is not None and 앱들 and any(item.get("subrepo") for item in items):
+        건드림 = [item for item in 앱들 if item.get("running") or _touched(item, changed)]
+        # 앱 폴더는 안 건드렸어도 **다른 서비스**(API·배치)를 건드렸으면 그 결과는 앱 화면에
+        # 나타난다 — 그때는 앱을 연다. 아무 서비스도 안 건드렸을 때만 안 띄운다.
+        if not 건드림 and any(_touched(item, changed) for item in items if item.get("subrepo")):
+            건드림 = 앱들
+        앱들 = 건드림
     if 앱들:
         # 같은 앱이 이미 돌고 있으면 그걸 쓴다(켜고 기다릴 이유가 없다), 아니면 이름 우선순위대로.
         도는앱 = [item for item in 앱들 if item.get("running")]
