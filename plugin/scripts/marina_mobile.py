@@ -2097,6 +2097,9 @@ def _drive_selector(tid: str, picks: Any, multi_select: bool, options: int = 0) 
     제출은 하지 않았다** — 형이 본 "첫 항목만 선택된 채 안 감"이 정확히 이 상태다(로그에도
     settled=False 로 남았다). 제출은 목록 안이 아니라 **오른쪽 Submit 창**에 있다.
     """
+    if isinstance(picks, dict) and picks.get("text") and multi_select:
+        # 위와 같은 이유. 이 경로로도 들어오면 안 된다 — 반쯤 채운 폼이 남는다.
+        raise ValueError("여러 개 고르는 질문이라 직접 입력은 안 돼요 — 골라서 답해주세요")
     if isinstance(picks, dict) and picks.get("text"):
         # 자유 입력 줄은 **옵션 다음 줄**이다(실물 관찰):
         #     단일: ❯ 1. 빨강  2. 파랑  3. 초록  4. Type something.
@@ -2214,6 +2217,12 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
         pending = mobile_pending_question(source, sid) or {}
         questions = pending.get("questions") or []
         first = questions[0] if questions and isinstance(questions[0], dict) else {}
+        if first.get("multiSelect"):
+            # 여러 개 고르는 질문에는 글로 답할 수가 없다. 자유 입력 줄에 글자를 넣는 것까지는
+            # 되는데 **입력칸을 빠져나와 Submit 으로 가는 키가 없다** — 실 CLI 로 네 가지
+            # 순서를 다 돌려봤다(→/Tab/Enter 는 제출 안 됨, ↑ 는 "답 안 함"으로 닫힘).
+            # 반쯤 채워두고 성공했다고 답하느니 여기서 멈춘다.
+            raise ValueError("여러 개 고르는 질문이라 직접 입력은 안 돼요 — 골라서 답해주세요")
         options = first.get("options") if isinstance(first.get("options"), list) else None
         if not options:
             # 옵션 수를 모르면 **몇 칸 내려가야 하는지 모른다.** 찍어서 내려가면 엉뚱한 옵션
@@ -2831,6 +2840,7 @@ _MOBILE_HTML = r"""<!doctype html>
     /* 보냈지만 서버가 아직 안 내린 카드 — 눌리지 않는다는 걸 눈으로도 알려준다. */
     .questionCard.submitted { opacity: .62; border-style: dashed; }
     .questionOpt.answered { min-height: 0; cursor: default; }
+    .questionOtherOff { padding: 6px 2px; font-size: 11px; color: #63708a; }
     .questionSubmitRow { display: flex; }
     .questionSubmit { width: 100%; min-height: 40px; }
     .questionFailed { padding: 7px 9px; border-radius: 7px; background: #fdecec; color: #a02222; font-size: 11px; line-height: 1.45; }

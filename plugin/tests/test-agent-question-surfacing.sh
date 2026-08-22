@@ -249,9 +249,14 @@ function activityFor(questions) {
   assert.ok(!none.includes("questionOptMark"), "선택 표시는 체크박스가 아니라 하이라이트다");
   assert.ok(none.includes("여러 개 고를 수 있어요"), `안내가 필요: ${none}`);
   assert.ok(none.includes("data-answer-submit"), "multiSelect 는 즉시 전송이 아니라 보내기 버튼이 필요");
-  // AskUserQuestion 은 내가 준 선택지 뒤에 Other 행을 **항상** 붙인다(그래서 tool_input.options 엔 없다).
-  // 여기서 감추면 터미널·앱에선 되는 선택지가 마리나에서만 사라진다 — multiSelect 에도 기타가 있어야 한다.
-  assert.ok(none.includes("data-answer-other"), `multiSelect 에도 기타(직접입력)가 있어야 함: ${none}`);
+  // 기타(직접 입력)는 **다중선택에선 못 준다.** 예전엔 "터미널에선 되니 여기서도 보여줘야 한다"고
+  // 봤는데, 실증해보니 마리나가 그 답을 넣을 방법이 없다(2026-08-22, 실 CLI PTY 4가지 순서):
+  //   타이핑→→→Enter / 타이핑→Enter→→→Enter / 타이핑→Enter→Tab→Enter  ⇒ 제출 자체가 안 됨
+  //   타이핑→Enter→↑→→→Enter                                    ⇒ "The user did not answer"
+  // 자유 입력 줄에 글자는 들어가는데 입력칸을 빠져나와 Submit 으로 갈 키가 없다. 칸만 띄워두면
+  // 형은 "썼는데 안 갔다"를 또 겪는다 — 그래서 칸 대신 이유를 말한다.
+  assert.ok(!none.includes("data-answer-other"), `다중선택엔 기타 칸을 주면 안 됨: ${none}`);
+  assert.ok(none.includes("questionOtherOff"), `왜 안 되는지 말해줘야 함: ${none}`);
 
   const some = renderQuestionCard(item, true, {choices: [[0, 2]]});
   assert.equal((some.match(/questionOpt chosen/g) || []).length, 2, `여러 개가 선택 표시돼야 함: ${some}`);
