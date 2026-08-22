@@ -2166,12 +2166,40 @@ def mobile_answer(body: dict[str, Any]) -> dict[str, Any]:
                 "delivery": result.get("delivery") or "resume"}
     before = _question_state_token(sid)
     if answer_text:
-        # 기타(직접 입력): 셀렉터에 텍스트를 타이핑 후 확정 — best-effort(실 셀렉터 동작 검증 필요).
+        # **직접 쓴 답은 목록 맨 끝의 자유 입력 줄에서 친다.**
+        #
+        # 실물 셀렉터(2026-08-22 PTY 관찰):
+        #     ❯ 1. 빨강   2. 파랑   3. 초록   4. Type something.   5. Chat about this
+        #        Enter to select · ↑/↓ to navigate · Esc to cancel
+        # 그 줄로 **내려가면 거기서 입력칸이 열린다**(하단 힌트가 "ctrl+g to edit in Vim" 으로
+        # 바뀌고, 친 글자가 그 줄에 찍힌다). 그러니 ↓×(옵션 수) → 타이핑 → Enter 다.
+        #
+        # 예전엔 커서를 안 옮기고 그냥 타이핑하고 Enter 를 쳤다. 목록 위에서 글자는 버려지고
+        # Enter 는 커서에 있던 **1번 옵션**을 확정한다 — 형이 쓴 문장 대신 1번 답이 갔다.
+        # 실증: ""부동산mcp"로 만들고 싶은 게 정확히 뭔가요?"="부동산 데이터 MCP 서버"(1번).
+        pending = mobile_pending_question(source, sid) or {}
+        questions = pending.get("questions") or []
+        first = questions[0] if questions and isinstance(questions[0], dict) else {}
+        options = first.get("options") if isinstance(first.get("options"), list) else None
+        if not options:
+            # 옵션 수를 모르면 **몇 칸 내려가야 하는지 모른다.** 찍어서 내려가면 엉뚱한 옵션
+            # 위에서 Enter 를 치게 된다 — 그 오답이 바로 이 버그였다. 그럴 땐 셀렉터를 건드리지
+            # 않고 글로 보낸다(작업 중이면 mobile_send 가 보류함에 넣는다).
+            _answer_log("free-text: 옵션 수 모름 → 글로 전달 text=%r" % answer_text[:80])
+            result = mobile_send({"root": str(root), "target": {"type": "agent", "source": source, "sid": sid},
+                                  "text": answer_text[:2000]})
+            _clear_pending_question(sid)
+            return {**result, "ok": True, "text": True, "settled": True, "viaMessage": True,
+                    "delivery": result.get("delivery") or "sent"}
+        _answer_log("free-text: 옵션 %d개 → ↓%d 후 타이핑" % (len(options), len(options)))
+        term_input(tid, "\x1b[B" * len(options))     # 마지막 옵션 다음 줄 = 자유 입력
+        _agent_input_pause()
         term_input(tid, answer_text[:2000])
         _agent_input_pause()
         term_input(tid, "\r")
         settled = _await_answer_settled(sid, before)
         return {"ok": True, "tid": tid, "text": True, "settled": settled}
+
     answers = _parse_answers(body)
     # multiSelect 는 **훅이 잡아둔 질문 원본**에서 읽는다 — 클라이언트 주장을 믿지 않는다.
     pending = mobile_pending_question(source, sid) or {}
@@ -2680,6 +2708,16 @@ _MOBILE_HTML = r"""<!doctype html>
     .viewerText { flex: 1; min-height: 0; margin: 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: #e8edf4; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
     .imageViewerClose { width: 34px; min-height: 34px; flex: none; padding: 0; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; border-color: transparent; font-size: 19px; }
     /* 세션 탭 — 가로 스크롤 한 줄. 목록 뷰에선 숨긴다(거기선 목록 자체가 탐색이다). */
+    .roomChats:empty { display: none; }
+    .roomChats { display: none; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain;
+                 padding: 0 10px 6px; scrollbar-width: none; }
+    .roomChats::-webkit-scrollbar { display: none; }
+    #mobileApp[data-view="chat"] .roomChats { display: flex; }
+    .roomChat { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; max-width: 60vw;
+                min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px;
+                background: transparent; color: inherit; font-size: 12px; font-weight: 700; }
+    .roomChat.active { border-color: #0b63ce; background: #e9f2ff; color: #0b4ea8; }
+    .roomChatLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .sessionTabs:empty { display: none; }
     .sessionTabs { display: none; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain;
                    scrollbar-width: none; padding: 2px 0 1px; }
@@ -2841,6 +2879,7 @@ _MOBILE_HTML = r"""<!doctype html>
       .galleryTab.active { background: #1c2431; color: #e8edf4; }
       .fileRow { background: #171d27; border-color: #303846; }
       .doneCard { background: #17251c; border-color: #2ea043; }
+      .roomChat.active { background: #16233a; border-color: #4b8fe0; color: #cfe0ff; }
       .wtAction { color: #e8edf4; }
       .fileThumb, .fileIcon { background: #222c3a; }
       .fileBadge { background: #1e3a2a; color: #7fd6a2; }
@@ -2926,6 +2965,11 @@ _MOBILE_HTML = r"""<!doctype html>
       <!-- 세션 탭 — shellRow 와 **별도 줄**이다(그 줄은 뒤로가기·제목·액션이 이미 꽉 찼다).
            헤더 안에 둬서 대화를 스크롤해도 붙어 있어야 "클릭 많이 안 하고 옮겨다니기"가 성립한다. -->
       <div class="sessionTabs" id="sessionTabs" role="tablist" aria-label="열린 세션"></div>
+      <!-- 방 안 대화 줄 — **이 방의 대화만** 나열한다(스펙 §3 `[기본] [디자인 손보기]`).
+           위 sessionTabs 는 방을 넘나드는 전역 줄이라 다른 방 탭과 섞이고 8개가 넘으면
+           오래된 것부터 밀어낸다. 방 안에서 대화를 고르는 일이 "전역 탭 중에 찾기"가 되면
+           대화 4개짜리 방에서 고를 수가 없다(형 실사용). 그래서 줄을 분리한다. -->
+      <div class="roomChats" id="roomChats" role="tablist" aria-label="이 방의 대화"></div>
       <div class="usagePanel" id="usagePanel" aria-label="사용량" aria-hidden="true">
         <div class="usageSection">
           <div class="usageSectionTitle">계정 한도</div>
@@ -3151,6 +3195,7 @@ _MOBILE_HTML = r"""<!doctype html>
     updateBanner.onclick = () => location.reload();
     const liveQuestionEl = document.getElementById("liveQuestion");
     const sessionTabsEl = document.getElementById("sessionTabs");
+    const roomChatsEl = document.getElementById("roomChats");
     // 라이브 질문 카드의 로컬 상태. **카드를 낙관적으로 지우지 않는다** — 예전엔 탭하자마자 innerHTML 을
     // 비우고 4초간 숨겼는데, 응답이 안 먹으면 카드가 그냥 사라져 "눌렀는데 아무 일도 안 남"으로 보였고
     // 되돌릴 방법도 없었다. 이제 카드는 서버 진실(pendingQuestion 소멸)로만 사라진다.
@@ -5643,6 +5688,7 @@ _MOBILE_HTML = r"""<!doctype html>
       chatNavTitle.textContent = session ? (session.title || "세션")
                                  : (selectedProjectId ? projectLabelOf(selectedProjectId) : "마리나");
       renderSessionTabs();
+      renderRoomChats();
       renderAgentUsage(session);
       restoreDraft();
       renderTurns(session);
@@ -6370,6 +6416,8 @@ _MOBILE_HTML = r"""<!doctype html>
     }
 
     // ROOM_SIBLING_TABS_START  (테스트가 이 블록을 vm 에 싣는다)
+    // 방 안 대화 줄 — 전역 탭 줄과 **다른 물건**이다. 여기 있는 것은 지금 방의 대화가 전부고,
+    // 밀려나지 않는다. 대화가 하나면 줄을 띄우지 않는다(화면만 먹는다).
     // 방 안에서 **다른 대화로 바로 넘어가게** 한다(스펙 §3 화면 그림의 `[기본] [디자인 손보기]`).
     // 예전엔 대화 화면의 탭 줄이 "형이 연 탭" 기준이라, 방 카드로 들어가면 탭이 하나뿐이라
     // 줄이 안 떴다 — 같은 방의 다른 대화로 가려면 목록으로 나갔다 다시 들어가야 했다.
@@ -6380,11 +6428,35 @@ _MOBILE_HTML = r"""<!doctype html>
         .filter(tab => tab && !tab.hidden && !tab.stale)
         .map(tab => `agent:${tab.source}:${tab.sid}:${room.root}`);
     }
-    // 기존 멀티탭(다른 방 대화를 함께 띄우는 것)은 **없애지 않고 얹기만** 한다.
-    function addRoomTabs(room) {
-      roomSiblingKeys(room).forEach(key => addTab(key));
-    }
     // ROOM_SIBLING_TABS_END
+
+    // 방 안 대화 줄을 그린다. 여기서 고르는 것은 **탭을 늘리지 않는다** — 전역 탭 줄은
+    // 형이 직접 연 것만 남는 자리다(방 대화를 거기 다 얹었더니 8개 상한에 밀려 정작 그 방
+    // 대화가 사라졌다).
+    function renderRoomChats() {
+      const session = selectedSession();
+      const room = session ? roomByRoot(String(session.root || "")) : null;
+      const keys = roomSiblingKeys(room);
+      if (!room || keys.length < 2) { if (roomChatsEl.innerHTML) roomChatsEl.innerHTML = ""; return; }
+      const tabs = (room.tabs || []).filter(tab => tab && !tab.hidden && !tab.stale);
+      const html = tabs.map(tab => {
+        const key = `agent:${tab.source}:${tab.sid}:${room.root}`;
+        const active = key === selectedSessionKey;
+        const meta = agentStatusMeta(tab.status);
+        return `<button class="roomChat${active ? " active" : ""}" type="button" role="tab"`
+          + ` aria-selected="${active}" data-room-chat="${esc(key)}">`
+          + `<i class="wt-dot ${meta ? meta.dot : "stop"}" aria-hidden="true"></i>`
+          + `<span class="roomChatLabel">${esc(String(tab.title || tab.sid || "대화").slice(0, 22))}</span></button>`;
+      }).join("");
+      if (roomChatsEl.innerHTML !== html) roomChatsEl.innerHTML = html;
+      const activeEl = roomChatsEl.querySelector(".roomChat.active");
+      if (activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({block: "nearest", inline: "nearest"});
+    }
+    roomChatsEl.addEventListener("click", event => {
+      const hit = event.target.closest && event.target.closest("[data-room-chat]");
+      if (!hit) return;
+      chooseSession(hit.getAttribute("data-room-chat"));
+    });
 
     // 방 목록 다시 그리기 — 폴·검색·필터가 모두 이 함수를 쓴다(규칙이 갈라지면 안 된다).
     function renderRoomList() {
@@ -6455,7 +6527,8 @@ _MOBILE_HTML = r"""<!doctype html>
       // 대화가 아직 없는 방은 고를 게 없으니 방 안을 연다 — 아무 반응이 없으면 고장으로 보인다.
       if (!tab) { openRoom(room.root); return; }
       closeRoom();
-      addRoomTabs(room);      // 같은 방의 다른 대화로 바로 넘어갈 수 있게
+      // 같은 방의 다른 대화는 **방 안 대화 줄**로 간다(renderRoomChats) — 전역 탭 줄에
+      // 얹지 않는다. 얹었더니 다른 방 탭과 섞이고 8개 상한에 밀려 정작 그 방 대화가 사라졌다.
       chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
     });
     roomOpen.addEventListener("click", async event => {
@@ -6507,10 +6580,8 @@ _MOBILE_HTML = r"""<!doctype html>
       const source = 값.slice(0, 값.indexOf(":"));
       const sid = 값.slice(값.indexOf(":") + 1);     // sid 에 ':' 가 있어도 안 깨지게
       const root = openRoomRoot;
-      const 방 = roomByRoot(root);
       closeRoom();
-      addRoomTabs(방);
-      chooseSession(`agent:${source}:${sid}:${root}`);
+      chooseSession(`agent:${source}:${sid}:${root}`);   // 나머지 대화는 방 안 대화 줄에 있다
     }
 
     // 접기 — 끝난 방을 목록에서 치운다. 서버가 "무엇으로 부르고 있었는지"를 같이 적어두므로,

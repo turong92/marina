@@ -4,8 +4,9 @@
 # 지금까지는 대화 화면의 탭 줄이 "형이 연 탭" 기준이라, 방 카드를 눌러 들어가면 탭이 하나뿐이라
 # 줄이 안 떴다 — 같은 방의 다른 대화로 가려면 목록으로 나갔다 다시 들어가야 했다.
 #
-# 기존 멀티탭(다른 방 대화를 함께 띄우는 것)은 없애지 않는다. 방을 열 때 그 방의 대화들을
-# 탭으로 **얹기만** 한다 — 없애면 형이 쓰던 게 사라진다.
+# 그 대화들은 **방 안 대화 줄**(#roomChats)에 있다. 전역 탭 줄에 얹는 방식은 버렸다 —
+# 다른 방 탭과 섞이고 8개 상한에 밀려서, 대화 4개짜리 방에서 정작 고를 수가 없었다(형 실사용:
+# "대화 4개 있다는데 그중 고를 수도 없네"). 전역 탭 줄은 형이 직접 연 것만 남는 자리다.
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -59,15 +60,19 @@ PYTHONPATH="$SCR" python3 - <<'PY2'
 from marina_mobile import render_mobile_html
 
 html = render_mobile_html()
-# 방 카드로 들어갈 때와 방 안 탭으로 들어갈 때 **둘 다** 얹어야 한다.
+# ④ 방 안 대화 줄이 화면에 있고, 대화 화면을 그릴 때 같이 그린다.
+assert 'id="roomChats"' in html, "방 안 대화 줄이 없다"
+assert "renderRoomChats();" in html, "대화 화면을 그릴 때 방 대화 줄을 안 그린다"
+
+# ⑤ 그 줄은 **지금 방의 대화만** 담는다 — 전역 탭(openTabs)이 아니라 room.tabs 를 읽어야 한다.
+그리기 = html[html.find("function renderRoomChats"):][:1400]
+assert "room.tabs" in 그리기 and "openTabs" not in 그리기, f"전역 탭을 읽고 있다: {그리기[:300]}"
+
+# ⑥ 방을 여는 길들이 전역 탭 줄을 오염시키지 않는다 — 8개 상한에 밀려 그 방 대화가 사라졌다.
+assert "addRoomTabs" not in html, "아직도 방 대화를 전역 탭에 얹는다"
 열기 = html[html.find("    roomList.addEventListener"):html.find("    // 클로드 로그인 — 폰에서 끝낸다")]
-assert 열기.count("addRoomTabs(") >= 2, \
-    f"방을 열어도 그 방 대화가 탭에 안 얹힌다(호출 {열기.count('addRoomTabs(')}회)"
-# 기존 멀티탭을 갈아엎으면 안 된다 — 얹기만 한다.
-얹기 = html[html.find("function addRoomTabs"):][:700]
-assert "addTab(" in 얹기, 얹기[:300]
-assert "openTabs = [" not in 얹기, f"기존 탭을 통째로 갈아치운다: {얹기[:300]}"
-print("ok 방을 열면 그 방 대화가 탭으로 얹힌다")
+assert "chooseSession(" in 열기, "방 카드로 대화를 못 연다"
+print("ok 방 안 대화 줄이 그 방 대화만 담는다")
 PY2
 
 echo "PASS test-room-chat-tabs"
