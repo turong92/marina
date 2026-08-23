@@ -636,10 +636,17 @@
         const other = !(interactive && !locked) ? ""
           : otherOpen
           ? `<div class="questionOtherRow" data-question-other-row><input class="questionOtherInput" type="text" data-answer-other-input data-answer-q="${qi}" placeholder="직접 입력..." value="${esc(otherText)}" enterkeyhint="send" autocomplete="off" /><button class="primary questionOtherSend" type="button" data-answer-other-send data-answer-q="${qi}">보내기</button></div>`
+          : otherText.trim()
+          // 적어둔 글은 **고른 것처럼** 보여준다. 접히면서 흔적이 사라지면 형은 자기 답이
+          // 날아간 줄 안다(누르면 다시 고쳐 쓸 수 있다).
+          ? `<button class="questionOpt questionOther chosen" type="button" data-answer-other data-answer-q="${qi}">&#9998; ${esc(otherText.trim())}</button>`
           : `<button class="questionOpt questionOther" type="button" data-answer-other data-answer-q="${qi}">&#9998; 기타 (직접 입력)</button>`;
         return `<div class="questionBlock">${step}${header}${text}<div class="questionOpts">${buttons}${other}</div></div>`;
       }).join("");
-      const answered = questions.reduce((n, _, qi) => n + (picks(qi).length ? 1 : 0), 0);
+      // **직접 입력도 '답한 것'이다.** 예전엔 고른 개수만 셌더니, 1번을 글로 쓰고 2번을 고른
+      // 폼이 계속 1/2 로 남아 보내기가 잠겼다(형 실사용 2026-08-23).
+      const 글답 = qi => Boolean(((state && state.otherText && state.otherText[qi]) || "").trim());
+      const answered = questions.reduce((n, _, qi) => n + (picks(qi).length || 글답(qi) ? 1 : 0), 0);
       const anyMultiSelect = questions.some(q => q && q.multiSelect);
       const needsSubmit = multi || anyMultiSelect;   // 다중선택은 탭 즉시 전송하면 안 된다(더 고를 수 있으니)
       // 카운터는 **형이 방금 한 행동**을 비춰야 한다. 질문이 하나인 다중선택에서 '답한 질문 수'를 세면

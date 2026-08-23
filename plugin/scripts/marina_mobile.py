@@ -3352,7 +3352,13 @@ _MOBILE_HTML = r"""<!doctype html>
       // 없게끔"). 확인은 뒤에서 하고, **실패했을 때만** 되돌린다.
       markAnswerSubmitted(true, Date.now());
       repaintLiveQuestion();
-      const body = payload || {answers: Array.from({length: liveAnswer.total}, (_, i) => liveAnswer.choices[i] || [])};
+      // 글로 답한 질문은 {text} 로 싣는다 — 고른 것만 실으면 그 질문이 빈 채로 가서
+      // 셀렉터에서 1번이 확정된다(형이 겪은 사고와 같은 원리).
+      const body = payload || {answers: Array.from({length: liveAnswer.total}, (_, i) => {
+        const 글 = (liveAnswer.otherText[i] || "").trim();
+        const 고름 = liveAnswer.choices[i] || [];
+        return 고름.length ? 고름 : (글 ? {text: 글} : []);
+      })};
       const result = await answerQuestion(body);
       // settled === false → 상태파일이 그대로다 = 셀렉터가 안 움직였다. 카드를 되살려 다시 누르게 한다.
       if (!result || result.settled === false) {
@@ -3425,9 +3431,16 @@ _MOBILE_HTML = r"""<!doctype html>
         if (i === qi || (글 && !(liveAnswer.choices[i] || []).length)) return {text: i === qi ? text : 글};
         return liveAnswer.choices[i] || [];
       });
-      // 아직 답하지 않은 질문이 있으면 보내지 않는다 — 빈 칸으로 보내면 셀렉터에서 1번이 확정된다.
+      // 아직 안 답한 질문이 남았으면 **여기서 보내지 않는다.** 이 글을 적어둔 것으로 치고
+      // 카드를 다시 그린다 — 형은 나머지 질문을 마저 답하고 [보내기]를 누르면 된다.
+      // (예전엔 이 자리에서 폼 전체를 보내려다 "1번 질문에 아직…" 토스트만 띄우고 막혔다.)
       const 빈질문 = answers.findIndex(a => Array.isArray(a) ? !a.length : !(a.text || "").trim());
-      if (빈질문 >= 0) { showToast(`${빈질문 + 1}번 질문에 아직 답을 안 했어요`); return; }
+      if (빈질문 >= 0) {
+        liveAnswer.otherOpen[qi] = false;     // 입력칸을 접고 "적어둔 답"으로 보여준다
+        repaintLiveQuestion(); repaintTurns();
+        showToast("적어뒀어요 — 남은 질문 고르고 보내기");
+        return;
+      }
       submitLiveAnswer({answers});
     }
     // 입력값을 state 에 계속 보관 — 재렌더가 일어나도 값이 살아남는다.

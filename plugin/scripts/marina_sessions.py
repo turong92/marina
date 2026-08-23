@@ -1534,7 +1534,11 @@ def _activity_failed(value: Any, container: dict[str, Any]) -> bool:
 # 형이 고른 답도 그 안에 다 들어 있는데 대화엔 안 보였다(형: "질문한거랑 답변한거 왜 안보여줘").
 # 그래서 활동이 아니라 **전용 kind** 로 내보낸다. 웹·모바일이 같은 타임라인을 쓰므로 여기 하나면 된다.
 _QUESTION_TOOL = "AskUserQuestion"
-_ANSWER_TAIL_RE = re.compile(r"\.\s*You can now continue.*$", re.S)
+# 결과 문구 뒤에 붙는 안내말. CLI 판마다 문장이 다르다 — 실측 두 가지:
+#   "… . You can now continue with these answers in mind."
+#   "… . Read the answers carefully — they may request clarification, …"
+# 안 걷어내면 **마지막 질문의 답**에 이 문장이 통째로 붙는다(형 실사용에서 그렇게 보였다).
+_ANSWER_TAIL_RE = re.compile(r"\.\s*(?:You can now continue|Read the answers carefully).*$", re.S)
 
 
 def _question_blocks(raw_input: Any) -> list[dict[str, Any]]:
@@ -1567,14 +1571,29 @@ def _question_answers(questions: list[dict[str, Any]], result: str) -> list[dict
     쪼개면 안 된다** — 질문 안에 따옴표가 들어가면(실제로 있었다) 바로 어긋난다. 질문 원문으로
     자리를 잡고, 거기서부터는 **아는 선택지 라벨과 대조**해 고른 것을 찾는다."""
     body = _ANSWER_TAIL_RE.sub("", str(result or "")).strip()
-    answers: list[dict[str, Any]] = []
+    # **답의 끝은 다음 질문이 시작하는 자리다.** 예전엔 rfind('"') 로 잡았는데, 그러면 첫 질문의
+    # 답이 문자열 맨 끝까지 먹는다 — 선택지로만 답할 땐 라벨 대조(picked)가 가려줬지만, 자유
+    # 입력엔 라벨이 없어 그대로 드러났다(형 실사용 2026-08-23: 1번 답 칸에 2번 질문·답이 통째로).
+    시작들: list[int] = []
     for entry in questions:
         question = str(entry.get("question") or "")
+        시작들.append(body.find(f'"{question}"="') if question else -1)
+    다음 = sorted(at for at in 시작들 if at >= 0)
+    answers: list[dict[str, Any]] = []
+    for entry, at in zip(questions, 시작들):
+        question = str(entry.get("question") or "")
         marker = f'"{question}"="'
-        at = body.find(marker) if question else -1
-        rest = body[at + len(marker):] if at >= 0 else ""
-        end = rest.rfind('"')
-        text = (rest[:end] if end > 0 else rest).strip()
+        머리 = at + len(marker) if at >= 0 else -1
+        끝 = next((pos for pos in 다음 if pos > at), len(body)) if at >= 0 else 0
+        rest = body[머리:끝] if 머리 >= 0 else ""
+        # 마지막 답은 `"` 로 닫히고, 중간 답은 `", ` 로 이어진다 — 둘 다 걷어낸다.
+        text = rest.strip().rstrip(",").strip()
+        if text.endswith('"'):
+            text = text[:-1]
+        text = text.rstrip(",").strip()
+        if text.endswith('"'):
+            text = text[:-1]
+        text = text.strip()
         labels = sorted((str(option.get("label") or "") for option in entry.get("options") or []),
                         key=len, reverse=True)
         picked: list[str] = []
