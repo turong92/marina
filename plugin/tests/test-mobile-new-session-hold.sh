@@ -70,8 +70,8 @@ grep -qF 'chooseSession(`term:${d.tid}`)' <<<"$launch" \
 ! grep -qF 'showChat(); render();' <<<"$launch" \
   || { echo "FAIL: 런치에 손수 만든 두 번째 진입 경로가 남아 있다"; exit 1; }
 
-# ③ 보고 있는 탭은 폴 한 번 빠져도 지운다 — 돌아왔을 때 탭이 없어져 있으면 안 된다.
-grep -qF 'openTabs.filter(key => key === selectedSessionKey || sessions.some' <<<"$html" \
-  || { echo "FAIL: 활성 탭이 폴 한 번에 정리된다"; exit 1; }
+# ③ (삭제) 전역 세션 탭 줄이 없어져서 "활성 탭이 정리된다"는 걱정 자체가 사라졌다.
+#    방 넘나들기는 서랍이 맡고(test-mobile-room-switch.sh), 보고 있는 대화를 지키는 일은
+#    ①의 holdSession 이 그대로 한다.
 
 echo "PASS test-mobile-new-session-hold"

@@ -72,7 +72,10 @@ assert "room.tabs" in 그리기 and "openTabs" not in 그리기, f"전역 탭을
 assert "addRoomTabs" not in html, "아직도 방 대화를 전역 탭에 얹는다"
 열기 = html[html.find("    roomList.addEventListener"):html.find("    // 클로드 로그인 — 폰에서 끝낸다")]
 assert "chooseSession(" in 열기, "방 카드로 대화를 못 연다"
-print("ok 방 안 대화 줄이 그 방 대화만 담는다")
+# ⑦ 헤더 아래 줄은 **이것 하나뿐**이다. 전역 세션 탭 줄은 없앴다(형: "왜 두줄이지?") —
+#    방 넘나들기는 서랍이 맡는다(test-mobile-room-switch.sh).
+assert "sessionTab" not in html, "전역 탭 줄이 아직 있다 — 줄이 두 개가 된다"
+print("ok 방 안 대화 줄이 그 방 대화만 담는다 · 전역 줄과 안 겹친다")
 PY2
 
 echo "PASS test-room-chat-tabs"

@@ -2487,6 +2487,8 @@ _MOBILE_HTML = r"""<!doctype html>
                 padding: 14px 12px; border: 0; border-bottom: 1px solid var(--line);
                 background: transparent; color: inherit; font: inherit; cursor: pointer; }
     .roomCard:active { background: var(--panel); }
+    /* 서랍에서 "지금 보고 있는 방" — 목록이 길어도 어디 있었는지 한눈에. */
+    .roomRow.here, .roomCard.here { background: #eef4ff; box-shadow: inset 3px 0 0 #0b63ce; }
     .roomIcon { width: 22px; flex: 0 0 22px; text-align: center; font-weight: 700; }
     .roomBody { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     /* 이름은 한 줄 — 넘치면 말줄임. 서버가 이미 줄이지만 화면 폭은 기기마다 다르다. */
@@ -2780,17 +2782,9 @@ _MOBILE_HTML = r"""<!doctype html>
                 background: transparent; color: inherit; font-size: 12px; font-weight: 700; }
     .roomChat.active { border-color: #0b63ce; background: #e9f2ff; color: #0b4ea8; }
     .roomChatLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .sessionTabs:empty { display: none; }
-    .sessionTabs { display: none; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain;
                    scrollbar-width: none; padding: 2px 0 1px; }
-    .sessionTabs::-webkit-scrollbar { display: none; }
-    #mobileApp[data-view="chat"] .sessionTabs { display: flex; }
-    .sessionTab { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 4px; max-width: 46vw;
                   padding: 3px 6px 3px 7px; border: 1px solid #dde2ea; border-radius: 999px;
                   background: #f4f6f9; color: #596070; font-size: 11px; font-weight: 700; line-height: 1.3; }
-    .sessionTab.active { background: #fff; border-color: #9db2d4; color: #17191f; }
-    .sessionTabLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-    .sessionTabX { flex: 0 0 auto; padding: 0 1px; color: #98a1b3; font-size: 10px; font-weight: 900; }
     .liveQuestion:empty { display: none; }
     /* 높이 상한이 필수다. 선택지가 많거나 설명이 길면 카드가 무한히 자라 **위 대화를 통째로 덮어**
        형이 질문 맥락을 못 읽는다(형: "질문 길어지면 위에 대화내용 못읽게 되는것도 문제야").
@@ -3028,13 +3022,9 @@ _MOBILE_HTML = r"""<!doctype html>
           <button class="usageBtn" id="usageBtn" type="button" title="토큰 사용량" aria-label="토큰 사용량"><span class="usageRing" id="usageRing"><span class="usageRingNum" id="usageRingNum"></span></span></button>
         </div>
       </div>
-      <!-- 세션 탭 — shellRow 와 **별도 줄**이다(그 줄은 뒤로가기·제목·액션이 이미 꽉 찼다).
-           헤더 안에 둬서 대화를 스크롤해도 붙어 있어야 "클릭 많이 안 하고 옮겨다니기"가 성립한다. -->
-      <div class="sessionTabs" id="sessionTabs" role="tablist" aria-label="열린 세션"></div>
       <!-- 방 안 대화 줄 — **이 방의 대화만** 나열한다(스펙 §3 `[기본] [디자인 손보기]`).
-           위 sessionTabs 는 방을 넘나드는 전역 줄이라 다른 방 탭과 섞이고 8개가 넘으면
-           오래된 것부터 밀어낸다. 방 안에서 대화를 고르는 일이 "전역 탭 중에 찾기"가 되면
-           대화 4개짜리 방에서 고를 수가 없다(형 실사용). 그래서 줄을 분리한다. -->
+           헤더 아래 줄은 이제 이것 하나다. 방을 넘나드는 일은 서랍(엣지 스와이프·☰)이 맡는다.
+           대화가 하나뿐인 방에선 이 줄도 안 뜬다. -->
       <div class="roomChats" id="roomChats" role="tablist" aria-label="이 방의 대화"></div>
       <div class="usagePanel" id="usagePanel" aria-label="사용량" aria-hidden="true">
         <div class="usageSection">
@@ -3260,7 +3250,6 @@ _MOBILE_HTML = r"""<!doctype html>
     const updateBanner = document.getElementById("updateBanner");
     updateBanner.onclick = () => location.reload();
     const liveQuestionEl = document.getElementById("liveQuestion");
-    const sessionTabsEl = document.getElementById("sessionTabs");
     const roomChatsEl = document.getElementById("roomChats");
     // 라이브 질문 카드의 로컬 상태. **카드를 낙관적으로 지우지 않는다** — 예전엔 탭하자마자 innerHTML 을
     // 비우고 4초간 숨겼는데, 응답이 안 먹으면 카드가 그냥 사라져 "눌렀는데 아무 일도 안 남"으로 보였고
@@ -3350,13 +3339,6 @@ _MOBILE_HTML = r"""<!doctype html>
       liveQuestionPending = "";
       if (liveQuestionEl.innerHTML !== html) liveQuestionEl.innerHTML = html;
     }
-    // 닫기(✕)를 탭 전환보다 먼저 본다 — ✕ 는 탭 안에 있어서 순서가 뒤집히면 닫으려다 전환된다.
-    sessionTabsEl.addEventListener("click", event => {
-      const x = event.target.closest && event.target.closest("[data-tab-close]");
-      if (x) { event.stopPropagation(); closeTab(x.getAttribute("data-tab-close")); return; }
-      const tab = event.target.closest && event.target.closest("[data-tab-key]");
-      if (tab) chooseSession(tab.getAttribute("data-tab-key"));
-    });
     function repaintLiveQuestion() { renderLiveQuestion(selectedSession()); }
     // 폴백 카드는 대화 안에 있어 turns 를 다시 그려야 반영된다(렌더키가 liveAnswer 를 모르므로 강제).
     function repaintTurns() { turnsStructureKey = ""; renderTurns(selectedSession()); }
@@ -3622,6 +3604,11 @@ _MOBILE_HTML = r"""<!doctype html>
       app.setAttribute("data-drawer", "open");
       listView.removeAttribute("aria-hidden");
       backBtn.setAttribute("aria-expanded", "true");
+      // 지금 방을 표시하고 그 자리로 스크롤 — 방 28개짜리 목록에서 "내가 어디 있었지"를
+      // 형이 찾아 헤매면 서랍이 탭 줄보다 느려진다(메신저들이 다 하는 것).
+      // typeof 로 감싸는 이유: 이 블록(DRAWER_START~END)은 테스트가 통째로 vm 에 싣는다.
+      // 바깥 함수를 그냥 부르면 로드가 터진다 — 순수 판정 부분을 테스트할 수 없게 된다.
+      if (typeof markCurrentRoom === "function") markCurrentRoom();
     }
     function closeDrawer() {
       app.setAttribute("data-drawer", "closed");
@@ -3643,6 +3630,35 @@ _MOBILE_HTML = r"""<!doctype html>
       return null;
     }
     // DRAWER_END
+
+    // 방마다 **마지막에 보던 대화**를 기억한다. 서랍에서 방을 고르면 거기로 돌아가야
+    // "바로 가기"가 된다 — 늘 기본 대화로 가면 형이 보던 자리를 매번 잃는다.
+    let 최근대화 = {};
+    try { 최근대화 = JSON.parse(localStorage.getItem("marinaMobileRoomChat") || "{}") || {}; } catch (_) { 최근대화 = {}; }
+    if (!최근대화 || typeof 최근대화 !== "object") 최근대화 = {};
+    function rememberRoomChat(root, key) {
+      if (!root || !key) return;
+      최근대화[String(root)] = String(key);
+      try { localStorage.setItem("marinaMobileRoomChat", JSON.stringify(최근대화)); } catch (_) {}
+    }
+    // 기억한 대화가 아직 살아 있을 때만 쓴다 — 지운 대화로 보내면 빈 화면이 뜬다.
+    function roomChatKey(room) {
+      const 살아있는 = (room.tabs || []).filter(tab => tab && !tab.hidden && !tab.stale && !tab.deleted);
+      const 기억 = 최근대화[String(room.root)];
+      const 맞는것 = 살아있는.find(tab => `agent:${tab.source}:${tab.sid}:${room.root}` === 기억);
+      const tab = 맞는것 || 살아있는.find(item => item.primary) || 살아있는[0];
+      return tab ? `agent:${tab.source}:${tab.sid}:${room.root}` : "";
+    }
+    function markCurrentRoom() {
+      const root = String((selectedSession() || {}).root || "");
+      let 현재 = null;
+      roomList.querySelectorAll("[data-room]").forEach(el => {
+        const 이방 = el.getAttribute("data-room") === root;
+        el.classList.toggle("here", 이방);
+        if (이방) 현재 = el;
+      });
+      if (현재 && 현재.scrollIntoView) 현재.scrollIntoView({block: "center"});
+    }
     function closeUsagePanel() {
       usagePanel.classList.remove("open");
       usagePanel.setAttribute("aria-hidden", "true");
@@ -4194,56 +4210,14 @@ _MOBILE_HTML = r"""<!doctype html>
     let heldSession = null;
     let heldSessionAt = 0;
 
-    // ── 세션 탭 — 목록으로 돌아가지 않고 바로 옮겨다니기 ────────────────────────
-    // 웹 대화 워크스페이스와 같은 모델: **연 것만** 탭으로 남는다(전체 세션을 늘어놓으면 14개가
-    // 그대로 줄이 돼 탭의 의미가 없다). 순서는 연 순서 그대로 — 자동 정렬하면 누르려던 탭이 움직인다.
-    const TAB_LIMIT = 8;   // 그 이상은 가장 오래된 비활성 탭부터 밀어낸다(가로 스크롤이 무한해지지 않게)
-    let openTabs = [];
-    try { openTabs = JSON.parse(localStorage.getItem("marinaMobileTabs") || "[]") || []; } catch (_) { openTabs = []; }
-    if (!Array.isArray(openTabs)) openTabs = [];
-    function saveTabs() { try { localStorage.setItem("marinaMobileTabs", JSON.stringify(openTabs.slice(0, 40))); } catch (_) {} }
-    function addTab(key) {
-      if (!key || openTabs.includes(key)) return;
-      openTabs.push(key);
-      if (openTabs.length > TAB_LIMIT) {
-        const victim = openTabs.find(k => k !== key && k !== selectedSessionKey);
-        if (victim) openTabs = openTabs.filter(k => k !== victim);
-      }
-      saveTabs();
-    }
-    function closeTab(key) {
-      const at = openTabs.indexOf(key);
-      if (at < 0) return;
-      openTabs = openTabs.filter(k => k !== key);
-      saveTabs();
-      if (key !== selectedSessionKey) { renderSessionTabs(); return; }
-      // 닫은 게 보고 있던 탭이면 옆 탭으로 — 아무것도 없으면 목록으로 돌아간다.
-      const next = openTabs[Math.min(at, openTabs.length - 1)];
-      if (next) chooseSession(next);
-      else { selectedSessionKey = ""; localStorage.removeItem("marinaMobileSession"); showList(); renderSessionTabs(); }
-    }
-    function renderSessionTabs() {
-      const sessions = state.sessions || [];
-      // 사라진 세션 탭은 조용히 정리 — 단 **보고 있는 탭**은 예외다. 기동·승격 틈에 폴 한 번
-      // 빠졌다고 지우면, 그 세션이 돌아왔을 때 탭이 없어져 있다(holdSession 과 같은 이유).
-      const alive = openTabs.filter(key => key === selectedSessionKey || sessions.some(s => s.key === key));
-      if (alive.length !== openTabs.length) { openTabs = alive; saveTabs(); }
-      // 탭이 하나뿐이면 줄을 띄울 이유가 없다 — 화면만 먹는다.
-      if (alive.length < 2) { if (sessionTabsEl.innerHTML) sessionTabsEl.innerHTML = ""; return; }
-      const html = alive.map(key => {
-        const s = sessions.find(item => item.key === key) || {};
-        const active = key === selectedSessionKey;
-        const sm = s.kind === "agent" ? agentStatusMeta(s.status) : null;
-        const label = esc(String(s.title || s.key || "세션").slice(0, 22));
-        return `<span class="sessionTab${active ? " active" : ""}" role="tab" aria-selected="${active}" tabindex="0" data-tab-key="${esc(key)}">`
-          + `<i class="wt-dot ${sm ? sm.dot : "stop"}" aria-hidden="true"></i>`
-          + `<span class="sessionTabLabel">${label}</span>`
-          + `<b class="sessionTabX" data-tab-close="${esc(key)}" aria-label="탭 닫기">&#10005;</b></span>`;
-      }).join("");
-      if (sessionTabsEl.innerHTML !== html) sessionTabsEl.innerHTML = html;
-      const activeEl = sessionTabsEl.querySelector(".sessionTab.active");
-      if (activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({block: "nearest", inline: "nearest"});
-    }
+    // ── 방 넘나들기는 **서랍**이 맡는다 ────────────────────────────────────────
+    // 예전엔 헤더 아래에 전역 세션 탭 줄이 있었다("바로바로 옮겨다니게"). 방 화면이 생기고
+    // 방 안 대화 줄(#roomChats)까지 붙자 **줄이 두 개**가 됐고, 같은 대화가 양쪽에 겹쳐 떴다
+    // (형: "왜 두줄이지?"). 메신저(카톡·슬랙·디스코드) 중 위에 탭 줄을 두는 앱은 없다 —
+    // 전부 왼쪽 서랍이나 목록으로 건너뛴다. 마리나엔 이미 엣지 스와이프 서랍이 있으니
+    // 그 역할을 서랍에 넘기고 줄 하나를 돌려준다. 대신 서랍이 "바로 가기"답게 굴어야 한다:
+    // 열리면 지금 방을 강조해 그 자리로 스크롤하고, 방을 고르면 **마지막에 보던 대화**로 간다.
+
     // 세션 단위 동작은 **그 세션의 root** 를 쓴다. 전역 selectedRoot() 는 워크트리 피커/프로젝트 탭이
     // 움직이면 선택된 세션과 어긋나고, 그러면 서버의 agent_belongs_to_root 가 막아 403 이 된다
     // (형: "이 세션 모바일에서 안되잖아 · do not access this resource"). settings/interrupt 는 원래
@@ -4296,13 +4270,13 @@ _MOBILE_HTML = r"""<!doctype html>
       if (key !== selectedSessionKey) clearFailedSend();
       closeUsagePanel();
       closeDrawer();          // 좌측 패널에서 골랐으면 바로 그 대화로 — 이게 "바로바로 넘어가기"의 핵심
-      addTab(key);            // 연 세션은 탭으로 남는다 — 다음부턴 목록 안 거치고 바로 전환
       selectedSessionKey = key;
       followLatest = true;
       turnsStructureKey = "";
       fileSuggestions = [];
       fileSuggestionKey = "";
       localStorage.setItem("marinaMobileSession", key);
+      rememberRoomChat(s.root, key);   // 이 방에선 이걸 보고 있었다 — 다음에 이 방을 고르면 여기로
       if (s.root) {
         localStorage.setItem("marinaMobileRoot", s.root);
         rootSelect.value = s.root;
@@ -5777,7 +5751,6 @@ _MOBILE_HTML = r"""<!doctype html>
       // 목록 안으로 내려가면서 헤더가 통째로 비었다 — 점 하나와 종만 남아 고장처럼 보인다.
       chatNavTitle.textContent = session ? (session.title || "세션")
                                  : (selectedProjectId ? projectLabelOf(selectedProjectId) : "마리나");
-      renderSessionTabs();
       renderRoomChats();
       renderAgentUsage(session);
       restoreDraft();
@@ -6554,6 +6527,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const 방들 = state.rooms || [];
       roomList.innerHTML = renderRooms(방들, Date.now() / 1000, showAll,
                                        sessionSearch.value, selectedProjectId);
+      if (drawerOpen()) markCurrentRoom();   // 폴 재렌더가 '지금 방' 표시를 지우지 않게
       // 방이 하나도 없으면 예전 세션 목록을 되살린다. 서버가 rooms 를 못 만들었을 때
       // (옛 데몬·조립 실패) 빈 화면만 남으면 형은 앱이 고장난 줄 안다 — 목록이 안 뜨면
       // 아무것도 못 하므로, 방은 부가정보고 세션 목록이 생명줄이다.
@@ -6614,13 +6588,12 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!card) return;
       const room = roomByRoot(card.getAttribute("data-room"));
       if (!room) return;
-      const tab = (room.tabs || []).find(item => item.primary) || (room.tabs || [])[0];
+      const key = roomChatKey(room);      // 마지막에 보던 대화로 — 없으면 기본 대화
       // 대화가 아직 없는 방은 고를 게 없으니 방 안을 연다 — 아무 반응이 없으면 고장으로 보인다.
-      if (!tab) { openRoom(room.root); return; }
+      if (!key) { openRoom(room.root); return; }
       closeRoom();
-      // 같은 방의 다른 대화는 **방 안 대화 줄**로 간다(renderRoomChats) — 전역 탭 줄에
-      // 얹지 않는다. 얹었더니 다른 방 탭과 섞이고 8개 상한에 밀려 정작 그 방 대화가 사라졌다.
-      chooseSession(`agent:${tab.source}:${tab.sid}:${room.root}`);
+      // 같은 방의 다른 대화는 **방 안 대화 줄**(renderRoomChats)로 간다.
+      chooseSession(key);
     });
     roomOpen.addEventListener("click", async event => {
       const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restore]");
