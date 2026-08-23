@@ -3967,8 +3967,9 @@ _MOBILE_HTML = r"""<!doctype html>
     // ROOM_LIST_START  (테스트가 이 블록을 vm 에 싣는다)
     // 방 목록 — 폰을 열면 이게 첫 화면이다.
     //
-    // 정렬이 **최근 순이 아니다.** 답을 기다리는 방이 목록 아래에 있으면 형은 그걸 놓치고,
-    // 그동안 일은 멈춰 있다. 그래서 급한 것부터 올린다(스펙 §2).
+    // 상태의 심각도 순서. **정렬에는 더 이상 쓰지 않는다**(목록은 최근 순 — renderRooms 참조).
+    // 남겨두는 이유: 방 하나에 대화가 여럿일 때 어느 상태로 접을지 서버가 이 순서로 정하고,
+    // 화면도 같은 어휘를 써야 하기 때문이다(marina_rooms.ROOM_STATUS_ORDER 와 짝).
     const ROOM_ORDER = ["문제", "응답필요", "작업중", "완료", "대기"];
     // 화면에 개발 용어를 쓰지 않는다(스펙 §3). 형이 읽고 바로 아는 말로만.
     const ROOM_LABEL = {
@@ -4008,16 +4009,14 @@ _MOBILE_HTML = r"""<!doctype html>
           ? '<div class="roomEmpty">찾는 게 없어요.</div>'
           : '<div class="roomEmpty">아직 방이 없어요.<br />새 일감을 만들면 여기 나와요.</div>';
       }
-      // 모르는 상태는 **맨 뒤**다. indexOf 가 -1 이라 그냥 쓰면 문제 방보다 위로 올라간다 —
-      // 라벨은 "쉬는 중"으로 떨어뜨리면서 정렬만 최상단이면 앞뒤가 안 맞는다.
-      // 접어둔 방도 뒤로 보낸다. 치워둔 것이 첫 줄이 되면 접기의 뜻과 반대다.
-      const rankOf = room => {
-        const idx = ROOM_ORDER.indexOf(String(room.status || ""));
-        return (room.archived ? 100 : 0) + (idx < 0 ? ROOM_ORDER.length : idx);
-      };
+      // **최근 소식 순.** 진짜 채팅방처럼(형 결정 2026-08-23). 예전엔 상태부터 줄을 세웠는데
+      // (문제 > 응답필요 > 작업중 > 완료 > 대기), 그러면 방금 답이 온 방이 며칠 전 "문제" 방
+      // 밑에 깔린다 — 메신저에서 그러면 아무도 안 쓴다. 카톡·슬랙 다 최근 순이고, 놓치면 안
+      // 되는 건 순서가 아니라 **표시**(상태 아이콘·라벨)로 말한다. 카드가 이미 그걸 한다.
+      // 접어둔 방만 뒤로 보낸다 — 치워둔 것이 첫 줄이 되면 접기의 뜻과 반대다.
       const sorted = live.slice().sort((a, b) => {
-        const rank = rankOf(a) - rankOf(b);
-        return rank !== 0 ? rank : (b.lastAt || 0) - (a.lastAt || 0);
+        const 접힘 = (a.archived ? 1 : 0) - (b.archived ? 1 : 0);
+        return 접힘 !== 0 ? 접힘 : (b.lastAt || 0) - (a.lastAt || 0);
       });
       return sorted.map(room => {
         const tabs = room.tabs || [];
