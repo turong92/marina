@@ -31,6 +31,10 @@ assert "markCurrentRoom" in 열기, f"서랍이 지금 방을 표시하지 않�
 assert "scrollIntoView" in 표시, "지금 방으로 스크롤하지 않는다"
 assert 'classList.toggle("here"' in 표시, "지금 방 강조가 없다"
 assert ".roomCard.here" in html or ".roomRow.here" in html, "강조 스타일이 없다"
+# 강조는 **어두운 화면에도** 있어야 한다. 밝은 연파랑만 주면 어두운 배경 위에 흰 판이 떠서
+# 그 카드 글씨가 통째로 사라진다(형: "그냥 허얘", 2026-08-23 실사용).
+어두운곳 = html[html.find("@media (prefers-color-scheme: dark)"):]
+assert ".here" in 어두운곳, "지금 방 강조가 어두운 화면에서 흰 판이 된다"
 
 # ③ 방을 고르면 마지막에 보던 대화로.
 키 = html[html.find("function roomChatKey"):][:800]

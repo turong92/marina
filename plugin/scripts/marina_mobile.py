@@ -2940,6 +2940,9 @@ _MOBILE_HTML = r"""<!doctype html>
       .fileRow { background: #171d27; border-color: #303846; }
       .doneCard { background: #17251c; border-color: #2ea043; }
       .roomChat.active { background: #16233a; border-color: #4b8fe0; color: #cfe0ff; }
+      /* '지금 방' 강조 — 밝은 화면용 연파랑(#eef4ff)을 그대로 두면 어두운 배경에 흰 판이
+         떠서 그 카드 글씨가 통째로 안 보인다(형: "그냥 허얘"). 어두운 쪽 색을 따로 준다. */
+      .roomRow.here, .roomCard.here { background: #16233a; box-shadow: inset 3px 0 0 #4b8fe0; }
       .wtAction { color: #e8edf4; }
       .fileThumb, .fileIcon { background: #222c3a; }
       .fileBadge { background: #1e3a2a; color: #7fd6a2; }
