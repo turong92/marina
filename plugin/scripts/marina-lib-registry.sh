@@ -33,6 +33,7 @@ PY
 
 registry_add() {
   local path="" subrepos_csv="" have_subrepos=0 compose_file="" env_var="" env_default="local" external_specs=()
+  local profile=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --subrepos)
@@ -49,6 +50,9 @@ registry_add() {
       --env-default=*) env_default="${1#--env-default=}"; shift ;;
       --external)   external_specs+=("${2:-}"); shift 2 ;;
       --external=*) external_specs+=("${1#--external=}"); shift ;;
+      # 실행 프로필: chat = 가벼운 채팅방(도구·MCP 최소화). 없으면 개발 방 그대로.
+      --profile)    profile="${2:-}"; shift 2 ;;
+      --profile=*)  profile="${1#--profile=}"; shift ;;
       *)
         [[ -z "$path" ]] || die "add: 인자 과다 ('$1')"
         path="$1"; shift ;;
@@ -71,7 +75,7 @@ registry_add() {
   mkdir -p "$MARINA_HOME"
   local abs_compose=""
   [[ -n "$compose_file" ]] && abs_compose="$(cd "$(dirname "$compose_file")" && pwd -P)/$(basename "$compose_file")"
-  entry="$(python3 - "$entry" "$have_subrepos" "$subrepos_csv" "$abs_compose" "$env_var" "$env_default" "$ext_joined" <<'PY'
+  entry="$(python3 - "$entry" "$have_subrepos" "$subrepos_csv" "$abs_compose" "$env_var" "$env_default" "$ext_joined" "$profile" <<'PY'
 import json, os, sys
 entry = json.loads(sys.argv[1])
 have_subrepos, subrepos_csv = sys.argv[2] == "1", sys.argv[3]
@@ -90,6 +94,11 @@ ext = [{"name": n.strip(), "source": s.strip()}
        for n, _, s in (ln.partition("=") for ln in external_joined.splitlines()) if n.strip() and s.strip()]
 if ext:
     entry["externalRepos"] = ext
+profile = sys.argv[8].strip() if len(sys.argv) > 8 else ""
+if profile:
+    if profile not in ("chat", "dev"):
+        raise SystemExit(f"알 수 없는 프로필: {profile} (chat|dev)")
+    entry["profile"] = "" if profile == "dev" else profile
 print(json.dumps(entry, ensure_ascii=False))
 PY
 )"

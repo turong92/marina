@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_logtext import redact_text
+from marina_registry import project_for
 from marina_state import MARINA_HOME
 
 TERM_SCROLLBACK_BYTES = 256 * 1024
@@ -318,8 +319,20 @@ _MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 _EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 
 
-def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "") -> list[str]:
+# 채팅 프로필이 붙일 플래그. **설정 파일로는 이 효과가 안 난다** — 실측(2026-08-24):
+#   마리나 레포 ~46,700 · 빈 폴더 ~25,600 · 빈 폴더+settings.json ~24,000 · 이 플래그 ~6,500
+# settings.json 의 MCP 키는 프로젝트 .mcp.json 서버에만 걸리고(사용자 스코프 MCP 는 그대로),
+# 내장 도구 스키마는 계속 실린다. 요청에 실을 목록 자체를 바꾸는 건 이 플래그뿐이다.
+# Read·Write 는 남긴다 — 첨부 파일을 읽고(모바일 첨부는 경로를 프롬프트에 실어 보낸다) 결과를
+# 파일로 돌려주는 게 채팅방에서도 필요하다(형 요구).
+_CHAT_FLAGS = ["--strict-mcp-config", "--tools", "Read", "Write"]
+
+
+def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "",
+                profile: str = "") -> list[str]:
     cmd = ["claude"]
+    if profile == "chat":
+        cmd += _CHAT_FLAGS
     if model:
         cmd += ["--model", model]
     if effort:
@@ -331,7 +344,9 @@ def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "") -
     return cmd
 
 
-def _codex_cli(sid: str, prompt: str = "", model: str = "", effort: str = "") -> list[str]:
+def _codex_cli(sid: str, prompt: str = "", model: str = "", effort: str = "",
+               profile: str = "") -> list[str]:
+    # codex 는 아직 채팅 프로필이 없다 — 대응 플래그를 확인 안 한 채 지어내면 기동 자체가 깨진다.
     cmd = ["codex", "resume"] if sid else ["codex"]   # sid 없음 = 새 세션(직접 launch)
     if model:
         cmd += ["--model", model]
@@ -347,7 +362,8 @@ def _codex_cli(sid: str, prompt: str = "", model: str = "", effort: str = "") ->
 _AGENT_CLIS = {"claude": _claude_cli, "codex": _codex_cli}
 
 
-def _agent_cli(source: str, sid: str, prompt: str = "", model: str = "", effort: str = "") -> list[str]:
+def _agent_cli(source: str, sid: str, prompt: str = "", model: str = "", effort: str = "",
+               profile: str = "") -> list[str]:
     if source not in _AGENT_CLIS:
         raise ValueError("unknown agent source")
     # sid 빈 값 = **새 세션 직접 launch**(resume 아님). 그 세션의 sid 는 시작 시점엔 알 수 없고,
@@ -358,7 +374,17 @@ def _agent_cli(source: str, sid: str, prompt: str = "", model: str = "", effort:
         raise ValueError("invalid agent model")
     if effort and effort not in _EFFORTS:
         raise ValueError("invalid agent effort")
-    return _AGENT_CLIS[source](sid, prompt, model, effort)
+    return _AGENT_CLIS[source](sid, prompt, model, effort, profile)
+
+
+def _project_profile(root: Path) -> str:
+    """이 워크트리가 속한 프로젝트의 프로필(""|"chat"). 레지스트리를 못 읽으면 빈 값 —
+    모르면 지금까지 하던 대로(개발 방) 띄운다."""
+    try:
+        project = project_for(root) or {}
+    except Exception:
+        return ""
+    return str(project.get("profile") or "")
 
 
 def term_open(root: Path, cols: int = 80, rows: int = 24,
@@ -376,7 +402,10 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
     key = ""
     agent = None
     if agent_source:
-        cmd = _agent_cli(agent_source, agent_sid, agent_prompt, agent_model, agent_effort)
+        # 프로젝트가 "chat" 이면 가벼운 채팅방으로 띄운다(도구·MCP 최소화). resume 에도 같이
+        # 붙여야 한다 — 붙었다 안 붙었다 하면 같은 방이 열 때마다 무게가 널뛴다.
+        cmd = _agent_cli(agent_source, agent_sid, agent_prompt, agent_model, agent_effort,
+                         _project_profile(root))
         # 재사용 키는 **같은 세션의 이중 resume** 을 막는 장치다. sid 가 없으면(새 세션 launch) 막을
         # 대상 자체가 없으므로 키를 만들지 않는다 — 안 그러면 ＋Claude 두 번이 한 PTY 로 합쳐진다.
         #

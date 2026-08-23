@@ -84,6 +84,9 @@ def load_projects() -> list[dict[str, Any]]:
                 "defaultAttach": [str(s) for s in _da] if isinstance(_da, list) else None,
                 "worktreeGlobs": [str(g) for g in entry.get("worktreeGlobs", [])],
                 "kind": str(entry.get("kind") or "compose"),
+                # 실행 프로필. ""(기본)=개발 방, "chat"=가벼운 채팅방(도구·MCP 최소화).
+                # 방을 열 때 marina_term 이 이 값을 보고 CLI 플래그를 붙인다.
+                "profile": str(entry.get("profile") or ""),
                 "composeFile": str(entry.get("composeFile") or "docker-compose.yml"),
                 "composeEnvVar": str(entry.get("composeEnvVar") or ""),
                 "composeEnvDefault": str(entry.get("composeEnvDefault") or "local"),

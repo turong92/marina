@@ -41,7 +41,7 @@ slow.write_text(
     "    time.sleep(0.8)\n"          # 사람이 답한 뒤 다음 질문을 그리기까지의 지연
     "    sys.stdout.write('QUESTION ' + 'x' * 200 + '\\n'); sys.stdout.flush()\n",
     encoding="utf-8")
-mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="": [
+mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="", profile="": [
     sys.executable, str(slow)]
 
 opened = mt.term_open(tmp, 80, 24, agent_source="fake", agent_sid="redraw-0001")
@@ -86,7 +86,7 @@ fast.write_text(
     "    sys.stdin.readline()\n"
     "    sys.stdout.write('QUESTION ' + 'x' * 200 + '\\n'); sys.stdout.flush()\n",
     encoding="utf-8")
-mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="": [sys.executable, str(fast)]
+mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="", profile="": [sys.executable, str(fast)]
 opened = mt.term_open(tmp, 80, 24, agent_source="fake", agent_sid="redraw-0002")
 tid = opened["tid"]
 try:
@@ -153,7 +153,7 @@ from pathlib import Path
 import marina_term as mt
 
 tmp = Path(sys.argv[1])
-mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="": [
+mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="", profile="": [
     sys.executable, "-c",
     "import sys,time; sys.stdout.write('\\x1b[32m선택하세요\\x1b[0m\\r\\n  1) 예\\n'); "
     "sys.stdout.flush(); time.sleep(5)"]
