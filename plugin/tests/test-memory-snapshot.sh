@@ -50,7 +50,7 @@ inspect = {
 }
 calls = []
 
-def fake_run(args, timeout):
+def fake_run(args, timeout, env=None):
     calls.append((tuple(args), timeout))
     if args[:2] == ["docker", "info"]:
         return info
@@ -63,7 +63,7 @@ def fake_run(args, timeout):
     raise AssertionError(args)
 
 mm._run = fake_run
-mm._snapshot_cache = None
+mm._snapshot_cache = {}
 mm._inspect_cache.clear()
 snapshot = mm.memory_snapshot(force=True)
 assert snapshot["docker"]["totalMb"] == 15972
@@ -82,11 +82,11 @@ inspect_calls = [args for args, _ in calls if args[:2] == ("docker", "inspect")]
 assert len(inspect_calls) == 1 and set(inspect_calls[0][2:]) == {"abc123", "def456", "oom789"}, inspect_calls
 
 # A refresh failure returns the prior snapshot marked stale instead of raising.
-def timeout_run(args, timeout):
+def timeout_run(args, timeout, env=None):
     raise subprocess.TimeoutExpired(args, timeout)
 
 mm._run = timeout_run
-mm.host_memory = lambda: {"totalMb": 32000, "availableMb": 2048, "availablePercent": 6}
+mm.host_memory = lambda target=None: {"totalMb": 32000, "availableMb": 2048, "availablePercent": 6}
 stale = mm.memory_snapshot(force=True)
 assert stale["stale"] is True and stale["partial"] is True
 assert stale["error"] and "TimeoutExpired" in stale["error"]
@@ -94,7 +94,7 @@ assert stale["containers"] == snapshot["containers"]
 assert stale["host"]["availableMb"] == 2048, stale["host"]
 
 # Missing stats for a running container is incomplete telemetry, never a valid 0 MiB sample.
-def incomplete_run(args, timeout):
+def incomplete_run(args, timeout, env=None):
     if args[:2] == ["docker", "info"]:
         return info
     if args[:2] == ["docker", "stats"]:
@@ -106,7 +106,7 @@ def incomplete_run(args, timeout):
     raise AssertionError(args)
 
 mm._run = incomplete_run
-mm._snapshot_cache = None
+mm._snapshot_cache = {}
 mm._inspect_cache.clear()
 incomplete = mm.memory_snapshot(force=True)
 assert incomplete["partial"] is True, incomplete
@@ -118,14 +118,14 @@ old_docker_timeout = mm._DOCKER_TIMEOUT_SECONDS
 old_inspect_timeout = mm._INSPECT_TIMEOUT_SECONDS
 mm._DOCKER_TIMEOUT_SECONDS = 0
 mm._INSPECT_TIMEOUT_SECONDS = 0
-mm._snapshot_cache = (time.monotonic() - mm._CACHE_TTL_SECONDS - 1, {
+mm._snapshot_cache[""] = (time.monotonic() - mm._CACHE_TTL_SECONDS - 1, {
     "host": {"totalMb": 32000, "availableMb": 8000, "availablePercent": 25},
     "docker": {"available": False, "totalMb": None, "usedMb": None, "usageComplete": False},
     "containers": [], "stale": False, "partial": True, "error": "docker unavailable",
     "capturedAt": "old",
 })
 mm._refreshing = True
-mm.host_memory = lambda: {"totalMb": 32000, "availableMb": 1000, "availablePercent": 3}
+mm.host_memory = lambda target=None: {"totalMb": 32000, "availableMb": 1000, "availablePercent": 3}
 try:
     waiter_fallback = mm.memory_snapshot()
 finally:
@@ -136,7 +136,7 @@ assert waiter_fallback["host"]["availableMb"] == 1000, waiter_fallback
 
 # Mutable inspect state must refresh when a running container later exits by OOM.
 transition = {"exited": False}
-def transition_run(args, timeout):
+def transition_run(args, timeout, env=None):
     if args[:2] == ["docker", "info"]:
         return info
     if args[:2] == ["docker", "stats"]:
@@ -151,7 +151,7 @@ def transition_run(args, timeout):
     raise AssertionError(args)
 
 mm._run = transition_run
-mm._snapshot_cache = None
+mm._snapshot_cache = {}
 mm._inspect_cache.clear()
 running_snapshot = mm.memory_snapshot(force=True)
 assert running_snapshot["containers"][0]["running"] is True
@@ -161,11 +161,11 @@ exited_web = next(row for row in exited_snapshot["containers"] if row["composeSe
 assert exited_web["running"] is False and exited_web["oomKilled"] is True, exited_web
 
 # A shared failed refresh marks every waiting caller stale, then caches that failure.
-mm._snapshot_cache = (time.monotonic() - mm._CACHE_TTL_SECONDS - 1, snapshot)
+mm._snapshot_cache[""] = (time.monotonic() - mm._CACHE_TTL_SECONDS - 1, snapshot)
 timeout_calls = 0
 timeout_lock = threading.Lock()
 
-def slow_timeout_run(args, timeout):
+def slow_timeout_run(args, timeout, env=None):
     global timeout_calls
     if args[:2] == ["docker", "info"]:
         with timeout_lock:
@@ -194,12 +194,12 @@ assert cached_failure["stale"] and cached_failure["partial"] and "TimeoutExpired
 assert timeout_calls == 1, timeout_calls
 
 # Eight callers share one refresh; only one docker stats invocation may run.
-mm._snapshot_cache = None
+mm._snapshot_cache = {}
 mm._inspect_cache.clear()
 stats_calls = 0
 stats_lock = threading.Lock()
 
-def slow_run(args, timeout):
+def slow_run(args, timeout, env=None):
     global stats_calls
     if args[:2] == ["docker", "stats"]:
         with stats_lock:

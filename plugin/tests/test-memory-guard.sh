@@ -94,7 +94,7 @@ with tempfile.TemporaryDirectory() as temp:
     })
     assert incomplete["reason"] == "docker-unknown", incomplete
 
-    mm.memory_snapshot = lambda force=False: snapshot(docker_used=7000)
+    mm.memory_snapshot = lambda force=False, target=None: snapshot(docker_used=7000)
     first_block, first_token = mm.acquire_memory_reservation(root, ["api"])
     assert first_block is None and first_token, (first_block, first_token)
     second_block, second_token = mm.acquire_memory_reservation(root, ["worker"])

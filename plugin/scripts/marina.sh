@@ -387,6 +387,53 @@ main() {
         [[ -n "$_jpid" && -n "$_jcfile" && -f "$MARINA_HOME/$_jpid/$_jcfile" ]] && _jstored="$MARINA_HOME/$_jpid/$_jcfile"
       fi
       links_json "$svc" "${2:-}" "$_jstored" "$_jcp" ;;
+    remote)
+      # 런타임 타깃 스위치 — 이 워크트리(또는 전역 기본)의 컨테이너를 어느 기계에서 돌릴지.
+      #   marina remote use [<host>] [--global]   원격으로. host 생략 시 전역 주소를 물려받는다.
+      #   marina remote off [--global]            로컬로 고정한다(전역이 원격이어도 이 워크트리만 로컬).
+      #   marina remote inherit [--global]        이 계층의 설정을 지운다 → 전역 기본을 따른다.
+      #   marina remote status                    지금 어디서 도나 + 어느 계층이 정했나.
+      # 전역=$MARINA_HOME/runtime-target.json, 세션=<session_dir>/runtime-target.json (세션이 전역을 덮는다).
+      local _rsub="${1:-status}"; shift || true
+      local _rglobal=0 _rhost="" _ra
+      for _ra in "$@"; do
+        case "$_ra" in
+          --global) _rglobal=1 ;;
+          -*) die "remote: 알 수 없는 옵션 $_ra" ;;
+          *) _rhost="$_ra" ;;
+        esac
+      done
+      local _rtarget
+      if [[ "$_rglobal" == "1" ]]; then _rtarget="$MARINA_HOME/runtime-target.json"
+      else _rtarget="$(session_dir)/runtime-target.json"; fi
+      case "$_rsub" in
+        use|off|inherit)
+          # 쓰기는 marina_runtime_target.write_target 한 곳으로 — 원자적 쓰기·검증이 거기 있다.
+          # (전역에 주소 없는 remote 를 막는 것도 그 함수가 한다: 성공을 찍고 로컬로 도는 걸 방지)
+          [[ "$_rsub" == "use" && "$_rglobal" == "1" && -z "$_rhost" ]] && die "remote use --global: 박스 주소가 필요합니다 (예: marina remote use ssh://user@host --global)"
+          PYTHONPATH="$SCRIPT_DIR" python3 -c '
+import sys
+from marina_runtime_target import write_target
+kind = {"use": "remote", "off": "local", "inherit": "inherit"}[sys.argv[2]]
+try:
+    write_target(sys.argv[1], kind, sys.argv[3] or None)
+except ValueError as e:
+    sys.stderr.write(f"error: {e}\n"); raise SystemExit(2)
+' "$(dirname "$_rtarget")" "$_rsub" "$_rhost" || exit $?
+          case "$_rsub" in
+            use)     echo "remote: $([[ $_rglobal == 1 ]] && echo 전역 || echo 이 워크트리) → 원격${_rhost:+ ($_rhost)}" ;;
+            off)     echo "remote: $([[ $_rglobal == 1 ]] && echo 전역 || echo 이 워크트리) → 로컬" ;;
+            inherit) echo "remote: $([[ $_rglobal == 1 ]] && echo 전역 설정 제거 || echo 이 워크트리는 전역 기본을 따름)" ;;
+          esac ;;
+        status)
+          PYTHONPATH="$SCRIPT_DIR" MARINA_HOME="$MARINA_HOME" python3 -c '
+import sys
+from marina_runtime_target import load_target
+t = load_target(sys.argv[1])
+print(f"런타임: 원격 ({t.host})" if t.is_remote else "런타임: 로컬")
+' "$(session_dir)" ;;
+        *) die "remote: use|off|inherit|status 중 하나 (받은 값: $_rsub)" ;;
+      esac ;;
     gateway)
       # 호스트 브라우저 게이트웨이 caddy 제어 — 설치 사용자도 PATH 의 marina 로 도달(코덱스 P2). marina gateway {start|stop|status|install|uninstall}
       exec bash "$SCRIPT_DIR/marina-gateway-control.sh" "$@" ;;

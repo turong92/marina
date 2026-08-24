@@ -271,6 +271,7 @@
       await loadGatewayState();   // 기본 열기 URL을 정하기 전에 Caddy 가용성을 확정한다.
       const data = await api('/api/sessions');
       renderMemory(data.memory, data.sessions);
+      renderRuntimeTarget(data.runtimeTarget);
       const nextSessions = data.sessions;
       const nextSignature = buildSessionSignature(nextSessions);
       const sessionListChanged = nextSignature !== sessionSignature;

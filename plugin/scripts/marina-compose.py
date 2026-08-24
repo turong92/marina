@@ -22,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import time
+
 from pathlib import Path
 
 try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로드(테스트)에서도 sibling 해석되게.
@@ -39,6 +40,7 @@ try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로
     )
     from marina_logtext import redact_text
     import marina_prebuild
+    from marina_runtime_target import LocalTarget, Mount, load_target as load_runtime_target
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from marina_dockerfile import is_profile_var
@@ -55,6 +57,7 @@ except ImportError:
     )
     from marina_logtext import redact_text
     import marina_prebuild
+    from marina_runtime_target import LocalTarget, Mount, load_target as load_runtime_target
 
 
 def compose_project_name(project_id: str, session: str) -> str:
@@ -573,8 +576,115 @@ def _auto_service_forward(config: dict) -> dict:
     return out
 
 
+def _volume_mount(v):
+    """resolved config 의 volume 항목 → Mount. 다룰 수 없으면 None(원본을 그대로 통과시킨다).
+
+    `docker compose config` 는 volumes 를 dict 로 정규화한다({type, source, target, read_only, ...}).
+    **문자열로 합치지 않는다** — 경로에 콜론이 있으면 되쪼갤 때 엉뚱하게 갈린다(`/p/a: b` → `/p/a`)."""
+    if isinstance(v, str):                            # 방어적: 단축 문법이 그대로 온 경우
+        src, sep, rest = v.partition(":")
+        if not sep:
+            return None
+        tgt, _, mode = rest.partition(":")
+        return Mount(source=src, target=tgt, mode=mode)
+    if not isinstance(v, dict):
+        return None
+    src, tgt = v.get("source"), v.get("target")
+    if not src or not tgt:
+        return None                                   # 익명 볼륨·tmpfs 등 — 건드리지 않는다
+    return Mount(source=str(src), target=str(tgt), mode="ro" if v.get("read_only") else "")
+
+
+def _service_mounts(svc: dict) -> list:
+    return [m for m in (_volume_mount(v) for v in (svc or {}).get("volumes") or []) if m]
+
+
+def _render_mount(m) -> str:
+    return f"{m.source}:{m.target}" + (f":{m.mode}" if m.mode else "")
+
+
+def injection_plan_for(config: dict, target, services=None) -> list:
+    """기동 **전에** 컨테이너로 밀어 넣어야 하는 목록. 로컬 타깃이면 빈 목록.
+
+    watch sync 로는 대체할 수 없다 — sync 는 돌고 있는 컨테이너에 넣는데 JVM 은 부팅 시점에 JAR 이
+    필요해 그 전에 죽는다(실측: `no jar found in /app/libs`).
+
+    services 는 **이번에 기동하는** 서비스로 범위를 좁힌다. 없는(안 뜬) 컨테이너에 `docker cp` 하면
+    `No such container` 로 기동 전체가 멈춘다 — 일부 서비스만 start 할 때 실제로 터졌다. None=전체."""
+    defined = (config or {}).get("services") or {}
+    names = sorted(defined) if services is None else [n for n in services if n in defined]
+    return target.injection_plan({n: _service_mounts(defined[n] or {}) for n in names})
+
+
+_WATCH_KEYS = ("action", "path", "target", "initial_sync", "ignore")   # resolved config 의 exec 기본값 부산물은 버린다
+
+
+def _watch_override_lines(svc: dict, injections: list) -> list:
+    """원격 전용: 주입된 경로의 `action: restart` 를 `sync+restart` 로 바꾼 watch 목록을 낸다.
+
+    왜. 로컬은 바인드 마운트라 새 JAR 이 바로 보이고 restart 로 끝난다. 원격은 named volume 에 기동
+    시점 파일이 들어가 있어 restart 만으론 예전 JAR 을 다시 읽는다 — 개발 루프가 끊긴다. sync 는 돌고
+    있는 컨테이너의 그 경로(=볼륨 마운트 지점)에 쓰므로 볼륨에 남고, 이어지는 restart 가 새 파일을 읽는다.
+
+    범위는 **경로가 정확히 일치하는 규칙**뿐이다. 부모/자식을 추측하면 프로젝트가 선언하지 않은 동작을
+    만들어낸다. 일치하는 규칙이 없으면 아무것도 바꾸지 않는다(로컬에서도 그 경로는 수동이었다는 뜻).
+    compose 의 리스트 병합 규칙에 기대지 않으려고 목록 전체를 !override 로 대체한다."""
+    rules = ((svc or {}).get("develop") or {}).get("watch")
+    if not isinstance(rules, list) or not rules:
+        return []
+    by_source = {i.source: i.target for i in injections}
+    changed, out = False, []
+    for r in rules:
+        if not isinstance(r, dict):
+            return []                                   # 모르는 모양이면 손대지 않는다
+        r = {k: r[k] for k in _WATCH_KEYS if k in r and r[k] is not None}
+        if r.get("action") == "restart" and r.get("path") in by_source:
+            r["action"] = "sync+restart"
+            r["target"] = by_source[r["path"]]
+            changed = True
+        out.append(r)
+    if not changed:
+        return []
+    lines = ["    develop:", "      watch: !override"]
+    for r in out:
+        first = True
+        for k in _WATCH_KEYS:
+            if k not in r:
+                continue
+            v = r[k]
+            if k == "ignore" and isinstance(v, list):
+                rendered = "[" + ", ".join(json.dumps(str(x)) for x in v) + "]"
+            elif isinstance(v, bool):
+                rendered = "true" if v else "false"
+            else:
+                # 경로는 반드시 인용한다 — `#` 는 주석으로 잘리고 `: ` 는 파싱을 깨뜨린다.
+                # 이 파일의 기존 관례(`context:` 등)와 같다.
+                rendered = json.dumps(str(v))
+            lines.append(("        - " if first else "          ") + f"{k}: {rendered}")
+            first = False
+    return lines
+
+
+def host_forward_warning(connectivity, target):
+    """원격인데 `forward: <port>: host` 가 있으면 경고 문구, 아니면 None.
+
+    `host` 는 "컨테이너 밖 그 기계"를 뜻한다. 로컬에선 개발자 맥(거기 redis/kafka 가 떠 있다)이지만
+    원격에선 **박스**가 된다. 같은 선언인데 가리키는 기계가 바뀌므로, 조용히 다른 데 붙느니 알린다.
+    서비스 타겟(`8081: user-api`)은 컨테이너 DNS 라 기계가 바뀌어도 뜻이 그대로다 — 경고 대상 아님."""
+    if not getattr(target, "is_remote", False):
+        return None
+    forward = (connectivity or {}).get("forward") or {}
+    ports = sorted((p for p, t in forward.items() if t == "host"), key=lambda x: int(x) if str(x).isdigit() else 0)
+    if not ports:
+        return None
+    return ("warning: 원격 런타임인데 host 로 엮인 포트가 있습니다 — "
+            + ", ".join(str(p) for p in ports)
+            + f". 이 포트들은 개발자 맥이 아니라 박스({target.host})에서 찾습니다. "
+              "해당 인프라를 박스에 띄우세요.")
+
+
 def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict = None,
-                  connectivity: dict = None, expose_env: dict = None) -> str:
+                  connectivity: dict = None, expose_env: dict = None, target=None) -> str:
     """resolved config → overlay YAML. 워크트리 격리를 위해 *비침투적으로* 덮는다(앱·외부 레포 불변):
     ① published ports → 127.0.0.1::<target> (호스트포트 Docker 자동할당)
     ② container_name → 제거(!reset, 워크트리별 자동명명 — 다중 인스턴스 충돌 방지)
@@ -594,6 +704,8 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
         if pairs:
             bind_pairs[fname] = pairs
     out, any_ = ["services:"], False
+    target = target or LocalTarget()                             # ⑦ 런타임 타깃 — 로컬이면 아래 전부 no-op
+    new_volumes = {}                                             # 원격에서 새로 만든 named volume(top-level 선언용)
     for name in sorted(services):
         svc = services[name] or {}
         body = []
@@ -614,6 +726,25 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
                 for t, proto in specs
             )
             body.append(f"    ports: !override [{entries}]")
+        # ⑦ 원격이면 호스트 경로 바인드를 named volume 으로 치환한다. 원격 데몬은 개발자 맥의 경로를
+        # 풀 수 없다(--project-driectory 가 클라이언트/데몬 이중 역할). 로컬 타깃은 원본을 그대로 돌려주므로
+        # 이 블록이 아무것도 하지 않는다.
+        ventries = (svc or {}).get("volumes") or []
+        vslots = [_volume_mount(v) for v in ventries]        # 다룰 수 없는 항목은 None (익명 볼륨·tmpfs 등)
+        vmounts = [m for m in vslots if m]
+        if vmounts:
+            rw = target.volume_rewrite(name, vmounts)
+            if rw.volumes != vmounts:
+                # !override 는 목록 전체를 대체한다 → 렌더 못 한 항목을 빼먹으면 그 서비스가 원격에서
+                # 조용히 볼륨을 잃는다. 원래 순서를 지키며 원본 dict 를 인라인으로 통과시킨다
+                # (YAML 은 JSON 상위집합이고, 이 dict 는 compose 자신이 정규화한 형태다).
+                _rw = iter(rw.volumes)
+                rendered = [json.dumps(_render_mount(next(_rw))) if slot else json.dumps(ventries[i])
+                            for i, slot in enumerate(vslots)]
+                body.append("    volumes: !override [" + ", ".join(rendered) + "]")
+                new_volumes.update(rw.named_volumes)
+                # 주입된 경로의 restart 규칙은 sync+restart 로 — 안 그러면 재빌드가 컨테이너에 안 닿는다.
+                body += _watch_override_lines(svc, rw.injections)
         if svc.get("container_name"):
             body.append("    container_name: !reset null")
         build_block = []                                   # dockerfile 보정 + args 를 한 build: 블록으로
@@ -681,6 +812,10 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
             if fname not in aliases:
                 aliases.append(fname)
             out += [f"      {net}:", f"        aliases: [{', '.join(json.dumps(a) for a in aliases)}]"]
+        any_ = True
+    if new_volumes:                                               # stored 가 이미 선언한 것은 여기 안 들어온다(치환된 것만)
+        out.append("volumes:")
+        out += [f"  {v}:" for v in sorted(new_volumes)]
         any_ = True
     return ("\n".join(out) + "\n") if any_ else ""
 
@@ -796,15 +931,69 @@ def _json_rows(value: str) -> list[dict]:
     return [row for row in rows if isinstance(row, dict)]
 
 
-def up_argv(stored, overlay, project_dir, project_name, services, build=False):
+def _compose_base(stored, overlay, project_dir, project_name):
     a = ["docker", "compose", "-f", stored]
     if overlay and os.path.exists(overlay) and os.path.getsize(overlay) > 0:   # 빈 overlay 는 -f 안 함(docker 실패 방지)
         a += ["-f", overlay]
-    a += ["--project-directory", project_dir, "-p", project_name, "up", "-d"]
+    return a + ["--project-directory", project_dir, "-p", project_name]
+
+
+def up_argv(stored, overlay, project_dir, project_name, services, build=False, no_start=False):
+    """no_start=True 면 컨테이너를 **만들기만** 한다(원격 3단계 기동의 1단계).
+
+    원격은 named volume 으로 치환한 파일(JAR 등)을 기동 전에 넣어야 해서 `up --no-start` → `docker cp`
+    → `start` 로 쪼갠다. compose 는 `--no-start` 와 `-d` 동시 지정을 거부하므로 -d 를 빼야 한다."""
+    a = _compose_base(stored, overlay, project_dir, project_name) + ["up"]
+    a.append("--no-start" if no_start else "-d")
     if build:
         a.append("--build")
     a.append("--remove-orphans")
     return a + list(services)
+
+
+def start_argv(stored, overlay, project_dir, project_name, services):
+    """원격 3단계 기동의 3단계 — 주입이 끝난 컨테이너를 켠다."""
+    return _compose_base(stored, overlay, project_dir, project_name) + ["start"] + list(services)
+
+
+def injection_source_path(inj, project_dir):
+    """주입 원본의 절대 경로. compose 의 상대 경로는 project_dir 기준이다.
+
+    is_dir 판정과 실제 복사가 **같은 경로**를 보게 하려고 한 군데로 모았다 — 갈라지면 디렉터리를
+    파일로 오판해 `docker cp` 가 /app/libs/libs 를 만들고 JVM 이 JAR 을 못 찾는다."""
+    if os.path.isabs(inj.source):
+        return inj.source
+    return os.path.normpath(os.path.join(project_dir, inj.source))
+
+
+def inject_argv(inj, project_name, project_dir, is_dir):
+    """원격 3단계 기동의 2단계 — `docker cp` 로 컨테이너에 밀어 넣는다(Docker API 경유라 원격 안전).
+
+    디렉터리는 `<src>/.` 로 **내용만** 넣는다 — `docker cp ./libs c:/app/libs` 는 /app/libs/libs 를 만든다."""
+    src = injection_source_path(inj, project_dir)
+    return ["docker", "cp", src + "/." if is_dir else src,
+            f"{project_name}-{inj.service}-1:{inj.target}"]
+
+
+def startup_plan(target, injections, stored, overlay, project_dir, project_name,
+                 services, build=False, is_dir_fn=None):
+    """기동을 몇 단계로 실행할지 결정한다. `[(kind, argv), ...]` 를 순서대로 돌리면 된다.
+
+    로컬(그리고 주입할 게 없는 원격)은 지금 그대로 `up -d` 한 방이다. 주입이 필요한 원격만
+    create → inject… → start 로 쪼갠다 — 부팅에 필요한 파일이 컨테이너가 뜨기 전에 들어가야 하므로.
+
+    is_dir_fn 은 테스트에서 파일시스템 없이 갈아끼우기 위한 것(기본 os.path.isdir)."""
+    is_dir_fn = is_dir_fn or os.path.isdir
+    svc = list(services)
+    if not (getattr(target, "is_remote", False) and injections):
+        return [("up", up_argv(stored, overlay, project_dir, project_name, svc, build=build))]
+    plan = [("create", up_argv(stored, overlay, project_dir, project_name, svc,
+                               build=build, no_start=True))]
+    for inj in injections:
+        plan.append(("inject", inject_argv(inj, project_name, project_dir,
+                                           is_dir=is_dir_fn(injection_source_path(inj, project_dir)))))
+    plan.append(("start", start_argv(stored, overlay, project_dir, project_name, svc)))
+    return plan
 
 
 def build_argv(stored, overlay, project_dir, project_name, services, no_cache=False):
@@ -942,8 +1131,14 @@ def _write_invocation_overlay(session_dir, overlay_text):
         raise
 
 
-def _env_with(overrides):
+def _env_with(overrides, session_dir=None):
+    """compose 호출이 받을 env. 모든 호출(up/build/watch/config)이 여기서 나온다 = 초크포인트 1곳.
+
+    session_dir 을 주면 그 워크트리의 런타임 타깃을 반영한다(원격이면 DOCKER_HOST). 로컬 타깃은 빈
+    델타를 주므로 기존 호출과 완전히 같다. 명시 override(--env)가 타깃보다 우선한다 — 디버깅 탈출구."""
     env = dict(os.environ)
+    if session_dir:
+        env.update(load_runtime_target(session_dir).docker_env())
     for kv in overrides:
         k, _, v = kv.partition("=")
         if k:
@@ -1470,11 +1665,16 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                         + _rebuild_hint_for_reason(reason, build_services)
                         + "`"
                     )
-            argv = up_argv(
+            # ⑦ 원격이면 기동이 create → inject → start 로 쪼개진다(부팅 전에 파일이 들어가야 함).
+            # 로컬은 plan 이 항상 단일 up 이라 기존 동작과 동일하다.
+            _target = load_runtime_target(a.session_dir)
+            plan = startup_plan(
+                _target, injection_plan_for(config, _target, services=requested + sidecars),
                 a.stored, overlay, a.project_dir, name, requested + sidecars,
                 build=effective_build,
             )
-            print("compose: " + " ".join(argv))
+            for _kind, _argv in plan:
+                print(("compose: " if _kind != "inject" else "inject: ") + " ".join(_argv))
             try:
                 with _effective_build_slot(
                     a.session_dir, effective_build, a.project_dir
@@ -1490,7 +1690,10 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                         print("compose: " + " ".join(clean_argv))
                         rc = subprocess.call(clean_argv, env=env)
                     if rc == 0:
-                        rc = subprocess.call(argv, env=env)
+                        for _kind, _argv in plan:               # 한 단계라도 실패하면 뒤를 돌리지 않는다
+                            rc = subprocess.call(_argv, env=env)
+                            if rc != 0:
+                                break
                     if rc == 0 and effective_build and current_inputs.get("status") == "ok":
                         try:
                             post_inputs = _capture_build_inputs(
@@ -1533,7 +1736,7 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
 
 
 def cmd_up(a):
-    env = _env_with(a.env)                                          # P1: env first
+    env = _env_with(a.env, session_dir=a.session_dir)               # P1: env first (+런타임 타깃)
     name = compose_project_name(a.project_id, a.session)
     try:
         config = docker_config_json(a.stored, a.project_dir, name, env)  # 비밀번호 in-memory only, 저장 안 함
@@ -1589,8 +1792,13 @@ def cmd_up(a):
             exp_env = resolve_expose_env(gw_gateway.get("expose") or {}, a.session, a.project_id, gwport,
                                          snap_services, gw_mod, primary=str(gw_gateway.get("primary") or ""))
         build_args = _parse_build_args(getattr(a, "build_arg", []))
+        _up_target = load_runtime_target(a.session_dir)
         overlay_text = build_overlay(config, build_args=build_args,
-                                     connectivity=overlay_conn, expose_env=exp_env)  # P2/P3/P4 + build args + 엮기 + expose
+                                     connectivity=overlay_conn, expose_env=exp_env,
+                                     target=_up_target)                              # P2/P3/P4 + build args + 엮기 + expose + ⑦ 런타임 타깃
+        _hw = host_forward_warning(overlay_conn, _up_target)   # host 엮기는 원격에서 가리키는 기계가 바뀐다
+        if _hw:
+            sys.stderr.write(_hw + "\n")
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
@@ -1646,7 +1854,7 @@ def cmd_prebuild_run(a):
 
 
 def cmd_watchable(a):
-    env = _env_with(a.env)
+    env = _env_with(a.env, session_dir=getattr(a, 'session_dir', None))
     name = compose_project_name(a.project_id, a.session)
     try:
         session_dir = getattr(a, "session_dir", None)
@@ -1670,7 +1878,7 @@ def cmd_watchable(a):
 
 
 def cmd_watch(a):
-    env = _env_with(a.env)
+    env = _env_with(a.env, session_dir=getattr(a, 'session_dir', None))
     name = compose_project_name(a.project_id, a.session)
     argv = watch_argv(a.stored, _overlay_path(a.session_dir), a.project_dir, name, a.service)
     print("compose watch: " + " ".join(argv), flush=True)

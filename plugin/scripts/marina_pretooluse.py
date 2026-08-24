@@ -9,6 +9,7 @@ import json
 import os
 import re
 import subprocess
+from pathlib import Path
 import sys
 
 # dev 서버 직접 기동 패턴표 — 추가/삭제는 여기 한 줄. 조회성(config/ps/logs)·build·test 는 표에 없음 = 통과.
@@ -54,6 +55,27 @@ _REMOTE_RE = re.compile(
 def _targets_remote(cmd: str) -> bool:
     """이 명령이 다른 기계(또는 컨테이너 안)를 향하나."""
     return bool(_REMOTE_RE.search(cmd or ""))
+
+
+def _targets_own_runtime(cmd: str, cwd: str) -> bool:
+    """이 명령이 **이 워크트리의 런타임 박스**를 향하나.
+
+    원격 워크트리에서 그 박스로 직접 쏘는 건 마리나 우회다(마리나가 관리하는 그 컨테이너들이다).
+    무관한 기계면 False — 기존의 "원격은 안 막는다" 취지를 그대로 둔다."""
+    try:
+        from marina_paths import session_dir
+        from marina_runtime_target import load_target
+        root = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
+                              capture_output=True, text=True, timeout=5).stdout.strip()
+        if not root:
+            return False
+        target = load_target(str(session_dir(Path(root))))
+        if not getattr(target, "is_remote", False):
+            return False
+        host = target.host.split("://", 1)[-1].strip("/")
+        return bool(host) and host in cmd
+    except Exception:
+        return False                       # 판정 불가 → 기존 동작(안 막음)
 
 
 def _strip_quoted(cmd: str) -> str:
@@ -102,12 +124,15 @@ def main() -> int:
     cmd = str((d.get("tool_input") or {}).get("command") or "")
     if not cmd or "MARINA_DIRECT=1" in cmd:                        # 의도적 직접 실행 탈출구
         return 0
-    if _targets_remote(cmd):
+    if _targets_remote(cmd) and not _targets_own_runtime(cmd, d.get("cwd") or os.getcwd()):
         # **다른 기계에서 도는 명령은 마리나가 막을 대상이 아니다.** 이 훅의 목적은 워크트리별
         # 포트 격리인데, 사무실 PC 나 원격 도커 호스트엔 그 개념이 없다. 그런데도 명령문에
         # `docker compose up` 이 보인다는 이유로 막으면, 원격 작업마다 MARINA_DIRECT 를 붙이게 된다.
         # 그게 진짜 위험이다 — "막히면 붙이면 되네"가 습관이 되면 정작 로컬에서 막아야 할 때도
         # 반사적으로 우회한다(형 지적). 탈출구가 탈출구로 남으려면 애초에 안 막아야 한다.
+        #
+        # 예외의 예외: **그 박스가 이 워크트리의 런타임**이면 마리나 관할이다. 거기서 도는 컨테이너가
+        # 곧 마리나가 관리하는 그것이라, 우회를 허용하면 격리가 그대로 뚫린다.
         return 0
     bare = _strip_quoted(cmd)                                      # 따옴표 안(검색어·인용)은 판정 비대상
     if not any(re.search(p, bare) for p in PATTERNS):              # 싼 검사 먼저 — git/파일 IO 전에

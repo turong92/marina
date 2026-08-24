@@ -922,6 +922,12 @@
     .empty { color: var(--sys-cont-neutral-lightest); padding: 18px; }
     .chev { display: inline-block; width: 14px; color: var(--sys-cont-neutral-lightest); font-size: 11px; }
     .run-summary { color: var(--sys-cont-positive-default); font-size: 12px; font-weight: 700; white-space: nowrap; }
+    /* 런타임 타깃 배지 — 로컬(기본)이면 숨는다. 원격일 때만 옆의 Docker/Host 숫자가 어느 기계
+       것인지 밝힌다(안 밝히면 표시가 거짓말이 된다). 눌러서 전환. */
+    .mem-target { border: 1px solid var(--sys-cont-neutral-light); border-radius: 10px; padding: 1px 7px;
+      font-size: 11px; line-height: 1.5; background: transparent; color: inherit; cursor: pointer; white-space: nowrap; }
+    .mem-target:hover { border-color: currentColor; }
+    .mem-target.session { border-style: dashed; }   /* 이 워크트리만 전역과 다르다 */
     .mem { display: flex; align-items: center; gap: 8px; color: var(--sys-cont-neutral-light); font-size: 12px; line-height: 1; white-space: nowrap; }
     .mem-separator { color: var(--sys-cont-neutral-lightest); margin: 0 -2px; }
     .mem-bar { width: 110px; height: 8px; border-radius: 4px; background: var(--sys-style-neutral-light); overflow: hidden; }

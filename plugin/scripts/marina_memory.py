@@ -26,7 +26,7 @@ _INSPECT_TIMEOUT_SECONDS = 2.0
 _PRESSURE_SAMPLE_INTERVAL_SECONDS = 2.0
 _cache_condition = threading.Condition()
 _refreshing = False
-_snapshot_cache: tuple[float, dict[str, Any]] | None = None
+_snapshot_cache: dict[str, tuple[float, dict[str, Any]]] = {}   # 데몬(DOCKER_HOST)별 — 워크트리마다 타깃이 다르다
 _inspect_cache: dict[str, dict[str, Any]] = {}
 _HISTORY_MAX_SERVICES = 200
 _pressure_condition = threading.Condition()
@@ -40,9 +40,30 @@ _memory_reservations: dict[str, int] = {}
 _reservation_sequence = 0
 
 
-def _run(args: list[str], timeout: float) -> str:
-    """Run a bounded command. Tests replace this module-level seam."""
-    return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=timeout)
+def _run(args: list[str], timeout: float, env: dict | None = None) -> str:
+    """Run a bounded command. Tests replace this module-level seam.
+
+    env 는 런타임 타깃의 docker 환경(원격이면 DOCKER_HOST)을 싣는다 — 메모리 판단은 컨테이너가
+    실제로 도는 데몬을 봐야 한다."""
+    full = {**os.environ, **env} if env else None
+    return subprocess.check_output(args, text=True, stderr=subprocess.DEVNULL, timeout=timeout, env=full)
+
+
+def _ssh_args(docker_host: str) -> list[str] | None:
+    """`ssh://user@host[:port]` → ssh 인자. ssh 가 아니면 None(읽을 방법이 없다)."""
+    if not docker_host.startswith("ssh://"):
+        return None
+    rest = docker_host[len("ssh://"):].strip("/")
+    if not rest:
+        return None
+    hostpart, sep, port = rest.rpartition(":")
+    if sep and port.isdigit():
+        return ["ssh", "-o", "BatchMode=yes", "-p", port, hostpart]
+    return ["ssh", "-o", "BatchMode=yes", rest]
+
+
+def _target_env(target) -> dict | None:
+    return target.docker_env() if target is not None and getattr(target, "is_remote", False) else None
 
 
 def _docker(*args: str) -> list[str]:
@@ -73,6 +94,18 @@ def parse_size_mb(value: str) -> int | None:
     }
     factor = factors.get(unit)
     return int(amount * factor / (1024**2)) if factor is not None else None
+
+
+def _parse_meminfo(text: str) -> dict[str, Any]:
+    values: dict[str, int] = {}
+    for line in text.splitlines():
+        match = re.match(r"^(MemTotal|MemAvailable):\s*(\d+)", line)
+        if match:
+            values[match.group(1)] = int(match.group(2)) // 1024
+    total = values.get("MemTotal")
+    available = values.get("MemAvailable")
+    percent = int(available * 100 / total) if total and available is not None else None
+    return {"totalMb": total, "availableMb": available, "availablePercent": percent}
 
 
 def _linux_memory() -> dict[str, Any]:
@@ -113,8 +146,29 @@ def _macos_memory() -> dict[str, Any]:
     return {"totalMb": total, "availableMb": available, "availablePercent": available_percent}
 
 
-def host_memory() -> dict[str, Any]:
-    """Read host memory without allowing an unsupported platform to raise."""
+_UNKNOWN_MEMORY = {"totalMb": None, "availableMb": None, "availablePercent": None}
+
+
+def _remote_memory(target) -> dict[str, Any]:
+    """박스의 /proc/meminfo 를 ssh 로 읽는다. 못 읽으면 unknown — **로컬 값으로 대체하지 않는다**.
+    다른 기계의 숫자로 판단하느니 모른다고 하는 편이 안전하다."""
+    ssh = _ssh_args(target.host)
+    if ssh is None:
+        return dict(_UNKNOWN_MEMORY)
+    try:
+        text = _run([*ssh, "cat", "/proc/meminfo"], _DOCKER_TIMEOUT_SECONDS)
+    except Exception:
+        return dict(_UNKNOWN_MEMORY)
+    return _parse_meminfo(text)
+
+
+def host_memory(target=None) -> dict[str, Any]:
+    """Read host memory without allowing an unsupported platform to raise.
+
+    target 이 원격이면 **그 박스**를 읽는다 — 개발자 맥의 여유 메모리로 박스 기동을 판단하면
+    양방향으로 틀린다(맥이 꽉 차면 한가한 박스를 막고, 맥이 한가하면 꽉 찬 박스에 더 밀어넣는다)."""
+    if target is not None and getattr(target, "is_remote", False):
+        return _remote_memory(target)
     system = platform.system()
     if system == "Linux":
         return _linux_memory()
@@ -170,15 +224,14 @@ def _row_for_id(rows: list[dict[str, Any]], container_id: str) -> dict[str, Any]
 
 def _inspect_many(
     container_ids: list[str],
-    refresh_ids: set[str] | None = None,
-) -> dict[str, dict[str, Any]]:
+    refresh_ids: set[str] | None = None, env: dict | None = None) -> dict[str, dict[str, Any]]:
     """Inspect all uncached containers in one bounded Docker call."""
     ids = list(dict.fromkeys(container_id for container_id in container_ids if container_id))
     refresh = refresh_ids or set()
     result = {container_id: _inspect_cache[container_id] for container_id in ids if container_id in _inspect_cache}
     missing = [container_id for container_id in ids if container_id not in result or container_id in refresh]
     if missing:
-        rows = _json_rows(_run(_docker("inspect", *missing), _INSPECT_TIMEOUT_SECONDS))
+        rows = _json_rows(_run(_docker("inspect", *missing), _INSPECT_TIMEOUT_SECONDS, env))
         for container_id in missing:
             details = _row_for_id(rows, container_id)
             if details:
@@ -188,15 +241,16 @@ def _inspect_many(
     return result
 
 
-def _inspect(container_id: str) -> dict[str, Any]:
+def _inspect(container_id: str, env: dict | None = None) -> dict[str, Any]:
     return _inspect_many([container_id]).get(container_id, {})
 
 
 def _container_rows(
     docker_total_mb: int | None,
+    env: dict | None = None,
 ) -> tuple[list[dict[str, Any]], bool, list[str], bool]:
-    stats_rows = _json_rows(_run(_docker("stats", "--no-stream", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS))
-    ps_rows = _json_rows(_run(_docker("ps", "--all", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS))
+    stats_rows = _json_rows(_run(_docker("stats", "--no-stream", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS, env))
+    ps_rows = _json_rows(_run(_docker("ps", "--all", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS, env))
     containers: list[dict[str, Any]] = []
     partial = False
     usage_complete = True
@@ -215,7 +269,7 @@ def _container_rows(
             refresh_ids.add(container_id)
     candidate_ids = list(dict.fromkeys(container_id for container_id in candidate_ids if container_id))
     try:
-        inspected = _inspect_many(candidate_ids, refresh_ids)
+        inspected = _inspect_many(candidate_ids, refresh_ids, env)
     except Exception as exc:
         inspected = {}
         partial = True
@@ -290,13 +344,13 @@ def _empty_snapshot(error: str | None = None, host: dict[str, Any] | None = None
     }
 
 
-def _collect_snapshot(host: dict[str, Any] | None = None) -> dict[str, Any]:
+def _collect_snapshot(host: dict[str, Any] | None = None, env: dict | None = None) -> dict[str, Any]:
     snapshot = _empty_snapshot(host=host)
-    info_rows = _json_rows(_run(_docker("info", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS))
+    info_rows = _json_rows(_run(_docker("info", "--format", "{{json .}}"), _DOCKER_TIMEOUT_SECONDS, env))
     info = info_rows[0] if info_rows else {}
     total_bytes = info.get("MemTotal")
     total_mb = round(int(total_bytes) / (1024**2)) if total_bytes is not None else None
-    containers, partial, errors, usage_complete = _container_rows(total_mb)
+    containers, partial, errors, usage_complete = _container_rows(total_mb, env)
     used_mb = (
         sum(row["memoryUsageMb"] for row in containers if row["memoryUsageMb"] is not None)
         if usage_complete else None
@@ -326,40 +380,47 @@ def _cache_value(snapshot: dict[str, Any], *, stale: bool = False, error: str | 
     return value
 
 
-def memory_snapshot(force: bool = False) -> dict[str, Any]:
-    """Return a cached best-effort host/Docker snapshot; never raise."""
-    global _refreshing, _snapshot_cache
+def memory_snapshot(force: bool = False, target=None) -> dict[str, Any]:
+    """Return a cached best-effort host/Docker snapshot; never raise.
+
+    target 이 원격이면 그 박스의 docker 와 /proc/meminfo 를 읽는다. 캐시는 **데몬별로 갈라 둔다** —
+    한 캐시를 공유하면 로컬 워크트리가 채운 값이 원격 질의에 그대로 나간다."""
+    global _refreshing
+    env = _target_env(target)
+    key = (env or {}).get("DOCKER_HOST") or ""
+    cached = _snapshot_cache.get(key)
     now = time.monotonic()
     wait_fallback: dict[str, Any] | None = None
     with _cache_condition:
-        if _snapshot_cache and not force and now - _snapshot_cache[0] < _CACHE_TTL_SECONDS:
-            return _cache_value(_snapshot_cache[1])
+        if cached and not force and now - cached[0] < _CACHE_TTL_SECONDS:
+            return _cache_value(cached[1])
         if _refreshing:
             _cache_condition.wait(timeout=_DOCKER_TIMEOUT_SECONDS + _INSPECT_TIMEOUT_SECONDS)
-            if _snapshot_cache:
+            cached = _snapshot_cache.get(key)
+            if cached:
                 if _refreshing:
                     wait_fallback = _cache_value(
-                        _snapshot_cache[1], stale=True, error="memory snapshot refresh is still running",
+                        cached[1], stale=True, error="memory snapshot refresh is still running",
                     )
                 else:
-                    return _cache_value(_snapshot_cache[1])
+                    return _cache_value(cached[1])
             elif _refreshing:
                 wait_fallback = _empty_snapshot("memory snapshot refresh is still running")
         if wait_fallback is None:
-            previous = _snapshot_cache[1] if _snapshot_cache else None
+            previous = cached[1] if cached else None
             _refreshing = True
         else:
             previous = None
     if wait_fallback is not None:
         try:
-            wait_fallback["host"] = host_memory()
+            wait_fallback["host"] = host_memory(target)
             wait_fallback["capturedAt"] = _captured_at()
         except Exception:
             pass
         return wait_fallback
     try:
-        fresh_host = host_memory()
-        snapshot = _collect_snapshot(fresh_host)
+        fresh_host = host_memory(target)
+        snapshot = _collect_snapshot(fresh_host, env)
     except Exception as exc:
         error = _error_text(exc)
         failed_snapshot = (
@@ -370,11 +431,11 @@ def memory_snapshot(force: bool = False) -> dict[str, Any]:
             failed_snapshot["host"] = copy.deepcopy(fresh_host)
             failed_snapshot["capturedAt"] = _captured_at()
         with _cache_condition:
-            _snapshot_cache = (time.monotonic(), failed_snapshot)
+            _snapshot_cache[key] = (time.monotonic(), failed_snapshot)
         return _cache_value(failed_snapshot)
     else:
         with _cache_condition:
-            _snapshot_cache = (time.monotonic(), snapshot)
+            _snapshot_cache[key] = (time.monotonic(), snapshot)
         return _cache_value(snapshot)
     finally:
         with _cache_condition:
@@ -820,6 +881,16 @@ def _memory_evaluation(
     return decision, None
 
 
+def _target_for(root):
+    """워크트리 root → 런타임 타깃. 못 읽으면 로컬(기존 동작)."""
+    try:
+        import marina_paths
+        from marina_runtime_target import load_target
+        return load_target(str(marina_paths.session_dir(Path(root))))
+    except Exception:
+        return None
+
+
 def memory_guard(
     root: Path,
     service_names: list[str],
@@ -829,7 +900,8 @@ def memory_guard(
     """Return a structured memory block before a lifecycle operation, or ``None``."""
     if force:
         return None
-    current = snapshot if isinstance(snapshot, dict) else memory_snapshot(force=True)
+    # 워크트리가 원격이면 그 박스를 재야 한다 — 호출부는 안 바꾸고 root 에서 타깃을 찾는다.
+    current = snapshot if isinstance(snapshot, dict) else memory_snapshot(force=True, target=_target_for(root))
     decision, reason = _memory_evaluation(root, service_names, current)
     return {**decision, "reason": reason} if reason else None
 
@@ -841,7 +913,7 @@ def acquire_memory_reservation(
 ) -> tuple[dict[str, Any] | None, str | None]:
     """Atomically evaluate projected pressure and reserve learned startup usage."""
     global _reservation_sequence
-    snapshot = memory_snapshot(force=True)
+    snapshot = memory_snapshot(force=True, target=_target_for(root))
     with _reservation_lock:
         pending = sum(_memory_reservations.values())
         decision, reason = _memory_evaluation(root, service_names, snapshot, pending)

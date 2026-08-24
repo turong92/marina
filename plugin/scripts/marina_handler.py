@@ -24,6 +24,16 @@ from marina_logtext import read_log_chunk, redact_text, scan_log_matches
 from marina_rooms import finalize_room
 from marina_registry import containing_project_for, discover_all_roots, discover_roots, external_repos_for, is_source_checkout, load_projects, project_for, source_root_for, subrepos_of
 from marina_paths import selected_log, session_dir, session_id, write_config, write_meta
+
+
+def _runtime_target_describe(root=None):
+    """서버 현황 영역이 그릴 런타임 타깃. root 가 없으면 전역만(대시보드 상단은 워크트리 무관)."""
+    try:
+        from marina_runtime_target import describe
+        sd = str(session_dir(Path(root))) if root else ""
+        return describe(sd, home=str(MARINA_HOME))
+    except Exception:
+        return {"kind": "local", "host": None, "scope": "default", "globalHost": None}
 from marina_cli import _marina_cli, run_marina, run_marina_registry
 from marina_build import build_summary
 
@@ -69,7 +79,7 @@ _ADMIN_POST_PATHS = {
     "/api/infer-project", "/api/add-project", "/api/compose-scan", "/api/compose-validate",
     "/api/compose-register", "/api/compose-import", "/api/remove-project",
     "/api/restart-dashboard", "/api/update-claude", "/api/update-codex",
-    "/api/set-default-attach", "/api/forward-set", "/api/expose-set",
+    "/api/set-default-attach", "/api/forward-set", "/api/expose-set", "/api/runtime-target",
 }
 _ROOT_POST_PATHS = {
     "/api/config", "/api/link-set", "/api/meta", "/api/stop-all", "/api/start-all",
@@ -1115,7 +1125,10 @@ class Handler(BaseHTTPRequestHandler):
                 item["webPortConflictWith"] = []
             if principal is not None and principal.user.role != "admin":
                 memory = {**memory, "containers": []}
-            self.send_json({"sessions": sessions, "memory": memory})
+            # 서버 현황(메모리) 영역이 런타임 타깃을 함께 싣는다. 원격이면 위 Docker/Host 숫자가
+            # **박스의 것**이라, 어느 기계인지 안 밝히면 표시가 거짓말이 된다.
+            self.send_json({"sessions": sessions, "memory": memory,
+                            "runtimeTarget": _runtime_target_describe()})
             return
 
         if parsed.path == "/api/worktrees":
@@ -2351,6 +2364,24 @@ class Handler(BaseHTTPRequestHandler):
 
             if self.path == "/api/update-codex":
                 self.send_json(update_codex())
+                return
+
+            if self.path == "/api/runtime-target":   # 서버 현황 영역에서 런타임 타깃(로컬/박스) 전환.
+                kind = str(body.get("kind", "")).strip()          # local | remote | inherit
+                host = str(body.get("host", "")).strip()
+                scope = str(body.get("scope", "session")).strip()  # session | global
+                if scope not in ("session", "global"):
+                    raise ValueError("scope 는 session|global")
+                if scope == "global" and kind == "remote" and not host:
+                    # 전역엔 물려받을 상위 계층이 없다 — 주소 없는 remote 는 해석하면 로컬이 된다.
+                    raise ValueError("전역 원격은 박스 주소가 필요합니다")
+                from marina_runtime_target import write_target
+                if scope == "global":
+                    write_target(str(MARINA_HOME), kind, host or None)
+                else:
+                    write_target(str(session_dir(safe_root(str(body.get("root", ""))))), kind, host or None)
+                self.send_json({"ok": True, "runtimeTarget": _runtime_target_describe(body.get("root") or None),
+                                "needsRestart": True})   # 이미 도는 컨테이너는 그 기계에 남는다
                 return
 
             root = safe_root(str(body.get("root", "")))

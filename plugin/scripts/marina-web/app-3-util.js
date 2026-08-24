@@ -95,6 +95,52 @@
       selectLog(root, service, 'current', selected?.mode ?? 'service');
     }
 
+    // 런타임 타깃 배지 — 이 숫자들이 **어느 기계** 것인지. 로컬(기본)이면 아무것도 안 그린다.
+    // 자리를 여기로 잡은 이유: 원격이면 옆의 Docker/Host 가 이미 박스 값이라, 안 밝히면 표시가 거짓말이 된다.
+    let runtimeTargetState = null;
+    function renderRuntimeTarget(rt) {
+      runtimeTargetState = rt || null;
+      const el = document.getElementById('memTarget');
+      if (!el) return;
+      const remote = rt && rt.kind === 'remote';
+      el.hidden = !remote;
+      if (!remote) return;
+      const host = String(rt.host || '').replace(/^ssh:\/\//, '');
+      el.textContent = `\u2601 ${host}`;
+      el.classList.toggle('session', rt.scope === 'session');
+      el.title = (rt.scope === 'session'
+        ? '이 워크트리만 원격입니다(전역과 다름). '
+        : '전역 기본이 원격입니다. ')
+        + '위 Docker/Host 수치는 이 박스의 값입니다. 눌러서 로컬로 되돌립니다.';
+      if (!el.dataset.wired) {
+        el.dataset.wired = '1';
+        el.addEventListener('click', onRuntimeTargetClick);
+      }
+    }
+
+    async function onRuntimeTargetClick() {
+      const rt = runtimeTargetState;
+      if (!rt || rt.kind !== 'remote') return;
+      // 이미 도는 컨테이너는 그 기계에 남는다 — 되돌려도 저절로 내려가지 않으므로 미리 알린다.
+      const where = rt.scope === 'global' ? '전역 기본을' : '이 설정을';
+      if (!confirm(`${where} 로컬로 되돌릴까요?\n\n이미 박스에서 도는 컨테이너는 그대로 남습니다 — 필요하면 먼저 정지하세요.`)) return;
+      try {
+        const scope = rt.scope === 'global' ? 'global' : 'session';
+        // 세션 범위는 어느 워크트리인지 알려줘야 한다. 배지는 대시보드 상단(워크트리 무관)이라
+        // 전역이 정한 경우가 대부분이고, 세션 override 는 그 워크트리가 선택돼 있을 때만 가능하다.
+        const root = scope === 'session' ? (selected && selected.root) : undefined;
+        if (scope === 'session' && !root) { alert('워크트리를 먼저 선택하세요.'); return; }
+        await api('/api/runtime-target', {
+          method: 'POST', headers: { 'content-type': 'application/json' },   // POST 는 root 를 body 에서 읽음
+          body: JSON.stringify({ root, kind: 'local', scope }),
+        });
+      } catch (e) {
+        alert('런타임 타깃 변경 실패: ' + (e && e.message ? e.message : e));
+        return;
+      }
+      load({ force: true });
+    }
+
     function renderMemory(memory) {
       const box = document.getElementById('mem');
       const docker = memory?.docker && typeof memory.docker === 'object' ? memory.docker : {};
