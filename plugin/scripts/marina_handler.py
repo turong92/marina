@@ -136,14 +136,26 @@ class Handler(BaseHTTPRequestHandler):
     def _host_allowed(self) -> bool:
         if host_allowed(self.headers.get("host")):
             return True
+        # 여기부터는 **펀넬(테일스케일)로 프록시된 요청**만 상대한다. 두 신호를 함께 본다:
+        #   · 클라이언트가 로컬 — 펀넬은 같은 기계에서 프록시한다(원격이 직접 때린 건 아니다)
+        #   · x-forwarded-proto=https — 브라우저는 이 헤더를 스스로 보내지 않는다
+        # 리바인딩 공격(evil.com → 127.0.0.1)은 이 조합을 만들 수 없으므로 가드는 유지된다.
         if not is_loopback_client(self) or str(self.headers.get("x-forwarded-proto") or "").lower() != "https":
             return False
         try:
             supplied = urllib.parse.urlsplit("//" + str(self.headers.get("host") or "")).hostname
             expected = self._remote_controller().status().get("dnsName")
-            return bool(supplied and expected and supplied.rstrip(".") == str(expected).rstrip("."))
         except Exception:
-            return False
+            supplied, expected = None, None
+        if expected:
+            # 이름을 알면 그 이름만 통과 — 펀넬 뒤에 다른 이름을 붙여 들어오는 건 막는다.
+            return bool(supplied and str(supplied).rstrip(".") == str(expected).rstrip("."))
+        # **이름을 못 얻는 경우가 실제로 있다.** 맥에서 GUI 앱과 CLI 가 서로 다른 tailscaled 를
+        # 보면 status 가 NeedsLogin·DNSName 빈 값으로 나온다(실측 2026-08-24: 형은 그 주소로
+        # 멀쩡히 접속 중인데 CLI 두 개 다 빈 값). 그때 예외를 죽여버리면 /api/auth/* 가 403 이라
+        # **새 계정이 로그인 화면조차 못 넘는다**(형: "먼저 대시보드에서 로그인 하라는데").
+        # 이름이 없을 때는 위의 두 프록시 신호만으로 통과시킨다.
+        return True
 
     def _origin_allowed(self, allow_any_local_port: bool = False) -> bool:
         origin = self.headers.get("origin")
