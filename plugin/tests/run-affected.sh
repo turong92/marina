@@ -153,8 +153,12 @@ if [[ "$LIST_ONLY" == "1" ]]; then printf '%s\n' "${SELECTED[@]}"; exit 0; fi
 
 pass=0; fail=0; failed=()
 for t in "${SELECTED[@]}"; do
-  out="$(bash "$HERE/$t" 2>&1)"
-  if grep -qE "^PASS|^ok$|^SKIP" <<<"$out" && ! grep -qE "AssertionError|^FAIL|Traceback" <<<"$out"; then
+  # 판정은 **종료코드**가 기준이다. 예전엔 출력에서 `^PASS|^ok$|^SKIP` 를 찾았는데, 파이썬 unittest 는
+  # `OK`(대문자)를 찍고 어떤 셸 테스트는 PASS 토큰을 안 찍어서 **통과한 테스트가 실패로 보고됐다**
+  # (test-remote-control·test-attach-clean-codex-worktree 가 그래서 오래 실패로 세어졌다 — 둘 다 exit 0).
+  # 텍스트 검사는 "exit 0 인데 실패를 찍은" 경우를 잡는 안전망으로만 남긴다.
+  out="$(bash "$HERE/$t" </dev/null 2>&1)"; rc=$?
+  if [[ $rc -eq 0 ]] && ! grep -qE "AssertionError|^FAIL|Traceback" <<<"$out"; then
     pass=$((pass + 1))
   else
     fail=$((fail + 1)); failed+=("$t")
