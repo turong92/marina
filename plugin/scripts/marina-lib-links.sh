@@ -133,7 +133,10 @@ def fmatch(name, abs_path, g):          # basename·소스상대경로 매치 + 
     return False
 def apply_op(src_abs, op):
     rel = os.path.relpath(src_abs, src_base); dst = os.path.join(dst_base, rel)
-    if os.path.realpath(src_abs) == os.path.realpath(dst):
+    # src==dst(=main 에서 실행) 만 skip. dst 가 src 를 **가리키는 심링크**인 경우는 skip 하지 않는다 —
+    # realpath 는 링크를 타고 넘어가 같은 값이 나오므로, 이 구분이 없으면 이미 걸린 링크를 영영 못 고친다
+    # (절대→상대 이관이 막힘).
+    if not os.path.islink(dst) and os.path.realpath(src_abs) == os.path.realpath(dst):
         return
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     if op == "copy":                   # 독립 복제 — 기존 심링크는 교체, 실파일은 보존(사용자 편집)
@@ -146,13 +149,18 @@ def apply_op(src_abs, op):
         else:
             shutil.copy2(src_abs, dst)
         print("copy:", rel)
-    else:                              # symlink — 공유
+    else:                              # symlink — 공유. 타깃은 **상대경로**로 적는다.
+        # 절대경로("/Users/<나>/...")면 그 워크트리가 이 머신에만 유효하다: 레포를 옮기면 링크가 전부
+        # 깨지고, 파일 동기화로 워크트리를 다른 기계에 올릴 때 전파되지 않는다(mutagen 실측:
+        # "invalid symbolic link: target is absolute" 로 세션은 초록불인 채 링크만 누락 → deps 없는
+        # 워크트리). 상대경로는 로컬 해석 결과가 절대와 동일해 기존 동작은 안 바뀐다.
+        link_target = os.path.relpath(src_abs, os.path.dirname(dst))
         if os.path.islink(dst):
-            os.unlink(dst); os.symlink(src_abs, dst); print("link:", rel)
+            os.unlink(dst); os.symlink(link_target, dst); print("link:", rel)
         elif os.path.exists(dst):
             print("link skip(존재·실파일):", rel)
         else:
-            os.symlink(src_abs, dst); print("link:", rel)
+            os.symlink(link_target, dst); print("link:", rel)
 for g, op in ops:
     g_eff = g.rsplit("**/", 1)[-1] if "**/" in g else g     # globstar 제거한 유효 경로 — descend 판정용
     g_first = g_eff.split("/", 1)[0] if "/" in g_eff else g_eff
