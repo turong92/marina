@@ -32,7 +32,8 @@ store.bootstrap_admin("owner", "Owner", "owner-password")
 store.claim_user("teammate", "teammate-password")
 PY
 
-$ENTRY user approve teammate | grep -q $'teammate\tmember\tactive'
+# 초대 계정은 claim 하는 순간 활성이다 — 승인 단계가 없다(초대 모델).
+$ENTRY user list | grep -q $'teammate\tmember\tactive'
 $ENTRY user reset-password teammate | grep -q $'teammate\tmember\tunclaimed'
 
 if $ENTRY auth disable >/dev/null 2>&1; then

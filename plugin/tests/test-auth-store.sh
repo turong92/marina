@@ -58,13 +58,10 @@ except AuthError as exc:
 
 member = accounts.add_user("sumin-dev", "Sumin Dev")
 assert (member.role, member.status) == ("member", "unclaimed")
-assert accounts.claim_user("sumin-dev", "member-password").status == "pending_approval"
-try:
-    accounts.authenticate("sumin-dev", "member-password")
-    raise AssertionError("pending user authenticated")
-except AuthError as exc:
-    assert (exc.code, exc.status) == ("pending_approval", 403)
-assert accounts.approve_user("sumin-dev").status == "active"
+# **초대 계정은 비밀번호를 정하면 곧바로 활성이다**(2026-08-24 형 결정: "초대가 맞다").
+# 마리나엔 회원가입 경로가 없어서 claim 에 닿는 사람은 언제나 관리자가 만들어준 사람뿐이고,
+# 만든 순간 이미 승인한 것이라 승인 단계는 같은 결정을 두 번 시키는 군더더기였다.
+assert accounts.claim_user("sumin-dev", "member-password").status == "active"
 assert accounts.authenticate("sumin-dev", "member-password").username == "sumin-dev"
 
 for attempt in range(5):
@@ -122,11 +119,11 @@ with sqlite3.connect(claim_db) as conn:
 claimable = claim_guard.add_user("claimable-user", "Claimable User")
 assert_claim_locks(claimable.username, "short", "weak_password")
 now[0] += 901
-assert claim_guard.claim_user(claimable.username, "claimable-password").status == "pending_approval"
+# 초대 계정은 비밀번호를 정하는 순간 활성이다(승인 단계 없음 — 위 주석 참조).
+assert claim_guard.claim_user(claimable.username, "claimable-password").status == "active"
 assert derived_passwords[0] == 1
-assert_claim_locks(claimable.username, "claimable-password", "pending_approval")
-now[0] += 901
-assert claim_guard.approve_user(claimable.username).status == "active"
+# 이미 비밀번호를 정한 계정에 또 claim 하면 거부된다 — 남이 남의 계정 비번을 덮어쓸 길을
+# 열어두면 안 된다(초대 링크는 공개 경로다).
 assert_claim_locks(claimable.username, "claimable-password", "already_claimed")
 now[0] += 901
 assert claim_guard.disable_user(claimable.username).status == "disabled"
@@ -146,8 +143,9 @@ try:
 except AuthError as exc:
     assert exc.code == "weak_password"
 
+# reject 는 이제 **초대 취소**다 — 아직 비밀번호를 안 정한 초대를 거둬들인다.
+# (이미 쓰고 있는 계정을 막는 건 disable 이다.)
 rejected = accounts.add_user("rejected-user", "Rejected")
-accounts.claim_user(rejected.username, "rejected-password")
 assert accounts.reject_user(rejected.username).status == "unclaimed"
 with sqlite3.connect(accounts_db) as conn:
     password = conn.execute(
@@ -174,8 +172,7 @@ audit_admin = audited.bootstrap_admin("audit-owner", "Audit Owner", "audit-passw
 audit_member = audited.add_user(
     "audit-member", "Audit Member", actor_user_id=audit_admin.id
 )
-audited.claim_user(audit_member.username, "audit-member-password")
-audit_member = audited.approve_user(audit_member.username, actor_user_id=audit_admin.id)
+audit_member = audited.claim_user(audit_member.username, "audit-member-password")
 audit_session = audited.create_session(audit_member.id)
 assert audited.logout(audit_session.token, actor_user_id=audit_member.id)
 with sqlite3.connect(audit_db) as conn:
@@ -183,15 +180,16 @@ with sqlite3.connect(audit_db) as conn:
     add_event = conn.execute(
         "select * from audit_events where action='user.add' and resource_key='audit-member'"
     ).fetchone()
-    approve_event = conn.execute(
-        "select * from audit_events where action='user.approve' and resource_key='audit-member'"
+    # 승인 이벤트는 이제 안 남는다(승인 단계 자체가 없다). 대신 **claim 이 활성 기록**이다.
+    claim_event = conn.execute(
+        "select * from audit_events where action='auth.claim' and resource_key='audit-member'"
     ).fetchone()
     logout_event = conn.execute(
         "select * from audit_events where action='auth.logout' and actor_user_id=?",
         (audit_member.id,),
     ).fetchone()
     assert add_event["actor_user_id"] == audit_admin.id and add_event["result"] == "ok"
-    assert approve_event["actor_user_id"] == audit_admin.id and approve_event["result"] == "active"
+    assert claim_event is not None and claim_event["result"] in ("ok", "active"), dict(claim_event or {})
     assert logout_event["result"] == "ok"
 
 rehash_db = Path(sys.argv[1]) / "rehash.db"
@@ -255,15 +253,13 @@ now[0] = absolute_start + 90 * 24 * 60 * 60 + 1
 assert accounts.resolve_session(absolute.token) is None
 
 session_member = accounts.add_user("session-member", "Session Member")
-accounts.claim_user(session_member.username, "session-password")
-session_member = accounts.approve_user(session_member.username)
+session_member = accounts.claim_user(session_member.username, "session-password")
 member_session = accounts.create_session(session_member.id)
 accounts.reset_password(session_member.username)
 assert accounts.resolve_session(member_session.token) is None
 
 disabled_member = accounts.add_user("disabled-member", "Disabled Member")
-accounts.claim_user(disabled_member.username, "disabled-password")
-disabled_member = accounts.approve_user(disabled_member.username)
+disabled_member = accounts.claim_user(disabled_member.username, "disabled-password")
 disabled_session = accounts.create_session(disabled_member.id)
 accounts.disable_user(disabled_member.username)
 assert accounts.resolve_session(disabled_session.token) is None

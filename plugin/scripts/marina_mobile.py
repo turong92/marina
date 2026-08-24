@@ -34,7 +34,7 @@ from marina_sessions import (
     worktree_info,
     worktree_labels,
 )
-from marina_login import extract_login_url, login_stage
+from marina_login import api_retry, extract_login_url, login_stage
 from marina_paths import write_meta
 from marina_state import MARINA_HOME, PORT
 from marina_term import (_agent_cli, term_await_redraw, term_input, term_kill, term_list,
@@ -1101,6 +1101,10 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                         "pending": mobile_pending_session_settings(root, source, sid),
                     },
                     "pendingQuestion": question,
+                    # 화면이 "API error · 재시도 중"이라고 말하면 그대로 올린다. 안 올리면
+                    # 폰에는 "생각 중"만 보여서, 서버가 밀리는 동안 형은 마리나가 먹통인 줄 안다
+                    # (실측 2026-08-24: 529 Overloaded 로 10회 재시도 중이었다).
+                    "retry": _agent_retry_state(agent_tid, status),
                 })
             for term in root_terms:
                 tid = str(term.get("tid") or "")
@@ -1564,6 +1568,19 @@ def _await_agent_ready(tid: str) -> bool:
     if mark < 0:
         return True          # 관찰 불가(분리된 PTY 등) — 막지 않는다
     return bool(term_await_redraw(tid, mark, quiet=0.6, timeout=_FRESH_READY_TIMEOUT_S))
+
+
+def _agent_retry_state(tid: str, status: str) -> dict[str, Any] | None:
+    """작업 중인 세션의 화면을 훑어 '재시도 중'을 읽는다.
+
+    작업 중일 때만 본다 — 놀고 있는 세션의 옛 오류 줄까지 읽으면 지나간 일로 겁을 준다.
+    화면을 못 읽으면 None(관찰 불가는 사실이 아니다)."""
+    if not tid or status != "working":
+        return None
+    try:
+        return api_retry(term_tail(tid, 1200))
+    except Exception:
+        return None
 
 
 def _deliver_agent_input(tid: str, source: str, text: str, requested: str = "",
@@ -5049,6 +5066,11 @@ _MOBILE_HTML = r"""<!doctype html>
       const status = String(session.status || "");
       if (session.pendingQuestion) return "";
       if (status !== "working" && !optimisticWorking) return "";
+      // **재시도 중이면 그걸 먼저 말한다.** 서버가 밀려 CLI 가 다시 던지는 중인데 "생각 중"만
+      // 보이면, 형은 마리나가 먹통인 줄 알고 기다린다(실측 2026-08-24: 529 Overloaded 로
+      // 10회 재시도 중이었고 폰엔 "생각 중"뿐이었다).
+      const retry = session.retry;
+      if (retry && retry.label) return retry.label;
       // 지금 도는 일을 **한 줄 사람말로**(스펙 §3). 못 알아내면 "생각 중" 으로 떨어뜨린다 —
       // 빈 칸이 뜨면 멈춘 것처럼 보이고, 도구 이름을 그대로 쓰면 개발 화면이 된다.
       return progressLine(running) || "생각 중";

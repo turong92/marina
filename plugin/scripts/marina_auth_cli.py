@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import urllib.parse
 import getpass
 import os
 import sys
@@ -66,6 +67,27 @@ def parser() -> argparse.ArgumentParser:
     return root
 
 
+def _invite_url(username: str) -> str:
+    """초대 링크. 원격 주소를 알면 그걸 쓰고(폰으로 바로 보낼 수 있어야 한다), 모르면 로컬."""
+    base = ""
+    try:
+        from marina_remote import RemoteController
+        from marina_state import MARINA_HOME
+
+        dns = str((RemoteController(MARINA_HOME).status() or {}).get("dnsName") or "").rstrip(".")
+        if dns:
+            base = f"https://{dns}:8443"
+    except Exception:
+        base = ""
+    if not base:
+        # 원격 이름을 못 얻는 경우가 실제로 있다(맥에서 GUI 앱과 CLI 가 다른 tailscaled 를 볼 때).
+        # 그때는 로컬 주소로 낸다 — 형이 주소만 바꿔 건네면 된다.
+        from marina_state import HOST, PORT
+
+        base = f"http://{HOST}:{PORT}"
+    return f"{base}/login?claim={urllib.parse.quote(username)}"
+
+
 def run(args: argparse.Namespace) -> int:
     store = _store()
     if args.group == "auth":
@@ -111,6 +133,12 @@ def run(args: argparse.Namespace) -> int:
         return 0
     if args.command == "add":
         result = store.add_user(args.username, args.display_name, args.role)
+        _print_user(result)
+        # **초대 링크를 같이 낸다.** 마리나엔 회원가입이 없다 — 계정은 관리자가 만들고 링크를
+        # 건네는 초대 모델이다. 링크 없이는 초대받은 사람이 "있지도 않은 비밀번호"를 아무거나
+        # 넣어 오류를 봐야 비밀번호 설정 화면에 닿는다(형 실사용에서 그 단계에서 헤맸다).
+        print(f"invite={_invite_url(result.username)}")
+        return 0
     elif args.command == "approve":
         result = store.approve_user(args.username)
     elif args.command == "reject":
@@ -126,6 +154,15 @@ def run(args: argparse.Namespace) -> int:
 def main() -> int:
     try:
         return run(parser().parse_args())
+    except BrokenPipeError:
+        # `marina user add … | grep -q …` 처럼 상대가 먼저 파이프를 닫는 건 정상이다.
+        # 그때 죽으면 파이프에 태워 쓰는 쪽이 전부 실패한다(실측: 초대 링크 한 줄을 더 찍자
+        # 기존 테스트가 Broken pipe 로 깨졌다). 조용히 끝낸다.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        except OSError:
+            pass
+        return 0
     except AuthError as exc:
         print(f"error: {exc.message}", file=sys.stderr)
         return 1

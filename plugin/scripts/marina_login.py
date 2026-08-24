@@ -68,3 +68,36 @@ def login_stage(screen: str) -> str:
     if "Notloggedin" in text or "Pleaserun/login" in text:
         return "logged_out"
     return ""
+
+
+# ── API 오류 재시도 읽기 ────────────────────────────────────────────────────────
+# CLI 는 요청이 튕기면 화면에 이렇게 쓴다(실측 2026-08-24):
+#     ✻ API error · Retrying in 1s · attempt 1/10
+# 그런데 모바일에는 이 줄이 안 보여서 그냥 "생각 중"으로만 나온다 — 형은 마리나가 먹통인 줄
+# 알고 기다렸다(그날 원인은 서버 529 Overloaded 였다). 로그인 화면과 같은 방식으로 읽어 올린다.
+#
+# 터미널이 좁으면 공백이 뭉개져 붙어 나오므로(실측) 공백을 지우고 본다.
+_RETRY_ATTEMPT = re.compile(r"attempt(\d+)/(\d+)", re.I)
+_RETRY_MARK = re.compile(r"APIerror|APIError:", re.I)
+_OVERLOADED = re.compile(r"overloaded|529", re.I)
+_RATE_LIMIT = re.compile(r"ratelimit|429", re.I)
+
+
+def api_retry(screen: str) -> dict | None:
+    """화면이 'API 오류로 재시도 중' 이라고 말하고 있나. 아니면 None.
+
+    반환: {"attempt": 3, "total": 10, "label": "서버 혼잡 · 재시도 중 (3/10)"}
+    사람 말로 옮기는 이유: 폰에서 보는 사람은 529 가 뭔지 알 이유가 없고, 알아야 할 것은
+    "마리나가 멈춘 게 아니라 서버가 밀린 것" 이라는 사실뿐이다."""
+    붙임 = "".join(str(screen or "").split())
+    if not 붙임 or not _RETRY_MARK.search(붙임):
+        return None
+    m = _RETRY_ATTEMPT.search(붙임)
+    attempt = int(m.group(1)) if m else 0
+    total = int(m.group(2)) if m else 0
+    이유 = ("서버 혼잡" if _OVERLOADED.search(붙임)
+            else "요청 한도" if _RATE_LIMIT.search(붙임)
+            else "연결 문제")
+    횟수 = f" ({attempt}/{total})" if attempt and total else ""
+    return {"attempt": attempt, "total": total, "reason": 이유,
+            "label": f"{이유} · 재시도 중{횟수}"}

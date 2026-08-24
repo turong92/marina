@@ -138,10 +138,9 @@ try:
     status, headers, body = request("POST", "/api/auth/claim", {
         "username": "teammate", "password": "teammate-password",
     })
-    assert status == 202 and body["status"] == "pending_approval"
-    status, headers, body = request("POST", "/api/auth/users/approve", {"username": "teammate"},
-                                    cookies=admin_cookies, csrf=admin_cookies["marina_csrf"])
-    assert status == 200 and body["user"]["status"] == "active"
+    # 초대 계정은 비밀번호를 정하는 순간 활성이다 — 관리자가 만든 계정을 관리자가 또 승인하는
+    # 중복을 없앴다(2026-08-24 형 결정: "초대가 맞다").
+    assert status == 202 and body["status"] == "active", body
 
     status, headers, body = request("POST", "/api/auth/login", {
         "username": "teammate", "password": "teammate-password",
@@ -164,9 +163,10 @@ try:
         assert conn.execute(
             "select actor_user_id from audit_events where action='user.add' and resource_key='teammate'"
         ).fetchone()[0] == admin_id
+        # 승인 이벤트는 더 이상 안 남는다(승인 단계 삭제). 대신 claim 이 활성 기록이다.
         assert conn.execute(
-            "select actor_user_id from audit_events where action='user.approve' and resource_key='teammate'"
-        ).fetchone()[0] == admin_id
+            "select result from audit_events where action='auth.claim' and resource_key='teammate'"
+        ).fetchone()[0] == "active"
         assert conn.execute(
             "select actor_user_id from audit_events where action='auth.logout' order by id desc limit 1"
         ).fetchone()[0] == member_id

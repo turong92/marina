@@ -514,13 +514,18 @@ class AuthStore:
         with self._transaction() as conn:
             self._check_attempt_lock(conn, username, "claim")
             row = self._claimable_user(conn, username)
+            # **초대받은 계정은 바로 활성이다.** 관리자가 user add 로 만든 순간 이미 승인한
+            # 것이라, 비밀번호를 정한 뒤 또 승인을 기다리게 하는 건 같은 결정을 두 번 시키는
+            # 것이다(형: "초대가 맞아 가입이 맞아?" → 초대). 마리나엔 회원가입 경로가 없어서
+            # claim 에 닿는 사람은 언제나 관리자가 만들어준 사람뿐이다.
             conn.execute(
-                "UPDATE users SET status='pending_approval', password_algorithm=?, password_iterations=?, "
-                "password_salt=?, password_hash=?, approved_at=NULL, updated_at=? WHERE id=?",
-                (algorithm, iterations, salt, password_hash, now, row["id"]),
+                "UPDATE users SET status='active', password_algorithm=?, password_iterations=?, "
+                "password_salt=?, password_hash=?, approved_at=?, updated_at=? WHERE id=?",
+                (algorithm, iterations, salt, password_hash, now, now, row["id"]),
             )
             self._clear_attempts(conn, username, "claim")
-            self._audit(conn, "auth.claim", "pending", int(row["id"]), "user", username)
+            # 결과는 "pending" 이 아니라 **active** 다 — 초대 계정은 여기서 곧바로 쓸 수 있다.
+            self._audit(conn, "auth.claim", "active", int(row["id"]), "user", username)
             return self._user(conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone())
 
     def approve_user(self, username: str, actor_user_id: int | None = None) -> User:
@@ -542,7 +547,11 @@ class AuthStore:
             row = conn.execute("SELECT * FROM users WHERE username=?", (username,)).fetchone()
             if row is None:
                 raise AuthError("unknown_user", "Unknown user.", 404)
-            if row["status"] != "pending_approval":
+            # 초대 모델로 오면서 승인 단계가 사라졌다(claim 하면 곧바로 활성). 그래서 reject 는
+            # **초대 취소**로 남는다 — 아직 비밀번호를 안 정한(unclaimed) 초대를 거둬들이는 것.
+            # 옛 DB 에 남아 있을 pending_approval 도 계속 받아준다.
+            허용 = ("pending_approval",) if approve else ("pending_approval", "unclaimed")
+            if row["status"] not in 허용:
                 raise AuthError("invalid_state", "User is not waiting for approval.", 409)
             if approve:
                 conn.execute(

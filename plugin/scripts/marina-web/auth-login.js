@@ -101,7 +101,10 @@
       const password = String(data.get('password') || '');
       if (password !== String(data.get('confirmPassword') || '')) throw {message: '비밀번호 확인이 일치하지 않습니다.'};
       await call('/api/auth/claim', {username: String(data.get('username') || ''), password});
-      show('pending');
+      // 초대받은 계정은 비밀번호를 정하는 순간 활성이다 — 바로 들여보낸다.
+      // (예전엔 여기서 '승인 대기'를 띄웠다. 관리자가 만든 계정을 관리자가 또 승인하는
+      //  중복이라 없앴다 — marina_auth.claim_user 주석 참조.)
+      location.replace(safeNext());
     });
   };
 
@@ -112,10 +115,17 @@
     };
   });
 
+  // 초대 링크(`/login?claim=<이름>`)로 들어오면 **바로 비밀번호 설정**이다. 없는 비밀번호를
+  // 아무거나 넣어 오류를 봐야 이 화면에 닿던 군더더기를 없앤다(형 실사용에서 그 단계에서 헤맸다).
+  const 초대 = new URLSearchParams(location.search).get('claim') || '';
   call('/api/auth/status').then(state => {
     if (state.user) location.replace(safeNext());
     else if (!state.enabled && state.bootstrapAllowed) show('bootstrap');
     else if (!state.enabled) showUnavailable();
+    else if (초대) {
+      modes.claim.elements.username.value = 초대;
+      show('claim');
+    }
     else show('login');
   }).catch(error => {
     if (error.error === 'auth_unavailable') showUnavailable(error);
