@@ -54,6 +54,15 @@ def parser() -> argparse.ArgumentParser:
     for name in ("approve", "reject", "disable", "reset-password"):
         command = user_commands.add_parser(name)
         command.add_argument("username")
+    # 멤버가 방을 보려면 **프로젝트 접근 + 그 워크트리 자원의 주인** 둘 다 필요하다
+    # (marina_access.can_root). 지금까지 그 둘을 주는 길이 관리자 웹 API 뿐이라, 멤버 계정을
+    # 만들어도 폰에 방이 하나도 안 보였다. 한 번에 주는 명령을 둔다.
+    grant = user_commands.add_parser("grant")
+    grant.add_argument("username")
+    grant.add_argument("--project", action="append", default=[], metavar="ID",
+                       help="접근을 줄 프로젝트 id (여러 번 가능)")
+    grant.add_argument("--root", action="append", default=[], metavar="PATH",
+                       help="주인으로 지정할 워크트리 경로 (여러 번 가능)")
     return root
 
 
@@ -82,6 +91,23 @@ def run(args: argparse.Namespace) -> int:
     if args.command == "list":
         for user in store.list_users():
             _print_user(user)
+        return 0
+    if args.command == "grant":
+        from pathlib import Path
+
+        from marina_access import canonical_root
+
+        user = store.user_by_username(args.username)
+        if args.project:
+            # **덮어쓰지 않고 더한다** — 한 프로젝트를 주려다 이미 있던 접근을 지우면
+            # 다른 방들이 조용히 사라진다.
+            이미 = store.project_access_for(user.id)
+            store.set_project_access(user.id, sorted(이미 | set(args.project)), actor_user_id=None)
+        for root in args.root:
+            store.assign_resource_owner("worktree", canonical_root(Path(root).expanduser()),
+                                        user.id, actor_user_id=None)
+        print(f"user={user.username} projects={sorted(store.project_access_for(user.id))} "
+              f"roots={[str(Path(r).expanduser()) for r in args.root]}")
         return 0
     if args.command == "add":
         result = store.add_user(args.username, args.display_name, args.role)

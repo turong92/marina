@@ -319,20 +319,23 @@ _MODEL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}")
 _EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 
 
-# 채팅 프로필이 붙일 플래그. **설정 파일로는 이 효과가 안 난다** — 실측(2026-08-24):
+# **가볍게 띄우기(lean)** — 이건 "채팅방"의 정의가 아니라 **따로 켜는 옵션**이다.
+# 형: "채팅 전체를 경량 챗으로 만들라고 한 게 아니잖아. 나는 개발자니까 알아서 잘 붙여서
+# mcp 도 쓰고 하겠지." 맞는 말이라 방 종류(profile=chat)와 무게(lean)를 갈랐다.
+# 기본은 **꺼짐** — 채팅방도 평소처럼 도구·MCP 를 다 갖고 뜬다.
+#
+# 켜면 얼마나 줄어드는지는 실측해뒀다(2026-08-24, `claude -p "안녕" --output-format json`):
 #   마리나 레포 ~46,700 · 빈 폴더 ~25,600 · 빈 폴더+settings.json ~24,000 · 이 플래그 ~6,500
-# settings.json 의 MCP 키는 프로젝트 .mcp.json 서버에만 걸리고(사용자 스코프 MCP 는 그대로),
-# 내장 도구 스키마는 계속 실린다. 요청에 실을 목록 자체를 바꾸는 건 이 플래그뿐이다.
-# Read·Write 는 남긴다 — 첨부 파일을 읽고(모바일 첨부는 경로를 프롬프트에 실어 보낸다) 결과를
-# 파일로 돌려주는 게 채팅방에서도 필요하다(형 요구).
-_CHAT_FLAGS = ["--strict-mcp-config", "--tools", "Read", "Write"]
+# settings.json 의 MCP 키는 프로젝트 .mcp.json 서버에만 걸리고 내장 도구 스키마는 계속
+# 실리므로, 요청에 실을 목록 자체를 바꾸는 건 이 플래그뿐이다.
+_LEAN_FLAGS = ["--strict-mcp-config", "--tools", "Read", "Write"]
 
 
 def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "",
-                profile: str = "") -> list[str]:
+                profile: str = "", lean: bool = False) -> list[str]:
     cmd = ["claude"]
-    if profile == "chat":
-        cmd += _CHAT_FLAGS
+    if lean:
+        cmd += _LEAN_FLAGS
     if model:
         cmd += ["--model", model]
     if effort:
@@ -345,8 +348,8 @@ def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "",
 
 
 def _codex_cli(sid: str, prompt: str = "", model: str = "", effort: str = "",
-               profile: str = "") -> list[str]:
-    # codex 는 아직 채팅 프로필이 없다 — 대응 플래그를 확인 안 한 채 지어내면 기동 자체가 깨진다.
+               profile: str = "", lean: bool = False) -> list[str]:
+    # codex 는 아직 lean 대응 플래그를 확인 못 했다 — 지어내면 기동 자체가 깨진다.
     cmd = ["codex", "resume"] if sid else ["codex"]   # sid 없음 = 새 세션(직접 launch)
     if model:
         cmd += ["--model", model]
@@ -363,7 +366,7 @@ _AGENT_CLIS = {"claude": _claude_cli, "codex": _codex_cli}
 
 
 def _agent_cli(source: str, sid: str, prompt: str = "", model: str = "", effort: str = "",
-               profile: str = "") -> list[str]:
+               profile: str = "", lean: bool = False) -> list[str]:
     if source not in _AGENT_CLIS:
         raise ValueError("unknown agent source")
     # sid 빈 값 = **새 세션 직접 launch**(resume 아님). 그 세션의 sid 는 시작 시점엔 알 수 없고,
@@ -374,7 +377,7 @@ def _agent_cli(source: str, sid: str, prompt: str = "", model: str = "", effort:
         raise ValueError("invalid agent model")
     if effort and effort not in _EFFORTS:
         raise ValueError("invalid agent effort")
-    return _AGENT_CLIS[source](sid, prompt, model, effort, profile)
+    return _AGENT_CLIS[source](sid, prompt, model, effort, profile, lean)
 
 
 def _project_profile(root: Path) -> str:
@@ -385,6 +388,15 @@ def _project_profile(root: Path) -> str:
     except Exception:
         return ""
     return str(project.get("profile") or "")
+
+
+def _project_lean(root: Path) -> bool:
+    """이 워크트리가 속한 프로젝트가 '가볍게' 설정인가. 모르면 False — 평소대로 띄운다."""
+    try:
+        project = project_for(root) or {}
+    except Exception:
+        return False
+    return bool(project.get("lean"))
 
 
 def term_open(root: Path, cols: int = 80, rows: int = 24,
@@ -402,10 +414,11 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
     key = ""
     agent = None
     if agent_source:
-        # 프로젝트가 "chat" 이면 가벼운 채팅방으로 띄운다(도구·MCP 최소화). resume 에도 같이
-        # 붙여야 한다 — 붙었다 안 붙었다 하면 같은 방이 열 때마다 무게가 널뛴다.
+        # 방 종류(profile)와 무게(lean)는 **다른 축**이다. 채팅방이라고 도구를 떼지 않는다 —
+        # 떼는 건 lean 을 켠 프로젝트뿐이고, resume 에도 같은 값을 붙인다(안 그러면 같은 방이
+        # 열 때마다 무게가 널뛴다).
         cmd = _agent_cli(agent_source, agent_sid, agent_prompt, agent_model, agent_effort,
-                         _project_profile(root))
+                         _project_profile(root), _project_lean(root))
         # 재사용 키는 **같은 세션의 이중 resume** 을 막는 장치다. sid 가 없으면(새 세션 launch) 막을
         # 대상 자체가 없으므로 키를 만들지 않는다 — 안 그러면 ＋Claude 두 번이 한 PTY 로 합쳐진다.
         #

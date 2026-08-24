@@ -84,9 +84,11 @@ def load_projects() -> list[dict[str, Any]]:
                 "defaultAttach": [str(s) for s in _da] if isinstance(_da, list) else None,
                 "worktreeGlobs": [str(g) for g in entry.get("worktreeGlobs", [])],
                 "kind": str(entry.get("kind") or "compose"),
-                # 실행 프로필. ""(기본)=개발 방, "chat"=가벼운 채팅방(도구·MCP 최소화).
-                # 방을 열 때 marina_term 이 이 값을 보고 CLI 플래그를 붙인다.
+                # 방 종류. ""(기본)=개발 프로젝트, "chat"=코드 없는 대화방(워크트리·서비스 없음).
+                # **무게와는 다른 축이다** — 채팅방이라고 도구를 떼지 않는다.
                 "profile": str(entry.get("profile") or ""),
+                # 가볍게 띄우기(도구·MCP 최소화). 따로 켜는 옵션이고 기본은 꺼짐.
+                "lean": bool(entry.get("lean")),
                 "composeFile": str(entry.get("composeFile") or "docker-compose.yml"),
                 "composeEnvVar": str(entry.get("composeEnvVar") or ""),
                 "composeEnvDefault": str(entry.get("composeEnvDefault") or "local"),

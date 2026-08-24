@@ -85,7 +85,7 @@ for bad in [("evil", "abcd1234"), ("claude", "../x"), ("claude", "a"), ("codex",
         raise AssertionError(f"검증 뚫림: {bad}")
     except ValueError:
         pass
-mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="", profile="": ["python3", "-c", "import sys,time; print('FAKE_'+sys.argv[1]+'_'+sys.argv[2]); time.sleep(2)", sid, prompt]   # argv 리스트(셸 문자열 조립 폐지)
+mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="", profile="", lean=False: ["python3", "-c", "import sys,time; print('FAKE_'+sys.argv[1]+'_'+sys.argv[2]); time.sleep(2)", sid, prompt]   # argv 리스트(셸 문자열 조립 폐지)
 d6 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0001")
 assert not d6["reused"] and mt._by_tid[d3["tid"]].key == "" and mt._by_tid[d6["tid"]].key, "셸은 키 없음·에이전트만 키 보유"
 assert {s["tid"]: s for s in mt.term_list()["sessions"]}[d6["tid"]]["agent"] == {"source": "fake", "sid": "sid0001"}, "에이전트 세션은 agent 필드가 실려야"
