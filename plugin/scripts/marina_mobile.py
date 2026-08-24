@@ -1552,10 +1552,27 @@ def _agent_delivery(source: str, requested: str = "") -> str:
     raise ValueError("unknown agent source")
 
 
-def _deliver_agent_input(tid: str, source: str, text: str, requested: str = "") -> str:
+# 갓 띄운 CLI 는 화면을 다 그리기까지 몇 초 걸린다. 그 전에 친 키는 **통째로 사라진다** —
+# 실측(2026-08-24): 방을 열자마자 보낸 첫 메시지가 흔적 없이 없어졌고(트랜스크립트 자체가
+# 안 생김) 마리나는 "보냈다"고 답했다. 그래서 새 세션에는 화면이 잠잠해질 때까지 기다렸다 친다.
+_FRESH_READY_TIMEOUT_S = 25.0
+
+
+def _await_agent_ready(tid: str) -> bool:
+    """CLI 가 입력을 받을 준비가 됐나 — 출력이 멎는 것으로 본다(부팅 중엔 계속 그린다)."""
+    mark = term_output_mark(tid)
+    if mark < 0:
+        return True          # 관찰 불가(분리된 PTY 등) — 막지 않는다
+    return bool(term_await_redraw(tid, mark, quiet=0.6, timeout=_FRESH_READY_TIMEOUT_S))
+
+
+def _deliver_agent_input(tid: str, source: str, text: str, requested: str = "",
+                         fresh: bool = False) -> str:
     if not text:
         raise ValueError("text 필요")
     delivery = _agent_delivery(source, requested)
+    if fresh:
+        _await_agent_ready(tid)
     term_input(tid, text)
     _agent_input_pause()
     term_input(tid, "\t" if source == "codex" and delivery == "queue" else "\r")
@@ -1651,6 +1668,29 @@ def _compact_wedged_claude(root: Path, sid: str, tid: str, transcript: Path) -> 
         return False
 
 
+def _confirm_screen_echo(tid: str, text: str, timeout: float = 4.0) -> bool:
+    """친 글자가 화면에 남았나 — 갓 띄운 세션의 유일한 도착 증거.
+
+    TUI 는 친 것을 입력줄에 그대로 그린다. 좁은 칸에서 줄바꿈·재그리기가 섞이므로 **앞부분
+    한 조각**만 본다(공백 제거 후 비교 — ZLE 가 칸 맞춤으로 공백을 끼워 넣는다)."""
+    조각 = "".join(str(text).split())[:12]
+    if not 조각:
+        return True
+    마감 = time.time() + timeout
+    보였다 = False
+    while time.time() < 마감:
+        화면 = "".join(str(term_tail(tid, 4000)).split())
+        if 화면:
+            보였다 = True
+        if 조각 in 화면:
+            return True
+        time.sleep(0.3)
+    # **화면을 한 번도 못 읽었으면 판정하지 않는다**(fail-open). 분리된 PTY·재시작 복원처럼
+    # 관찰 자체가 불가능한 경우가 있는데, 그걸 "안 갔다"로 읽으면 멀쩡한 전달에 대고 다시
+    # 보내라고 한다. 증거가 없는 것과 못 갔다는 증거는 다르다.
+    return not 보였다
+
+
 def _deliver_to_live_agent(root: Path, source: str, sid: str, tid: str, text: str,
                            requested: str, from_outbox: bool) -> dict[str, Any]:
     """살아있는 PTY 로의 전달. **유휴 claude 는 도착을 트랜스크립트로 확인한다** — 실측에서
@@ -1667,7 +1707,13 @@ def _deliver_to_live_agent(root: Path, source: str, sid: str, tid: str, text: st
         except (OSError, ValueError):
             transcript = None
     if transcript is None:
-        delivery = _deliver_agent_input(tid, source, text, requested)
+        # 트랜스크립트가 없다 = 아직 한 턴도 안 돈 **갓 띄운 세션**이다. 준비를 기다렸다 치고,
+        # 도착을 **화면 메아리**로 확인한다(확인할 트랜스크립트가 없으니 화면이 유일한 물증).
+        delivery = _deliver_agent_input(tid, source, text, requested, fresh=True)
+        if not _confirm_screen_echo(tid, text):
+            # 성공을 지어내지 않는다 — 화면에 흔적이 없으면 형이 다시 보낼 수 있게 알린다.
+            return {"ok": False, "tid": tid, "opened": False, "delivery": delivery,
+                    "error": "아직 준비가 안 됐어요 — 잠시 뒤 다시 보내주세요"}
         return {"ok": True, "tid": tid, "opened": False, "delivery": delivery}
     offset = transcript.stat().st_size
     delivery = _deliver_agent_input(tid, source, text, requested)

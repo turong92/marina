@@ -57,7 +57,7 @@ assert saved == {"model": "claude-sonnet-5", "effort": "low"}, saved
 # ③ 예약은 다음 유휴 전송 때 회수된다 — 이게 없으면 예약 배지가 영원히 남는다(원래 버그).
 sent.clear()
 busy["value"] = False
-mm._deliver_agent_input = lambda tid, source, text, delivery: "send"
+mm._deliver_agent_input = lambda tid, source, text, delivery, fresh=False: "send"
 out = mm.mobile_send({"root": str(root), "text": "안녕",
                       "target": {"type": "agent", "source": "claude", "sid": "claude-sid-0002"}})
 assert out["ok"], out
