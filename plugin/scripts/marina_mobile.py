@@ -2032,6 +2032,32 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def mobile_restart_chat(body: dict[str, Any]) -> dict[str, Any]:
+    """이 대화를 끄고 같은 자리에 새로 띄운다 — **한 번 눌러서**.
+
+    왜 필요한가: 방을 띄울 때 정해지는 것들이 있다(모델·프로필 플래그 — 예: 채팅방의
+    --disallowedTools Artifact). 이미 도는 세션에는 안 붙으므로 설정을 바꾸면 새로 시작해야
+    한다. 그런데 지금까지는 ⋯ 패널에서 [끄기] 누르고 [＋Claude] 를 다시 누르는 두 단계였고,
+    그건 개발자한테나 자연스러운 순서다(형: "비개발자한테 하라하면 못할거같은데").
+
+    대화 기록은 그대로 남는다 — 프로세스만 새로 뜬다."""
+    root = safe_root(str(body.get("root") or ""))
+    source = str(body.get("source") or "")
+    if source not in ("claude", "codex"):
+        raise ValueError("source 는 claude 또는 codex")
+    sid = str(body.get("sid") or "")
+    tid = _live_agent_tid(root, source, sid)
+    if tid:
+        term_kill(tid)
+    result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24),
+                       agent_source=source, agent_sid="",
+                       agent_prompt=str(body.get("prompt") or ""),
+                       agent_model=str(body.get("model") or ""),
+                       agent_effort=str(body.get("effort") or ""))
+    return {"ok": True, "tid": str(result.get("tid") or ""), "source": source,
+            "closed": bool(tid)}
+
+
 def mobile_launch(body: dict[str, Any]) -> dict[str, Any]:
     """이 워크트리에서 에이전트 **새 세션**을 띄운다(resume 아님).
 
@@ -4169,7 +4195,8 @@ _MOBILE_HTML = r"""<!doctype html>
           ? `<button class="roomTabUnhide" type="button" data-restore="${esc(key)}">되살리기</button><span class="roomTabNote">지움</span>`
           : tab.hidden
           ? `<button class="roomTabUnhide" type="button" data-unhide="${esc(key)}">숨김 해제</button>`
-          : `<button class="roomTabUnhide" type="button" data-close-chat="${esc(key)}" title="이 대화 끄기">끄기</button>`
+          : `<button class="roomTabUnhide" type="button" data-restart-chat="${esc(key)}" title="이 대화를 새로 시작">다시 시작</button>`
+            + `<button class="roomTabUnhide" type="button" data-close-chat="${esc(key)}" title="이 대화 끄기">끄기</button>`
             + `<button class="roomTabUnhide" type="button" data-forget="${esc(key)}" title="이 대화 지우기">지우기</button>`
             + (tab.stale ? '<span class="roomTabNote">오래됨</span>' : "");
         return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
@@ -6679,7 +6706,7 @@ _MOBILE_HTML = r"""<!doctype html>
       chooseSession(key);
     });
     roomOpen.addEventListener("click", async event => {
-      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restore]");
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restart-chat],[data-restore]");
       if (!target) return;
       roomBusy = true;
       try { await handleRoomAction(target); } finally { roomBusy = false; }
@@ -6700,6 +6727,10 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       if (target.hasAttribute("data-restore")) {
         await forgetChat(target.getAttribute("data-restore"), false);
+        return;
+      }
+      if (target.hasAttribute("data-restart-chat")) {
+        await restartChatProcess(target.getAttribute("data-restart-chat"));
         return;
       }
       if (target.hasAttribute("data-close-chat")) {
@@ -6820,6 +6851,24 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     // 대화 끄기 — 돌고 있는 프로세스를 닫는다. 기록은 그대로라 다시 열면 이어서 한다.
     // 정지(Esc)는 붙잡힌 CLI 에 안 먹어서, 아예 끄는 길이 따로 있어야 한다.
+    // 끄고 새로 띄우기를 **한 번에**. 예전엔 [끄기] → [＋Claude] 두 단계라, 모델이나 방 설정을
+    // 바꾼 뒤 반영시키려면 그 순서를 아는 사람만 할 수 있었다(형: "비개발자한테 하라하면
+    // 못할거같은데"). 기록은 그대로 남고 프로세스만 새로 뜬다.
+    async function restartChatProcess(key) {
+      const source = key.slice(0, key.indexOf(":"));
+      const sid = key.slice(key.indexOf(":") + 1);
+      if (!confirm("이 대화를 새로 시작할까요?\n하던 일은 끊기고, 기록은 남아요.")) return;
+      try {
+        const r = await fetch("/mobile/api/restart-chat", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root: openRoomRoot, source, sid})});
+        if (!r.ok) throw new Error(await responseError(r));
+        showToast("새로 시작했어요");
+        await load({force: true});
+        if (openRoomRoot) openRoom(openRoomRoot);
+      } catch (error) {
+        showToast(`다시 시작 실패 · ${String(error)}`);
+      }
+    }
     async function closeChatProcess(key) {
       const source = key.slice(0, key.indexOf(":"));
       const sid = key.slice(key.indexOf(":") + 1);
