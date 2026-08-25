@@ -738,9 +738,17 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
                 # !override 는 목록 전체를 대체한다 → 렌더 못 한 항목을 빼먹으면 그 서비스가 원격에서
                 # 조용히 볼륨을 잃는다. 원래 순서를 지키며 원본 dict 를 인라인으로 통과시킨다
                 # (YAML 은 JSON 상위집합이고, 이 dict 는 compose 자신이 정규화한 형태다).
-                _rw = iter(rw.volumes)
-                rendered = [json.dumps(_render_mount(next(_rw))) if slot else json.dumps(ventries[i])
-                            for i, slot in enumerate(vslots)]
+                # 위치 대응(iter+next)으로 만들면 빠진 자리(파일 마운트)에서 어긋난다.
+                # rw.mapping 은 입력과 같은 길이라 빠진 자리를 None 으로 정확히 알려준다.
+                _mapped = iter(rw.mapping)
+                rendered = []
+                for i, slot in enumerate(vslots):
+                    if not slot:                       # 렌더 못 한 항목(익명 볼륨·tmpfs) — 원본 그대로
+                        rendered.append(json.dumps(ventries[i]))
+                        continue
+                    new_mount = next(_mapped)
+                    if new_mount is not None:          # None = 파일 마운트라 제거됨(주입으로 대신한다)
+                        rendered.append(json.dumps(_render_mount(new_mount)))
                 body.append("    volumes: !override [" + ", ".join(rendered) + "]")
                 new_volumes.update(rw.named_volumes)
                 # 주입된 경로의 restart 규칙은 sync+restart 로 — 안 그러면 재빌드가 컨테이너에 안 닿는다.

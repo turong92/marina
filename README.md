@@ -489,6 +489,86 @@ Marina의 전역 최소 Compose 버전은 `2.24.4`다. 프로젝트가 더 최�
 
 ---
 
+## 원격 런타임 — 맥이 버거울 때 컨테이너만 서버에서
+
+**누구를 위한 건가.** 메모리가 부족한 맥이다. mdc 실측으로 `web` 컨테이너 하나가 피크 11GB,
+기본 시작 그룹 전체가 18.4GB다. 16GB 맥은 Docker VM 배정이 7GB 남짓이라 **워크트리 격리 이전에
+스택 하나가 시작을 못 한다.** 이런 경우 **컨테이너가 도는 기계만** 사무실 리눅스 박스로 옮긴다.
+
+**안 바뀌는 것.** 소스·git·IDE·`node_modules`·`.venv` 는 전부 맥에 남는다. 빌드 명령(gradle 등)도
+맥에서 돈다. compose 파일은 한 줄도 안 고친다. 브라우저 주소도 그대로 `<워크트리>.<프로젝트>.localhost`
+다. 바뀌는 건 컨테이너가 어느 기계에서 도느냐 뿐이다.
+
+원격을 안 쓰는 사람의 동작은 **물리적으로 동일하다** — 로컬 경로에 분기가 들어가지 않는다.
+
+### 준비 (한 번)
+
+박스에 Docker 가 있고 맥에서 ssh 키로 붙을 수 있으면 된다.
+
+```bash
+# 1) 키 등록 — 박스에서 한 번
+ssh-copy-id -i ~/.ssh/id_ed25519.pub <user>@<box>
+
+# 2) 프로젝트가 host 로 엮는 인프라를 박스에 띄운다.
+#    `host` 는 "컨테이너가 도는 그 기계"라서, 원격이면 맥이 아니라 박스에서 찾는다.
+#    (mdc 기준 redis 하나. 무엇이 필요한지는 start 할 때 marina 가 경고로 알려준다)
+ssh <user>@<box> 'docker run -d --name marina-redis --restart unless-stopped -p 6379:6379 redis:7-alpine'
+
+# 3) 박스 주소를 marina 에 알려준다 (전역 1회)
+marina remote use ssh://<user>@<box> --global
+```
+
+### 쓰기
+
+```bash
+marina remote status     # 지금 어디서 도나
+marina start --all       # 평소대로. 컨테이너는 박스에서 뜬다
+marina stop --all        # 정지도 박스를 향한다
+```
+
+브라우저는 평소와 같다 — `marina ports` 나 대시보드에 뜨는 `<워크트리>.<프로젝트>.localhost` 를 연다.
+게시된 포트는 marina 가 `ssh -L` 로 **같은 번호로** 맥에 되돌리므로 게이트웨이 설정이 로컬과 동일하다.
+
+### 워크트리별로 다르게
+
+전역은 기본값일 뿐이고, 워크트리마다 덮을 수 있다.
+
+| 명령 | 뜻 |
+|---|---|
+| `marina remote use` | 이 워크트리를 원격으로 (주소는 전역에서 물려받음) |
+| `marina remote off` | 이 워크트리만 **로컬로 고정** (전역이 원격이어도) |
+| `marina remote inherit` | 이 워크트리의 설정을 지움 → 전역 기본을 따름 |
+| `marina remote ... --global` | 위 셋을 전역에 적용 |
+
+`off` 와 `inherit` 는 다른 뜻이다. 전역이 원격일 때 특정 워크트리만 로컬로 빼는 게 `off`,
+그걸 되돌리는 게 `inherit` 다.
+
+대시보드에서는 **서버 현황(메모리 표시) 옆 배지**로 보인다. 로컬이면 배지가 없고, 원격이면
+`☁ <box>` 가 뜬다 — 그 옆의 Docker/Host 수치가 맥이 아니라 **박스의 값**이기 때문이다.
+이 워크트리만 전역과 다르면 테두리가 점선이다. 눌러서 로컬로 되돌릴 수 있다.
+
+### 로컬로 개발하다 원격으로 옮길 때
+
+1. **먼저 `marina stop --all`** — 타깃을 바꿔도 로컬 컨테이너는 안 내려간다. 양쪽에 뜬 채로 두면
+   메모리만 더 먹는다.
+2. **첫 기동은 박스에서 전체 빌드다.** 맥(arm64)과 박스(x86_64)는 이미지를 공유하지 않는다.
+   프로젝트 크기에 따라 십수 분 걸릴 수 있고, 그 다음부터는 캐시가 산다.
+3. 그 뒤는 평소와 같다. 소스 수정은 Compose Watch 로 반영되고(체감 지연 없음), backend JAR 처럼
+   부팅에 필요한 산출물은 marina 가 기동 전에 컨테이너로 넣는다.
+
+### 알아둘 것
+
+- **박스는 공유 자원이다.** 여러 명이 쓰면 컨테이너가 같이 올라간다. 안 쓰는 스택은 내려두자.
+  포트는 Docker 가 임의로 할당하므로 사람끼리 충돌하지는 않는다.
+- **`.env` 는 기동 시점에 들어간다.** 원격에서 `.env` 를 바꾸면 반영에 재기동이 필요하다
+  (컨텍스트 루트 `.dockerignore` 가 `.env*` 를 제외해 Watch 대상이 아니기 때문).
+- **박스가 안 닿으면 로컬로 떨어진다.** 설정이 깨졌거나 주소가 없으면 조용히 원격을 시도하지 않고
+  로컬로 돌며 경고한다.
+- **터널이 안 열리면** `<세션 디렉터리>/remote-tunnel.log` 에 이유가 남는다
+  (맥 쪽 포트 충돌인지, 박스에 못 붙는지).
+
+---
+
 ## compose 구성 — 자동 주입 (ⓘ 구성뷰)
 
 같은 Dockerfile 이라도 dev 로 띄우려면 빌드 인자·아티팩트·런타임 설정이 더 필요할 때가 많다.
@@ -677,6 +757,7 @@ x-marina:
 | 등록 관리 | `marina project ls \| infer <path> \| rm <id> \| default <id> a,b,c` |
 | 실행 | `marina start\|stop\|restart\|rebuild\|clean-rebuild <svc>\|--all` · `marina status \| ports \| logs [svc]` |
 | 게이트웨이 | `marina gateway start\|stop\|status\|install\|uninstall` (보통 서비스 start 시 자동 기동이라 수동 불필요) |
+| 원격 런타임 | `marina remote use [<ssh://user@host>] \| off \| inherit \| status` + `--global` (컨테이너를 어느 기계에서 돌릴지) |
 | 워크트리(작업 시작) | `marina worktree create <branch> [base] [--project <id>]` — git worktree(-b) + 서브레포를 같은 브랜치로 미러 (Claude 자동 `claude/<id>` 대신 `feature/{task}` 등으로). `--project`=cwd 무관(프로젝트 밖에서도). attach 범위는 `marina project default <id> a,b,c` 로 좁힘(예: compose 서브레포만) |
 
 내부 호출은 `marina.sh`(launcher)와 `marina-control.py`(데몬·CLI 브리지)지만, 평소엔 위 `marina` 래퍼만

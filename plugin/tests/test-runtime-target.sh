@@ -105,6 +105,35 @@ class RemoteTargetTests(unittest.TestCase):
         self.assertEqual(r.injections[0].source, "/p/a: b/libs")
         self.assertEqual(r.injections[0].target, "/app/libs")
 
+
+    def test_file_mount_is_dropped_not_volumised(self):
+        # named volume 은 **디렉터리**로 마운트된다. 파일 경로(.env)에 얹으면 도커가 거부한다:
+        #   "source /.../.env.ssm.local is not directory" → 컨테이너 생성 자체가 실패.
+        # 파일은 볼륨 없이 컨테이너 안으로 바로 넣는다(주입 목록엔 그대로 남는다).
+        r = self.t.volume_rewrite(
+            "web",
+            [Mount("/p/apps/web/.env", "/app/apps/web/.env"),
+             Mount("/p/build/libs", "/app/libs")],
+            is_dir_fn=lambda src: src.endswith("libs"),
+        )
+        self.assertEqual(r.volumes, [Mount("marina_web_app_libs", "/app/libs")])   # 파일 마운트는 사라짐
+        self.assertEqual(sorted(r.named_volumes), ["marina_web_app_libs"])         # 파일용 볼륨 안 만듦
+        self.assertEqual(sorted(i.target for i in r.injections),
+                         ["/app/apps/web/.env", "/app/libs"])                      # 둘 다 주입 대상
+
+    def test_file_injection_records_no_volume(self):
+        r = self.t.volume_rewrite("web", [Mount("/p/.env", "/app/.env")], is_dir_fn=lambda src: False)
+        self.assertEqual(r.volumes, [])
+        self.assertEqual(r.named_volumes, {})
+        self.assertEqual(r.injections[0].volume, "")     # 볼륨 없음을 명시
+
+    def test_default_predicate_is_the_filesystem(self):
+        import tempfile, os
+        with tempfile.TemporaryDirectory() as d:
+            os.mkdir(os.path.join(d, "libs"))
+            r = self.t.volume_rewrite("s", [Mount(os.path.join(d, "libs"), "/app/libs")])
+            self.assertEqual(len(r.volumes), 1)          # 실제 디렉터리 → 볼륨
+
     def test_missing_host_falls_back_to_local(self):
         # host 없는 깨진 설정으로 원격을 자칭하면 로컬로 떨어진다 — 조용히 원격을 시도하는 게 더 위험하다.
         s = Path(tempfile.mkdtemp())

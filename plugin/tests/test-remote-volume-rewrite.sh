@@ -149,6 +149,28 @@ class RemoteRewriteTests(unittest.TestCase):
         self.assertEqual(vols[0], "marina_svc_app_libs:/app/libs")
         self.assertEqual(vols[1].get("type"), "tmpfs")
 
+    def test_file_mount_disappears_from_overlay(self):
+        # named volume 은 디렉터리로 마운트된다 → 파일 경로에 얹으면 컨테이너 생성이 실패한다
+        # ("source /.../.env is not directory"). 파일 마운트는 오버레이에서 빠지고 주입만 남는다.
+        import os, tempfile
+        with tempfile.TemporaryDirectory() as d:
+            envf = os.path.join(d, ".env"); open(envf, "w").write("A=1")
+            libs = os.path.join(d, "libs"); os.mkdir(libs)
+            cfg = {"services": {"web": {"build": {"context": d}, "volumes": [
+                {"type": "bind", "source": envf, "target": "/app/.env"},
+                {"type": "bind", "source": libs, "target": "/app/libs"},
+                {"type": "volume", "source": "cache", "target": "/app/.next"},
+                {"type": "tmpfs", "target": "/tmp/x"},
+            ]}}}
+            out = mctl.build_overlay(cfg, target=self.target)
+            line = [l for l in out.splitlines() if "volumes: !override" in l][0]
+            self.assertNotIn("/app/.env", line)        # 파일 마운트 사라짐
+            self.assertIn("/app/libs", line)           # 디렉터리는 볼륨으로
+            self.assertIn("cache:/app/.next", line)    # 기존 named volume 그대로
+            self.assertIn("/tmp/x", line)              # tmpfs 보존
+            plan = mctl.injection_plan_for(cfg, self.target, services=["web"])
+            self.assertEqual(sorted(i.target for i in plan), ["/app/.env", "/app/libs"])
+
     def test_service_with_no_volumes_is_not_broken(self):
         cfg = {"services": {"index-api": {"build": {"context": "./ai-api"}}}}
         out = mctl.build_overlay(cfg, target=self.target)

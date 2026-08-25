@@ -35,7 +35,7 @@ class Injection:
     service: str
     source: str            # 개발자 머신 기준 경로(compose 표기 그대로)
     target: str            # 컨테이너 안 경로
-    volume: str            # 치환된 named volume 이름
+    volume: str = ""       # 치환된 named volume 이름. 파일 주입은 볼륨이 없어 빈 문자열.
 
 
 @dataclass(frozen=True)
@@ -53,6 +53,9 @@ class VolumeRewrite:
     volumes: list                           # 서비스의 `volumes` 최종값 (list[Mount])
     named_volumes: dict[str, None] = field(default_factory=dict)   # top-level `volumes:` 에 선언할 것
     injections: list[Injection] = field(default_factory=list)
+    # 입력 mounts 와 **같은 길이**. 각 자리의 최종 Mount, 빠진 것(파일 마운트)은 None.
+    # 위치 대응으로 렌더링하면 빠진 자리에서 어긋난다(실제로 StopIteration 으로 터졌다).
+    mapping: list = field(default_factory=list)
 
 
 def _is_host_path(source: str) -> bool:
@@ -68,6 +71,15 @@ def _volume_name(service: str, target: str) -> str:
     return f"{_VOLUME_PREFIX}_{slug}"
 
 
+def _looks_like_dir(source: str) -> bool:
+    """바인드 소스를 디렉터리로 볼 것인가.
+
+    **파일로 존재할 때만 파일**, 그 외(없는 경로 포함)는 디렉터리로 본다 — 도커가 바인드 소스를
+    자동 생성할 때 쓰는 규칙과 같다. 첫 gradle 빌드 전이라 `build/libs` 가 아직 없는 경우가 흔한데,
+    그걸 파일로 오판하면 볼륨을 안 만들어 JAR 을 넣을 그릇이 사라진다."""
+    return not os.path.isfile(source)
+
+
 class LocalTarget:
     """지금 동작. 아무것도 바꾸지 않는다."""
 
@@ -77,8 +89,8 @@ class LocalTarget:
     def docker_env(self) -> dict[str, str]:
         return {}
 
-    def volume_rewrite(self, service: str, mounts: list) -> VolumeRewrite:
-        return VolumeRewrite(volumes=list(mounts))
+    def volume_rewrite(self, service: str, mounts: list, is_dir_fn=None) -> VolumeRewrite:
+        return VolumeRewrite(volumes=list(mounts), mapping=list(mounts))
 
     def injection_plan(self, per_service_mounts: dict) -> list[Injection]:
         return []
@@ -96,24 +108,39 @@ class RemoteTarget:
     def docker_env(self) -> dict[str, str]:
         return {"DOCKER_HOST": self.host}
 
-    def volume_rewrite(self, service: str, mounts: list) -> VolumeRewrite:
+    def volume_rewrite(self, service: str, mounts: list, is_dir_fn=None) -> VolumeRewrite:
+        """호스트 경로 바인드를 원격에서 풀 수 있는 형태로 바꾼다.
+
+        **디렉터리**는 named volume 으로 치환한다(내용을 담을 그릇이 필요하다).
+        **파일**은 마운트를 아예 없앤다 — named volume 은 디렉터리로 마운트되므로 파일 경로에 얹으면
+        도커가 컨테이너 생성을 거부한다(`source /.../.env is not directory`). 파일은 볼륨 없이 컨테이너
+        안으로 바로 넣으면 되고(이미지에 이미 그 경로가 있다), 주입 목록엔 그대로 남는다."""
+        is_dir_fn = is_dir_fn or _looks_like_dir
         out: list = []
         named: dict[str, None] = {}
         injections: list[Injection] = []
+        mapping: list = []
         for m in mounts:
             if not _is_host_path(m.source):
                 out.append(m)                        # named volume 등 — 데몬 쪽에 살아서 그대로 둔다
+                mapping.append(m)
+                continue
+            if not is_dir_fn(m.source):              # 파일 — 마운트를 빼고 주입만
+                injections.append(Injection(service=service, source=m.source, target=m.target))
+                mapping.append(None)
                 continue
             vol = _volume_name(service, m.target)
-            out.append(Mount(source=vol, target=m.target, mode=m.mode))
+            new = Mount(source=vol, target=m.target, mode=m.mode)
+            out.append(new)
+            mapping.append(new)
             named[vol] = None
             injections.append(Injection(service=service, source=m.source, target=m.target, volume=vol))
-        return VolumeRewrite(volumes=out, named_volumes=named, injections=injections)
+        return VolumeRewrite(volumes=out, named_volumes=named, injections=injections, mapping=mapping)
 
-    def injection_plan(self, per_service_mounts: dict) -> list[Injection]:
+    def injection_plan(self, per_service_mounts: dict, is_dir_fn=None) -> list[Injection]:
         plan: list[Injection] = []
         for service, mounts in per_service_mounts.items():
-            plan.extend(self.volume_rewrite(service, mounts).injections)
+            plan.extend(self.volume_rewrite(service, mounts, is_dir_fn).injections)
         return plan
 
 
