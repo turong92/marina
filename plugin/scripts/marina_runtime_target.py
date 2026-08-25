@@ -203,3 +203,17 @@ def describe(session_dir: str, home: str | None = None) -> dict:
         "scope": scope,
         "globalHost": (g.get("host") if g.get("kind") == "remote" else None),
     }
+
+
+def docker_env_for_root(root) -> dict:
+    """워크트리 root → docker 호출에 얹을 env 델타. 로컬이면 `{}`.
+
+    **라우팅 규칙은 여기 한 군데만 산다.** 호출부마다 다시 구현하면 또 빠뜨린다 — 실제로 compose
+    수명·메모리·ps 를 따로 고치다 게이트웨이용 ps 를 놓쳤다. docker 를 실행하는 곳은 이걸 쓴다."""
+    if not root:
+        return {}
+    try:
+        import marina_paths
+        return load_target(str(marina_paths.session_dir(Path(root)))).docker_env()
+    except Exception:
+        return {}

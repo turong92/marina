@@ -975,6 +975,110 @@ def inject_argv(inj, project_name, project_dir, is_dir):
             f"{project_name}-{inj.service}-1:{inj.target}"]
 
 
+def _tunnel_pid_file(session_dir):
+    return Path(session_dir) / "remote-tunnel.pid"
+
+
+def _stop_remote_tunnel(session_dir):
+    """열려 있던 터널을 걷는다. 없으면 조용히 지나간다."""
+    if not session_dir:
+        return
+    pid_file = _tunnel_pid_file(session_dir)
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").split()[0])
+    except (FileNotFoundError, IndexError, ValueError):
+        return
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        pass
+    pid_file.unlink(missing_ok=True)
+
+
+def start_remote_tunnel(session_dir, target, project_name, env):
+    """기동 뒤 게시된 포트를 개발자 맥으로 되돌린다(같은 번호). 로컬이면 아무것도 안 한다.
+
+    포트는 Docker 가 매번 새로 할당하므로 기동할 때마다 다시 연다 — 먼저 옛 터널을 걷는다."""
+    if not tunnel_needed(target):
+        return None
+    _stop_remote_tunnel(session_dir)
+    try:
+        ps = subprocess.check_output(label_argv(project_name, ["ps", "--format", "json"]),
+                                     text=True, env=env, timeout=20)
+    except Exception:
+        return None
+    argv = tunnel_argv(target.host, tunnel_ports(ps))
+    if not argv:
+        return None
+    # stderr 를 버리면 실패 이유가 안 보인다 — "포트가 이미 쓰이는 중"인지 "박스에 못 붙는지"를
+    # 구분 못 해 디버깅이 막힌다(실제로 겪었다). 세션 디렉터리에 남긴다(compose.watch.log 와 같은 자리).
+    Path(session_dir).mkdir(parents=True, exist_ok=True)
+    log_path = Path(session_dir) / "remote-tunnel.log"
+    try:
+        log = open(log_path, "a", encoding="utf-8")
+        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=log)
+    except OSError as exc:
+        sys.stderr.write(f"warning: 포트 되돌리기 실패({exc}) — 박스에서만 열 수 있습니다\n")
+        return None
+    print(f"tunnel: 포트 {', '.join(str(p) for p in tunnel_ports(ps))} → 맥 localhost (로그: {log_path})")
+    _tunnel_pid_file(session_dir).write_text(f"{proc.pid}\n", encoding="utf-8")
+    return proc
+
+
+def tunnel_needed(target) -> bool:
+    """포트를 개발자 맥으로 되돌려야 하나. ssh 원격일 때만 — 그때만 터널을 뚫을 수단이 있다."""
+    return bool(getattr(target, "is_remote", False)) and str(getattr(target, "host", "")).startswith("ssh://")
+
+
+def tunnel_ports(ps_text: str) -> list:
+    """`compose ps --format json` → 되돌릴 호스트 포트 목록.
+
+    게시 안 된 것(PublishedPort 0)은 제외한다 — 사이드카 netns 에 합류한 앱은 자기 행에 포트가 없고
+    사이드카 행에 잡힌다."""
+    try:
+        parsed = parse_ps_ports(ps_text) or {}
+    except Exception:
+        return []                       # ps 출력이 깨졌으면 터널을 못 여는 것이지 기동을 깰 일은 아니다
+    out = set()
+    for ports in parsed.values():
+        for port in ports:
+            try:
+                value = int(port)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                out.add(value)
+    return sorted(out)
+
+
+def tunnel_argv(docker_host: str, ports: list):
+    """`ssh -L` 인자. 되돌릴 게 없거나 ssh 가 아니면 None.
+
+    **같은 번호로 되돌린다** — 그래야 게이트웨이 Caddyfile 생성이 로컬과 글자 하나 안 달라진다.
+    프로세스는 하나가 모든 포트를 진다(수명 관리가 pid 하나로 끝난다).
+    -f 는 쓰지 않는다(마리나가 pid 로 관리하므로 포크하면 놓친다). -N 은 원격 명령 실행 안 함.
+    ExitOnForwardFailure: 맥 쪽 포트를 못 잡으면 조용히 살아 있지 말고 죽어야 원인이 드러난다."""
+    if not ports or not str(docker_host or "").startswith("ssh://"):
+        return None
+    rest = docker_host[len("ssh://"):].strip("/")
+    if not rest:
+        return None
+    hostpart, sep, port = rest.rpartition(":")
+    argv = ["ssh", "-N",
+            "-o", "BatchMode=yes",
+            "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=3"]
+    if sep and port.isdigit():
+        argv += ["-p", port]
+        target_host = hostpart
+    else:
+        target_host = rest
+    for p in ports:
+        argv += ["-L", f"{p}:127.0.0.1:{p}"]
+    return argv + [target_host]
+
+
 def startup_plan(target, injections, stored, overlay, project_dir, project_name,
                  services, build=False, is_dir_fn=None):
     """기동을 몇 단계로 실행할지 결정한다. `[(kind, argv), ...]` 를 순서대로 돌리면 된다.
@@ -1146,9 +1250,20 @@ def _env_with(overrides, session_dir=None):
     return env
 
 
-def _show_ports(project_name):
+def _lifecycle_env(session_dir):
+    """stop/down/restart/status/logs 가 쓸 env. 원격이면 그 박스를 향한다.
+
+    없으면 로컬 데몬을 보며 "그런 컨테이너 없다"고 한다 — 원격에 띄운 스택을 **정지조차 못 한다**.
+    로컬 타깃은 빈 델타라 기존 호출과 완전히 같다."""
+    env = dict(os.environ)
+    if session_dir:
+        env.update(load_runtime_target(session_dir).docker_env())
+    return env
+
+
+def _show_ports(project_name, env=None):
     try:
-        out = subprocess.check_output(label_argv(project_name, ["ps", "--format", "json"]), text=True)
+        out = subprocess.check_output(label_argv(project_name, ["ps", "--format", "json"]), text=True, env=env)
     except subprocess.CalledProcessError:
         return
     ports = parse_ps_ports(out)
@@ -1694,6 +1809,9 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                             rc = subprocess.call(_argv, env=env)
                             if rc != 0:
                                 break
+                        if rc == 0:
+                            # 포트를 개발자 맥으로 되돌린다 — 없으면 박스에 떠도 브라우저로 못 연다.
+                            start_remote_tunnel(a.session_dir, _target, name, env)
                     if rc == 0 and effective_build and current_inputs.get("status") == "ok":
                         try:
                             post_inputs = _capture_build_inputs(
@@ -1891,24 +2009,31 @@ def cmd_watch(a):
 
 def cmd_down(a):  # 전체 teardown (stop --all). --volumes 요청 시 compose named volume 도 제거
     name = compose_project_name(a.project_id, a.session)
+    env = _lifecycle_env(getattr(a, "session_dir", None))
+    _stop_remote_tunnel(getattr(a, "session_dir", None))     # 내려가면 터널도 같이 걷는다
     verb = ["down", "--remove-orphans"] + (["--volumes"] if getattr(a, "volumes", False) else [])
-    return subprocess.call(label_argv(name, verb))  # P7/P8
+    return subprocess.call(label_argv(name, verb), env=env)  # P7/P8
 
 
 def cmd_stop(a):  # 선택 서비스만 정지 — 컨테이너 유지
     name = compose_project_name(a.project_id, a.session)
-    return subprocess.call(label_argv(name, ["stop", *a.service]))          # P7
+    env = _lifecycle_env(getattr(a, "session_dir", None))
+    if not a.service:                                        # 전체 정지면 터널도 걷는다
+        _stop_remote_tunnel(getattr(a, "session_dir", None))
+    return subprocess.call(label_argv(name, ["stop", *a.service]), env=env)  # P7
 
 
 def cmd_restart(a):  # 선택 서비스만 재시작 (quick bounce, config 재해석 안 함)
     name = compose_project_name(a.project_id, a.session)
-    return subprocess.call(label_argv(name, ["restart", *a.service]))       # P7
+    env = _lifecycle_env(getattr(a, "session_dir", None))
+    return subprocess.call(label_argv(name, ["restart", *a.service]), env=env)   # P7
 
 
 def cmd_status(a):
     name = compose_project_name(a.project_id, a.session)
+    env = _lifecycle_env(getattr(a, "session_dir", None))
     try:
-        out = subprocess.check_output(label_argv(name, ["ps", "--format", "json"]), text=True)
+        out = subprocess.check_output(label_argv(name, ["ps", "--format", "json"]), text=True, env=env)
     except subprocess.CalledProcessError:
         print("(not running)")
         return 0
@@ -1916,13 +2041,14 @@ def cmd_status(a):
         print(svc + "=" + ",".join(str(p) for p in ports))
     if a.ports_only:
         return 0
-    return subprocess.call(label_argv(name, ["ps"]))               # 사람용 표
+    return subprocess.call(label_argv(name, ["ps"]), env=env)      # 사람용 표
 
 
 def cmd_logs(a):
     name = compose_project_name(a.project_id, a.session)
     verb = ["logs"] + ([] if a.no_follow else ["-f"]) + list(a.service)
-    return subprocess.call(label_argv(name, verb))                 # P7
+    return subprocess.call(label_argv(name, verb),
+                           env=_lifecycle_env(getattr(a, "session_dir", None)))   # P7
 
 
 # ---- test hooks (stdin) ----
@@ -1970,11 +2096,11 @@ def main(argv=None):
     p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir"); p.add_argument("--with-signature", action="store_true"); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
     p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("build-active"); p.add_argument("--session-dir", required=True); p.set_defaults(fn=cmd_build_active)
-    p = sub.add_parser("down"); name_args(p); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
-    p = sub.add_parser("stop"); name_args(p); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_stop)
-    p = sub.add_parser("restart"); name_args(p); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_restart)
-    p = sub.add_parser("status"); name_args(p); p.add_argument("--ports-only", action="store_true"); p.set_defaults(fn=cmd_status)
-    p = sub.add_parser("logs"); name_args(p); p.add_argument("--service", action="append", default=[]); p.add_argument("--no-follow", action="store_true"); p.set_defaults(fn=cmd_logs)
+    p = sub.add_parser("down"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
+    p = sub.add_parser("stop"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_stop)
+    p = sub.add_parser("restart"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_restart)
+    p = sub.add_parser("status"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--ports-only", action="store_true"); p.set_defaults(fn=cmd_status)
+    p = sub.add_parser("logs"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--service", action="append", default=[]); p.add_argument("--no-follow", action="store_true"); p.set_defaults(fn=cmd_logs)
 
     args = ap.parse_args(argv)
     return args.fn(args)

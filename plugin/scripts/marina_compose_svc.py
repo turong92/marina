@@ -210,10 +210,15 @@ def build_compose_services(ps_rows: list) -> list:
 def compose_ps(root: Path, project_name: str) -> list:
     """docker compose -p <name> ps --all --format json → 행 리스트. docker 없거나 실패 시 [].
     --all 로 정지 컨테이너도 포함(대시보드에서 재기동 가능)."""
+    # 이 워크트리의 데몬을 본다 — 원격 스택을 로컬 데몬에서 찾으면 "안 도는 것"으로 보이고,
+    # 게이트웨이 upstream 이 아예 안 생겨 `<wt>.<proj>.localhost` 가 열리지 않는다.
+    from marina_runtime_target import docker_env_for_root
+    delta = docker_env_for_root(root)
     try:
         out = subprocess.check_output(
             _docker_cmd("compose", "-p", project_name, "ps", "--all", "--format", "json"),
             cwd=str(root), text=True, stderr=subprocess.DEVNULL, timeout=5,
+            env={**os.environ, **delta} if delta else None,
         )
     except Exception:
         return []

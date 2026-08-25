@@ -322,14 +322,14 @@ PY
         stop)
           if [[ ${#svcs[@]} -gt 0 ]]; then
             for x in "${svcs[@]}"; do _compose_logtail_stop "${x#--service=}"; done
-            python3 "$cp" stop "${nameargs[@]}" "${svcs[@]}" || return $?
+            python3 "$cp" stop --session-dir "$sd" "${nameargs[@]}" "${svcs[@]}" || return $?
             cname="$(python3 "$cp" name "${nameargs[@]}")"
             refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
               ${envargs[@]+"${envargs[@]}"}
           else
             _compose_watch_stop
             _compose_logtail_stop
-            python3 "$cp" down "${nameargs[@]}"
+            python3 "$cp" down --session-dir "$sd" "${nameargs[@]}"
           fi ;;
         restart)
           if [[ ${#svcs[@]} -gt 0 ]]; then
@@ -351,7 +351,7 @@ PY
           else
 	            _compose_logtail_stop
 	            local restart_down_rc=0 restart_all_up_rc=0
-	            python3 "$cp" down "${nameargs[@]}" || restart_down_rc=$?
+	            python3 "$cp" down --session-dir "$sd" "${nameargs[@]}" || restart_down_rc=$?
 	            if [[ "$restart_down_rc" -ne 0 ]]; then
 	              refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
 	                ${envargs[@]+"${envargs[@]}"} || true
@@ -371,11 +371,11 @@ PY
               ${envargs[@]+"${envargs[@]}"}
           fi ;;
       esac ;;
-    status)  python3 "$cp" status "${nameargs[@]}" ;;
-    ports)   python3 "$cp" status "${nameargs[@]}" --ports-only ;;
+    status)  python3 "$cp" status --session-dir "$sd" "${nameargs[@]}" ;;
+    ports)   python3 "$cp" status --session-dir "$sd" "${nameargs[@]}" --ports-only ;;
     logs)
       local -a lsvc=(); [[ -n "${1:-}" ]] && lsvc+=("--service=$1")
-      python3 "$cp" logs "${nameargs[@]}" ${lsvc[@]+"${lsvc[@]}"} ;;
+      python3 "$cp" logs --session-dir "$sd" "${nameargs[@]}" ${lsvc[@]+"${lsvc[@]}"} ;;
     *) die "compose: 미지원 명령 $command" ;;
   esac
   # start/restart 성공 직후(여기 도달=up 성공): 게이트웨이 자동 기동 + 라우트 반영(CLI 경로도 대시보드와 동일 UX)
