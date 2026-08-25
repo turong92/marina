@@ -1565,6 +1565,24 @@ def mobile_outbox_drain() -> int:
     return delivered
 
 
+def _pid_gone(pid: int) -> bool:
+    """이 프로세스가 정말 사라졌나.
+
+    os.kill(pid, 0) 만으로는 부족하다 — **좀비**(죽었지만 부모가 아직 안 거둔 상태)도 살아
+    있다고 답한다. 그걸 "안 죽었다"로 읽으면 멀쩡한 인수인계까지 보류로 떨어진다(테스트가
+    이 과함을 잡았다). ps 의 상태가 Z 면 죽은 것으로 센다."""
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return True
+    try:
+        state = subprocess.run(["ps", "-o", "stat=", "-p", str(pid)],
+                               capture_output=True, text=True, timeout=2).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        return False         # 확인 불가 — 살아 있다고 본다(둘로 갈라지는 쪽을 피한다)
+    return state.startswith("Z") or not state
+
+
 def _takeover_agent(source: str, sid: str, pid: int) -> bool:
     """붙들고 있는 프로세스를 정중히 끊고(SIGTERM) 세션을 넘겨받는다.
 
@@ -1589,6 +1607,12 @@ def _takeover_agent(source: str, sid: str, pid: int) -> bool:
             time.sleep(0.1)
         except OSError:
             pass
+    # **정말 죽었는지 확인한다.** 예전엔 쏘고 나서 무조건 True 를 냈다 — Claude 데스크톱 앱은
+    # 죽은 프로세스를 되살리므로 "끊었다"가 사실이 아니었고, 마리나가 그 말을 믿고 resume 을
+    # 띄워 **같은 대화가 둘**이 됐다(실측 2026-08-25: 원격 사이드바에 같은 세션 두 줄,
+    # pid 85133[마리나 resume] + pid 9837[데스크톱 앱]). 둘이 같은 세션 파일에 쓰면 답이 엇갈린다.
+    if not _pid_gone(pid):
+        return False         # 아직 살아 있다. 성공을 지어내지 않는다.
     try:
         import marina_agent_procs
 
@@ -2083,6 +2107,16 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
             holder = _agent_holder_pid(root, source, sid)
             if holder:
                 took_over = _takeover_agent(source, sid, holder)
+                if not took_over:
+                    # 못 끊었다 = 다른 앱(주로 Claude 데스크톱)이 그 대화를 계속 쥐고 있다.
+                    # 여기서 resume 을 띄우면 **같은 대화가 둘**이 되어 답이 엇갈린다.
+                    # 보류함에 넣고 사실대로 말한다 — 저쪽에서 놓으면 드레이너가 전달한다.
+                    if body.get("_from_outbox"):
+                        raise ValueError("아직 다른 앱이 그 대화를 쥐고 있어요 — 보류 유지")
+                    queued = mobile_outbox_put(root, source, sid, text,
+                                               str(body.get("model") or ""), str(body.get("effort") or ""))
+                    return {"ok": True, "tid": "", "opened": False, "delivery": "queue",
+                            "heldBy": "other-app", **queued}
             saved = mobile_pending_session_settings(root, source, sid)
             model = str(body.get("model") if "model" in body else saved["model"])
             effort = str(body.get("effort") if "effort" in body else saved["effort"])
