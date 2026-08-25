@@ -840,7 +840,20 @@ class Handler(BaseHTTPRequestHandler):
                         return
                     self.send_json(agent_session_files(root, source, sid))
                     return
-                data, content_type = agent_session_file_bytes(root, query.get("path", [""])[0])
+                # 세션을 같이 넘긴다 — 그 세션이 **건네준** 파일이면 방 밖이라도 받을 수 있다
+                # (아무 경로가 아니라 기록에 남은 것만. marina_sessions._handed_over_file).
+                파일소스, 파일sid = query.get("source", [""])[0], query.get("sid", [""])[0]
+                if 파일소스 and 파일sid:
+                    agent_key = canonical_agent(파일소스, 파일sid)
+                    self._policy().inherit_from_root("agent", agent_key, root)
+                    if not self._policy().can_resource(principal, "agent", agent_key):
+                        self._forbidden()
+                        return
+                    if not agent_belongs_to_root(root, 파일소스, 파일sid):
+                        self._forbidden()
+                        return
+                data, content_type = agent_session_file_bytes(
+                    root, query.get("path", [""])[0], 파일소스, 파일sid)
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return

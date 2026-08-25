@@ -1480,7 +1480,9 @@ def _activity_type(name: str, detail: str) -> str:
         return "skill"
     if lowered in ("apply_patch", "edit", "multiedit", "patch") or "tools.apply_patch(" in detail_lower or re.search(r"\*\*\*\s+(?:update|add|delete)\s+file:", detail_lower):
         return "diff"
-    if lowered in ("write", "read", "notebookedit"):
+    if lowered in ("write", "read", "notebookedit", "senduserfile"):
+        # 건네주기(SendUserFile)도 파일 활동이다 — 임시 폴더에 만들어 건네는 경우가 있어서,
+        # 이걸 도구 취급하면 대화에 받을 링크가 안 생긴다(실측 2026-08-25).
         return "file"
     if lowered in ("bash", "exec", "exec_command", "shell", "terminal"):
         return "command"
@@ -1493,6 +1495,12 @@ def _activity_file_path(raw_input: Any, detail: str) -> str:
     """file/diff 활동이 건드린 파일 경로. 라벨과 payload 두 군데서 쓰므로 규칙은 여기 하나뿐이다."""
     payload = _json_value(raw_input)
     target = str(payload.get("file_path") or payload.get("path") or payload.get("file") or "").strip()
+    if not target:
+        # 건네주기는 목록으로 온다 — 첫 파일을 대표로 싣는다(칩은 활동 하나에 하나다).
+        묶음 = payload.get("files")
+        if isinstance(묶음, str):
+            묶음 = [묶음]
+        target = str((묶음 or [""])[0]).strip()
     if not target:
         # codex diff 는 구조화 payload 가 없고 본문에 "*** Update File: <경로>" 로만 남는다
         match = re.search(r"\*\*\*\s+(?:update|add|delete)\s+file:\s*([^\s'\";\\]+)", detail, re.I)
@@ -2602,6 +2610,10 @@ def agent_transcript_image(root: Path, source: str, sid: str, ref: str) -> tuple
 # 만들기만 한 파일은 트랜스크립트에 내용이 안 남고 경로만 남으므로, 도구 호출의 file_path 가 유일한 근거다.
 # (실측: 세션 하나에 Write 2 + Edit 44 인데 트랜스크립트 이미지는 0장 — 갤러리로는 아무것도 안 잡힌다.)
 _WRITE_TOOLS = {"write", "edit", "multiedit", "notebookedit", "apply_patch", "patch"}
+# 건네주는 도구 — "이 파일을 형에게 준다"는 뜻이라 결과물 신호로 이보다 분명한 게 없다.
+# (실측 2026-08-25: 아티팩트를 막았더니 에이전트가 스크래치패드에 Write → Bash 로 방에 복사 →
+#  SendUserFile 로 건넸다. Write 경로만 보던 목록엔 그 결과물이 하나도 안 잡혔다.)
+_HANDOFF_TOOLS = {"senduserfile"}
 _PATCH_TARGET_RE = re.compile(r"\*\*\*\s+(?:update|add|delete)\s+file:\s*([^\s'\";\\]+)", re.I)
 AGENT_SESSION_FILES_MAX = 300
 _SESSION_FILE_BYTES_MAX = 8 * 1024 * 1024
@@ -2613,7 +2625,14 @@ _SESSION_FILE_IMAGE_TYPES = {
 
 
 def _tool_file_targets(name: str, raw_input: Any) -> list[str]:
-    if name.strip().lower() not in _WRITE_TOOLS:
+    키 = name.strip().lower()
+    if 키 in _HANDOFF_TOOLS:
+        payload = _json_value(raw_input)
+        묶음 = payload.get("files")
+        if isinstance(묶음, str):
+            묶음 = [묶음]
+        return [str(item).strip() for item in (묶음 or []) if str(item).strip()]
+    if 키 not in _WRITE_TOOLS:
         return []
     payload = _json_value(raw_input)
     direct = payload.get("file_path") or payload.get("path") or payload.get("file")
@@ -2646,7 +2665,16 @@ def session_file_in_root(root: Path, raw: str) -> Path | None:
 def agent_session_files(root: Path, source: str, sid: str,
                         limit: int = AGENT_SESSION_FILES_MAX) -> dict[str, Any]:
     """이 세션이 만든/바꾼 파일 목록 — 최근에 손댄 것이 앞. 내용은 안 싣는다(메타만)."""
-    path = agent_transcript_path(root, source, sid)
+    # 트랜스크립트가 없을 수도 있다(갓 띄운 세션·만료). 채팅방은 그래도 **폴더에 있는 것**을
+    # 보여줘야 하므로 여기서 죽지 않는다 — 없으면 도구 기록만 못 읽을 뿐이다.
+    try:
+        path = agent_transcript_path(root, source, sid)
+    except (ValueError, OSError):
+        방파일 = _chat_room_files(root, set())
+        if 방파일:
+            return {"files": 방파일[:max(1, int(limit or AGENT_SESSION_FILES_MAX))],
+                    "total": len(방파일), "source": source}
+        raise
     limit = max(1, min(AGENT_SESSION_FILES_MAX, int(limit or AGENT_SESSION_FILES_MAX)))
     order: list[str] = []
     seen: dict[str, dict[str, Any]] = {}
@@ -2674,15 +2702,29 @@ def agent_session_files(root: Path, source: str, sid: str,
                 calls = [(str(payload.get("name") or ""),
                           payload.get("arguments") if payload.get("type") == "function_call" else payload.get("input"))]
             for name, raw_input in calls:
+                건넴 = name.strip().lower() in _HANDOFF_TOOLS
                 for target in _tool_file_targets(name, raw_input):
                     resolved = session_file_in_root(root, target)
+                    if resolved is None and 건넴:
+                        # **건네준 파일은 방 밖이라도 받는다.** 에이전트가 임시 폴더에 만들어
+                        # 건네는 일이 실제로 있었다(2026-08-25). 그걸 "워크트리 밖"이라며 막으면
+                        # 형에게 주겠다고 한 결과물이 영영 안 닿는다 — 지시문으로 막을 일이
+                        # 아니라 마리나가 집어와야 하는 일이다.
+                        try:
+                            resolved = Path(target).expanduser().resolve()
+                        except OSError:
+                            resolved = None
                     if resolved is None:
                         continue                  # 워크트리 밖은 목록에도 안 넣는다
                     key = str(resolved)
                     record = seen.get(key)
                     if record is None:
+                        try:
+                            상대 = str(resolved.relative_to(root.resolve()))
+                        except ValueError:
+                            상대 = resolved.name      # 방 밖(건네준 파일) — 이름만 보여준다
                         record = {"path": key, "name": resolved.name,
-                                  "relPath": str(resolved.relative_to(root.resolve())),
+                                  "relPath": 상대,
                                   "action": "created" if name.strip().lower() == "write" else "edited",
                                   "touches": 0}
                         seen[key] = record
@@ -2703,13 +2745,79 @@ def agent_session_files(root: Path, source: str, sid: str,
         record["isImage"] = suffix in _SESSION_FILE_IMAGE_TYPES
         record["servable"] = bool(record["exists"] and record["size"] <= _SESSION_FILE_BYTES_MAX)
         files.append(record)
+    files.extend(_chat_room_files(root, {f["path"] for f in files}))
     return {"files": files[:limit], "total": len(files), "source": source}
 
 
-def agent_session_file_bytes(root: Path, raw_path: str) -> tuple[bytes, str]:
+def _chat_room_files(root: Path, 이미: set[str]) -> list[dict[str, Any]]:
+    """채팅방은 **폴더에 있는 것**을 그대로 결과물로 본다.
+
+    코드 레포가 아니라 결과물을 담으라고 만든 폴더라, 파일이 어떻게 놓였는지 따질 이유가 없다.
+    실측(2026-08-25): 에이전트가 스크래치패드에 Write 하고 Bash 로 방에 복사했더니, 도구 기록만
+    훑는 목록에는 결과물이 하나도 안 잡혀 폰에서 받을 길이 없었다(형: "어케받냐").
+    마리나 자기 폴더(.workspace)와 숨김 파일은 뺀다 — 형 결과물이 아니다."""
+    try:
+        from marina_registry import project_for
+
+        project = project_for(root) or {}
+        if str(project.get("profile") or "") != "chat":
+            return []
+        base = root.resolve()
+    except Exception:
+        return []
+    out: list[dict[str, Any]] = []
+    try:
+        entries = sorted(base.iterdir(), key=lambda item: item.stat().st_mtime, reverse=True)
+    except OSError:
+        return []
+    for item in entries:
+        if item.name.startswith(".") or not item.is_file() or str(item) in 이미:
+            continue
+        try:
+            stat = item.stat()
+        except OSError:
+            continue
+        suffix = item.suffix.lower()
+        out.append({
+            "path": str(item), "name": item.name, "relPath": item.name,
+            "action": "created", "touches": 1, "exists": True,
+            "size": stat.st_size, "mtime": int(stat.st_mtime),
+            "isImage": suffix in _SESSION_FILE_IMAGE_TYPES,
+            "servable": stat.st_size <= _SESSION_FILE_BYTES_MAX,
+        })
+    return out
+
+
+def _handed_over_file(root: Path, source: str, sid: str, raw: str) -> Path | None:
+    """이 세션이 SendUserFile 로 건넨 파일인가 — 맞으면 그 경로를 준다."""
+    try:
+        want = Path(raw).expanduser().resolve()
+    except OSError:
+        return None
+    try:
+        목록 = agent_session_files(root, source, sid).get("files") or []
+    except (ValueError, OSError):
+        return None
+    for item in 목록:
+        try:
+            if Path(str(item.get("path"))).resolve() == want:
+                return want
+        except OSError:
+            continue
+    return None
+
+
+def agent_session_file_bytes(root: Path, raw_path: str,
+                             source: str = "", sid: str = "") -> tuple[bytes, str]:
     """워크트리 안 파일 원본. 이미지 화이트리스트 외에는 전부 text/plain 으로 준다 —
-    대시보드 오리진에서 HTML/JS 를 그대로 서빙하면 저장형 XSS 가 되기 때문."""
+    대시보드 오리진에서 HTML/JS 를 그대로 서빙하면 저장형 XSS 가 되기 때문.
+
+    **그 세션이 건네준(SendUserFile) 파일은 방 밖이라도 준다.** 에이전트가 임시 폴더에 만들어
+    건네는 일이 실제로 있어서(2026-08-25), 그걸 막으면 형에게 주겠다고 한 결과물이 안 닿는다.
+    아무 경로나 여는 게 아니라 **그 세션 기록에 남은 파일만** 이다 — 명시적 동의가 근거다."""
     resolved = session_file_in_root(root, raw_path or "")
+    if resolved is None and source and sid:
+        resolved = _handed_over_file(root, source, sid, raw_path or "")
     if resolved is None:
         raise ValueError("이 워크트리 밖의 경로예요")
     if not resolved.is_file():

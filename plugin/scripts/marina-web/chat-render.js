@@ -466,6 +466,21 @@
         ? ` data-file-path="${esc(item.path)}" data-file-name="${esc(String(item.path).split("/").pop())}"` : "";
       return `<details class="activityItem ${status}" data-activity-detail data-activity-key="${esc(activityItemKey(item, index))}" data-activity-fp="${esc(activityItemFingerprint(item))}" ${timelineDetailAttrs(`item:${item.id || item.label || "activity"}`)}><summary><span class="activityDot"></span><span class="activityLabel">${esc(item.label || item.name || activityTypeLabels[type] || "작업")}</span>${item.path ? `<button class="activityOpen" type="button"${fileAttrs}>열기</button>` : ""}<span class="activityType">${esc(activityTypeLabels[type] || "도구")}</span></summary>${body ? `<div class="activityBody">${body}</div>` : ""}</details>`;
     }
+    function renderTimelineFiles(items) {
+      const seen = new Set();
+      const chips = (items || []).map(item => {
+        const path = item && item.path;
+        if (!path || seen.has(path)) return "";
+        seen.add(path);
+        const url = host.fileUrl ? host.fileUrl(path) : "";
+        if (!url) return "";
+        const name = String(path).split("/").pop();
+        // download 속성 — 서버가 HTML 을 text/plain 으로 준다(저장형 XSS 방지). 브라우저는
+        // 열지 않고 저장하는데, 폰에서 "받기"가 목적이라 그게 맞다.
+        return `<a class="fileChip" href="${esc(url)}" download="${esc(name)}" rel="noopener">📄 ${esc(name)}</a>`;
+      }).join("");
+      return chips ? `<div class="activityFiles hoisted">${chips}</div>` : "";
+    }
     function renderActivityGroup(items, stableId="") {
       if (!items.length) return "";
       const rows = items.map((item, index) => renderActivityItem(item, index)).join("");
@@ -474,8 +489,12 @@
       // 대화를 그냥 읽어서는 절대 안 보인다 — 도구 작업 요약은 접되 결과 그림은 항상 내놓는다.
       const shots = renderTimelineImages(
         {images: items.flatMap(item => (item && item.images) || [])}, "activityImages hoisted");
+      // 만든 파일도 접지 않는다. [열기]는 접힘 **안**이라 폰만 쓰는 사람은 못 찾는다
+      // (형: "다운로드 바로 받을 수 있게 하이퍼링크 줄 수 있지않아?"). 그림과 같은 규칙으로
+      // 그룹 **위에** 칩을 띄우고, 누르면 바로 내려받는다.
+      const files = renderTimelineFiles(items);
       const fold = `<details class="activityGroup" ${timelineDetailAttrs(groupId)}><summary>${esc(activityGroupSummary(items))}</summary><div class="activityList" data-activity-list>${rows}</div></details>`;
-      return shots ? `${fold}${shots}` : fold;
+      return `${files}${fold}${shots}`;
     }
     // 활동 목록 제자리 갱신 — 새 작업은 **덧붙이고**, 안 바뀐 항목은 건드리지 않는다.
     // (exchange 통째 교체를 피하는 이유: 자율 진행 중인 턴은 exchange 가 하나라, 도구 하나 늘 때마다

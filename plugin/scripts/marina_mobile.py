@@ -2942,6 +2942,12 @@ _MOBILE_HTML = r"""<!doctype html>
     .questionCard.submitted { opacity: .62; border-style: dashed; }
     .questionOpt.answered { min-height: 0; cursor: default; }
     .questionOtherOff { padding: 6px 2px; font-size: 11px; color: #63708a; }
+    /* 만든 파일 칩 — 접힘 밖에 뜬다(대화에서 바로 받기). */
+    .activityFiles { display: flex; flex-wrap: wrap; gap: 6px; margin: 4px 0 6px; }
+    .fileChip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 6px 10px;
+                border: 1px solid var(--line); border-radius: 999px; background: var(--panel);
+                color: inherit; font-size: 12px; font-weight: 700; text-decoration: none;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .questionDismissRow { display: flex; justify-content: center; padding-top: 2px; }
     .questionDismiss { width: auto; min-height: 32px; padding: 0 12px; border: 0; background: transparent;
                        color: #63708a; font-size: 11px; text-decoration: underline; }
@@ -3936,7 +3942,12 @@ _MOBILE_HTML = r"""<!doctype html>
       return `${(n / 1048576).toFixed(1)}MB`;
     }
     function sessionFileUrl(path) {
+      // 세션도 같이 보낸다 — 에이전트가 건네준 파일은 방 밖에 있을 수 있고, 그때는 "그 세션이
+      // 건넸다"는 기록이 근거가 된다(marina_sessions._handed_over_file).
+      const 값 = currentTargetValue();
+      const [, 소스, sid] = 값.startsWith("agent:") ? 값.split(":") : ["", "", ""];
       const params = new URLSearchParams({root: sessionRoot(), path});
+      if (소스 && sid) { params.set("source", 소스); params.set("sid", sid); }
       if (!cookieAuth && token()) params.set("token", token());
       return `/mobile/api/session-file?${params}`;
     }
