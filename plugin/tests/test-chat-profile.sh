@@ -25,9 +25,15 @@ SCR="$HERE/../scripts"
 PYTHONPATH="$SCR" python3 - <<'PY'
 import marina_term as mt
 
-# ① 채팅방이라고 도구를 떼지 않는다 — 명령줄이 개발 방과 똑같다.
+# ① 채팅방은 **결과물을 파일로 준다.** 아티팩트는 만든 사람 계정에 묶인 비공개 페이지라,
+#    방에 있는 다른 사람이 열면 claude.ai 가 "Page not found · Sign in" 을 준다
+#    (실측 2026-08-25, 멤버 daeun 이 그 화면을 봤다). 그래서 그 도구만 빼고, 파일로 저장하라고
+#    한 줄 일러둔다. 나머지 도구·MCP 는 그대로다(경량 모드가 아니다).
 채팅 = mt._agent_cli("claude", "", "", "", "", profile="chat")
-assert 채팅 == ["claude"], f"채팅방인데 뭔가 붙었다: {채팅}"
+assert "--disallowedTools" in 채팅 and "Artifact" in 채팅, 채팅
+i = 채팅.index("--append-system-prompt")
+assert "파일" in 채팅[i + 1], 채팅
+assert "--strict-mcp-config" not in 채팅 and "--tools" not in 채팅, f"채팅방을 경량으로 만들면 안 된다: {채팅}"
 
 # ② 가볍게(lean)는 **따로 켤 때만**. 그때도 Read·Write 는 남긴다 — 첨부를 읽고 결과를 파일로
 #    돌려주는 건 채팅에서도 필요하다.
@@ -39,7 +45,7 @@ assert 가볍게[i + 1:i + 3] == ["Read", "Write"], 가볍게
 모델 = mt._agent_cli("claude", "", "", "claude-sonnet-5", "high", profile="chat", lean=True)
 assert "--model" in 모델 and "claude-sonnet-5" in 모델 and "--effort" in 모델, 모델
 
-# ③ 개발 방은 **하나도 안 바뀐다**.
+# ③ 개발 방은 **하나도 안 바뀐다** — 아티팩트도 그대로 쓴다.
 개발 = mt._agent_cli("claude", "", "", "", "")
 assert "--strict-mcp-config" not in 개발 and "--tools" not in 개발, 개발
 assert 개발 == ["claude"], 개발

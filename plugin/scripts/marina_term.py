@@ -330,10 +330,24 @@ _EFFORTS = {"low", "medium", "high", "xhigh", "max", "ultra"}
 # 실리므로, 요청에 실을 목록 자체를 바꾸는 건 이 플래그뿐이다.
 _LEAN_FLAGS = ["--strict-mcp-config", "--tools", "Read", "Write"]
 
+# 채팅방(profile=chat)이 붙이는 것 — **결과물을 파일로 준다.**
+# 아티팩트는 만든 사람 계정에 묶인 비공개 페이지다. 방에 있는 다른 사람이 그 링크를 누르면
+# claude.ai 가 "Page not found · Sign in" 을 준다(실측 2026-08-25: 멤버 daeun 이 그 화면을
+# 봤다 — 링크가 깨진 게 아니라 계정이 다른 것뿐이다). 채팅방의 결과물은 그 방 사람이 열 수
+# 있어야 하므로 그 도구만 빼고, 파일로 저장하라고 한 줄 일러둔다. 다른 도구·MCP 는 안 건드린다.
+_CHAT_FLAGS = [
+    "--disallowedTools", "Artifact",
+    "--append-system-prompt",
+    "결과물은 아티팩트로 만들지 말고 현재 폴더에 파일로 저장한 뒤 파일 경로를 알려줘 "
+    "— 이 방은 폰에서 파일로 받아 본다.",
+]
+
 
 def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "",
                 profile: str = "", lean: bool = False) -> list[str]:
     cmd = ["claude"]
+    if profile == "chat":
+        cmd += _CHAT_FLAGS
     if lean:
         cmd += _LEAN_FLAGS
     if model:
