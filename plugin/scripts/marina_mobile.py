@@ -1256,12 +1256,15 @@ def _start_pending_chat(root: Path, tid: str, agent: dict[str, Any], text: str,
     않는다**(None) — 바로 앞 메시지로 막 시작된 것이라, 접으면 방금 시킨 일이 사라진다."""
     if agent.get("sid") or agent.get("prompted"):
         return None
-    term_kill(tid)
+    # **띄우고 나서 접는다.** 반대로 하면 term_open 이 실패했을 때(프로필 인자 오류·자원 부족)
+    # 자리표시자는 이미 죽어 있어서, 형이 [다시 보내기]를 눌러도 겨눌 PTY 가 없다 —
+    # 방으로 돌아가 ＋Claude 를 다시 눌러야 한다. 실패는 아무것도 잃지 않아야 한다.
     result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24),
                        agent_source=str(agent.get("source") or ""), agent_sid="",
                        agent_prompt=text,
                        agent_model=str(body.get("model") or ""),
                        agent_effort=str(body.get("effort") or ""))
+    term_kill(tid)      # 빈 자리표시자 — 한 턴도 안 돌았으니 잃을 게 없다
     return {"ok": True, "tid": str(result.get("tid") or ""), "opened": True, "started": True}
 
 

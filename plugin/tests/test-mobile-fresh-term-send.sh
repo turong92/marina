@@ -60,9 +60,24 @@ out = 보내기("tid-placeholder")
 assert out["ok"] and out.get("started") and out["tid"] == "tid-new", out
 assert not any(kind == "input" for kind, _ in 일지), f"부팅 중인 TUI 에 타이핑했다: {일지}"
 assert ("kill", "tid-placeholder") in 일지, 일지
+# 실패가 아무것도 잃지 않도록 **띄우고 나서 접는다** — 반대면 open 이 실패했을 때 겨눌 PTY 가 없다.
+assert [k for k, _ in 일지].index("open") < [k for k, _ in 일지].index("kill"), 일지
 열린것 = [payload for kind, payload in 일지 if kind == "open"]
 assert len(열린것) == 1 and 열린것[0]["agent_prompt"] == "야 이거 확인해줘", 열린것
 assert 열린것[0]["agent_source"] == "claude" and 열린것[0]["agent_sid"] == "", 열린것
+
+# ①-1 다시 띄우기가 실패하면 자리표시자는 **그대로 남는다**(형이 다시 보내기를 누를 곳).
+def 터지는열기(root_, cols=80, rows=24, **kw):
+    raise ValueError("자원 부족")
+열던것, mm.term_open = mm.term_open, 터지는열기
+try:
+    보내기("tid-placeholder")
+except ValueError:
+    pass
+else:
+    raise AssertionError("open 실패를 삼켰다")
+assert not any(kind == "kill" for kind, _ in 일지), f"실패했는데 자리표시자를 접었다: {일지}"
+mm.term_open = 열던것
 
 # ② 이미 프롬프트를 싣고 뜬 PTY 는 **접지 않는다** — 방금 시킨 일이 사라진다.
 mm.agent_transcript_path = lambda r, s, i: tmp / "none.jsonl"     # 아직 트랜스크립트 없음
