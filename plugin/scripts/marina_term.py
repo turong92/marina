@@ -122,6 +122,7 @@ def _persist_term(term: _Term) -> None:
             "pid_start": term.pid_start or _pid_start(term.pid),   # pid 재사용 방어 지문(fail-open="")
             "source": str(agent.get("source") or ""),
             "sid": str(agent.get("sid") or ""),
+            "prompted": bool(agent.get("prompted")),
             "key": term.key or "",
             "created": term.created,
         }
@@ -235,6 +236,8 @@ def _reconstruct_registry() -> None:
             sid = str(meta.get("sid") or "")
             key = str(meta.get("key") or "")
             agent = {"source": source, "sid": sid} if source else None
+            if agent and meta.get("prompted"):
+                agent["prompted"] = True
             term = _Term(tid, cwd, -1, pid, key, agent, detached=True, pid_start=pid_start)
             created = meta.get("created")
             if isinstance(created, (int, float)):
@@ -444,6 +447,12 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
         # 인자로 시작하므로 이미 돌고 있는 TUI 에 붙일 수가 없다. 그래서 키를 비운다(의도된 동작).
         key = "" if (agent_prompt or not agent_sid) else f"{cwd}::agent:{agent_source}:{agent_sid}"
         agent = {"source": agent_source, "sid": agent_sid}
+        # 프롬프트를 **싣고** 떴는가. 아직 sid 가 안 붙은 PTY 가 둘로 갈리기 때문에 필요하다:
+        # ＋Claude 가 띄운 빈 자리표시자(첫 메시지를 기다리는 중)와, 그 첫 메시지를 argv 로
+        # 받아 막 일을 시작한 것. 앞엣것은 접어도 잃을 게 없지만 뒤엣것을 접으면 방금 시킨
+        # 일이 사라진다. 화면·시각으로는 구별할 수 없어 시작 시점에 기록해 둔다.
+        if agent_prompt:
+            agent["prompted"] = True
         if agent_model:
             agent["model"] = agent_model
         if agent_effort:

@@ -1219,6 +1219,52 @@ def _term_root(tid: str) -> Path | None:
     return None
 
 
+def _term_agent(tid: str) -> dict[str, Any] | None:
+    """이 PTY 가 에이전트 CLI 인가 — {source, sid, prompted} 또는 None(평범한 셸).
+
+    ＋Claude 로 갓 띄운 대화는 sid 가 아직 없다(훅이 입양할 때 붙는다). 그래서 sid 가 비어
+    있어도 **에이전트**다 — 여기서 None 을 돌려주면 첫 메시지가 다시 셸 취급을 받는다."""
+    for item in term_list().get("sessions", []):
+        if str(item.get("tid") or "") != tid:
+            continue
+        agent = item.get("agent") if isinstance(item.get("agent"), dict) else None
+        if not agent:
+            return None
+        source = str(agent.get("source") or "")
+        if not source:
+            return None
+        return {"source": source, "sid": str(agent.get("sid") or ""),
+                "prompted": bool(agent.get("prompted"))}
+    return None
+
+
+def _start_pending_chat(root: Path, tid: str, agent: dict[str, Any], text: str,
+                        body: dict[str, Any]) -> dict[str, Any] | None:
+    """＋Claude 가 띄운 **자리표시자**의 첫 메시지 — 타이핑이 아니라 CLI 인자로 실어 시작한다.
+
+    자리표시자는 프롬프트 없이 뜬 빈 CLI 다(카드가 "첫 메시지를 보내면 시작돼요"라고 말하는
+    바로 그것). 거기에 타이핑하면 부팅 중인 TUI 가 키를 통째로 삼킨다 — 실측(2026-09-03,
+    같은 워크트리·같은 문장): launch 0.3초 뒤에 친 문장은 트랜스크립트조차 안 남기고
+    사라졌고(12초 뒤에 친 건 정상 도착), 그동안 marina 는 "보냄"이라 답했다.
+
+    "언제 준비됐나"를 화면으로 맞히려 들지 않는다. 실측한 부팅 출력은 t+0 · t+7 · t+10초로
+    **중간에 7초를 쉬어서**, 출력이 멎는 걸 준비 신호로 쓰면 한창 부팅 중에 준비됐다고 오판한다.
+    대신 marina 가 원래 첫 메시지를 넣는 방식을 그대로 쓴다 — resume·다시 시작과 똑같이
+    프롬프트를 argv 로 넘긴다. 그러면 부팅 경쟁 자체가 없다.
+
+    아직 한 턴도 안 돈 PTY 라 접어도 잃을 게 없다. **이미 프롬프트를 싣고 뜬 PTY 는 건드리지
+    않는다**(None) — 바로 앞 메시지로 막 시작된 것이라, 접으면 방금 시킨 일이 사라진다."""
+    if agent.get("sid") or agent.get("prompted"):
+        return None
+    term_kill(tid)
+    result = term_open(root, int(body.get("cols") or 80), int(body.get("rows") or 24),
+                       agent_source=str(agent.get("source") or ""), agent_sid="",
+                       agent_prompt=text,
+                       agent_model=str(body.get("model") or ""),
+                       agent_effort=str(body.get("effort") or ""))
+    return {"ok": True, "tid": str(result.get("tid") or ""), "opened": True, "started": True}
+
+
 def _live_agent_tid(root: Path, source: str, sid: str) -> str:
     """조작 가능한 PTY 의 tid. detached(marina 재시작으로 master fd 를 잃은) term 은 제외한다 —
     tid 를 돌려줘 봐야 term_input 이 거부하므로, 호출자가 인수인계 경로로 내려가게 둔다.
@@ -2073,6 +2119,23 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("터미널 세션이 없어요")
         if term_root != root.resolve():
             raise ValueError("선택한 터미널이 worktree와 맞지 않습니다")
+        # ＋Claude 로 갓 띄운 대화는 sid 가 없어 **터미널**로 보인다. 그 대화의 첫 메시지가
+        # 이 길로 나가는데, 예전엔 준비도 안 기다리고 도착 확인도 없이 그냥 쳤다 — 부팅 중인
+        # TUI 는 그 키를 통째로 삼키고, marina 는 "보냄"이라 답했다(형: "새채팅 보내면 왜
+        # 안받냐"). 실측(2026-09-03, 같은 워크트리·같은 문장): launch 0.3초 뒤 타이핑은
+        # 트랜스크립트조차 안 생겼고, 12초 뒤는 정상 도착했다.
+        #
+        # 준비 대기와 도착 확인은 에이전트 타겟 쪽에 이미 있었다(2026-08-24). 같은 규칙을
+        # 여기에 **베껴 오지 않는다** — 길이 둘로 갈린 것이 애초에 이 버그의 원인이다.
+        # 에이전트에게 보내는 길은 하나다.
+        agent = _term_agent(tid)
+        if agent:
+            started = _start_pending_chat(root, tid, agent, text, body)
+            if started is not None:
+                return started
+            return _deliver_to_live_agent(root, agent["source"], agent["sid"], tid, text,
+                                          str(body.get("delivery") or ""),
+                                          from_outbox=bool(body.get("_from_outbox")))
     elif target_type == "agent":
         source = str(target.get("source") or "")
         sid = str(target.get("sid") or "")
@@ -6412,6 +6475,10 @@ _MOBILE_HTML = r"""<!doctype html>
             : (d.delivery || (target.type === "agent" ? "started" : "sent"));
           // 미리 세운 말풍선에 결과만 얹는다 — 여기서 새로 만들면 같은 말이 두 개로 보인다.
           settleOptimisticTurn(requestContext.sessionKey, optimisticId, delivery, d.tid);
+          // 자리표시자("첫 메시지를 보내면 시작돼요")로 보낸 첫 마디는 서버가 **다른 PTY 를**
+          // 띄워 돌려준다 — 그 말을 CLI 인자로 실어야 부팅 중에 삼켜지지 않기 때문. 옛 tid 를
+          // 계속 겨누면 다음 메시지가 죽은 PTY 로 가므로 여기서 갈아탄다.
+          if (target.type === "term" && d.tid && d.tid !== target.tid) target = {type: "term", tid: d.tid};
           selectReturnedTerm(d.tid, text, target, delivery, optimisticId);
           statusEl.textContent = target.type === "agent" ? pendingDeliveryLabel(delivery) : `보냄 · ${d.tid}`;
           if (delivery === "held" || delivery === "held-compacting") showToast(pendingDeliveryLabel(delivery));
