@@ -169,8 +169,12 @@ grep -q 'selectedSessionKey !== sessionKey' <<<"$mobile_html" || { echo "FAIL: /
 grep -q 'fileSuggestionKey === key.*selectedSessionKey === sessionKey' <<<"$mobile_html" || { echo "FAIL: /mobile stale file errors should not clear the active session results"; exit 1; }
 grep -q 'newMessagesBtn' <<<"$mobile_html" || { echo "FAIL: /mobile chat should preserve reading position on refresh"; exit 1; }
 ! grep -q 'subagentMenuBtn' <<<"$mobile_html" || { echo "FAIL: /mobile should not expose subagents as a global menu action"; exit 1; }
-grep -q 'subagentSessionBtn' <<<"$mobile_html" || { echo "FAIL: /mobile should expose subagents inside their session"; exit 1; }
-grep -q 'subagentSheet' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render a subagent bottom sheet"; exit 1; }
+# 여는 길은 세션 안에 있다 — 전역 메뉴가 아니다. 2026-09-09 부터 그 길은 상단 드롭다운의
+# '이 대화의 작업자' 구역(data-nav-agent)이고, 열리는 것은 우측 패널이다(스펙 §1·§2).
+grep -q 'data-nav-agent' <<<"$mobile_html" || { echo "FAIL: /mobile should expose subagents inside their session"; exit 1; }
+! grep -q 'subagentSessionBtn' <<<"$mobile_html" || { echo "FAIL: /mobile should not keep the old composer subagent button"; exit 1; }
+grep -q 'subagentSheet' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render a subagent surface"; exit 1; }
+grep -q 'sidePanel' <<<"$mobile_html" || { echo "FAIL: /mobile subagents should open as a side panel, not a bottom sheet"; exit 1; }
 grep -q '/mobile/api/activity' <<<"$mobile_html" || { echo "FAIL: /mobile should load subagent activity on demand"; exit 1; }
 grep -q 'renderSubagents' <<<"$mobile_html" || { echo "FAIL: /mobile chat should render subagent activity"; exit 1; }
 grep -q 'openSubagentIds' <<<"$mobile_html" || { echo "FAIL: /mobile polling should preserve opened subagent details"; exit 1; }

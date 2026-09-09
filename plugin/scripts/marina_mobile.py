@@ -3106,6 +3106,18 @@ _MOBILE_HTML = r"""<!doctype html>
     .suggestion-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
     .suggestion-description { overflow: hidden; color: #747d8b; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
     .suggestion-kind { color: #747d8b; font-size: 10px; text-transform: uppercase; }
+    /* 우측에서 들어오는 패널 — **한 컴포넌트, 폭에 따라 전면/반쪽**(스펙 §1).
+       폰 세로에선 100%(전면), 넓은 화면에선 오른쪽 480px. 나머지 시트 넷(받은작업·서비스·
+       로그·깃)은 바텀시트 그대로다 — 그건 화면 전체에 해당하는 것이고, 이건 '지금 이 대화에
+       딸린 것'이라 옆에서 나오는 게 맞다. */
+    .panelBackdrop { position: fixed; inset: 0; z-index: 12; display: none; justify-content: flex-end; background: rgb(10 14 20 / 38%); }
+    .panelBackdrop.open { display: flex; }
+    .sidePanel { display: flex; flex-direction: column; width: 100%; max-width: 480px; height: 100%;
+                 overflow: hidden; background: #fff; box-shadow: -12px 0 34px rgb(0 0 0 / 18%);
+                 animation: panelIn .16s ease-out; }
+    .sidePanel > .sheetHeader { flex: none; }
+    @keyframes panelIn { from { transform: translateX(12px); opacity: .6; } to { transform: none; opacity: 1; } }
+    @media (prefers-reduced-motion: reduce) { .sidePanel { animation: none; } }
     .sheetBackdrop { position: fixed; inset: 0; z-index: 12; display: none; align-items: flex-end; background: rgb(10 14 20 / 38%); }
     .sheetBackdrop.open { display: flex; }
     /* flex 컬럼이라야 본문이 남는 높이를 먹고 스크롤한다. 예전엔 블록 + overflow:hidden 이라
@@ -3325,7 +3337,6 @@ _MOBILE_HTML = r"""<!doctype html>
       <div class="liveQuestion" id="liveQuestion"></div>
       <div class="sessionControls">
         <button class="sessionControlBtn" id="settingsBtn" type="button">모델 · 기본값</button>
-        <button class="sessionControlBtn" id="subagentSessionBtn" type="button" style="display:none">서브에이전트 <span id="subagentCount">0</span></button>
         <div class="status" id="status" aria-live="polite"></div>
         <button class="stopBtn" id="stopBtn" type="button" title="현재 응답 중단" aria-label="현재 응답 중단">&#9632;</button>
       </div>
@@ -3339,9 +3350,9 @@ _MOBILE_HTML = r"""<!doctype html>
       </div>
       <div class="composerMeta"><button class="retryBtn" id="retryBtn" type="button">다시 보내기</button></div>
     </div>
-    <div class="sheetBackdrop" id="subagentSheet" aria-hidden="true">
-      <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="subagentSheetTitle">
-        <div class="sheetHeader"><strong id="subagentSheetTitle">서브에이전트</strong><button class="iconBtn sheetClose" id="subagentCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+    <div class="panelBackdrop" id="subagentSheet" aria-hidden="true">
+      <section class="sidePanel" role="dialog" aria-modal="true" aria-labelledby="subagentSheetTitle">
+        <div class="sheetHeader"><strong id="subagentSheetTitle">작업자 <span id="subagentCount"></span></strong><button class="iconBtn sheetClose" id="subagentCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
         <div class="subagentList" id="subagentList"></div>
       </section>
     </div>
@@ -3679,7 +3690,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const chat = event.target.closest && event.target.closest("[data-nav-chat]");
       if (chat) { closeNav(); chooseSession(chat.getAttribute("data-nav-chat")); return; }
       const agent = event.target.closest && event.target.closest("[data-nav-agent]");
-      if (agent) { closeNav(); openSubagents(); return; }
+      if (agent) { closeNav(); openSubagents(agent.getAttribute("data-nav-agent")); return; }
     });
     document.addEventListener("click", event => {
       if (!navOpen) return;
@@ -3823,7 +3834,6 @@ _MOBILE_HTML = r"""<!doctype html>
     const imageViewerClose = document.getElementById("imageViewerClose");
     const retryBtn = document.getElementById("retryBtn");
     const sendBtn = document.getElementById("sendBtn");
-    const subagentSessionBtn = document.getElementById("subagentSessionBtn");
     const subagentCount = document.getElementById("subagentCount");
     const subagentSheet = document.getElementById("subagentSheet");
     const subagentList = document.getElementById("subagentList");
@@ -4670,6 +4680,9 @@ _MOBILE_HTML = r"""<!doctype html>
       const s = (state.sessions || []).find(item => item.key === key);
       if (!s) return;
       if (key !== selectedSessionKey) clearFailedSend();
+      // 작업자는 **부모 대화의 소유물**이다(스펙 §2.5). 대화를 바꾸면 패널을 닫는다 —
+      // 따라가면 남의 기록을 남의 대화 옆에 붙여 보여주는 셈이라 거짓말이 된다.
+      if (key !== selectedSessionKey) closeSubagents();
       closeUsagePanel();
       closeDrawer();          // 좌측 패널에서 골랐으면 바로 그 대화로 — 이게 "바로바로 넘어가기"의 핵심
       selectedSessionKey = key;
@@ -5522,7 +5535,6 @@ _MOBILE_HTML = r"""<!doctype html>
       const activity = sessionActivity(session);
       const subagents = activity ? activity.items : [];
       subagentCount.textContent = activity && activity.loaded ? String(subagents.length) : "";
-      subagentSessionBtn.style.display = activity ? "inline-block" : "none";
       galleryBtn.style.display = app.getAttribute("data-view") === "chat" && currentTargetValue().startsWith("agent:")
         ? "inline-block" : "none";
       if (!subagents.length) {
@@ -5542,7 +5554,7 @@ _MOBILE_HTML = r"""<!doctype html>
         subagentList.scrollTop = previousScrollTop;
       }
     }
-    async function openSubagents() {
+    async function openSubagents(focusId) {
       const session = selectedSession();
       if (!session || session.kind !== "agent") return;
       renderSubagents(session);
@@ -5553,6 +5565,13 @@ _MOBILE_HTML = r"""<!doctype html>
       } catch (error) {
         updateHtmlIfChanged(subagentList, `<div class="empty-state">서브에이전트를 불러오지 못했습니다.<br>${esc(String(error))}</div>`);
       }
+      // 드롭다운에서 고른 것은 **펼친 채로** 보여준다 — 목록만 열면 뭘 눌렀는지 다시 찾아야 한다.
+      if (!focusId) return;
+      renderSubagents(selectedSession());
+      const 그것 = subagentList.querySelector(`[data-subagent-id="${CSS.escape(focusId)}"]`);
+      if (!그것) return;
+      그것.open = true;
+      if (그것.scrollIntoView) 그것.scrollIntoView({block: "nearest"});
     }
     function renderServiceState() {
       const labels = {running: "실행 중", starting: "시작 중", stopped: "정지", error: "오류"};
@@ -6743,7 +6762,6 @@ _MOBILE_HTML = r"""<!doctype html>
     };
     document.getElementById("inboxCloseBtn").onclick = closeInbox;
     inboxSheet.onclick = event => { if (event.target === inboxSheet) closeInbox(); };
-    subagentSessionBtn.onclick = openSubagents;
     document.getElementById("subagentCloseBtn").onclick = closeSubagents;
     subagentSheet.onclick = event => { if (event.target === subagentSheet) closeSubagents(); };
     document.getElementById("servicesCloseBtn").onclick = closeServices;
