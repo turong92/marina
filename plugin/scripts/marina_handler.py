@@ -50,7 +50,7 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
-from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_interrupt, mobile_launch, mobile_clear_uploads, mobile_close_chat, mobile_restart_chat, mobile_forget_chat, mobile_relogin, mobile_remove_room, mobile_rename_room, mobile_request_ok, mobile_set_archived, mobile_set_hidden, mobile_set_pin, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
+from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_escape, mobile_interrupt, mobile_launch, mobile_clear_uploads, mobile_close_chat, mobile_restart_chat, mobile_forget_chat, mobile_relogin, mobile_remove_room, mobile_rename_room, mobile_request_ok, mobile_set_archived, mobile_set_hidden, mobile_set_pin, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
 from marina_sessions import agent_activity, agent_belongs_to_root, agent_session_file_bytes, agent_session_files, agent_transcript, agent_transcript_image, agent_transcript_images, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
@@ -1701,6 +1701,21 @@ class Handler(BaseHTTPRequestHandler):
                             "mobile.upload", "ok", principal.user.id, "worktree", canonical_root(root),
                         )
                     self.send_json(result)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
+            if parsed.path == "/mobile/api/escape":
+                # 선택창에 갇힌 CLI 에 Esc 한 번. 폰에는 이걸 보낼 수단이 아예 없어서, 오늘
+                # `/resume` 이 연 선택창 하나에 세션이 47분 갇혔다(2026-09-09).
+                if not self._agent_api_ok(parsed, principal):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    mobile_body = self.read_json()
+                    root = safe_root(str(mobile_body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    self.send_json(mobile_escape(mobile_body))
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return

@@ -780,7 +780,10 @@ def term_list() -> dict[str, Any]:
         adopt_agent_terms()
     with _lock:
         terms = sorted(_by_tid.values(), key=lambda t: t.created)
+    # pid/pid_start 도 싣는다 — 마리나가 `~/.claude/sessions/<pid>.json` 에서 CLI 가 무엇을
+    # 기다리는지 읽고, 지문으로 pid 재사용을 거른다(cli_dialog_state).
     return {"sessions": [{"tid": t.tid, "root": t.root, "agent": t.agent,
+                          "pid": t.pid, "pidStart": t.pid_start,
                           "fg": _fg_command(t), "cmd": t.cmd, "preview": _preview(t),
                           "created": t.created, "alive": t.alive,
                           "detached": t.detached} for t in terms]}

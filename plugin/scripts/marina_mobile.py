@@ -1079,6 +1079,11 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                 # 버튼이 눌리는 것처럼 보이면 안 되니 controllable 은 "살아있는 non-detached tid" 만 True.
                 agent_tid = str(agent_term.get("tid") or "")
                 controllable = bool(agent_tid) and not bool(agent_term.get("detached"))
+                # CLI 가 선택창을 띄운 채 멈췄나. 멈춘 세션은 메시지를 못 받는데 화면엔
+                # "대기 중"으로만 보였다(실측 2026-09-09, 47분). fail-open — 못 읽으면 없는 것.
+                갇힘 = (cli_dialog_state(agent_term.get("pid") or 0,
+                                        str(agent_term.get("pidStart") or ""))
+                        if controllable else {})
                 sessions.append({
                     "key": f"agent:{source}:{sid}:{root}",
                     "kind": "agent",
@@ -1095,6 +1100,7 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                     "statusReason": "pending_question" if question else (agent.get("statusReason") or ""),
                     "tid": agent_tid,
                     "controllable": controllable,
+                    "cliDialog": 갇힘 or None,
                     "externalActive": _root_has_live_agent(root, live_cwds),
                     "settings": {
                         "current": mobile_current_session_settings(root, source, sid),
@@ -1352,6 +1358,51 @@ def mobile_outbox_put(root: Path, source: str, sid: str, text: str,
         except OSError:
             pass
         return {"queued": len(messages)}
+
+
+# CLI 가 **선택창을 띄운 채 멈춘 것**을 알아본다.
+#
+# Claude Code 는 `~/.claude/sessions/<pid>.json` 에 자기 상태를 적는다(`status`, `waitingFor`,
+# `bridgeSessionId`). 실측 사고(2026-09-09): `/resume` 이 세션 선택 다이얼로그를 열어 CLI 가
+# 멈췄는데, 마리나 화면은 "대기 중"이라고만 했고 폰에는 Esc 를 보낼 수단이 없어 맥 앞에 갈
+# 때까지 못 풀었다(47분). 그 파일에 답이 적혀 있었는데 아무도 안 읽고 있었다.
+#
+# **이건 CLI 내부 계약이다** — 포맷이 바뀌면 조용히 없는 것으로 떨어진다(fail-open). 표시가
+# 안 뜰 뿐 기존 동작은 그대로여야 한다. 없는 것과 틀린 것은 다르므로, 지문을 모를 땐 막지 않는다.
+def cli_dialog_state(pid: int, pid_start: str = "") -> dict[str, Any]:
+    """그 pid 의 CLI 가 무엇을 기다리는가. 선택창에 갇혔을 때만 값이 있고, 그 외엔 {}."""
+    try:
+        raw = (CLAUDE_HOME / "sessions" / f"{int(pid)}.json").read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError, TypeError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    # pid 재사용 방어 — 시작시각 지문이 어긋나면 그 pid 는 이미 무관한 프로세스다.
+    적힌지문 = str(data.get("procStart") or "")
+    if pid_start and 적힌지문 and 적힌지문 != pid_start:
+        return {}
+    if str(data.get("status") or "") != "waiting":
+        return {}
+    기다림 = str(data.get("waitingFor") or "").strip()
+    return {"waitingFor": 기다림} if 기다림 else {}
+
+
+def mobile_escape(body: dict[str, Any]) -> dict[str, Any]:
+    """선택창에 갇힌 CLI 에 Esc 를 보낸다 — 폰에서 푸는 유일한 수단.
+
+    성공을 지어내지 않는다: 조작 가능한 PTY 가 없으면 사실대로 실패한다. 눌렀는데 아무 일도
+    안 나면 형은 앱이 고장난 줄 안다."""
+    root = safe_root(str(body.get("root") or ""))
+    source = str(body.get("source") or "")
+    sid = str(body.get("sid") or "")
+    if source not in ("claude", "codex"):
+        raise ValueError("source 는 claude 또는 codex")
+    tid = _live_agent_tid(root, source, sid)
+    if not tid:
+        raise ValueError("조작할 수 있는 화면이 없어요 — 맥에서 직접 Esc 를 눌러주세요")
+    term_input(tid, "\x1b")
+    return {"ok": True, "tid": tid}
 
 
 def mobile_outbox_pending(root: Path, source: str, sid: str) -> list[str]:
@@ -2932,6 +2983,15 @@ _MOBILE_HTML = r"""<!doctype html>
                    scrollbar-width: none; padding: 2px 0 1px; }
                   padding: 3px 6px 3px 7px; border: 1px solid #dde2ea; border-radius: 999px;
                   background: #f4f6f9; color: #596070; font-size: 11px; font-weight: 700; line-height: 1.3; }
+    /* 선택창에 갇힌 CLI — 질문 카드와 같은 계열(대기 상태를 카드로 알리고 그 자리에서 푼다).
+       색은 '응답필요'와 같은 주황 계열: 형이 손대야 풀리는 상태라는 뜻이 같다. */
+    .cliDialog:empty { display: none; }
+    .cliDialogCard { display: flex; flex-direction: column; gap: 6px; margin-bottom: 6px;
+                     padding: 10px 12px; border: 1px solid #d29922; border-radius: 10px;
+                     background: #fff8e6; }
+    .cliDialogCard .t { font-weight: 700; color: #7a5200; }
+    .cliDialogCard .d { font-size: 13px; color: #6b5626; }
+    .cliDialogCard button { align-self: flex-start; }
     .liveQuestion:empty { display: none; }
     /* 높이 상한이 필수다. 선택지가 많거나 설명이 길면 카드가 무한히 자라 **위 대화를 통째로 덮어**
        형이 질문 맥락을 못 읽는다(형: "질문 길어지면 위에 대화내용 못읽게 되는것도 문제야").
@@ -3246,6 +3306,7 @@ _MOBILE_HTML = r"""<!doctype html>
       </section>
     </main>
     <div class="chatComposer" id="chatComposer" style="display:none">
+      <div class="cliDialog" id="cliDialog"></div>
       <div class="liveQuestion" id="liveQuestion"></div>
       <div class="sessionControls">
         <button class="sessionControlBtn" id="settingsBtn" type="button">모델 · 기본값</button>
@@ -3403,6 +3464,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const newMessagesBtn = document.getElementById("newMessagesBtn");
     const updateBanner = document.getElementById("updateBanner");
     updateBanner.onclick = () => location.reload();
+    const cliDialogEl = document.getElementById("cliDialog");
     const liveQuestionEl = document.getElementById("liveQuestion");
     const roomChatsEl = document.getElementById("roomChats");
     // 라이브 질문 카드의 로컬 상태. **카드를 낙관적으로 지우지 않는다** — 예전엔 탭하자마자 innerHTML 을
@@ -3493,6 +3555,34 @@ _MOBILE_HTML = r"""<!doctype html>
       liveQuestionPending = "";
       if (liveQuestionEl.innerHTML !== html) liveQuestionEl.innerHTML = html;
     }
+    // 선택창에 갇힌 CLI. 서버가 `~/.claude/sessions/<pid>.json` 에서 읽어 실어준다 —
+    // 못 읽으면 없는 것이라 카드가 안 뜰 뿐이다(fail-open).
+    function renderCliDialog(session) {
+      const d = session && session.cliDialog;
+      const html = !d ? "" : `<div class="cliDialogCard">
+        <span class="t">선택창이 열려 있어요</span>
+        <span class="d">CLI 가 선택창을 띄운 채 멈춰 있어요. 이 상태로는 보낸 메시지가 도착하지 않아요.</span>
+        <button class="primary" type="button" data-cli-esc="1">Esc 보내기</button>
+      </div>`;
+      if (cliDialogEl.innerHTML !== html) cliDialogEl.innerHTML = html;
+    }
+    cliDialogEl.addEventListener("click", async event => {
+      if (!event.target.closest || !event.target.closest("[data-cli-esc]")) return;
+      const session = selectedSession();
+      if (!session) return;
+      const btn = event.target.closest("[data-cli-esc]");
+      btn.disabled = true;
+      try {
+        const r = await fetch("/mobile/api/escape", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root: session.root, source: sessionSource(session), sid: session.sid})});
+        if (!r.ok) throw new Error(await responseError(r));
+        showToast("Esc 보냈어요");
+        setTimeout(() => load({quiet: true}).catch(() => {}), 600);
+      } catch (error) {
+        showToast(`Esc 실패 · ${String(error)}`);
+        btn.disabled = false;
+      }
+    });
     function repaintLiveQuestion() { renderLiveQuestion(selectedSession()); }
     // 폴백 카드는 대화 안에 있어 turns 를 다시 그려야 반영된다(렌더키가 liveAnswer 를 모르므로 강제).
     function repaintTurns() { turnsStructureKey = ""; renderTurns(selectedSession()); }
@@ -5967,6 +6057,7 @@ _MOBILE_HTML = r"""<!doctype html>
       restoreDraft();
       renderTurns(session);
       renderSubagents(session);
+      renderCliDialog(session);
       renderSessionControls(session);
       const source = sessionSource(session);
       promptInput.placeholder = source === "claude" ? "Claude에 메시지" : source === "codex" ? "Codex에 메시지" : "터미널에 입력";
