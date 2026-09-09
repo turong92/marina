@@ -1285,6 +1285,27 @@ def _outbox_path(source: str, sid: str) -> Path:
     return OUTBOX_DIR / f"{source}-{sid}.json"
 
 
+# 슬래시 명령은 **보류·재시도 대상이 아니다.**
+#
+# 실측 사고(2026-09-09): `/resume` 이 Claude Code 의 세션 선택 다이얼로그를 열어 CLI 가 그 자리에
+# 멈췄고(`waitingFor: "dialog open"`), 멈춘 세션이 클라우드 브리지까지 붙들어 데스크탑 앱이
+# 47분간 스피너였다. 그동안 마리나는 그 `/resume` 을 보류함에 넣고 **14번 재시도**했다 —
+# 풀어줄 때마다 다시 갇히는 재감염 고리다.
+#
+# 일반 메시지를 되풀이하는 건 "한 번 더 말한 것"이지만, 명령은 화면 상태를 바꾸는 물건이고
+# 마리나는 그 결과를 확인할 수단이 없다. **결과를 모르는 것을 되풀이하지 않는다.**
+#
+# 경로는 명령이 아니다 — 형은 절대경로(`/Users/…`)를 자주 붙여넣는다. 슬래시 뒤가 곧바로
+# 영문/숫자로 이어지는 한 낱말일 때만 명령으로 본다.
+_SLASH_COMMAND_RE = re.compile(r"^/[A-Za-z][A-Za-z0-9:_-]*$")
+
+
+def _is_slash_command(text: str) -> bool:
+    첫줄 = str(text or "").strip().split("\n", 1)[0].strip()
+    첫낱말 = 첫줄.split(" ", 1)[0]
+    return bool(첫줄) and 첫줄 == 첫낱말 and bool(_SLASH_COMMAND_RE.fullmatch(첫낱말))
+
+
 def mobile_outbox_put(root: Path, source: str, sid: str, text: str,
                       model: str = "", effort: str = "",
                       extra: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -1292,7 +1313,15 @@ def mobile_outbox_put(root: Path, source: str, sid: str, text: str,
     전달 확인 실패(입력을 삼키는 세션)일 때. 유휴·회복되는 순간 드레이너가 전달한다.
 
     extra: 전달 실패 경로의 상태(compactingSince·compactOffset 등). 기존 항목의 그 상태는
-    새 메시지를 얹어도 유지된다 — 안 그러면 압축 대기 중 재전송이 대기 표식을 지워버린다."""
+    새 메시지를 얹어도 유지된다 — 안 그러면 압축 대기 중 재전송이 대기 표식을 지워버린다.
+
+    **명령은 받지 않는다**(_is_slash_command 주석 참조). 여기가 보류함으로 들어가는 유일한
+    문이라, 막을 자리도 여기 하나다."""
+    if _is_slash_command(text):
+        raise ValueError(
+            f"{str(text).strip().splitlines()[0]} 같은 명령은 대기열에 못 넣어요 — "
+            "선택창을 열면 세션이 갇히는데 마리나가 그걸 풀 수 없어요. "
+            "대화가 쉬는 중일 때 직접 보내주세요")
     with _OUTBOX_LOCK:
         OUTBOX_DIR.mkdir(parents=True, exist_ok=True)
         try:
@@ -1441,6 +1470,9 @@ def mobile_outbox_drain() -> int:
             root = Path(str(record.get("root") or ""))
             if not source or not sid or not messages or not root.is_dir():
                 entry.unlink(missing_ok=True)
+                continue
+            if any(_is_slash_command(m) for m in messages):
+                entry.unlink(missing_ok=True)   # 옛 감염분 — 되풀이하지 않고 끊는다
                 continue
             if time.time() - float(record.get("ts") or 0) > OUTBOX_MAX_AGE_S:
                 entry.unlink(missing_ok=True)
