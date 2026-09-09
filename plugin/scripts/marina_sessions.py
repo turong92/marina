@@ -2191,13 +2191,20 @@ def _usage_token_count(usage: dict[str, Any], key: str) -> int:
 # (~/.claude.json additionalModelOptionsCache 는 사용자가 직접 만진 커스텀 모델만 담아 불완전).
 # 그래서 모바일 모델 드롭다운과 컨텍스트 윈도우 폴백을 이 큐레이트 목록에서 공급한다.
 # 기본값 + 정식 버전만(형 지시 — opus/sonnet/haiku alias '최신' 항목은 헷갈려 제거). 목록에 없는 건 "직접 입력"으로.
+# 지금 제공되는 모델 전부(2026-09-10 갱신). 순서는 **고르는 빈도**다 — 기본값·Opus 5 가 위,
+# 지난 세대는 아래. Mythos 는 Project Glasswing 전용이라 넣지 않는다(고를 수 없는 걸 보여주면
+# 눌러보고 나서야 안 된다는 걸 안다). id 에 날짜 접미사를 붙이지 않는다 — 표의 문자열 그대로다.
 CLAUDE_MODEL_CATALOG = [
     {"value": "default", "label": "기본값 (CLI 설정 모델)", "window": None},
     {"value": "claude-opus-5", "label": "Opus 5", "window": 1_000_000},
-    {"value": "claude-opus-4-8", "label": "Opus 4.8", "window": 1_000_000},
-    {"value": "claude-sonnet-5", "label": "Sonnet 5", "window": 1_000_000},
-    {"value": "claude-haiku-4-5", "label": "Haiku 4.5", "window": 200_000},
+    {"value": "claude-fable-5-1", "label": "Fable 5.1", "window": 1_000_000},
     {"value": "claude-fable-5", "label": "Fable 5", "window": 1_000_000},
+    {"value": "claude-opus-4-8", "label": "Opus 4.8", "window": 1_000_000},
+    {"value": "claude-opus-4-7", "label": "Opus 4.7", "window": 1_000_000},
+    {"value": "claude-opus-4-6", "label": "Opus 4.6", "window": 1_000_000},
+    {"value": "claude-sonnet-5", "label": "Sonnet 5", "window": 1_000_000},
+    {"value": "claude-sonnet-4-6", "label": "Sonnet 4.6", "window": 1_000_000},
+    {"value": "claude-haiku-4-5", "label": "Haiku 4.5", "window": 200_000},
 ]
 _CLAUDE_WINDOW_BY_MODEL = {m["value"]: m["window"] for m in CLAUDE_MODEL_CATALOG if m["window"]}
 

@@ -2966,7 +2966,13 @@ _MOBILE_HTML = r"""<!doctype html>
     .viewerNav[disabled] { opacity: .25; }
     .viewerDead { display: none; padding: 0 24px; color: #e8b96b; font-size: 13px; line-height: 1.6; text-align: center; }
     .viewerName { flex: 1; min-width: 0; color: #e8edf4; font-size: 11px; font-weight: 700; overflow-wrap: anywhere; }
-    .imageViewer img { flex: 1; min-height: 0; max-width: 100%; margin: 0 auto; padding: 0 12px 12px; object-fit: contain; }
+    /* 확대는 **이미지가** 한다. 예전엔 줌 개념이 없어 핀치가 브라우저 페이지 줌으로 새어
+       화면 전체가 커졌다(형: "사진이 아니라 페이지가 확대돼서 불편해"). touch-action:none 으로
+       브라우저 제스처를 끄고, transform 으로 우리가 직접 확대·이동한다. */
+    .imageViewer img { flex: 1; min-height: 0; max-width: 100%; margin: 0 auto; padding: 0 12px 12px;
+                       object-fit: contain; touch-action: none; will-change: transform;
+                       transform-origin: center center; }
+    .imageViewer img.zoomed { cursor: grab; }
     .viewerText { flex: 1; min-height: 0; margin: 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: #e8edf4; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
     .imageViewerClose { width: 34px; min-height: 34px; flex: none; padding: 0; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; border-color: transparent; font-size: 19px; }
     /* 세션 탭 — 가로 스크롤 한 줄. 목록 뷰에선 숨긴다(거기선 목록 자체가 탐색이다). */
@@ -4103,6 +4109,7 @@ _MOBILE_HTML = r"""<!doctype html>
     function closeImageViewer() {
       imageViewer.classList.remove("open");
       imageViewer.setAttribute("aria-hidden", "true");
+      줌리셋();                                 // 다음에 열 때 확대된 채로 뜨지 않게
       imageViewerImg.removeAttribute("src");   // 큰 이미지를 붙잡고 있지 않게
       imageViewerImg.style.display = "none";
       viewerText.style.display = "none";
@@ -4114,6 +4121,7 @@ _MOBILE_HTML = r"""<!doctype html>
       viewerSeq += 1;
     }
     function showViewer(name) {
+      줌리셋();                                 // 그림이 바뀌면 배율도 처음으로
       viewerName.textContent = name || "";
       imageViewer.classList.add("open");
       imageViewer.setAttribute("aria-hidden", "false");
@@ -7575,6 +7583,74 @@ _MOBILE_HTML = r"""<!doctype html>
     };
     imageViewerClose.onclick = closeImageViewer;
     // 배경(오버레이 자체)만 닫는다 — 텍스트를 스크롤/선택하려면 본문 클릭이 닫으면 안 된다.
+    // ── 이미지 줌 — 핀치/더블탭. 페이지가 아니라 **그림**이 커진다. ──
+    const 줌 = {k: 1, x: 0, y: 0};
+    const ZOOM_MAX = 5;
+    function 줌적용() {
+      // 확대분만큼만 움직일 수 있다 — 안 묶으면 그림이 화면 밖으로 날아가 되돌릴 길이 없다.
+      const r = imageViewerImg.getBoundingClientRect();
+      const 여유x = Math.max(0, (r.width * 줌.k - r.width) / 2);
+      const 여유y = Math.max(0, (r.height * 줌.k - r.height) / 2);
+      줌.x = Math.max(-여유x, Math.min(여유x, 줌.x));
+      줌.y = Math.max(-여유y, Math.min(여유y, 줌.y));
+      imageViewerImg.style.transform = `translate(${줌.x}px, ${줌.y}px) scale(${줌.k})`;
+      imageViewerImg.classList.toggle("zoomed", 줌.k > 1.01);
+    }
+    function 줌리셋() { 줌.k = 1; 줌.x = 0; 줌.y = 0; imageViewerImg.style.transform = ""; imageViewerImg.classList.remove("zoomed"); }
+
+    const 손가락 = new Map();
+    let 핀치시작 = null;
+    imageViewerImg.addEventListener("pointerdown", event => {
+      손가락.set(event.pointerId, {x: event.clientX, y: event.clientY});
+      if (손가락.size === 2) {
+        const [a, b] = [...손가락.values()];
+        핀치시작 = {거리: Math.hypot(a.x - b.x, a.y - b.y), k: 줌.k};
+      }
+      if (손가락.size === 1 && 줌.k > 1.01) imageViewerImg.setPointerCapture(event.pointerId);
+    });
+    imageViewerImg.addEventListener("pointermove", event => {
+      if (!손가락.has(event.pointerId)) return;
+      const 이전 = 손가락.get(event.pointerId);
+      손가락.set(event.pointerId, {x: event.clientX, y: event.clientY});
+      if (손가락.size === 2 && 핀치시작) {
+        const [a, b] = [...손가락.values()];
+        const 거리 = Math.hypot(a.x - b.x, a.y - b.y);
+        줌.k = Math.max(1, Math.min(ZOOM_MAX, 핀치시작.k * (거리 / (핀치시작.거리 || 1))));
+        if (줌.k <= 1.01) { 줌.x = 0; 줌.y = 0; }
+        줌적용();
+        event.preventDefault();
+      } else if (손가락.size === 1 && 줌.k > 1.01) {
+        줌.x += event.clientX - 이전.x;
+        줌.y += event.clientY - 이전.y;
+        줌적용();
+        event.preventDefault();     // 확대 중엔 스와이프 넘기기 대신 **이동**이다
+      }
+    });
+    const 손뗌 = event => { 손가락.delete(event.pointerId); if (손가락.size < 2) 핀치시작 = null; };
+    imageViewerImg.addEventListener("pointerup", 손뗌);
+    imageViewerImg.addEventListener("pointercancel", 손뗌);
+    // 더블탭 = 1배 ↔ 2.5배. 핀치가 어려운 한 손 상황의 지름길이다.
+    let 마지막탭 = 0;
+    imageViewerImg.addEventListener("click", event => {
+      const 지금 = Date.now();
+      if (지금 - 마지막탭 < 300) {
+        if (줌.k > 1.01) 줌리셋();
+        else { 줌.k = 2.5; 줌.x = 0; 줌.y = 0; 줌적용(); }
+        event.stopPropagation();
+        마지막탭 = 0;      // 짝을 끊는다 — 안 그러면 세 번째 탭이 또 토글한다(실측)
+        return;
+      }
+      마지막탭 = 지금;
+    });
+    // 데스크톱: ctrl+휠 = 확대(브라우저 페이지 줌을 가로챈다)
+    imageViewerImg.addEventListener("wheel", event => {
+      if (!event.ctrlKey) return;
+      event.preventDefault();
+      줌.k = Math.max(1, Math.min(ZOOM_MAX, 줌.k * (event.deltaY < 0 ? 1.12 : 0.89)));
+      if (줌.k <= 1.01) { 줌.x = 0; 줌.y = 0; }
+      줌적용();
+    }, {passive: false});
+
     imageViewer.onclick = event => { if (event.target === imageViewer || event.target === viewerBar) closeImageViewer(); };
     viewerPrev.onclick = event => { event.stopPropagation(); stepViewer(-1); };
     viewerNext.onclick = event => { event.stopPropagation(); stepViewer(1); };
@@ -7586,7 +7662,7 @@ _MOBILE_HTML = r"""<!doctype html>
       viewerTouch = t ? {x: t.clientX, y: t.clientY} : null;
     }, {passive: true});
     imageViewer.addEventListener("touchend", event => {
-      if (!viewerTouch || viewerList.length < 2) return;
+      if (!viewerTouch || viewerList.length < 2 || 줌.k > 1.01) return;
       const t = event.changedTouches[0];
       if (!t) return;
       const dx = t.clientX - viewerTouch.x, dy = t.clientY - viewerTouch.y;
