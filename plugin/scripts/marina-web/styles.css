@@ -1277,6 +1277,30 @@
     .chat-head { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-top: 1px solid var(--sys-style-neutral-light); border-bottom: 1px solid var(--sys-style-neutral-light); flex: 0 0 auto; }
     .chat-head-root { color: var(--sys-cont-neutral-lightest); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .chat-body { display: flex; flex-direction: column; flex: 1 1 auto; min-height: 0; }
+    /* ── 분할 그리드(스펙 §3) — 터미널 term-grid 와 같은 뼈대 ── */
+    .chat-grid { flex: 1 1 auto; min-height: 0; display: grid; gap: 1px;
+                 background: var(--sys-style-neutral-light); }
+    .chat-cell { position: relative; display: flex; flex-direction: column; min-width: 0; min-height: 0;
+                 overflow: hidden; background: var(--sys-bg-surface); }
+    /* 어느 칸에 말하는지 보여야 한다 — 입력창이 여럿이기 때문이다(§3.6). */
+    .chat-cell.focus { box-shadow: inset 0 0 0 2px var(--sys-cont-primary-default); }
+    .chat-cell-empty { display: flex; align-items: center; justify-content: center; height: 100%;
+                       color: var(--sys-cont-neutral-lightest); font-size: 12px; }
+    .chat-lay { display: inline-flex; gap: 2px; margin-left: auto; flex: 0 0 auto; }
+    .chat-lay button { min-width: 26px; padding: 2px 6px; border: 1px solid var(--sys-style-neutral-light);
+                       border-radius: 6px; background: transparent; color: inherit; cursor: pointer; font-size: 12px; }
+    .chat-lay button.active { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
+    /* 못 고르는 것은 **지우지 않는다** — 사라지면 기능이 없는 줄 안다(스펙 §1). */
+    .chat-lay button:disabled { opacity: .35; cursor: not-allowed; }
+    /* 구분선 — 칸 위에 얹는다(그리드 자식이 아니라 칸 수를 안 건드린다). 손이 닿는 폭은
+       보이는 선보다 넓어야 잡힌다(1px 선을 정확히 짚을 수는 없다). */
+    .chat-grid { position: relative; }
+    .chat-rail { position: absolute; z-index: 3; }
+    .chat-rail.v { top: 0; bottom: 0; width: 9px; margin-left: -4px; cursor: col-resize; }
+    .chat-rail.h { left: 0; right: 0; height: 9px; margin-top: -4px; cursor: row-resize; }
+    .chat-rail:hover { background: var(--sys-cont-primary-default); opacity: .25; }
+    /* 드래그 중엔 칸 안이 마우스를 먹지 않게 — iframe·xterm 위에서 놓치면 선이 붙어 다닌다. */
+    .chat-grid.dragging .chat-cell { pointer-events: none; user-select: none; }
     .chat-turns { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 12px; }
     .chat-older-btn { flex: 0 0 auto; margin: 8px auto 0; padding: 4px 12px; border: 1px solid var(--sys-style-neutral-default); border-radius: 999px; background: var(--sys-bg-surface); font-size: 12px; cursor: pointer; }
     .chat-raw { flex: 1 1 auto; min-height: 0; display: flex; }

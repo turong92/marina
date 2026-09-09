@@ -11,6 +11,38 @@
     //
     // 타임라인 렌더는 chat-render.js(모바일과 공유)가 한다. 이 파일은 탭 셸·폴링·전송만 맡는다.
     const CHAT_TABS_KEY = 'marina.chat.tabs';
+    const CHAT_LAYOUT_KEY = 'marinaChatLayout';
+    // 분할 상태 — **slots 는 탭을 가리킨다**(대화가 아니라). 터미널이 정확히 이 구조라
+    // (사이드바=세션 목록, 그리드=배치) 탭 닫기·추가와 분할이 싸우지 않는다. 탭을 닫으면
+    // 그 칸만 비고 레이아웃은 안 흔들린다. (스펙 §3.1)
+    let chatSplit = splitNormalize(null);
+    function saveChatSplit() {
+      try { localStorage.setItem(CHAT_LAYOUT_KEY, JSON.stringify(chatSplit)); } catch (e) {}
+    }
+    function loadChatSplit() {
+      let raw = null;
+      try { raw = JSON.parse(localStorage.getItem(CHAT_LAYOUT_KEY) || 'null'); } catch (e) {}
+      chatSplit = splitNormalize(raw);
+    }
+    // 형이 **고른** 레이아웃과 지금 **그리는** 레이아웃은 다르다(스펙 §3.3). 창이 좁아지면
+    // 접어 그리되 고른 값은 그대로 둔다 — 안 그러면 창을 한 번 줄였다 늘렸을 때 설정이
+    // 영구히 뭉개진다. 폴드를 펴면 아무것도 안 눌러도 돌아오는 것이 이 구분 덕이다.
+    function chatEffectiveLayout() {
+      const grid = document.querySelector('[data-chat-grid]');
+      const box = grid && grid.getBoundingClientRect();
+      if (!box || !box.width || !box.height) return chatSplit.layout;
+      return splitEffective(chatSplit.layout, box.width, box.height);
+    }
+    // 보이는 칸에 실제로 얹힌 탭들. 폴링·렌더는 이것만 돈다.
+    function chatVisibleTabs() {
+      const 칸수 = splitSlotCount(chatEffectiveLayout());
+      const keys = chatSplit.slots.slice(0, 칸수).filter(Boolean);
+      const 보임 = keys.map(k => chatTabs.find(t => chatTabKey(t) === k)).filter(Boolean);
+      // 아무 칸도 안 채워졌으면 활성 탭 하나가 보이는 것이다(분할을 안 쓰는 평소 상태).
+      if (보임.length) return 보임;
+      const t = activeChatTab();
+      return t ? [t] : [];
+    }
     let chatTabs = [];
     let chatActive = -1;
     let chatTimer = null;
@@ -96,6 +128,9 @@
 
     function closeChatTab(i) {
       if (i < 0 || i >= chatTabs.length) return;
+      const key = chatTabKey(chatTabs[i]);
+      const 칸 = chatSplit.slots.indexOf(key);
+      if (칸 >= 0) { chatSplit.slots[칸] = null; saveChatSplit(); }   // 칸만 비운다
       chatTabs.splice(i, 1);
       if (!chatTabs.length) chatActive = -1;
       else if (i < chatActive) chatActive -= 1;
@@ -147,8 +182,14 @@
           <button class="chat-gal-btn" data-chat-gallery title="모아보기 — 이 세션의 이미지·만든 파일 전부">모아보기</button>
           <button class="chat-usage-chip" data-chat-usage title="계정 사용량 — 눌러서 창별로 보기">한도 …</button>
           <span class="chat-head-root">${escapeHtml(tab.root)}</span>
+          <span class="chat-lay" data-chat-lay-bar>
+            <button data-chat-lay="1" title="분할 없음">▭</button>
+            <button data-chat-lay="lr" title="좌우 2분할">▯▯</button>
+            <button data-chat-lay="tb" title="상하 2분할">⊟</button>
+            <button data-chat-lay="4" title="4분할">⊞</button>
+          </span>
         </div>
-        <div class="chat-body" data-chat-body="${escapeHtml(chatTabKey(tab))}"></div>`;
+        <div class="chat-grid" data-chat-grid></div>`;
 
       pane.querySelectorAll('[data-chat-tab]').forEach(el => {
         const i = Number(el.dataset.chatTab);
@@ -173,12 +214,131 @@
         btn.onclick = () => { tab.view = btn.dataset.chatView; saveChatTabs(); renderChatPane(); };
       });
 
-      const body = pane.querySelector('[data-chat-body]');
+      pane.querySelectorAll('[data-chat-lay]').forEach(b => {
+        b.onclick = () => chatSetLayout(b.dataset.chatLay);
+      });
       // pane 을 갈아엎었으므로 직전 raw xterm 의 등록을 먼저 푼다 — 안 그러면 chatTermInsts 가
       // 세션을 열 때마다 자라고, 죽은 세션이 영영 dispose 되지 않는다.
       if (typeof unmountAgentTerms === 'function') unmountAgentTerms();
-      if (tab.view === 'raw') mountAgentTerm(body, tab.root, tab);
-      else renderChatConversation(body, tab);
+      renderChatGrid();
+    }
+
+    // 지금 고른 탭을 칸에 얹는다. 배치 규칙은 터미널과 **같은 함수**(splitPlace)를 쓴다.
+    function chatPlaceActive() {
+      const tab = activeChatTab();
+      if (!tab) return;
+      const 칸수 = splitSlotCount(chatEffectiveLayout());
+      const key = chatTabKey(tab);
+      const at = splitPlace(chatSplit.slots, 칸수, key, chatSplit.focus);
+      // 다른 칸에 이미 있으면 옮긴다(중복 배치 금지) — 같은 대화가 두 칸에 뜨면 어느 쪽에
+      // 친 글이 갔는지 알 수 없다.
+      const 이전 = chatSplit.slots.indexOf(key);
+      if (이전 >= 0 && 이전 !== at) chatSplit.slots[이전] = null;
+      chatSplit.slots[at] = key;
+      chatSplit.focus = at;
+    }
+
+    function chatSetLayout(name) {
+      if (!SPLIT_LAYOUTS[name]) return;
+      chatSplit.layout = name;                 // **고른 값**은 그대로 저장한다(§3.3)
+      chatPlaceActive();
+      saveChatSplit();
+      renderChatGrid();
+    }
+
+    function renderChatGrid() {
+      const pane = chatPane();
+      const grid = pane && pane.querySelector('[data-chat-grid]');
+      if (!grid) return;
+      chatPlaceActive();
+      const layout = chatEffectiveLayout();
+      const [cols, rows] = SPLIT_LAYOUTS[layout];
+      const 칸수 = cols * rows;
+      // 비율은 fr 로 — 드래그가 이 값만 바꾼다(§3.4).
+      const fr = (arr, n) => n === 1 ? '1fr' : `${arr[0]}fr ${arr[1]}fr`;
+      grid.style.gridTemplateColumns = fr(chatSplit.frac.col, cols);
+      grid.style.gridTemplateRows = fr(chatSplit.frac.row, rows);
+      // 못 고르는 레이아웃은 **지우지 말고 흐리게** — 사라지면 기능이 없는 줄 안다(스펙 §1).
+      const box = grid.getBoundingClientRect();
+      pane.querySelectorAll('[data-chat-lay]').forEach(b => {
+        const 됨 = !box.width || splitFits(b.dataset.chatLay, box.width, box.height);
+        b.disabled = !됨;
+        b.title = 됨 ? b.title.replace(' · 화면이 좁아요', '')
+                     : (b.title.replace(' · 화면이 좁아요', '') + ' · 화면이 좁아요');
+        b.classList.toggle('active', b.dataset.chatLay === chatSplit.layout);
+      });
+      const 칸 = [];
+      for (let i = 0; i < 칸수; i++) {
+        const key = chatSplit.slots[i];
+        const tab = key && chatTabs.find(t => chatTabKey(t) === key);
+        칸.push(`<div class="chat-cell${i === chatSplit.focus ? ' focus' : ''}" data-chat-cell="${i}">`
+          + (tab ? `<div class="chat-body" data-chat-body="${escapeHtml(key)}"></div>`
+                 : `<div class="chat-cell-empty">빈 칸 — 위 탭을 누르면 여기 얹혀요</div>`)
+          + `</div>`);
+      }
+      // 구분선 — 칸 사이에 얹는다(그리드 자식이 아니라 절대배치라 칸 수를 안 건드린다).
+      // 4분할은 축마다 하나씩. 교차점 드래그는 만들지 않는다 — 두 축을 따로 끄는 게 예측된다.
+      const 선 = [];
+      if (cols === 2) 선.push(`<div class="chat-rail v" data-chat-rail="col" title="드래그 = 폭 조절 · 더블클릭 = 반반"></div>`);
+      if (rows === 2) 선.push(`<div class="chat-rail h" data-chat-rail="row" title="드래그 = 높이 조절 · 더블클릭 = 반반"></div>`);
+      grid.innerHTML = 칸.join('') + 선.join('');
+      grid.querySelectorAll('[data-chat-rail]').forEach(rail => {
+        const 축 = rail.dataset.chatRail;          // col = 세로선(폭), row = 가로선(높이)
+        const 세로 = 축 === 'col';
+        const 놓기 = () => {
+          const b = grid.getBoundingClientRect();
+          const a = chatSplit.frac[축][0];
+          rail.style[세로 ? 'left' : 'top'] = ((세로 ? b.width : b.height) * a) + 'px';
+        };
+        놓기();
+        rail.onmousedown = (e) => {
+          e.preventDefault();                      // 드래그 중 텍스트 선택 방지
+          grid.classList.add('dragging');          // 드래그 동안 재렌더 금지(§3.4)
+          const mv = (ev) => {
+            const b = grid.getBoundingClientRect();
+            const px = 세로 ? ev.clientX - b.left : ev.clientY - b.top;
+            const 총 = 세로 ? b.width : b.height;
+            chatSplit.frac[축] = splitFrac(px, 총, 세로 ? SPLIT_MIN_W : SPLIT_MIN_H);
+            // 매 픽셀마다 트랜스크립트를 다시 그리면 끊긴다 — 그리드 비율만 갱신한다.
+            const [c2, r2] = SPLIT_LAYOUTS[chatEffectiveLayout()];
+            if (c2 === 2) grid.style.gridTemplateColumns = `${chatSplit.frac.col[0]}fr ${chatSplit.frac.col[1]}fr`;
+            if (r2 === 2) grid.style.gridTemplateRows = `${chatSplit.frac.row[0]}fr ${chatSplit.frac.row[1]}fr`;
+            놓기();
+          };
+          const up = () => {
+            document.removeEventListener('mousemove', mv);
+            document.removeEventListener('mouseup', up);
+            grid.classList.remove('dragging');
+            saveChatSplit();
+          };
+          document.addEventListener('mousemove', mv);
+          document.addEventListener('mouseup', up);
+        };
+        rail.ondblclick = () => {                  // 사이드바 rail 과 같은 관습
+          chatSplit.frac[축] = [0.5, 0.5];
+          saveChatSplit();
+          renderChatGrid();
+        };
+      });
+      grid.querySelectorAll('[data-chat-cell]').forEach(cell => {
+        cell.onmousedown = () => {
+          const i = Number(cell.dataset.chatCell);
+          if (chatSplit.focus === i) return;
+          chatSplit.focus = i;
+          saveChatSplit();
+          renderChatGrid();
+        };
+      });
+      for (let i = 0; i < 칸수; i++) {
+        const key = chatSplit.slots[i];
+        const tab = key && chatTabs.find(t => chatTabKey(t) === key);
+        if (!tab) continue;
+        const body = grid.querySelector(`[data-chat-body="${cssEscape(key)}"]`);
+        if (!body) continue;
+        if (tab.view === 'raw') mountAgentTerm(body, tab.root, tab);
+        else renderChatConversation(body, tab);
+        if (!tab.items || !tab.items.length) loadChatTranscript(true, tab).catch(console.error);
+      }
     }
 
     // ＋ — 지금 선택된 워크트리에서 아직 안 열린 세션을 고르게 한다.
@@ -653,12 +813,19 @@
       if (chatTimer) return;
       chatTimer = setInterval(() => {
         const pane = chatPane();
-        const tab = activeChatTab();
-        if (!pane || pane.hidden || !tab || tab.view !== 'chat') return;
-        const prompt = pane.querySelector('[data-chat-prompt]');
-        const typing = prompt && (prompt.value.trim() || document.activeElement === prompt);
-        if (typing || chatSending || chatAnswering) return;
-        loadChatTranscript(true).catch(console.error);
+        if (!pane || pane.hidden || chatSending || chatAnswering) return;
+        // 입력 중이면 그 칸만 건너뛴다 — 옆 칸까지 멈출 이유가 없다.
+        const 치는중 = document.activeElement && document.activeElement.matches
+          && document.activeElement.matches('[data-chat-prompt]')
+          ? document.activeElement.closest('[data-chat-body]') : null;
+        chatVisibleTabs().forEach(tab => {
+          if (tab.view !== 'chat') return;
+          const body = chatBodyFor(tab);
+          if (body && body === 치는중) return;
+          const prompt = body && body.querySelector('[data-chat-prompt]');
+          if (prompt && prompt.value.trim()) return;      // 쓰던 글이 있으면 안 건드린다
+          loadChatTranscript(true, tab).catch(console.error);
+        });
       }, 3000);
     }
     function chatStopPoll() { clearInterval(chatTimer); chatTimer = null; }
@@ -669,3 +836,18 @@
     };
 
     loadChatTabs();
+    loadChatSplit();
+    // 창 크기가 바뀌면 **그리는** 레이아웃이 달라질 수 있다(고른 값은 그대로). 폴드를 펴면
+    // 아무것도 안 눌러도 원래 분할로 돌아오는 자리다.
+    if (window.ResizeObserver) {
+      let 마지막 = '';
+      const ro = new ResizeObserver(() => {
+        const now = chatEffectiveLayout();
+        if (now === 마지막) return;
+        마지막 = now;
+        renderChatGrid();
+      });
+      const 관찰 = () => { const g = document.querySelector('[data-chat-grid]'); if (g) ro.observe(g); };
+      setTimeout(관찰, 0);
+      WS_VIEWS.chat && (WS_VIEWS.chat._observe = 관찰);
+    }
