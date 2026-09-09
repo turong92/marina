@@ -121,9 +121,15 @@ assert "if (drawerOpen()) closeDrawer();" in html, "Esc 로 드로어를 닫지 
 assert html.find("if (viewerOpen())") < html.find("if (drawerOpen()) closeDrawer();"), \
     "뷰어보다 드로어를 먼저 닫으면 뷰어가 안 닫힌다"
 
-# 뒤로가기는 드로어만 닫는다 — 대화에서 튕겨나가면 안 된다. 그리고 그 분기가 list 분기보다 **먼저** 와야 한다.
+# 뒤로가기는 드로어만 닫는다 — 대화에서 튕겨나가면 안 된다. 그리고 그 분기가 list 분기보다
+# **먼저** 와야 한다. 2026-09-09 부터 그 판단은 위에뜬것닫기() 하나로 모였다(뷰어·패널·
+# 드롭다운·드로어를 위에서부터). 의도는 그대로다.
 popstate = html[html.find('window.addEventListener("popstate"'):]
-assert "if (drawerOpen()) {" in popstate[:400], "뒤로가기가 드로어를 먼저 닫지 않음"
+assert "위에뜬것닫기()" in popstate[:400], "뒤로가기가 오버레이를 먼저 닫지 않음"
+닫기 = html[html.find("function 위에뜬것닫기"):][:600]
+assert "closeDrawer()" in 닫기, "뒤로가기가 드로어를 안 닫는다"
+assert 닫기.find("viewerOpen()") < 닫기.find("drawerOpen()"), \
+    "뷰어보다 드로어를 먼저 닫으면 뷰어가 안 닫힌다"
 assert popstate.find("if (drawerOpen())") < popstate.find('history.state.view === "list"'), \
     "드로어 분기가 list 분기보다 뒤에 있으면 뒤로가기로 대화에서 튕겨난다"
 

@@ -7661,10 +7661,23 @@ _MOBILE_HTML = r"""<!doctype html>
       history.replaceState({view: "base"}, "", location.href);
       history.pushState({view: "list"}, "", location.href);
     }
+    // 뒤로가기는 **위에 뜬 것부터 하나씩** 닫는다(스펙 §2.4). 대화에서 튕겨나가면 안 된다 —
+    // 찾으려고 연 것 때문에 보던 자리를 잃으면 그건 뒤로가기가 아니라 사고다.
+    //
+    //   목록 → 채팅 → [드롭다운|패널|서랍|뷰어]
+    //           ←back      ←back
+    //
+    // 여는 쪽에서 pushState 를 하지 않는다 — 상태를 둘로 들고 있으면 어긋난다. 대신 뒤로가기
+    // 한 번을 **삼키고** 채팅 상태를 다시 밀어 넣는다(드로어가 원래 쓰던 방식 그대로).
+    function 위에뜬것닫기() {
+      if (viewerOpen()) { closeImageViewer(); return true; }
+      if (subagentSheet.classList.contains("open")) { closeSubagents(); return true; }
+      if (navOpen) { closeNav(); return true; }
+      if (drawerOpen()) { closeDrawer(); return true; }
+      return false;
+    }
     window.addEventListener("popstate", () => {
-      // 드로어가 열려 있으면 뒤로가기는 **드로어만** 닫는다 — 대화에서 튕겨나가면 안 된다.
-      if (drawerOpen()) {
-        closeDrawer();
+      if (위에뜬것닫기()) {
         history.pushState({view: "chat"}, "", location.href);
         return;
       }

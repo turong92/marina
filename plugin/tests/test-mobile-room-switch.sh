@@ -28,6 +28,16 @@ assert 'id="navDrop"' in html, "이 방의 다른 대화로 갈 길이 사라졌
 assert 'id="roomChats"' not in html, "옛 칩줄이 남아 있다 — 줄이 다시 두 개가 된다"
 assert "roomChatsEl" not in html, "죽은 엘리먼트 참조가 남아 스크립트가 초기화에서 죽는다"
 
+# 뒤로가기는 **위에 뜬 것부터 하나씩** 닫는다(스펙 §2.4). 드롭다운·패널을 열어둔 채 뒤로
+# 가면 대화에서 튕겨나가던 것을 막는다 — 찾으려고 연 것 때문에 보던 자리를 잃으면 안 된다.
+닫기 = html[html.find("function 위에뜬것닫기"):][:600]
+assert 닫기, "뒤로가기가 오버레이를 닫지 않는다"
+for 오버레이 in ["closeImageViewer", "closeSubagents", "closeNav", "closeDrawer"]:
+    assert 오버레이 in 닫기, f"뒤로가기가 {오버레이} 를 안 부른다"
+# 오버레이를 닫은 뒤에는 **채팅 상태를 다시 밀어 넣는다** — 안 그러면 다음 뒤로가기가 두 칸 간다.
+팝 = html[html.find('window.addEventListener("popstate"'):][:400]
+assert "위에뜬것닫기()" in 팝 and 'view: "chat"' in 팝, f"뒤로가기 스택이 안 맞물린다: {팝[:200]}"
+
 # ② 서랍이 열리면 지금 방을 표시하고 그 자리로 간다.
 열기 = html[html.find("function openDrawer"):][:700]
 assert "markCurrentRoom" in 열기, f"서랍이 지금 방을 표시하지 않는다: {열기[:300]}"
