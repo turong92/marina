@@ -42,8 +42,10 @@ const context = {};
 vm.createContext(context);
 vm.runInContext(`${src}
 this.renderRooms = renderRooms;
-this.renderRoomMenu = renderRoomMenu;`, context, {filename: "marina_mobile::rooms"});
-const {renderRooms, renderRoomMenu} = context;
+this.renderRoomMenu = renderRoomMenu;
+this.renderChatMenu = renderChatMenu;
+this.renderRoomAccordion = renderRoomAccordion;`, context, {filename: "marina_mobile::rooms"});
+const {renderRooms, renderRoomMenu, renderRoomAccordion} = context;
 
 const rooms = [
   {root: "/top", name: "맨 위 방", shortName: "맨 위 방", status: "작업중",
@@ -88,6 +90,30 @@ for (const attr of ["data-rename", "data-archive", "data-room-delete"]) {
 }
 // 지울 수 없는 방(원본 체크아웃 등)엔 삭제를 주지 않는다 — 눌러도 안 되는 버튼은 거짓말이다.
 assert.ok(!renderRoomMenu({root: "/x", name: "x", removable: false}).includes("data-room-delete"));
+
+// ⑤-0 대화 행은 **이름만** 남고 작업은 ⋯ 뒤로 간다. 예전엔 대화마다 [다시 시작][끄기][지우기]
+// 셋이 늘 펼쳐져 있어서, 대화 3개짜리 방을 열면 버튼이 12개였다(형: "디자인도 구리고").
+// 방 작업을 팝오버로 뺐으면 성격이 같은 대화 작업도 같은 규칙을 받아야 한다 — 한쪽만
+// 고치면 같은 화면 안에서 규칙이 둘이 된다.
+for (const attr of ["data-restart-chat", "data-close-chat", "data-forget"]) {
+  assert.ok(!acc.includes(attr), `대화 작업이 아직 아코디언에 펼쳐져 있다: ${attr}`);
+}
+assert.match(acc, /data-chat-menu="claude:s2"/);
+const 대화메뉴 = context.renderChatMenu("claude:s2", {});
+for (const attr of ["data-restart-chat", "data-close-chat", "data-forget"]) {
+  assert.ok(대화메뉴.includes(attr), `대화 메뉴에 ${attr} 가 없다`);
+}
+
+// ⑤-1 **숨긴·지운 대화의 되살리기는 인라인에 남는다.** 그건 작업이 아니라 구조선이다 —
+// ⋯ 뒤에 묻으면 "방 화면에서는 숨긴 것이 영영 잠긴다"는 옛 버그로 돌아간다.
+const 숨김 = renderRoomAccordion({root: "/h", name: "h", tabs: [
+  {source: "claude", sid: "a", title: "A", primary: true},
+  {source: "claude", sid: "b", title: "B", hidden: true},
+  {source: "claude", sid: "c", title: "C", deleted: true},
+]}, sources);
+assert.match(숨김, /data-unhide="claude:b"/, "숨긴 대화의 되살리기가 사라졌다");
+assert.match(숨김, /data-restore="claude:c"/, "지운 대화의 되살리기가 사라졌다");
+assert.ok(!숨김.includes('data-chat-menu="claude:b"'), "숨긴 대화에 작업 메뉴를 주면 안 된다");
 
 // ⑤ 대화 목록과 시작줄은 아코디언 안에 있다.
 assert.ok(acc.includes("디자인 손보기"), "다른 대화가 아코디언에 없다");

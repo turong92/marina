@@ -2611,6 +2611,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .roomRow.open .roomExpand { transform: rotate(180deg); }
     @media (prefers-reduced-motion: reduce) { .roomExpand { transition: none; } }
     /* ⋯ 메뉴 — 누른 버튼 바로 아래. listView 기준 절대배치라 목록과 같이 스크롤된다. */
+    .roomTabMore { flex: 0 0 32px; font-size: 15px; }
     .roomMenuPop { position: absolute; z-index: 40; }
     .roomMenu { display: flex; flex-direction: column; min-width: 148px; padding: 4px;
                 border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
@@ -4227,20 +4228,33 @@ _MOBILE_HTML = r"""<!doctype html>
         const key = `${tab.source}:${tab.sid}`;
         const cls = "roomTab" + (tab.primary ? " current" : "")
                   + (tab.hidden || tab.deleted ? " off" : "") + (tab.stale ? " stale" : "");
-        // 숨긴 대화는 **되살릴 손잡이**를 같이 준다. 예전엔 세션 카드 롱프레스에만 있어서,
-        // 방 화면에서는 숨긴 것이 영영 잠겼다. 무엇 때문에 안 세는지도 글자로 말해준다 —
-        // 흐리기만 하면 "접힘"인지 "숨김"인지 구별이 안 된다.
+        // 꼬리는 **두 종류를 가른다.**
+        // ① 되살리기(숨김·지움)는 인라인에 남는다 — 작업이 아니라 **구조선**이다. 예전엔 세션
+        //    카드 롱프레스에만 있어서 방 화면에서는 숨긴 것이 영영 잠겼다. ⋯ 뒤로 묻으면 그
+        //    버그로 돌아간다. 무엇 때문에 안 세는지도 글자로 말해준다 — 흐리기만 하면
+        //    "접힘"인지 "숨김"인지 구별이 안 된다.
+        // ② 평상시 작업(다시 시작·끄기·지우기)은 ⋯ 팝오버로 간다. 늘 펼쳐두면 대화 3개짜리
+        //    방에 버튼이 12개가 된다(형: "디자인도 구리고"). 방 작업을 팝오버로 뺐으면 성격이
+        //    같은 이것도 같은 규칙을 받아야 한다 — 한쪽만 고치면 한 화면에 규칙이 둘이 된다.
         const 꼬리 = tab.deleted
           ? `<button class="roomTabUnhide" type="button" data-restore="${esc(key)}">되살리기</button><span class="roomTabNote">지움</span>`
           : tab.hidden
           ? `<button class="roomTabUnhide" type="button" data-unhide="${esc(key)}">숨김 해제</button>`
-          : `<button class="roomTabUnhide" type="button" data-restart-chat="${esc(key)}" title="이 대화를 새로 시작">다시 시작</button>`
-            + `<button class="roomTabUnhide" type="button" data-close-chat="${esc(key)}" title="이 대화 끄기">끄기</button>`
-            + `<button class="roomTabUnhide" type="button" data-forget="${esc(key)}" title="이 대화 지우기">지우기</button>`
-            + (tab.stale ? '<span class="roomTabNote">오래됨</span>' : "");
+          : (tab.stale ? '<span class="roomTabNote">오래됨</span>' : "")
+            + `<button class="roomMore roomTabMore" type="button" data-chat-menu="${esc(key)}" aria-label="대화 메뉴">⋯</button>`;
         return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
       }).join("");
       return `<div class="roomTabs">${strip}</div>` + 시작줄;
+    }
+
+    // 대화 작업 — 그 대화 줄의 ⋯ 자리에 뜬다. 방 메뉴와 **같은 껍데기**(roomMenu)를 쓴다:
+    // 두 메뉴가 다르게 생기면 같은 화면에서 같은 제스처가 다른 물건처럼 보인다.
+    function renderChatMenu(key, tab) {
+      return `<div class="roomMenu" role="menu">
+        <button type="button" role="menuitem" data-restart-chat="${esc(key)}">다시 시작</button>
+        <button type="button" role="menuitem" data-close-chat="${esc(key)}">끄기</button>
+        <button type="button" role="menuitem" class="danger" data-forget="${esc(key)}">지우기</button>
+      </div>`;
     }
 
     // 방 작업 — ⋯ 를 누르면 **그 버튼 자리에** 뜬다. 아코디언에 두지 않는 이유: 삭제가 목록
@@ -6750,16 +6764,25 @@ _MOBILE_HTML = r"""<!doctype html>
       const el = document.getElementById("roomMenuPop");
       if (el) el.remove();
     }
+    // 방 메뉴와 대화 메뉴는 **한 기계**를 쓴다 — 여는 자리·닫는 규칙·바깥 탭 처리가 갈라지면
+    // 같은 제스처가 자리마다 다르게 동작한다. 다른 것은 안에 그리는 내용뿐이다.
     function openRoomMenu(root, anchor) {
       const room = roomByRoot(root);
+      if (!room) { closeRoomMenu(); return; }
+      openMenuAt(`room:${root}`, anchor, renderRoomMenu(room));
+    }
+    function openChatMenu(key, anchor) {
+      openMenuAt(`chat:${key}`, anchor, renderChatMenu(key, null));
+    }
+    function openMenuAt(id, anchor, html) {
       const was = roomMenuRoot;
       closeRoomMenu();
-      if (!room || was === root) return;      // 같은 버튼을 다시 누르면 닫기
-      roomMenuRoot = root;
+      if (was === id) return;                 // 같은 버튼을 다시 누르면 닫기
+      roomMenuRoot = id;
       const pop = document.createElement("div");
       pop.id = "roomMenuPop";
       pop.className = "roomMenuPop";
-      pop.innerHTML = renderRoomMenu(room);
+      pop.innerHTML = html;
       listView.appendChild(pop);
       // 뷰포트 밖으로 새지 않게 — 목록 맨 아래 방을 누르면 메뉴가 화면 밖에 그려진다.
       const a = anchor.getBoundingClientRect();
@@ -6771,7 +6794,8 @@ _MOBILE_HTML = r"""<!doctype html>
     document.addEventListener("click", event => {
       if (!roomMenuRoot) return;
       if (event.target.closest && (event.target.closest("#roomMenuPop")
-                                   || event.target.closest("[data-room-menu]"))) return;
+                                   || event.target.closest("[data-room-menu]")
+                                   || event.target.closest("[data-chat-menu]"))) return;
       closeRoomMenu();
     });
     // 방 카드를 누르면 **바로 그 방의 대화로** 간다. 대부분의 방은 대화가 하나뿐이라,
@@ -6781,6 +6805,8 @@ _MOBILE_HTML = r"""<!doctype html>
       if (back) { unarchiveRoom(back.getAttribute("data-room-unarchive")); return; }
       const menu = event.target.closest && event.target.closest("[data-room-menu]");
       if (menu) { openRoomMenu(menu.getAttribute("data-room-menu"), menu); return; }
+      const chat = event.target.closest && event.target.closest("[data-chat-menu]");
+      if (chat) { openChatMenu(chat.getAttribute("data-chat-menu"), chat); return; }
       const grow = event.target.closest && event.target.closest("[data-room-expand]");
       if (grow) { openRoom(grow.getAttribute("data-room-expand")); return; }
       const card = event.target.closest && event.target.closest("[data-room]");
@@ -6799,7 +6825,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restart-chat],[data-restore]");
       if (!target) return;
       roomBusy = true;
-      try { await handleRoomAction(target); } finally { roomBusy = false; }
+      try { await handleRoomAction(target); } finally { roomBusy = false; closeRoomMenu(); }
     });
     async function handleRoomAction(target) {
       if (target.hasAttribute("data-room-close")) { closeRoom(); return; }
