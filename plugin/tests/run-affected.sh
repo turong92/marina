@@ -106,7 +106,11 @@ while frontier:
 daemon_affected = bool(seen & closure) or any(c.endswith("marina-control.py") for c in changed)
 
 # 스크립트가 아닌 자산(웹 JS/CSS, 훅, 셸)은 파일명으로 직접 찾는다.
-asset_names = {Path(c).name for c in changed if not c.endswith(".py") and "/plugin/" in c}
+# git 은 레포 기준 상대경로(`plugin/scripts/...`)를 준다 — 앞에 슬래시가 없다. 예전 조건
+# `"/plugin/" in c` 는 **한 번도 참이 된 적이 없어** 웹 JS·CSS·훅·셸 변경이 선택에서 통째로
+# 빠졌다(실측 2026-09-10: app-11-chat.js 를 고쳐도 "돌릴 테스트가 없다").
+asset_names = {Path(c).name for c in changed
+               if not c.endswith(".py") and (c.startswith("plugin/") or "/plugin/" in c)}
 changed_tests = {Path(c).name for c in changed if "/tests/" in c and c.endswith(".sh")}
 
 deep = os.environ.get("DEEP") == "1"
