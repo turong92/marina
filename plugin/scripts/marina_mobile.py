@@ -2487,7 +2487,8 @@ _MOBILE_HTML = r"""<!doctype html>
     button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 2px solid #0b63ce; outline-offset: 2px; }
     .iconBtn { width: 36px; height: 36px; min-height: 36px; padding: 0; border-color: transparent; background: transparent; color: #303846; font-size: 19px; line-height: 1; }
     .backBtn { grid-column: 1; }
-    #listView { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow-y: auto; overscroll-behavior: contain; }
+    #listView { display: flex; min-height: 0; flex-direction: column; gap: 10px; overflow-y: auto; overscroll-behavior: contain;
+                position: relative; }   /* ⋯ 팝오버의 배치 기준 */
     #chatView { position: relative; display: none; min-height: 0; grid-template-rows: auto minmax(0, 1fr); gap: 5px; overflow: hidden; }
     .hiddenSelect { display: none !important; }
     /* **줄어들지 않는다.** #listView 는 세로 flex 라, flex 자식은 기본으로 줄어들 수 있다 —
@@ -2592,12 +2593,32 @@ _MOBILE_HTML = r"""<!doctype html>
     .roomRow.st-응답필요 .roomIcon { color: #d29922; }
     .roomRow.st-작업중 .roomIcon { color: #2f81f7; }
     .roomRow.st-완료 .roomIcon { color: #3fb950; }
-    /* 방 안 — 목록 위에 얹는다. 화면을 갈아끼우지 않으므로 닫으면 보던 자리로 돌아온다. */
-    .room-open { border: 1px solid var(--line); border-radius: 10px; margin: 8px 0 12px;
-                 background: var(--panel); }
-    .roomHead { display: flex; align-items: center; gap: 6px; padding: 10px 8px 10px 12px; }
-    .roomOpenTitle { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis;
-                     white-space: nowrap; font-weight: 600; }
+    /* 방 안 — **누른 카드 바로 밑**에서 펼쳐진다(목록 위에 얹던 상자를 없앴다).
+       카드와 한 몸으로 읽혀야 하므로 테두리를 두르지 않는다: 왼쪽 레일 하나와 배경만으로
+       "이 카드에 딸린 것"을 말한다. 상자를 또 그리면 목록 안에 상자가 겹친다. */
+    .roomAcc { background: var(--panel); border-bottom: 1px solid var(--line);
+               padding: 2px 0 8px 0; }
+    .roomAcc > * { margin-left: 22px; }         /* 레일만큼 들여쓴다 — 부모-자식이 눈에 보이게 */
+    .roomAcc { position: relative; }
+    .roomAcc::before { content: ""; position: absolute; left: 12px; top: 2px; bottom: 10px;
+                       width: 1px; background: var(--line); }
+    .roomRow.open { border-bottom-color: transparent; }
+    /* 펼친 카드는 이름을 풀어 준다 — 목록에서만 줄인다는 규칙은 그대로고, 열어 본 방에서는
+       원래 이름이 보여야 한다(예전엔 패널 머리가 그 몫이었다). */
+    .roomRow.open .roomName { white-space: normal; overflow: visible; }
+    .roomRow.open .roomCard { background: var(--panel); }
+    .roomExpand { transition: transform .12s ease; }
+    .roomRow.open .roomExpand { transform: rotate(180deg); }
+    @media (prefers-reduced-motion: reduce) { .roomExpand { transition: none; } }
+    /* ⋯ 메뉴 — 누른 버튼 바로 아래. listView 기준 절대배치라 목록과 같이 스크롤된다. */
+    .roomMenuPop { position: absolute; z-index: 40; }
+    .roomMenu { display: flex; flex-direction: column; min-width: 148px; padding: 4px;
+                border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+                box-shadow: 0 8px 24px rgba(0,0,0,.18); }
+    .roomMenu button { text-align: left; padding: 10px 12px; border: 0; border-radius: 7px;
+                       background: transparent; color: inherit; font: inherit; cursor: pointer; }
+    .roomMenu button:active { background: var(--line); }
+    .roomMenu button.danger { color: #e5534b; }
     .roomTabs { display: flex; flex-direction: column; padding: 0 8px 8px; gap: 6px; }
     .roomTab { text-align: left; padding: 10px 12px; border: 1px solid var(--line);
                border-radius: 8px; background: transparent; color: inherit; font: inherit;
@@ -3162,7 +3183,6 @@ _MOBILE_HTML = r"""<!doctype html>
         </div>
         <!-- 방 목록이 첫 화면이다(형 결정 2026-08-18). 세션 목록은 지우지 않고 숨겨만 둔다 —
              방 화면이 이상하면 한 줄로 되돌릴 수 있어야 한다. -->
-        <div class="room-open" id="roomOpen" hidden></div>
         <div class="room-list" id="roomList"></div>
         <div class="session-list" id="sessionList"></div>
       </section>
@@ -3337,7 +3357,6 @@ _MOBILE_HTML = r"""<!doctype html>
     const sessionSearch = document.getElementById("sessionSearch");
     const sessionList = document.getElementById("sessionList");
     const roomList = document.getElementById("roomList");
-    const roomOpen = document.getElementById("roomOpen");
     const projectTabs = document.getElementById("projectTabs");
     const sourceTabs = document.getElementById("sourceTabs");
     const turnsEl = document.getElementById("turns");
@@ -4105,7 +4124,12 @@ _MOBILE_HTML = r"""<!doctype html>
 
     // withArchived 는 "전체보기"에서 켜진다. 접은 방을 다시 볼 길이 없으면 접는 순간
     // 잃어버린 것과 같다 — 접기는 치우는 것이지 버리는 게 아니다.
-    function renderRooms(rooms, now, withArchived, query, projectId) {
+    // openRoot = 지금 펼친 방. **아코디언은 이 함수가 그린다** — 예전엔 `#roomOpen` 이라는
+    // 고정 상자가 목록 맨 위에 따로 있어서, 어느 카드를 눌러도 패널이 저 위에 열렸다.
+    // 코드가 그걸 알고 scrollIntoView 로 화면을 끌어올렸지만, 그건 원인이 아니라 증상을 덮은
+    // 것이다(형: "내가 누른 게 카드 밑이 아니라 맨 위에 뜨니까 직관적이지 않다").
+    // 참고한 관습(Slack·Discord·Notion·Telegram·Gmail): 하위 목록은 부모 바로 밑에서 펼친다.
+    function renderRooms(rooms, now, withArchived, query, projectId, openRoot, sources) {
       const q = String(query || "").trim().toLowerCase();
       const live = (rooms || []).filter(room => {
         if (!withArchived && room.archived) return false;
@@ -4143,20 +4167,28 @@ _MOBILE_HTML = r"""<!doctype html>
         // 기다리기만 하는데, 실제로는 형이 뭘 해야 풀리는 상태다.
         const 막힘 = statusReasonText(room.blockedReason);
         const status = String(room.status || "대기");
-        // 카드 몸통을 누르면 바로 대화로, ⋯ 를 누르면 방 안(다른 대화·이름·접기)으로.
+        // 카드 몸통 = 바로 그 대화로. **손잡이는 둘로 갈린다**: ⌄ 는 이 방의 대화를 펼치고
+        // (하위 목록 → 부모 밑), ⋯ 는 방 작업 메뉴를 손가락 자리에 띄운다(작업 → 팝오버).
+        // 예전엔 ⋯ 하나가 둘을 겸해서, 다른 대화를 보려다 삭제 버튼까지 늘 같이 펼쳐졌다.
         // 버튼 안에 버튼을 넣을 수 없어 형제로 두고 줄로 감싼다.
-        return `<div class="roomRow st-${esc(status)}${room.archived ? " archived" : ""}">
+        const 펼침 = !room.archived && String(openRoot || "") === String(room.root);
+        const 손잡이 = room.archived
+          ? `<button class="roomMore" type="button" data-room-unarchive="${esc(room.root)}" title="다시 꺼내기" aria-label="다시 꺼내기">↑</button>`
+          : `<button class="roomMore roomExpand" type="button" data-room-expand="${esc(room.root)}" aria-expanded="${펼침 ? "true" : "false"}" aria-label="${펼침 ? "대화 접기" : "대화 보기"}">⌄</button>`
+            + `<button class="roomMore" type="button" data-room-menu="${esc(room.root)}" aria-label="방 메뉴">⋯</button>`;
+        return `<div class="roomRow st-${esc(status)}${room.archived ? " archived" : ""}${펼침 ? " open" : ""}">
           <button class="roomCard" type="button" data-room="${esc(room.root)}">
             <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
             <span class="roomBody">
-              <span class="roomName">${esc(room.shortName || room.name || "")}</span>
+              <span class="roomName">${esc(펼침 ? (room.name || room.shortName || "")
+                                                  : (room.shortName || room.name || ""))}</span>
               <span class="roomMeta">${esc(막힘 ? 막힘 + count : roomStatusLabel(status) + count + where)}</span>
             </span>
           </button>
-          ${room.archived
-            ? `<button class="roomMore" type="button" data-room-unarchive="${esc(room.root)}" title="다시 꺼내기" aria-label="다시 꺼내기">↑</button>`
-            : `<button class="roomMore" type="button" data-room-more="${esc(room.root)}" aria-label="방 메뉴">⋯</button>`}
-        </div>`;
+          ${손잡이}
+        </div>` + (펼침
+          ? `<div class="roomAcc" data-room-acc="${esc(room.root)}">${renderRoomAccordion(room, sources)}</div>`
+          : "");
       }).join("");
     }
     // ROOM_LIST_END
@@ -4165,9 +4197,13 @@ _MOBILE_HTML = r"""<!doctype html>
     // 방 안 — 대화들이 탭이다(스펙 §2). 탭을 고르면 기존 대화 화면이 그대로 열린다.
     //
     // 방을 여는 길이 둘인 이유: 방 대부분은 대화가 하나뿐이라(실측 28개 중 21개), 카드를
-    // 누르면 바로 그 대화로 간다. 이름 고치기·접기·다른 대화는 ⋯ 로 이 패널을 열어서 한다.
+    // 누르면 바로 그 대화로 간다. 다른 대화는 ⌄ 로 펼쳐서 고른다.
     // 모두를 패널로 보내면 흔한 경우에 손가락이 한 번 더 든다.
-    function renderRoomTabs(room, sources) {
+    //
+    // **머리(이름·접기·삭제·닫기)는 여기 없다.** 한 상자가 세 가지를 담고 있어서 어디에 놓아도
+    // 어색했다 — 하위 목록(대화)·작업(이름·접기·삭제)·생성(＋Claude)은 관습상 여는 자리가 서로
+    // 다르다. 작업은 renderRoomMenu 의 팝오버로 갈라 나갔다.
+    function renderRoomAccordion(room, sources) {
       const tabs = room.tabs || [];
       // **새 대화를 시작할 길**이 여기 있어야 한다. 예전엔 세션 목록 안에만 있어서, 방 목록이
       // 첫 화면이 된 순간 대화가 하나도 없는 방(실측 28개 중 14개)이 막다른 길이 됐다 —
@@ -4175,14 +4211,6 @@ _MOBILE_HTML = r"""<!doctype html>
       const 시작 = (sources || []).map(item =>
         `<button class="roomStart" type="button" data-room-launch="${esc(item.id)}">＋ ${esc(item.label)}</button>`
       ).join("");
-      const head = `<div class="roomHead">
-        <span class="roomOpenTitle">${esc(room.name || room.shortName || "")}</span>
-        <button class="iconBtn" type="button" data-rename="${esc(room.root)}" title="이름 바꾸기" aria-label="이름 바꾸기">✎</button>
-        <button class="iconBtn" type="button" data-archive="${esc(room.root)}" title="접어두기" aria-label="접어두기">↓</button>
-        ${room.removable === false ? "" :
-          `<button class="iconBtn danger" type="button" data-room-delete="${esc(room.root)}" title="방 지우기" aria-label="방 지우기">🗑</button>`}
-        <button class="iconBtn" type="button" data-room-close="1" title="닫기" aria-label="닫기">✕</button>
-      </div>`;
       // 로그인이 풀린 방에는 **여기서 푸는 길**을 준다. 예전엔 맥에 가야만 했다 —
       // 폰엔 터미널 화면이 없어서 CLI 가 띄우는 로그인 URL 을 볼 방법이 아예 없었다.
       const 막힘글 = statusReasonText(room.blockedReason);
@@ -4193,7 +4221,7 @@ _MOBILE_HTML = r"""<!doctype html>
         : 막힘글 ? `<div class="roomBlocked">${esc(막힘글)}</div>` : "";
       const 시작줄 = (로그인줄 || "") + (시작 ? `<div class="roomStartRow">${시작}</div>` : "");
       if (!tabs.length) {
-        return head + 시작줄 + '<div class="roomEmpty">아직 대화가 없어요.</div>';
+        return 시작줄 + '<div class="roomEmpty">아직 대화가 없어요.</div>';
       }
       const strip = tabs.map(tab => {
         const key = `${tab.source}:${tab.sid}`;
@@ -4212,7 +4240,19 @@ _MOBILE_HTML = r"""<!doctype html>
             + (tab.stale ? '<span class="roomTabNote">오래됨</span>' : "");
         return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
       }).join("");
-      return head + `<div class="roomTabs">${strip}</div>` + 시작줄;
+      return `<div class="roomTabs">${strip}</div>` + 시작줄;
+    }
+
+    // 방 작업 — ⋯ 를 누르면 **그 버튼 자리에** 뜬다. 아코디언에 두지 않는 이유: 삭제가 목록
+    // 안에 늘 펼쳐져 있으면 다른 대화를 보려고 열 때마다 무서운 물건이 같이 나온다.
+    // 지울 수 없는 방(원본 체크아웃)엔 삭제를 안 준다 — 눌러도 안 되는 버튼은 거짓말이다.
+    function renderRoomMenu(room) {
+      return `<div class="roomMenu" role="menu">
+        <button type="button" role="menuitem" data-rename="${esc(room.root)}">이름 바꾸기</button>
+        <button type="button" role="menuitem" data-archive="${esc(room.root)}">접어두기</button>
+        ${room.removable === false ? "" :
+          `<button type="button" role="menuitem" class="danger" data-room-delete="${esc(room.root)}">방 지우기</button>`}
+      </div>`;
     }
     // ROOM_TABS_END
 
@@ -6644,24 +6684,26 @@ _MOBILE_HTML = r"""<!doctype html>
     });
 
     // 방 목록 다시 그리기 — 폴·검색·필터가 모두 이 함수를 쓴다(규칙이 갈라지면 안 된다).
-    function renderRoomList() {
+    // force = 형이 직접 시킨 것(펼치기·접기·삭제 뒤 정리). 폴은 force 없이 부른다.
+    function renderRoomList(force) {
       const 방들 = state.rooms || [];
+      // **동작 중에는 손대지 않는다.** 목록을 다시 그리면 눌러서 잠가둔 버튼이 새 노드로
+      // 갈리며 잠금이 풀린다 — 기동 중인데 다시 눌려서 세션이 둘 생긴다(실측: 폴 한 번 3초).
+      // 아코디언이 목록 **안**에 살게 된 뒤로는 이 가드가 목록 전체를 덮는다. 다만 형이 직접
+      // 시킨 것은 통과시킨다 — 방을 지운 뒤 정리(closeRoom)까지 막히면 없는 방이 펼쳐진 채 남는다.
+      if (roomBusy && !force) return;
+      // 사라진 방은 접는다. **여기서 closeRoom 을 부르지 않는다** — closeRoom 이 다시
+      // renderRoomList 를 불러 한 바퀴 더 돈다. 상태만 정리하고 아래에서 한 번에 그린다.
+      if (openRoomRoot && !roomByRoot(openRoomRoot)) { openRoomRoot = ""; closeRoomMenu(); }
+      const 스크롤 = listView.scrollTop;     // 폴 재렌더가 보던 자리를 잃지 않게
       roomList.innerHTML = renderRooms(방들, Date.now() / 1000, showAll,
-                                       sessionSearch.value, selectedProjectId);
+                                       sessionSearch.value, selectedProjectId,
+                                       openRoomRoot, launchSources());
+      listView.scrollTop = 스크롤;
       if (drawerOpen()) markCurrentRoom();   // 폴 재렌더가 '지금 방' 표시를 지우지 않게
       // 방이 하나도 없으면 예전 세션 목록을 되살린다. 서버가 rooms 를 못 만들었을 때
       // (옛 데몬·조립 실패) 빈 화면만 남으면 형은 앱이 고장난 줄 안다 — 목록이 안 뜨면
       // 아무것도 못 하므로, 방은 부가정보고 세션 목록이 생명줄이다.
-      // 열어둔 패널도 같이 갱신한다 — 안 그러면 상태가 멈춘 화면을 보고 있게 되고,
-      // 그 사이 사라진 대화의 탭은 눌러도 아무 일이 안 난다.
-      if (openRoomRoot) {
-        const 열린방 = roomByRoot(openRoomRoot);
-        // **동작 중에는 손대지 않는다.** 패널을 다시 그리면 눌러서 잠가둔 버튼이 새 노드로
-        // 갈리며 잠금이 풀린다 — 기동 중인데 다시 눌려서 세션이 둘 생긴다(실측: 폴 한 번 3초).
-        if (roomBusy) { /* 그대로 둔다 */ }
-        else if (열린방) roomOpen.innerHTML = renderRoomTabs(열린방, launchSources());
-        else closeRoom();
-      }
       const 방없음 = !방들.length;
       sessionList.hidden = !방없음;
       roomList.hidden = 방없음;
@@ -6684,27 +6726,63 @@ _MOBILE_HTML = r"""<!doctype html>
       return (state.rooms || []).find(item => item.root === root) || null;
     }
     function closeRoom() {
+      if (!openRoomRoot) return;
       openRoomRoot = "";
-      roomOpen.hidden = true;
-      roomOpen.innerHTML = "";
+      closeRoomMenu();
+      renderRoomList(true);
     }
+    // 펼치기·접기. **scrollIntoView 가 없다** — 아코디언이 누른 카드 바로 밑에서 열리므로
+    // 화면을 끌고 갈 일이 없어졌다. 예전 그 호출은 "패널이 화면 밖에서 열린다"는 증상을 덮는
+    // 덮개였고, 원인이 사라지면 덮개도 같이 사라진다.
     function openRoom(root) {
       const room = roomByRoot(root);
       if (!room) return;
-      openRoomRoot = root;
-      roomOpen.innerHTML = renderRoomTabs(room, launchSources());
-      roomOpen.hidden = false;
-      // 패널은 목록 맨 위에 있다 — 아래쪽 방을 열면 화면 밖에서 열려서 "아무 일도 안 났다"로
-      // 보인다(실측: 목록을 1300px 내린 상태에서 열면 패널이 뷰포트 위 -1300px).
-      roomOpen.scrollIntoView({block: "nearest", behavior: "smooth"});
+      openRoomRoot = (openRoomRoot === root) ? "" : root;   // 한 번에 한 방만
+      closeRoomMenu();
+      renderRoomList(true);
     }
+
+    // ⋯ 메뉴 — 누른 버튼 **바로 아래**에 띄운다. 목록 맨 위 상자로 보내면 무엇에 대한
+    // 작업인지가 화면에서 끊긴다(삭제가 특히 그렇다).
+    let roomMenuRoot = "";
+    function closeRoomMenu() {
+      roomMenuRoot = "";
+      const el = document.getElementById("roomMenuPop");
+      if (el) el.remove();
+    }
+    function openRoomMenu(root, anchor) {
+      const room = roomByRoot(root);
+      const was = roomMenuRoot;
+      closeRoomMenu();
+      if (!room || was === root) return;      // 같은 버튼을 다시 누르면 닫기
+      roomMenuRoot = root;
+      const pop = document.createElement("div");
+      pop.id = "roomMenuPop";
+      pop.className = "roomMenuPop";
+      pop.innerHTML = renderRoomMenu(room);
+      listView.appendChild(pop);
+      // 뷰포트 밖으로 새지 않게 — 목록 맨 아래 방을 누르면 메뉴가 화면 밖에 그려진다.
+      const a = anchor.getBoundingClientRect();
+      const box = listView.getBoundingClientRect();
+      const top = a.bottom - box.top + listView.scrollTop + 4;
+      pop.style.top = Math.max(0, Math.min(top, listView.scrollHeight - pop.offsetHeight - 4)) + "px";
+      pop.style.right = "12px";
+    }
+    document.addEventListener("click", event => {
+      if (!roomMenuRoot) return;
+      if (event.target.closest && (event.target.closest("#roomMenuPop")
+                                   || event.target.closest("[data-room-menu]"))) return;
+      closeRoomMenu();
+    });
     // 방 카드를 누르면 **바로 그 방의 대화로** 간다. 대부분의 방은 대화가 하나뿐이라,
     // 여기서 한 번 더 고르게 하면 흔한 경우에 손가락이 한 번 더 든다.
     roomList.addEventListener("click", event => {
       const back = event.target.closest && event.target.closest("[data-room-unarchive]");
       if (back) { unarchiveRoom(back.getAttribute("data-room-unarchive")); return; }
-      const more = event.target.closest && event.target.closest("[data-room-more]");
-      if (more) { openRoom(more.getAttribute("data-room-more")); return; }
+      const menu = event.target.closest && event.target.closest("[data-room-menu]");
+      if (menu) { openRoomMenu(menu.getAttribute("data-room-menu"), menu); return; }
+      const grow = event.target.closest && event.target.closest("[data-room-expand]");
+      if (grow) { openRoom(grow.getAttribute("data-room-expand")); return; }
       const card = event.target.closest && event.target.closest("[data-room]");
       if (!card) return;
       const room = roomByRoot(card.getAttribute("data-room"));
@@ -6716,7 +6794,8 @@ _MOBILE_HTML = r"""<!doctype html>
       // 같은 방의 다른 대화는 **방 안 대화 줄**(renderRoomChats)로 간다.
       chooseSession(key);
     });
-    roomOpen.addEventListener("click", async event => {
+    // 아코디언은 roomList 안, 팝오버는 listView 안 — 둘의 공통 조상에 한 번만 건다.
+    listView.addEventListener("click", async event => {
       const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restart-chat],[data-restore]");
       if (!target) return;
       roomBusy = true;
@@ -6810,7 +6889,9 @@ _MOBILE_HTML = r"""<!doctype html>
         if (!r.ok) throw new Error(await responseError(r));
         const data = await r.json();
         // 링크는 **새 탭**으로 연다 — 이 화면을 떠나면 코드를 붙여넣을 자리가 사라진다.
-        roomOpen.querySelector(".roomBlocked").innerHTML =
+        const 막힘칸 = roomList.querySelector(`[data-room-acc="${CSS.escape(root)}"] .roomBlocked`);
+        if (!막힘칸) { showToast("방을 다시 펼쳐 주세요"); return; }
+        막힘칸.innerHTML =
           `<a class="reloginLink" href="${esc(data.url || "")}" target="_blank" rel="noopener">클로드 로그인 열기</a>
            <div class="reloginHint">로그인하면 코드가 나와요. 그걸 여기 붙여넣어 주세요.</div>
            <div class="reloginRow">

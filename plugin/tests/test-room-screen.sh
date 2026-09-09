@@ -144,6 +144,11 @@ src = (scripts / "marina_mobile.py").read_text(encoding="utf-8")
 chunk = src[src.find("// ROOM_TABS_START"):src.find("// ROOM_TABS_END")]
 if not chunk:
     raise SystemExit("ROOM_TABS_START/END 경계가 없다")
+# 아코디언을 목록이 그리게 된 뒤로 두 블록이 한 묶음이다 — renderRooms 가 renderRoomAccordion 을 부른다.
+목록 = src[src.find("// ROOM_LIST_START"):src.find("// ROOM_LIST_END")]
+if not 목록:
+    raise SystemExit("ROOM_LIST_START/END 경계가 없다")
+chunk = 목록 + chunk
 helpers = (scripts / "marina-web" / "chat-render.js").read_text(encoding="utf-8")
 esc = helpers[helpers.find("// ESC_HELPERS_START"):helpers.find("// ESC_HELPERS_END")]
 사유 = src[src.find("// STATUS_REASON_START"):src.find("// STATUS_REASON_END")]
@@ -154,8 +159,12 @@ const assert = require("node:assert/strict");
 const context = {};
 vm.createContext(context);
 vm.runInContext(`${src}
-this.renderRoomTabs = renderRoomTabs;`, context, {filename: "marina_mobile::roomtabs"});
-const {renderRoomTabs} = context;
+this.renderRoomAccordion = renderRoomAccordion;
+this.renderRoomMenu = renderRoomMenu;
+this.renderRooms = renderRooms;`, context, {filename: "marina_mobile::roomtabs"});
+const {renderRoomAccordion, renderRoomMenu, renderRooms} = context;
+// 패널 머리가 사라지고 아코디언으로 갈렸다(2026-09-09) — 같은 계약을 새 자리에서 지킨다.
+const renderRoomTabs = renderRoomAccordion;
 
 const room = {root: "/b", shortName: "배포", name: "배포 파이프라인 통합 대시보드", status: "응답필요",
   tabs: [
@@ -172,13 +181,20 @@ assert.match(html, /data-tab="claude:s2"/);
 assert.match(html, /class="[^"]*roomTab[^"]*current/);
 
 // ③ 이름을 고칠 수 있다 — 자동으로 줄인 이름이 거슬릴 때의 출구다(형 결정).
-assert.match(html, /data-rename="\/b"/);
-
 // ④ 접을 수 있다 — 끝난 방을 치우는 유일한 길이다.
-assert.match(html, /data-archive="\/b"/);
+// 둘 다 이제 **⋯ 메뉴**에 산다. 아코디언에 두면 다른 대화를 보려고 열 때마다 삭제까지
+// 같이 펼쳐진다 — 작업은 손가락 자리 팝오버가 관습이다(Slack·Notion·ChatGPT 앱).
+const 메뉴 = renderRoomMenu(room);
+assert.match(메뉴, /data-rename="\/b"/);
+assert.match(메뉴, /data-archive="\/b"/);
+assert.ok(!html.includes("data-rename"), "방 작업이 아코디언에 남아 있다");
 
-// ⑤ 방 안에서는 **원래 이름**을 보여준다(줄이는 건 목록에서만).
-assert.ok(html.includes("배포 파이프라인 통합 대시보드"), "방 안에서도 이름이 잘려 있다");
+// ⑤ 방을 펼치면 **원래 이름**을 보여준다(줄이는 건 목록에서만). 예전엔 패널 머리가 그
+// 몫이었는데, 머리를 없앤 뒤로는 펼친 카드의 이름이 그 자리에서 전체로 풀린다.
+const 펼친목록 = renderRooms([Object.assign({lastAt: 1}, room)], 1000, false, "", "", "/b", []);
+assert.ok(펼친목록.includes("배포 파이프라인 통합 대시보드"), "펼쳤는데도 이름이 잘려 있다");
+const 접힌목록 = renderRooms([Object.assign({lastAt: 1}, room)], 1000, false, "", "", "", []);
+assert.ok(!접힌목록.includes("배포 파이프라인 통합 대시보드"), "목록에서 이름을 안 줄였다");
 
 // ⑥ 대화가 없는 방에는 **시작할 수단**이 있어야 한다. 예전엔 "대화를 시작해 보세요"라고
 // 말해놓고 버튼이 없었다 — 실측 28개 방 중 14개가 그런 막다른 길이었다.
@@ -208,7 +224,7 @@ const 막힌 = renderRoomTabs({root: "/L", name: "막힌방", blockedReason: "ne
 ]}, []);
 assert.match(막힌, /data-room-relogin="\/L"/, "로그인을 풀 버튼이 없다");
 assert.match(막힌, /클로드 로그인이 풀렸어요/);
-console.log("ok 방 열기: 탭 전부·현재 표시·이름 바꾸기·접기·로그인 복구");
+console.log("ok 방 열기: 탭 전부·현재 표시·이름 바꾸기·접기·로그인 복구(아코디언+메뉴)");
 ''')
 PY
 
