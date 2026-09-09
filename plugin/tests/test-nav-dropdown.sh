@@ -87,6 +87,9 @@ for (const 제목 of ["최근 대화", "이 방의 대화", "이 대화의 작�
 }
 // 대화는 전환(data-nav-chat), 작업자는 패널(data-nav-agent) — 누르기 전에 결과를 안다.
 assert.match(셋다, /data-nav-chat="b"/);
+// 최근 구역은 방을 넘나든다 — 방 이름이 **앞에** 붙어야 구별이 된다(대화 제목은 죄다 "기본"이다).
+// 붙이는 규칙은 트리거와 같은 것을 쓴다: 방과 제목이 같으면 접는다.
+assert.ok(셋다.includes("결제 플로우 · 결제"), `최근 줄에 방 이름이 없다: ${셋다.slice(0, 400)}`);
 assert.match(셋다, /data-nav-agent="s1"/);
 assert.ok(!/data-nav-chat="s1"/.test(셋다), "작업자를 대화처럼 눌리게 했다");
 

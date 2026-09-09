@@ -2550,7 +2550,6 @@ _MOBILE_HTML = r"""<!doctype html>
        main·작성기까지 늘어나 페이지 전체가 가로로 오버플로한다(형: "제목 섹션 때문에 전체 늘어져").
        자식(chatNavTitle)의 ellipsis 는 이게 없으면 무력하다 — 줄어들 기회 자체가 없어서. */
     .shellRow { display: flex; gap: 5px; align-items: center; min-height: 38px; min-width: 0; }
-    header { position: relative; }   /* navDrop 의 배치 기준 */
     .shellRow > .backBtn { flex: 0 0 auto; }
     .shellRow > .project-strip, .shellRow > .chatNavTitle { flex: 1 1 auto; min-width: 0; }
     h2 { margin: 0; font-size: 22px; }
@@ -2980,7 +2979,7 @@ _MOBILE_HTML = r"""<!doctype html>
                             font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 999px;
                             background: var(--panel); border: 1px solid var(--line); }
     /* 드롭다운 — 헤더 아래로 내려온다. 목록이 길어질 수 있어 스스로 스크롤한다. */
-    .navDrop { position: absolute; z-index: 45; left: 8px; right: 8px; top: 100%;
+    .navDrop { position: absolute; z-index: 45; left: 8px; right: 8px; top: 100%; box-sizing: border-box;
                max-height: 60dvh; overflow-y: auto; overscroll-behavior: contain;
                border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
                box-shadow: 0 10px 28px rgba(0,0,0,.18); padding: 6px; }
@@ -3630,7 +3629,9 @@ _MOBILE_HTML = r"""<!doctype html>
       const session = selectedSession();
       const room = session ? roomByRoot(String(session.root || "")) : null;
       return {
-        recent: navRecent(최근.map(s => ({
+        // 지금 방의 대화는 최근에서 뺀다 — 바로 아래 '이 방의 대화' 구역에 또 나와서
+        // 같은 이름이 두 번 보인다(실측: 한 화면에 "기본"이 다섯 줄).
+        recent: navRecent(최근.filter(s => !room || String(s.root || "") !== String(room.root)).map(s => ({
           key: s.key, title: s.title, status: s.status,
           room: (roomByRoot(String(s.root || "")) || {}).shortName || "",
         })), 5),
@@ -6992,8 +6993,11 @@ _MOBILE_HTML = r"""<!doctype html>
     // 성격이 다른 것을 한 목록에 섞으면 같은 제스처가 다른 일을 한다.
     function renderNavSections(ctx) {
       const 구역 = (제목, html) => html ? `<div class="navSection"><div class="navSectionTitle">${제목}</div>${html}</div>` : "";
+      // 최근 대화는 방을 넘나든다 — **방 이름이 앞에 와야** 스캔이 된다. 오른쪽 쪽지로 두면
+      // 잘려서 안 보이고(실측: '날', '결', '소셜' 만 보였다), 대화 제목이 죄다 "기본"이라
+      // 방 이름 없이는 구별 자체가 안 된다. 합치는 규칙은 트리거와 **같은 것**을 쓴다.
       const 최근 = (ctx.recent || []).map(item =>
-        navRow("data-nav-chat", item.key, item.title, item.room && item.room !== item.title ? item.room : "",
+        navRow("data-nav-chat", item.key, navTriggerLabel(item.room, item.title), "",
                item.status, item.key === ctx.currentKey)).join("");
       const 방대화 = (ctx.roomTabs || []).map(item =>
         navRow("data-nav-chat", item.key, item.title, "", item.status, item.key === ctx.currentKey)).join("");
