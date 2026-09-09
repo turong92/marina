@@ -148,7 +148,7 @@
           <button class="chat-usage-chip" data-chat-usage title="계정 사용량 — 눌러서 창별로 보기">한도 …</button>
           <span class="chat-head-root">${escapeHtml(tab.root)}</span>
         </div>
-        <div class="chat-body" data-chat-body></div>`;
+        <div class="chat-body" data-chat-body="${escapeHtml(chatTabKey(tab))}"></div>`;
 
       pane.querySelectorAll('[data-chat-tab]').forEach(el => {
         const i = Number(el.dataset.chatTab);
@@ -178,7 +178,7 @@
       // 세션을 열 때마다 자라고, 죽은 세션이 영영 dispose 되지 않는다.
       if (typeof unmountAgentTerms === 'function') unmountAgentTerms();
       if (tab.view === 'raw') mountAgentTerm(body, tab.root, tab);
-      else renderChatConversation(body);
+      else renderChatConversation(body, tab);
     }
 
     // ＋ — 지금 선택된 워크트리에서 아직 안 열린 세션을 고르게 한다.
@@ -320,18 +320,30 @@
 
     // 요청 세대 번호 — 같은 탭에서 R1 을 보낸 뒤 R2 를 보내면 R1 이 늦게 도착해 최신을 과거로
     // 덮을 수 있다. 탭 키 비교만으론 그 역전을 못 막는다(둘 다 같은 탭이니까).
-    let chatReqSeq = 0;
+    // 요청 순번은 **탭별**이다. 전역 하나면 칸이 여럿일 때 서로의 응답을 역전으로 취급해
+    // 버린다 — 분할에서 한 칸만 갱신되고 나머지는 영영 멈춘 것처럼 보인다.
+    const chatReqSeq = new Map();
 
-    async function loadChatTranscript(initial) {
-      const tab = activeChatTab();
+    // 이 탭이 그려질 자리. 분할에서는 칸마다 다르므로 한 군데서만 찾는다.
+    function chatBodyFor(tab) {
+      const pane = chatPane();
+      if (!pane || !tab) return null;
+      return pane.querySelector(`[data-chat-body="${cssEscape(chatTabKey(tab))}"]`);
+    }
+    function cssEscape(v) {
+      return (window.CSS && CSS.escape) ? CSS.escape(String(v)) : String(v).replace(/["\\]/g, '\\$&');
+    }
+
+    async function loadChatTranscript(initial, tabArg) {
+      const tab = tabArg || activeChatTab();
       if (!tab) return;
       const key = chatTabKey(tab);
-      const seq = ++chatReqSeq;
+      const seq = (chatReqSeq.get(key) || 0) + 1;
+      chatReqSeq.set(key, seq);
       const before = !initial && tab.cursor != null ? `&before=${enc(tab.cursor)}` : '';
       const d = await api(`/api/agent/transcript?root=${enc(tab.root)}&source=${enc(tab.source)}&sid=${enc(tab.sid)}${before}`);
-      // 응답이 오는 사이 탭을 바꿨거나(남의 응답) 더 새 요청이 떠났으면(역전) 버린다.
-      const now = activeChatTab();
-      if (!now || chatTabKey(now) !== key || seq !== chatReqSeq) return;
+      // 그 사이 탭이 닫혔거나(남의 응답) 같은 탭에 더 새 요청이 떠났으면(역전) 버린다.
+      if (!chatTabs.some(t => chatTabKey(t) === key) || seq !== chatReqSeq.get(key)) return;
       // **서버의 timeline 이 진실이다.** turns 는 평문 메시지만이라 도구 활동·diff·이미지 ref·
       // 질문 활동이 전부 빠진다 — timelineFromTurns 는 timeline 이 없을 때의 폴백일 뿐이다.
       const fresh = (d.timeline && d.timeline.length)
@@ -347,12 +359,12 @@
         tab.hasMore = Boolean(d.hasMore);
       }
       tab.unread = false;
-      const body = chatPane().querySelector('[data-chat-body]');
-      if (body && tab.view === 'chat') renderChatConversation(body);
+      const body = chatBodyFor(tab);
+      if (body && tab.view === 'chat') renderChatConversation(body, tab);
     }
 
-    function renderChatConversation(body) {
-      const tab = activeChatTab();
+    function renderChatConversation(body, tabArg) {
+      const tab = tabArg || activeChatTab();
       if (!tab) return;
       MarinaChat.configure(chatAdapter(tab));
       MarinaChat.setDetailScope(chatTabKey(tab));
@@ -361,7 +373,7 @@
           <button class="chat-older-btn" data-chat-older hidden>이전 메시지</button>
           <div class="chat-turns" data-chat-turns></div>
           <div class="chat-composer" data-chat-composer></div>`;
-        body.querySelector('[data-chat-older]').onclick = () => loadChatTranscript(false).catch(console.error);
+        body.querySelector('[data-chat-older]').onclick = () => loadChatTranscript(false, tab).catch(console.error);
         renderChatComposer(body.querySelector('[data-chat-composer]'), tab);
         // 펼침 상태는 렌더러가 세션 스코프로 기억한다 — 모바일과 같은 규칙.
         body.querySelector('[data-chat-turns]').addEventListener('toggle', (e) => {
