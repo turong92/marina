@@ -2616,8 +2616,12 @@ _MOBILE_HTML = r"""<!doctype html>
     .roomMenu { display: flex; flex-direction: column; min-width: 148px; padding: 4px;
                 border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
                 box-shadow: 0 8px 24px rgba(0,0,0,.18); }
-    .roomMenu button { text-align: left; padding: 10px 12px; border: 0; border-radius: 7px;
-                       background: transparent; color: inherit; font: inherit; cursor: pointer; }
+    /* 항목 높이는 ⋯ 더보기 메뉴(.moreMenu)와 **같은 38px**. 전역 규칙이 버튼에 42px 를 주는데
+       메뉴 항목은 손가락 하나로 고르는 목록이라 이 앱은 이미 38px 로 쓰고 있다 — 여기만 다른
+       숫자를 만들면 같은 제스처의 메뉴 둘이 서로 다른 크기가 된다. */
+    .roomMenu button { text-align: left; width: 100%; min-height: 38px; padding: 0 12px;
+                       border: 0; border-radius: 7px; background: transparent; color: inherit;
+                       font: inherit; cursor: pointer; }
     .roomMenu button:active { background: var(--line); }
     .roomMenu button.danger { color: #e5534b; }
     .roomTabs { display: flex; flex-direction: column; padding: 0 8px 8px; gap: 6px; }
@@ -6784,12 +6788,24 @@ _MOBILE_HTML = r"""<!doctype html>
       pop.className = "roomMenuPop";
       pop.innerHTML = html;
       listView.appendChild(pop);
-      // 뷰포트 밖으로 새지 않게 — 목록 맨 아래 방을 누르면 메뉴가 화면 밖에 그려진다.
+      // 아래로 펼칠 자리가 없으면 **위로** 연다. 목록 맨 아래 방을 누르면 화면 밖에 그려지고,
+      // 아래 방 카드까지 덮으면 이 메뉴가 어느 것에 딸린 건지 흐려진다(형: "너무 밑에 뜨는 거 아니야?").
       const a = anchor.getBoundingClientRect();
       const box = listView.getBoundingClientRect();
-      const top = a.bottom - box.top + listView.scrollTop + 4;
-      pop.style.top = Math.max(0, Math.min(top, listView.scrollHeight - pop.offsetHeight - 4)) + "px";
-      pop.style.right = "12px";
+      const h = pop.offsetHeight;
+      const 아래로 = (box.bottom - a.bottom) >= h + 8;
+      const top = 아래로 ? a.bottom - box.top + listView.scrollTop + 2
+                         : a.top - box.top + listView.scrollTop - h - 2;
+      pop.style.top = Math.max(0, Math.min(top, listView.scrollHeight - h - 4)) + "px";
+      // **누른 버튼에 붙인다.** 예전엔 컨테이너 오른쪽 가장자리에 고정(right:12px)이라 가로로는
+      // 앵커를 아예 안 따라갔다 — 방 ⋯ 와 대화 ⋯ 가 서로 다른 x 에 있는데 메뉴는 늘 같은 자리에
+      // 떠서, 어느 것에서 나온 건지 알 수가 없었다(형: "햄버거 누르면 거기에 바로 떠야지").
+      // 오른쪽 끝을 버튼 오른쪽 끝에 맞춘다 — 오른쪽에 달린 메뉴는 왼쪽으로 펼치는 게 관습이다.
+      // 스크롤바 폭을 빼야 정확히 맞는다 — `right` 는 패딩 박스 기준이라 스크롤바 안쪽에서 잰다.
+      // (폰은 오버레이 스크롤바라 0, 데스크톱 대시보드에선 15px 쯤 어긋났다.)
+      const 스크롤바 = listView.offsetWidth - listView.clientWidth;
+      const right = box.right - a.right - 스크롤바;
+      pop.style.right = Math.max(4, Math.min(right, box.width - 48)) + "px";
     }
     document.addEventListener("click", event => {
       if (!roomMenuRoot) return;
