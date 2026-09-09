@@ -2550,6 +2550,7 @@ _MOBILE_HTML = r"""<!doctype html>
        main·작성기까지 늘어나 페이지 전체가 가로로 오버플로한다(형: "제목 섹션 때문에 전체 늘어져").
        자식(chatNavTitle)의 ellipsis 는 이게 없으면 무력하다 — 줄어들 기회 자체가 없어서. */
     .shellRow { display: flex; gap: 5px; align-items: center; min-height: 38px; min-width: 0; }
+    header { position: relative; }   /* navDrop 의 배치 기준 */
     .shellRow > .backBtn { flex: 0 0 auto; }
     .shellRow > .project-strip, .shellRow > .chatNavTitle { flex: 1 1 auto; min-width: 0; }
     h2 { margin: 0; font-size: 22px; }
@@ -2970,16 +2971,30 @@ _MOBILE_HTML = r"""<!doctype html>
     .viewerText { flex: 1; min-height: 0; margin: 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: #e8edf4; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
     .imageViewerClose { width: 34px; min-height: 34px; flex: none; padding: 0; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; border-color: transparent; font-size: 19px; }
     /* 세션 탭 — 가로 스크롤 한 줄. 목록 뷰에선 숨긴다(거기선 목록 자체가 탐색이다). */
-    .roomChats:empty { display: none; }
-    .roomChats { display: none; gap: 4px; overflow-x: auto; overscroll-behavior-x: contain;
-                 padding: 0 10px 6px; scrollbar-width: none; }
-    .roomChats::-webkit-scrollbar { display: none; }
-    #mobileApp[data-view="chat"] .roomChats { display: flex; }
-    .roomChat { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 5px; max-width: 60vw;
-                min-height: 30px; padding: 0 10px; border: 1px solid var(--line); border-radius: 999px;
-                background: transparent; color: inherit; font-size: 12px; font-weight: 700; }
-    .roomChat.active { border-color: #0b63ce; background: #e9f2ff; color: #0b4ea8; }
-    .roomChatLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .navTrigger { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto;
+                  border: 0; background: transparent; color: inherit; font: inherit;
+                  font-weight: 700; text-align: left; padding: 0 4px; cursor: pointer; }
+    .navTrigger .navLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .navTrigger .navCaret { flex: none; opacity: .55; font-size: 11px; }
+    .navTrigger .navBadge { flex: none; display: inline-flex; align-items: center; gap: 3px;
+                            font-size: 11px; font-weight: 700; padding: 1px 6px; border-radius: 999px;
+                            background: var(--panel); border: 1px solid var(--line); }
+    /* 드롭다운 — 헤더 아래로 내려온다. 목록이 길어질 수 있어 스스로 스크롤한다. */
+    .navDrop { position: absolute; z-index: 45; left: 8px; right: 8px; top: 100%;
+               max-height: 60dvh; overflow-y: auto; overscroll-behavior: contain;
+               border: 1px solid var(--line); border-radius: 12px; background: var(--panel);
+               box-shadow: 0 10px 28px rgba(0,0,0,.18); padding: 6px; }
+    .navSection + .navSection { margin-top: 4px; border-top: 1px solid var(--line); padding-top: 4px; }
+    .navSectionTitle { font-size: 11px; font-weight: 700; color: #747d8b;
+                       padding: 6px 10px 4px; letter-spacing: .02em; }
+    .navRow { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 38px;
+              padding: 0 10px; border: 0; border-radius: 8px; background: transparent;
+              color: inherit; font: inherit; text-align: left; cursor: pointer; }
+    .navRow:active { background: var(--line); }
+    .navRow.current { background: var(--panel); font-weight: 700; }
+    .navRowLabel { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .navRowNote { flex: none; font-size: 11px; color: #747d8b; max-width: 40%;
+                  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
                    scrollbar-width: none; padding: 2px 0 1px; }
                   padding: 3px 6px 3px 7px; border: 1px solid #dde2ea; border-radius: 999px;
                   background: #f4f6f9; color: #596070; font-size: 11px; font-weight: 700; line-height: 1.3; }
@@ -3152,7 +3167,6 @@ _MOBILE_HTML = r"""<!doctype html>
       .galleryTab.active { background: #1c2431; color: #e8edf4; }
       .fileRow { background: #171d27; border-color: #303846; }
       .doneCard { background: #17251c; border-color: #2ea043; }
-      .roomChat.active { background: #16233a; border-color: #4b8fe0; color: #cfe0ff; }
       /* '지금 방' 강조 — 밝은 화면용 연파랑(#eef4ff)을 그대로 두면 어두운 배경에 흰 판이
          떠서 그 카드 글씨가 통째로 안 보인다(형: "그냥 허얘"). 어두운 쪽 색을 따로 준다. */
       .roomRow.here, .roomCard.here { background: #16233a; box-shadow: inset 3px 0 0 #4b8fe0; }
@@ -3223,7 +3237,8 @@ _MOBILE_HTML = r"""<!doctype html>
     <header>
       <div class="shellRow">
         <button class="iconBtn backBtn" id="backBtn" type="button" title="세션 목록 열기/닫기" aria-label="세션 목록 열기/닫기" aria-expanded="false" style="display:none">&#9776;</button>
-        <div class="chatNavTitle" id="chatNavTitle"></div>
+        <button class="chatNavTitle navTrigger" id="chatNavTitle" type="button"
+                aria-haspopup="menu" aria-expanded="false"></button>
         <div class="shellActions">
           <!-- 살아있음 표시. 폴링이 조용히 돌던 시절엔 화면이 멈춘 건지 알 길이 없었다
                (형: "폴링중인게 보이지도 않으니 멈춘 것 같고"). 점 하나로 연결 상태를 늘 보여준다. -->
@@ -3241,7 +3256,7 @@ _MOBILE_HTML = r"""<!doctype html>
       <!-- 방 안 대화 줄 — **이 방의 대화만** 나열한다(스펙 §3 `[기본] [디자인 손보기]`).
            헤더 아래 줄은 이제 이것 하나다. 방을 넘나드는 일은 서랍(엣지 스와이프·☰)이 맡는다.
            대화가 하나뿐인 방에선 이 줄도 안 뜬다. -->
-      <div class="roomChats" id="roomChats" role="tablist" aria-label="이 방의 대화"></div>
+      <div class="navDrop" id="navDrop" hidden></div>
       <div class="usagePanel" id="usagePanel" aria-label="사용량" aria-hidden="true">
         <div class="usageSection">
           <div class="usageSectionTitle">계정 한도</div>
@@ -3466,7 +3481,6 @@ _MOBILE_HTML = r"""<!doctype html>
     updateBanner.onclick = () => location.reload();
     const cliDialogEl = document.getElementById("cliDialog");
     const liveQuestionEl = document.getElementById("liveQuestion");
-    const roomChatsEl = document.getElementById("roomChats");
     // 라이브 질문 카드의 로컬 상태. **카드를 낙관적으로 지우지 않는다** — 예전엔 탭하자마자 innerHTML 을
     // 비우고 4초간 숨겼는데, 응답이 안 먹으면 카드가 그냥 사라져 "눌렀는데 아무 일도 안 남"으로 보였고
     // 되돌릴 방법도 없었다. 이제 카드는 서버 진실(pendingQuestion 소멸)로만 사라진다.
@@ -3583,6 +3597,96 @@ _MOBILE_HTML = r"""<!doctype html>
         btn.disabled = false;
       }
     });
+    // 방문 순서 — "최근 대화"의 기준이다. 서버 활동순이 아니라 **내가 연 순서**여야 해서
+    // 클라이언트가 기억한다(브라우저 탭·앱 전환기와 같은 감각).
+    let 방문순서 = [];
+    try { 방문순서 = JSON.parse(localStorage.getItem("marinaMobileVisited") || "[]") || []; } catch (_) {}
+    function rememberVisit(key) {
+      if (!key) return;
+      방문순서 = [String(key)].concat(방문순서.filter(k => k !== String(key))).slice(0, 40);
+      try { localStorage.setItem("marinaMobileVisited", JSON.stringify(방문순서)); } catch (_) {}
+    }
+
+    const navDropEl = document.getElementById("navDrop");
+    let navOpen = false;
+    let navSnapshot = null;   // 여는 순간 굳힌 목록 — 열려 있는 동안 순서·구성이 안 바뀐다
+
+    function navEntries() {
+      const 전부 = (state.sessions || []).filter(s => s.kind === "agent");
+      const 자리 = new Map(전부.map(s => [s.key, s]));
+      const 최근 = 방문순서.map(k => 자리.get(k)).filter(Boolean)
+        .concat(전부.filter(s => !방문순서.includes(s.key)));
+      const session = selectedSession();
+      const room = session ? roomByRoot(String(session.root || "")) : null;
+      return {
+        recent: navRecent(최근.map(s => ({
+          key: s.key, title: s.title, status: s.status,
+          room: (roomByRoot(String(s.root || "")) || {}).shortName || "",
+        })), 5),
+        roomTabs: !room ? [] : (room.tabs || [])
+          .filter(t => t && !t.hidden && !t.stale && !t.deleted)
+          .map(t => ({key: `agent:${t.source}:${t.sid}:${room.root}`, title: t.title, status: t.status})),
+        subagents: ((sessionActivity(session) || {}).items || [])
+          .map(a => ({id: String(a.id || a.title || ""), title: a.title || a.id, status: a.status})),
+        currentKey: selectedSessionKey,
+      };
+    }
+
+    // 트리거는 접힌 것들의 상태를 진다 — 칩줄을 지우며 잃는 가시성의 보전분이다.
+    function renderNavTrigger(session) {
+      if (!session) { chatNavTitle.innerHTML = ""; return; }
+      const room = roomByRoot(String(session.root || ""));
+      const 이름 = navTriggerLabel((room || {}).shortName || "", session.title || "");
+      // **안 보이는 것만** 센다 — 지금 보고 있는 대화까지 세면 배지가 늘 켜져 있다.
+      const 숨은것 = (state.sessions || [])
+        .filter(s => s.kind === "agent" && s.key !== selectedSessionKey);
+      const 배지 = navBadge(숨은것);
+      chatNavTitle.innerHTML = `<span class="navLabel">${esc(이름)}</span>`
+        + (배지 ? `<span class="navBadge"><i class="wt-dot ${배지.dot}"></i>${배지.count}</span>` : "")
+        + `<span class="navCaret">▾</span>`;
+    }
+
+    function renderNavDrop() {
+      if (!navOpen) { if (!navDropEl.hidden) { navDropEl.hidden = true; navDropEl.innerHTML = ""; } return; }
+      // **열려 있는 동안 순서·구성은 고정.** 폴이 3초마다 도는데 재정렬되면 누르려던 게 도망간다.
+      // 상태 dot 은 갱신한다 — 죽은 화면을 보여주지 않는다.
+      const 지금 = navEntries();
+      const 굳힌것 = navSnapshot || 지금;
+      const 상태 = new Map((state.sessions || []).map(s => [s.key, s.status]));
+      const 새로 = (arr) => arr.map(x => ({...x, status: 상태.has(x.key) ? 상태.get(x.key) : x.status}));
+      const html = renderNavSections({
+        recent: 새로(굳힌것.recent), roomTabs: 새로(굳힌것.roomTabs),
+        subagents: 지금.subagents, currentKey: selectedSessionKey,
+      }) || '<div class="navSectionTitle">열 수 있는 대화가 없어요</div>';
+      if (navDropEl.innerHTML !== html) navDropEl.innerHTML = html;
+      navDropEl.hidden = false;
+    }
+    function openNav() {
+      navSnapshot = navEntries();
+      navOpen = true;
+      chatNavTitle.setAttribute("aria-expanded", "true");
+      renderNavDrop();
+    }
+    function closeNav() {
+      if (!navOpen) return;
+      navOpen = false;
+      navSnapshot = null;
+      chatNavTitle.setAttribute("aria-expanded", "false");
+      renderNavDrop();
+    }
+    chatNavTitle.addEventListener("click", () => { navOpen ? closeNav() : openNav(); });
+    navDropEl.addEventListener("click", event => {
+      const chat = event.target.closest && event.target.closest("[data-nav-chat]");
+      if (chat) { closeNav(); chooseSession(chat.getAttribute("data-nav-chat")); return; }
+      const agent = event.target.closest && event.target.closest("[data-nav-agent]");
+      if (agent) { closeNav(); openSubagents(); return; }
+    });
+    document.addEventListener("click", event => {
+      if (!navOpen) return;
+      if (event.target.closest && (event.target.closest("#navDrop") || event.target.closest("#chatNavTitle"))) return;
+      closeNav();
+    });
+
     function repaintLiveQuestion() { renderLiveQuestion(selectedSession()); }
     // 폴백 카드는 대화 안에 있어 turns 를 다시 그려야 반영된다(렌더키가 liveAnswer 를 모르므로 강제).
     function repaintTurns() { turnsStructureKey = ""; renderTurns(selectedSession()); }
@@ -3798,6 +3902,7 @@ _MOBILE_HTML = r"""<!doctype html>
       terminal: {label: "Terminal", badge: "TERM"},
     };
     // 웹 대시보드(app-1-core.js AGENT_STATUS_META)와 동일하게 통일 — 같은 상태를 같은 dot/라벨로.
+    // AGENT_STATUS_META_START  (상태→dot·라벨의 단일 출처. 테스트가 이 블록을 같이 싣는다)
     const AGENT_STATUS_META = {
       working:   {dot: "boot", label: "작업 중"},
       blocked:   {dot: "ask",  label: "응답 필요"},
@@ -3808,6 +3913,7 @@ _MOBILE_HTML = r"""<!doctype html>
       idle:      {dot: "stop", label: "유휴"},
     };
     function agentStatusMeta(status) { return AGENT_STATUS_META[status] || AGENT_STATUS_META.idle; }
+    // AGENT_STATUS_META_END
 
     // STATUS_REASON_START  (테스트가 이 블록을 확인한다)
     // "실패" 만으로는 형이 뭘 해야 할지 알 수 없다. 잠깐 먹통(CLI 가 알아서 재시도한다)과
@@ -4573,6 +4679,7 @@ _MOBILE_HTML = r"""<!doctype html>
       fileSuggestionKey = "";
       localStorage.setItem("marinaMobileSession", key);
       rememberRoomChat(s.root, key);   // 이 방에선 이걸 보고 있었다 — 다음에 이 방을 고르면 여기로
+      rememberVisit(key);              // 드롭다운 '최근 대화'의 기준 — 내가 연 순서
       if (s.root) {
         localStorage.setItem("marinaMobileRoot", s.root);
         rootSelect.value = s.root;
@@ -6050,9 +6157,15 @@ _MOBILE_HTML = r"""<!doctype html>
       else showList();
       // 방 목록에서도 헤더에 **뭔가는 있어야 한다.** 예전엔 프로젝트 칩이 헤더에 있었는데
       // 목록 안으로 내려가면서 헤더가 통째로 비었다 — 점 하나와 종만 남아 고장처럼 보인다.
-      chatNavTitle.textContent = session ? (session.title || "세션")
-                                 : (selectedProjectId ? projectLabelOf(selectedProjectId) : "마리나");
-      renderRoomChats();
+      if (session) {
+        renderNavTrigger(session);
+      } else {
+        // 방 목록에서도 헤더에 **뭔가는 있어야 한다.** 예전엔 프로젝트 칩이 헤더에 있었는데
+        // 목록 안으로 내려가면서 헤더가 통째로 비었다 — 점 하나와 종만 남아 고장처럼 보인다.
+        closeNav();
+        chatNavTitle.textContent = selectedProjectId ? projectLabelOf(selectedProjectId) : "마리나";
+      }
+      renderNavDrop();
       renderAgentUsage(session);
       restoreDraft();
       renderTurns(session);
@@ -6796,33 +6909,83 @@ _MOBILE_HTML = r"""<!doctype html>
     }
     // ROOM_SIBLING_TABS_END
 
-    // 방 안 대화 줄을 그린다. 여기서 고르는 것은 **탭을 늘리지 않는다** — 전역 탭 줄은
-    // 형이 직접 연 것만 남는 자리다(방 대화를 거기 다 얹었더니 8개 상한에 밀려 정작 그 방
-    // 대화가 사라졌다).
-    function renderRoomChats() {
-      const session = selectedSession();
-      const room = session ? roomByRoot(String(session.root || "")) : null;
-      const keys = roomSiblingKeys(room);
-      if (!room || keys.length < 2) { if (roomChatsEl.innerHTML) roomChatsEl.innerHTML = ""; return; }
-      const tabs = (room.tabs || []).filter(tab => tab && !tab.hidden && !tab.stale);
-      const html = tabs.map(tab => {
-        const key = `agent:${tab.source}:${tab.sid}:${room.root}`;
-        const active = key === selectedSessionKey;
-        const meta = agentStatusMeta(tab.status);
-        return `<button class="roomChat${active ? " active" : ""}" type="button" role="tab"`
-          + ` aria-selected="${active}" data-room-chat="${esc(key)}">`
-          + `<i class="wt-dot ${meta ? meta.dot : "stop"}" aria-hidden="true"></i>`
-          + `<span class="roomChatLabel">${esc(String(tab.title || tab.sid || "대화").slice(0, 22))}</span></button>`;
-      }).join("");
-      if (roomChatsEl.innerHTML !== html) roomChatsEl.innerHTML = html;
-      const activeEl = roomChatsEl.querySelector(".roomChat.active");
-      if (activeEl && activeEl.scrollIntoView) activeEl.scrollIntoView({block: "nearest", inline: "nearest"});
+    // NAV_DROPDOWN_START  (테스트가 이 블록을 vm 에 싣는다)
+    // 상단 드롭다운 — "다른 대화로 가는 길"을 하나로 접는다(스펙 §2).
+    //
+    // 접으면서 **잃는 것이 없어야** 한다. 예전 칩줄은 눌러보지 않아도 상태 dot 이 보였는데,
+    // 접으면 그게 사라진다. 그래서 트리거가 요약 배지를 진다 — 그게 보전분이다.
+
+    // 가장 센 상태 하나 + 개수. 우선순위는 방 상태와 **같은 어휘**다(문제 > 응답필요 > 작업중) —
+    // 한쪽만 고치면 같은 것을 두 이름으로 부르게 된다.
+    const NAV_BADGE = [
+      {canon: ["failed"],             dot: "bad",  label: "문제"},
+      {canon: ["blocked", "waiting"], dot: "ask",  label: "응답필요"},
+      {canon: ["working"],            dot: "boot", label: "작업중"},
+    ];
+    function navBadge(items) {
+      for (const 급 of NAV_BADGE) {
+        const 수 = (items || []).filter(x => 급.canon.includes(String((x || {}).status || ""))).length;
+        if (수) return {dot: 급.dot, label: 급.label, count: 수};
+      }
+      return null;
     }
-    roomChatsEl.addEventListener("click", event => {
-      const hit = event.target.closest && event.target.closest("[data-room-chat]");
-      if (!hit) return;
-      chooseSession(hit.getAttribute("data-room-chat"));
-    });
+
+    // 방 이름과 대화 제목이 같으면 하나로 접는다 — 둘 다 "첫 사용자 메시지"에서 나와 거의 같은
+    // 문자열이 되는 일이 흔하다(카드가 이름을 세 번 반복하던 그 뿌리와 같다).
+    function navTriggerLabel(roomName, chatTitle) {
+      const 방 = String(roomName || "").trim(), 대화 = String(chatTitle || "").trim();
+      if (!방) return 대화;
+      if (!대화 || 방 === 대화) return 방;
+      return `${방} · ${대화}`;
+    }
+
+    // 최근 대화 = **내가 마지막으로 연 순서**(브라우저 탭·앱 전환기와 같다). 서버 활동순이
+    // 아니다 — 활동순이면 내가 안 건드린 게 위로 튀어오른다.
+    //
+    // 다만 **응답필요는 상한 밖이어도 끌어올린다.** 물어봐 놓고 기다리는 대화를 놓치면 안 된다.
+    // 자리는 가장 오래 안 본 것이 낸다. 단 절반까지만 — 급한 게 많다고 목록을 통째로 갈아치우면
+    // "최근순"이라는 뜻 자체가 사라진다.
+    function navRecent(entries, limit) {
+      const 전부 = (entries || []).slice();
+      const 앞 = 전부.slice(0, limit);
+      const 급함 = (x) => ["blocked", "waiting"].includes(String((x || {}).status || ""));
+      const 밖의급한것 = 전부.slice(limit).filter(급함);
+      let 바꿀수있는만큼 = Math.max(0, Math.floor(limit / 2));
+      for (const 항목 of 밖의급한것) {
+        if (!바꿀수있는만큼) break;
+        const 내줄자리 = 앞.map((x, i) => [x, i]).reverse().find(([x]) => !급함(x));
+        if (!내줄자리) break;
+        앞[내줄자리[1]] = 항목;
+        바꿀수있는만큼 -= 1;
+      }
+      return 앞;
+    }
+
+    function navRow(attr, id, title, note, status, current) {
+      const meta = agentStatusMeta(status);
+      return `<button class="navRow${current ? " current" : ""}" type="button" ${attr}="${esc(id)}">`
+        + `<i class="wt-dot ${meta ? meta.dot : "stop"}" aria-hidden="true"></i>`
+        + `<span class="navRowLabel">${esc(String(title || "대화"))}</span>`
+        + (note ? `<span class="navRowNote">${esc(note)}</span>` : "")
+        + `</button>`;
+    }
+
+    // 구역이 갈려 있어야 **누르기 전에 결과를 안다** — 대화는 전환, 작업자는 패널이다.
+    // 성격이 다른 것을 한 목록에 섞으면 같은 제스처가 다른 일을 한다.
+    function renderNavSections(ctx) {
+      const 구역 = (제목, html) => html ? `<div class="navSection"><div class="navSectionTitle">${제목}</div>${html}</div>` : "";
+      const 최근 = (ctx.recent || []).map(item =>
+        navRow("data-nav-chat", item.key, item.title, item.room && item.room !== item.title ? item.room : "",
+               item.status, item.key === ctx.currentKey)).join("");
+      const 방대화 = (ctx.roomTabs || []).map(item =>
+        navRow("data-nav-chat", item.key, item.title, "", item.status, item.key === ctx.currentKey)).join("");
+      const 작업자 = (ctx.subagents || []).map(item =>
+        navRow("data-nav-agent", item.id, item.title, "", item.status, false)).join("");
+      return 구역("최근 대화", 최근) + 구역("이 방의 대화", 방대화) + 구역("이 대화의 작업자", 작업자);
+    }
+    // NAV_DROPDOWN_END
+
+    // (방 안 대화 줄은 상단 드롭다운으로 접혔다 — NAV_DROPDOWN 블록. 스펙 §2)
 
     // 방 목록 다시 그리기 — 폴·검색·필터가 모두 이 함수를 쓴다(규칙이 갈라지면 안 된다).
     // force = 형이 직접 시킨 것(펼치기·접기·삭제 뒤 정리). 폴은 force 없이 부른다.

@@ -61,11 +61,12 @@ from marina_mobile import render_mobile_html
 
 html = render_mobile_html()
 # ④ 방 안 대화 줄이 화면에 있고, 대화 화면을 그릴 때 같이 그린다.
-assert 'id="roomChats"' in html, "방 안 대화 줄이 없다"
-assert "renderRoomChats();" in html, "대화 화면을 그릴 때 방 대화 줄을 안 그린다"
+# 방 안 대화 줄은 상단 드롭다운의 '이 방의 대화' 구역으로 접혔다(2026-09-09, 스펙 §2).
+assert 'id="navDrop"' in html, "이 방의 대화를 고를 길이 없다"
+assert "renderNavDrop();" in html, "대화 화면을 그릴 때 드롭다운을 안 그린다"
 
-# ⑤ 그 줄은 **지금 방의 대화만** 담는다 — 전역 탭(openTabs)이 아니라 room.tabs 를 읽어야 한다.
-그리기 = html[html.find("function renderRoomChats"):][:1400]
+# ⑤ 그 구역은 **지금 방의 대화만** 담는다 — 전역 탭(openTabs)이 아니라 room.tabs 를 읽어야 한다.
+그리기 = html[html.find("function navEntries"):][:1600]
 assert "room.tabs" in 그리기 and "openTabs" not in 그리기, f"전역 탭을 읽고 있다: {그리기[:300]}"
 
 # ⑥ 방을 여는 길들이 전역 탭 줄을 오염시키지 않는다 — 8개 상한에 밀려 그 방 대화가 사라졌다.

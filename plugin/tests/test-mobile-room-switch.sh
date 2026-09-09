@@ -22,7 +22,11 @@ html = render_mobile_html()
 
 # ① 전역 탭 줄은 없다 — 흔적(마크업·CSS·렌더러)까지 남기지 않는다.
 assert "sessionTab" not in html, "전역 세션 탭 줄이 아직 남아 있다"
-assert 'id="roomChats"' in html, "방 안 대화 줄은 남아 있어야 한다"
+# 방 안 대화 줄은 **상단 드롭다운으로 접혔다**(2026-09-09, 스펙 §2) — 헤더가 두 줄에서 한 줄이
+# 됐다. 의도는 그대로다: 이 방의 다른 대화로 가는 길이 대화 화면에 있어야 한다.
+assert 'id="navDrop"' in html, "이 방의 다른 대화로 갈 길이 사라졌다"
+assert 'id="roomChats"' not in html, "옛 칩줄이 남아 있다 — 줄이 다시 두 개가 된다"
+assert "roomChatsEl" not in html, "죽은 엘리먼트 참조가 남아 스크립트가 초기화에서 죽는다"
 
 # ② 서랍이 열리면 지금 방을 표시하고 그 자리로 간다.
 열기 = html[html.find("function openDrawer"):][:700]
