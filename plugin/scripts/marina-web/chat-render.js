@@ -370,7 +370,33 @@
       }).join("");
       return cells ? `<div class="${className || "turnAttachments"}">${cells}</div>` : "";
     }
+    // CHAIN_ITEM_START
+    // 역할 방 묶음의 흐름(스펙 7.2) — 형의 말도 에이전트 답도 아니다. 무슨 일이 도는지만 알린다.
+    const CHAIN_END_LABEL = {
+      "clean": "리뷰 끝", "max-rounds": "리뷰 끝 · 상한 도달", "stopped": "리뷰 멈춤",
+      "wait-timeout": "리뷰 끝 · 커밋 없이 30분", "no-result": "리뷰 끝 · 결과를 못 받음",
+      "implementer-gone": "리뷰 끝 · 구현 대화가 꺼짐",
+    };
+    function renderChainItem(item) {
+      const id = esc(String(item.chainId || ""));
+      if (item.event === "end") {
+        const held = Array.isArray(item.held) ? item.held : [];
+        const label = CHAIN_END_LABEL[item.reason] || "리뷰 끝";
+        const count = held.length ? ` · <span class="held">보류 ${held.length}</span>` : "";
+        const list = held.length ? `<ul>${held.map(h => `<li class="held">${esc(String(h))}</li>`).join("")}</ul>` : "";
+        return `<details class="chainDone${item.reason === "stopped" ? " stopped" : ""}" data-chain-id="${id}"${held.length ? " open" : ""}>`
+          + `<summary>✓ ${esc(label)} · ${esc(String(item.round || 0))}바퀴 · 반영 ${esc(String(item.applied || 0))}${count}</summary>${list}</details>`;
+      }
+      const shown = item.model ? (typeof host.displayModel === "function" ? host.displayModel(item.model) : item.model) : "";
+      const model = shown ? `(${esc(String(shown))})` : "";
+      const verb = Number(item.round) > 1 ? "재리뷰" : "리뷰 요청";
+      const max = item.unlimited ? "∞" : esc(String(item.maxRounds || ""));
+      return `<div class="chainLine" data-chain-id="${id}">🔁 ${verb} · ${esc(String(item.role || "역할"))}${model} `
+        + `<span class="n">${esc(String(item.round || 1))}/${max}</span></div>`;
+    }
+    // CHAIN_ITEM_END
     function renderTimelineMessage(item) {
+      if (item && item.kind === "chain") return renderChainItem(item);
       if (item && item.kind === "question") return renderAnsweredQuestion(item);
       const text = String(item.text || "");
       const role = item.role === "user" ? "user" : item.role === "output" ? "output"
@@ -810,7 +836,7 @@
     pendingDeliveryLabel, renderThinking, runtimeLabel, mergeHistoryTurns, timelineFromTurns,
     mergeTimelineItems, exchangeSections, exchangeRuns, exchangeRuntime, renderTurnMeta,
     renderLiveAction, extractAttachments, renderTurnAttachments, renderTimelineImages,
-    renderTimelineMessage, timelineDetailAttrs, activityItemKey, activityItemFingerprint,
+    renderChainItem, renderTimelineMessage, timelineDetailAttrs, activityItemKey, activityItemFingerprint,
     activityGroupSummary, progressLine, renderActivityItem, renderActivityGroup, reconcileActivityList,
     renderTimelineSequence, questionsFromActivity, pendingQuestionActivity,
     questionFallbackText, renderQuestionCard, renderAnsweredQuestion, renderConversationSequence, pendingKeyPart,

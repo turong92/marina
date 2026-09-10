@@ -3121,6 +3121,18 @@ _MOBILE_HTML = r"""<!doctype html>
     .conversationSequence { display: flex; align-self: stretch; flex-direction: column; gap: 8px; }
     .turn { align-self: flex-start; max-width: 88%; padding: 9px 11px; border-radius: 8px; background: #eef2f7; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
     .turn.user { align-self: flex-end; background: #dcecff; }
+    /* 역할 방 묶음 흐름(스펙 7.2) — 가운데 점선 알약·요약 카드. 말풍선이 아니다. */
+    .chainLine { align-self: center; display: inline-flex; align-items: center; gap: 6px; padding: 5px 11px;
+                 border: 1px dashed #b9a6e8; border-radius: 999px; background: #faf7ff; color: #5b3fb0;
+                 font-size: 11.5px; font-weight: 700; }
+    .chainLine .n { font-variant-numeric: tabular-nums; opacity: .8; }
+    .chainDone { align-self: stretch; border: 1px solid #cfe3d5; background: #f3faf5; border-radius: 10px;
+                 padding: 9px 11px; font-size: 12px; }
+    .chainDone.stopped { border-color: #e5d2d2; background: #fbf5f5; }
+    .chainDone summary { cursor: pointer; font-weight: 800; color: #1f6b3a; }
+    .chainDone.stopped summary { color: #8a3b3b; }
+    .chainDone ul { margin: 7px 0 0; padding-left: 16px; line-height: 1.55; }
+    .chainDone .held { color: #8a5a00; font-weight: 700; }
     /* 다른 Claude 세션이 보낸 메시지 — 형의 말(오른쪽 파랑)도, 에이전트 답(왼쪽 회색)도 아니다.
        왼쪽에 두되 점선 테두리와 보라 기운으로 '밖에서 들어온 말'임을 먼저 보이게 한다. */
     .turn.peer { background: #f5f0ff; border: 1px dashed #b9a6e8; }
@@ -3529,6 +3541,10 @@ _MOBILE_HTML = r"""<!doctype html>
       .turn { background: #202838; }
       .turn.user { background: #182f4f; }
       .turn.peer { background: #231d36; border-color: #4d3f7a; }
+      .chainLine { background: #1d1830; border-color: #4d3f7a; color: #c9b8f5; }
+      .chainDone { background: #14231a; border-color: #2c4a36; }
+      .chainDone summary { color: #8fd3a4; }
+      .chainDone .held { color: #e0b35a; }
       .peerFrom { color: #b7a3f0; }
       .turn.output { background: #080c12; }
       .turn a, .subagent-turn a { color: #78aaff; }

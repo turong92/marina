@@ -824,6 +824,18 @@ class Handler(BaseHTTPRequestHandler):
                 before = int(raw_before) if raw_before else None
                 payload = agent_transcript(root, query.get("source", [""])[0],
                                            query.get("sid", [""])[0], before=before, limit=40)
+                # 역할 방 묶음 흐름 줄 — 사건은 트랜스크립트에 없어 오프셋으로 끼운다(스펙 7.1). 실패해도 대화는 보인다.
+                try:
+                    from marina_chains import list_chains, merge_chain_items
+                    src_q, sid_q = query.get("source", [""])[0], query.get("sid", [""])[0]
+                    mine = [c for c in list_chains()
+                            if (c.get("implementer") or {}).get("source") == src_q
+                            and (c.get("implementer") or {}).get("sid") == sid_q]
+                    if mine:
+                        payload["timeline"] = merge_chain_items(payload.get("timeline") or [], mine,
+                                                                is_latest_page=before is None)
+                except Exception:
+                    pass
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return
