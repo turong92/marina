@@ -586,8 +586,14 @@
     }
     function pendingQuestionActivity(sections) {
       const pool = [...(sections.questions || []), ...(sections.activities || [])];
+      // **끝난 질문은 되살리지 않는다.** completed 만 빼던 시절, 끊긴 질문(status=failed —
+      // "[Request interrupted by user for tool use]")이 열린 질문으로 남았다. 폰에서 답을 보내면 서버가
+      // 세션을 이어받으며 원래 질문을 끊는데, 그 순간 대화 안 폴백 카드가 선택이 비워진 채
+      // "보내기 (0/4)"로 다시 떴다 — 이미 답한 질문을(형 2026-09-10, ovation 인수인계).
+      // 아래 답한-카드(renderAnsweredQuestion)가 이미 failed 를 '끝남'으로 본다. 규칙을 하나로 맞춘다.
       return pool.find(item =>
-        item.name === "AskUserQuestion" && item.status !== "completed" && questionsFromActivity(item));
+        item.name === "AskUserQuestion" && item.status !== "completed" && item.status !== "failed"
+        && questionsFromActivity(item));
     }
     // 구조화된 카드(헤더/질문문/옵션 버튼)를 만들 재료가 하나도 없을 때, 원문에서 뽑아낼 수 있는
     // 텍스트(질문/옵션 라벨 등)를 최대한 찾아 평문으로라도 보여주기 위한 헬퍼.
