@@ -485,7 +485,9 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
         #
         # prompt attach(모바일 전송)는 **매 전송이 새 턴**이라 재사용하지 않는다 — CLI 의 prompt
         # 인자로 시작하므로 이미 돌고 있는 TUI 에 붙일 수가 없다. 그래서 키를 비운다(의도된 동작).
-        key = "" if (agent_role_argv or agent_prompt or not agent_sid) else f"{cwd}::agent:{agent_source}:{agent_sid}"
+        key = "" if (agent_prompt or not agent_sid) else f"{cwd}::agent:{agent_source}:{agent_sid}"
+        if agent_role_argv:
+            key = ""    # 역할 방은 늘 새로 뜬다 — 같은 sid 재사용 대상이 아니다
         agent = {"source": agent_source, "sid": agent_sid, "launch": launch,
                  "profile": 프로필, "lean": bool(가볍게)}
         if agent_role:

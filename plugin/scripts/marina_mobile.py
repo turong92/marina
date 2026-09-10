@@ -907,6 +907,28 @@ def mobile_set_hidden(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "keys": keys[:500]}
 
 
+def _decorate_room_chain(room: dict[str, Any], open_chains: list[dict[str, Any]], reviewer_on: bool,
+                         role_sid: Callable[[dict[str, Any]], str]) -> None:
+    """역할 방 탭은 딸린 줄로(roleOf), 구현 방에 열린 묶음이 있으면 방 배지로(스펙 7.2).
+
+    역할 방 sid 는 결과가 오기 전엔 장부에 없다 — role_sid 가 term 기록으로 찾아 준다. 못 찾으면
+    리뷰 도는 내내 리뷰어가 보통 대화로 그려지고 "대화 N개"에 섞인다."""
+    room["chain"] = None
+    role_of = {}
+    for c in open_chains:
+        sid = role_sid(c)
+        if sid:
+            role_of[sid] = {"chainId": c["id"], "role": c.get("role")}
+    for tab in room.get("tabs") or []:
+        tab["chainEnabled"] = reviewer_on and tab.get("sid") not in role_of
+        if tab.get("sid") in role_of:
+            tab["roleOf"] = role_of[tab["sid"]]
+        for c in open_chains:
+            if (c.get("implementer") or {}).get("sid") == tab.get("sid") and room["chain"] is None:
+                room["chain"] = {"state": c["state"], "round": c["round"],
+                                 "maxRounds": c["maxRounds"], "unlimited": bool(c.get("unlimited"))}
+
+
 def _session_chain_summary(source: str, sid: str, now: float | None = None) -> dict[str, Any] | None:
     """폰에 보일 묶음 요약 — 열린 묶음, 없으면 끝난 지 10분 안의 것(요약 카드용)."""
     try:
@@ -1072,19 +1094,12 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                         finalize_room(room)     # 탭을 건드렸으면 부른다(값 셋이 같이 움직인다)
                 # 역할 방 묶음(스펙 7.2) — 역할 방 탭은 딸린 줄로, 방에 열린 묶음이 있으면 배지로.
                 try:
+                    from marina_chain_runtime import role_room_sid
                     from marina_chains import TERMINAL, list_chains
                     from marina_registry import project_for
                     열린 = [c for c in list_chains() if c.get("state") not in TERMINAL]
                     역할켬 = isinstance(((project_for(Path(room["root"])) or {}).get("roles") or {}).get("reviewer"), dict)
-                    room["chain"] = None
-                    for tab in room["tabs"]:
-                        tab["chainEnabled"] = 역할켬
-                        for c in 열린:
-                            if (c.get("roleRoom") or {}).get("sid") == tab.get("sid"):
-                                tab["roleOf"] = {"chainId": c["id"], "role": c.get("role")}
-                            if (c.get("implementer") or {}).get("sid") == tab.get("sid") and room["chain"] is None:
-                                room["chain"] = {"state": c["state"], "round": c["round"],
-                                                 "maxRounds": c["maxRounds"], "unlimited": bool(c.get("unlimited"))}
+                    _decorate_room_chain(room, 열린, 역할켬, role_room_sid)
                 except Exception:
                     pass
                 rooms.append(room)

@@ -70,3 +70,26 @@ strip = strip[:strip.index("\n    });\n")]
 assert 'classList.contains("on")' in strip and "on})" in strip, "끝까지가 켜기만 한다(토글 아님)"
 print("PASS: 방 메뉴 처리기·끝까지 토글")
 PY
+
+# 방 조립(서버) — 결과 오기 전 장부엔 역할 방 sid 가 없다. term 기록(tid)으로 찾아야 리뷰어가 딸린 줄이 된다.
+PYTHONPATH="$SCR" python3 - <<'PY'
+import marina_mobile as MM
+import marina_chain_runtime as RT
+import marina_term
+chains = [{"id": "c1", "role": "reviewer", "state": "reviewing", "round": 1, "maxRounds": 2, "unlimited": False,
+           "implementer": {"sid": "impl"}, "roleRoom": {"tid": "t1", "model": "m"}}]
+marina_term.term_list = lambda: {"sessions": [{"tid": "t0", "agent": {"sid": "x"}}, {"tid": "t1", "agent": {"sid": "rsid"}}]}
+assert RT.role_room_sid(chains[0]) == "rsid", "tid 로 역할 방 sid 를 못 찾는다"
+assert RT.role_room_sid({"roleRoom": {"sid": "s9", "tid": "t1"}}) == "s9"
+assert RT.role_room_sid({"roleRoom": {}}) == ""
+room = {"tabs": [{"sid": "impl"}, {"sid": "rsid"}, {"sid": "other"}]}
+MM._decorate_room_chain(room, chains, True, RT.role_room_sid)
+assert room["tabs"][1]["roleOf"] == {"chainId": "c1", "role": "reviewer"}, room
+assert room["tabs"][1]["chainEnabled"] is False, "리뷰어 방에 리뷰 보내기가 뜬다"
+assert room["tabs"][0]["chainEnabled"] is True and "roleOf" not in room["tabs"][0]
+assert room["chain"] == {"state": "reviewing", "round": 1, "maxRounds": 2, "unlimited": False}
+off = {"tabs": [{"sid": "impl"}]}
+MM._decorate_room_chain(off, [], False, RT.role_room_sid)
+assert off["chain"] is None and off["tabs"][0]["chainEnabled"] is False
+print("PASS: 방 조립 — 역할 방 sid 를 term 기록으로")
+PY

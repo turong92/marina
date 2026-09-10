@@ -349,3 +349,20 @@ def verify_caller(pid: int, sid: str, cwd: str, sessions_dir: Path | None = None
     if not _belongs(root, "claude", sid):
         return None
     return {"root": root, "sid": sid}
+
+
+def role_room_sid(chain: dict[str, Any]) -> str:
+    """역할 방의 sid. 결과가 오기 전엔 장부에 없어서(저장은 사건 처리 때) term 기록의 tid 로 찾는다 — 읽기만."""
+    room = chain.get("roleRoom") or {}
+    if room.get("sid"):
+        return str(room["sid"])
+    if not room.get("tid"):
+        return ""
+    try:
+        from marina_term import term_list
+        for item in term_list().get("sessions", []):
+            if item.get("tid") == room["tid"]:
+                return str((item.get("agent") or {}).get("sid") or "")
+    except Exception:
+        pass
+    return ""
