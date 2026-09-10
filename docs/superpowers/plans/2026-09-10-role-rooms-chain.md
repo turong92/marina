@@ -1768,12 +1768,24 @@ def _belongs(root: Path, source: str, sid: str) -> bool:
     return bool(agent_belongs_to_root(root, source, sid))
 
 
+def _proc_start_utc(pid: int) -> str:
+    """Claude 세션 파일의 procStart 는 UTC asctime 이다. ps lstart 는 로컬 시각이라 TZ=UTC 로 맞춘다."""
+    import os
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], check=False, capture_output=True,
+                             text=True, timeout=1, env={**os.environ, "TZ": "UTC"})
+        return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+
+
 def verify_caller(pid: int, sid: str, cwd: str, sessions_dir: Path | None = None, pid_start=None) -> dict | None:
     """pid 의 세션 파일이 sid 와 맞고, procStart 가 지금 그 pid 와 맞고(재사용 방지), sid 가 cwd 의 워크트리에 속할 때만."""
     import subprocess
     sessions_dir = sessions_dir or (Path.home() / ".claude" / "sessions")
     if pid_start is None:
-        from marina_agent_procs import _pid_start as pid_start
+        pid_start = _proc_start_utc
     try:
         data = json.loads((sessions_dir / f"{int(pid)}.json").read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
@@ -2272,8 +2284,8 @@ def _session_chain_summary(source: str, sid: str, now: float | None = None) -> d
       const c = session && session.chain;
       if (!c || !["reviewing", "applying", "waiting"].includes(c.state)) return "";
       const 바퀴 = `${esc(String(c.round || 1))}/${c.unlimited ? "∞" : esc(String(c.maxRounds || ""))}바퀴`;
-      const 상태 = c.state === "reviewing" ? "리뷰 도는 중" : c.state === "applying" ? "반영 중" : "커밋 기다리는 중";
-      return `<span>🔁</span><span class="grow"><b>${상태}</b> · ${esc(String(c.role || "reviewer"))} · ${바퀴}</span>`
+      const 단계 = c.state === "applying" ? " · 반영 중" : c.state === "waiting" ? " · 커밋 기다리는 중" : "";
+      return `<span>🔁</span><span class="grow"><b>리뷰 도는 중</b> · ${esc(String(c.role || "reviewer"))} · ${바퀴}${단계}</span>`
         + `<button class="chipBtn${c.unlimited ? " on" : ""}" type="button" data-chain-action="unlimited">끝까지</button>`
         + `<button class="chipBtn stop" type="button" data-chain-action="stop">멈추기</button>`;
     }

@@ -907,6 +907,27 @@ def mobile_set_hidden(body: dict[str, Any]) -> dict[str, Any]:
     return {"ok": True, "keys": keys[:500]}
 
 
+def _session_chain_summary(source: str, sid: str, now: float | None = None) -> dict[str, Any] | None:
+    """폰에 보일 묶음 요약 — 열린 묶음, 없으면 끝난 지 10분 안의 것(요약 카드용)."""
+    try:
+        from marina_chains import TERMINAL, last_chain_for, open_chain_for
+        chain = open_chain_for(source, sid, "reviewer")
+        if chain is None:
+            last = last_chain_for(source, sid, "reviewer")
+            now = time.time() if now is None else now
+            if last and last.get("state") in TERMINAL and now - float(last.get("endedAt") or 0) <= 600:
+                chain = last
+        if chain is None:
+            return None
+        return {"id": chain["id"], "role": chain.get("role"), "state": chain.get("state"),
+                "round": chain.get("round"), "maxRounds": chain.get("maxRounds"),
+                "unlimited": bool(chain.get("unlimited")), "heldCount": len(chain.get("held") or []),
+                "roleModel": str((chain.get("roleRoom") or {}).get("model") or ""),
+                "endedReason": chain.get("endedReason")}
+    except Exception:
+        return None
+
+
 def mobile_watch_state(refresh: bool = False) -> dict[str, Any]:
     """변화 감지 전용 상태 — **git 을 부르지 않는다.**
 
@@ -1049,6 +1070,23 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                             tab["primary"] = False
                         room["tabs"] = room["tabs"] + extra
                         finalize_room(room)     # 탭을 건드렸으면 부른다(값 셋이 같이 움직인다)
+                # 역할 방 묶음(스펙 7.2) — 역할 방 탭은 딸린 줄로, 방에 열린 묶음이 있으면 배지로.
+                try:
+                    from marina_chains import TERMINAL, list_chains
+                    from marina_registry import project_for
+                    열린 = [c for c in list_chains() if c.get("state") not in TERMINAL]
+                    역할켬 = isinstance(((project_for(Path(room["root"])) or {}).get("roles") or {}).get("reviewer"), dict)
+                    room["chain"] = None
+                    for tab in room["tabs"]:
+                        tab["chainEnabled"] = 역할켬
+                        for c in 열린:
+                            if (c.get("roleRoom") or {}).get("sid") == tab.get("sid"):
+                                tab["roleOf"] = {"chainId": c["id"], "role": c.get("role")}
+                            if (c.get("implementer") or {}).get("sid") == tab.get("sid") and room["chain"] is None:
+                                room["chain"] = {"state": c["state"], "round": c["round"],
+                                                 "maxRounds": c["maxRounds"], "unlimited": bool(c.get("unlimited"))}
+                except Exception:
+                    pass
                 rooms.append(room)
             except Exception as exc:
                 # 조용히 넘기면 방이 **영원히 안 보이는데 이유를 알 수 없다**(오타 하나로 전
@@ -1108,6 +1146,7 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                         "pending": mobile_pending_session_settings(root, source, sid),
                     },
                     "pendingQuestion": question,
+                    "chain": _session_chain_summary(source, sid),
                     # 화면이 "API error · 재시도 중"이라고 말하면 그대로 올린다. 안 올리면
                     # 폰에는 "생각 중"만 보여서, 서버가 밀리는 동안 형은 마리나가 먹통인 줄 안다
                     # (실측 2026-08-24: 529 Overloaded 로 10회 재시도 중이었다).
@@ -3133,6 +3172,16 @@ _MOBILE_HTML = r"""<!doctype html>
     .chainDone.stopped summary { color: #8a3b3b; }
     .chainDone ul { margin: 7px 0 0; padding-left: 16px; line-height: 1.55; }
     .chainDone .held { color: #8a5a00; font-weight: 700; }
+    .chainStrip { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 8px 10px; border-radius: 10px;
+                  background: #efe9ff; border: 1px solid #d6c9f5; font-size: 12px; color: #43308a; }
+    .chainStrip .grow { flex: 1; min-width: 0; }
+    .chipBtn { min-height: 0; padding: 4px 9px; border-radius: 999px; border: 1px solid #b9a6e8; background: #fff; color: #43308a; font-size: 11.5px; font-weight: 700; }
+    .chipBtn.on { background: #43308a; color: #fff; border-color: #43308a; }
+    .chipBtn.stop { border-color: #e3b3b3; color: #a33; }
+    .roomChainBadge { flex: 0 0 auto; padding: 2px 7px; border-radius: 999px; background: #efe9ff; color: #43308a; font-size: 11px; font-weight: 800; }
+    .roleRow { display: flex; align-items: center; gap: 8px; padding: 8px 11px; border: 1px dashed #cdbff0; border-radius: 9px; background: #faf8ff; color: #5b4a8f; font-size: 12px; }
+    .roleRow .grow { flex: 1; min-width: 0; } .roleRow .st { font-size: 11px; opacity: .75; }
+    .roomMenu button.hot { background: #efe9ff; color: #43308a; font-weight: 800; }
     /* 다른 Claude 세션이 보낸 메시지 — 형의 말(오른쪽 파랑)도, 에이전트 답(왼쪽 회색)도 아니다.
        왼쪽에 두되 점선 테두리와 보라 기운으로 '밖에서 들어온 말'임을 먼저 보이게 한다. */
     .turn.peer { background: #f5f0ff; border: 1px dashed #b9a6e8; }
@@ -3545,6 +3594,10 @@ _MOBILE_HTML = r"""<!doctype html>
       .chainDone { background: #14231a; border-color: #2c4a36; }
       .chainDone summary { color: #8fd3a4; }
       .chainDone .held { color: #e0b35a; }
+      .chainStrip { background: #221b38; border-color: #4d3f7a; color: #d7c9ff; }
+      .chipBtn { background: #171d27; color: #d7c9ff; border-color: #4d3f7a; }
+      .roomChainBadge { background: #2a2145; color: #d7c9ff; }
+      .roleRow { background: #1d1830; border-color: #4d3f7a; color: #c9b8f5; }
       .peerFrom { color: #b7a3f0; }
       .turn.output { background: #080c12; }
       .turn a, .subagent-turn a { color: #78aaff; }
@@ -3655,6 +3708,7 @@ _MOBILE_HTML = r"""<!doctype html>
     </main>
     <div class="chatComposer" id="chatComposer" style="display:none">
       <div class="cliDialog" id="cliDialog"></div>
+      <div class="chainStrip" id="chainStrip" hidden></div>
       <div class="liveQuestion" id="liveQuestion"></div>
       <div class="sessionControls">
         <button class="sessionControlBtn" id="settingsBtn" type="button">모델 · 기본값</button>
@@ -3821,6 +3875,25 @@ _MOBILE_HTML = r"""<!doctype html>
     updateBanner.onclick = () => location.reload();
     const cliDialogEl = document.getElementById("cliDialog");
     const liveQuestionEl = document.getElementById("liveQuestion");
+    const chainStripEl = document.getElementById("chainStrip");
+    // 고정 줄의 끝까지/멈추기 — 지금 보고 있는 대화의 묶음을 조작한다(스펙 7.2).
+    chainStripEl.addEventListener("click", async event => {
+      const b = event.target.closest && event.target.closest("[data-chain-action]");
+      if (!b) return;
+      const v = currentTargetValue();
+      if (!v.startsWith("agent:")) return;
+      const [, source, sid] = v.split(":");
+      const action = b.getAttribute("data-chain-action");
+      try {
+        const r = await fetch(`/mobile/api/chain/${action}`, {method: "POST", headers: headers(true),
+          body: JSON.stringify({root: sessionRoot(), source, sid, on: true})});
+        if (!r.ok) throw new Error(await responseError(r));
+        showToast(action === "stop" ? "리뷰를 멈췄어요" : "끝까지 돌려요");
+        load({quiet: true}).catch(() => {});
+      } catch (error) {
+        showToast(`리뷰 조작 실패 · ${String(error)}`);
+      }
+    });
     // 라이브 질문 카드의 로컬 상태. **카드를 낙관적으로 지우지 않는다** — 예전엔 탭하자마자 innerHTML 을
     // 비우고 4초간 숨겼는데, 응답이 안 먹으면 카드가 그냥 사라져 "눌렀는데 아무 일도 안 남"으로 보였고
     // 되돌릴 방법도 없었다. 이제 카드는 서버 진실(pendingQuestion 소멸)로만 사라진다.
@@ -4785,7 +4858,8 @@ _MOBILE_HTML = r"""<!doctype html>
         return 접힘 !== 0 ? 접힘 : (b.lastAt || 0) - (a.lastAt || 0);
       });
       return sorted.map(room => {
-        const tabs = room.tabs || [];
+        // 역할 방 탭은 대화가 아니다 — 수에 안 세고 딸린 줄로 그린다(스펙 7.2).
+                const tabs = (room.tabs || []).filter(tab => !tab.roleOf);
         // 이름이 같은 방이 실제로 있다(실측: 'ZZe2e' 두 개). 프로젝트를 안 고른 동안에는
         // 그게 유일한 구별 단서라 부제에 넣는다.
         const where = (!projectId && room.project ? " · " + room.project : "")
@@ -4808,6 +4882,9 @@ _MOBILE_HTML = r"""<!doctype html>
             + ` aria-expanded="${펼침 ? "true" : "false"}"`
             + ` aria-label="${펼침 ? "대화 접기" : "대화 보기"}">대화 ${tabs.length}개`
             + `<span class="chipCaret" aria-hidden="true">⌄</span></button>`;
+        const 묶음 = room.chain && ["reviewing", "applying", "waiting"].includes(room.chain.state)
+          ? `<span class="roomChainBadge">🔁 리뷰 ${esc(String(room.chain.round))}/${room.chain.unlimited ? "∞" : esc(String(room.chain.maxRounds))}</span>`
+          : "";
         const 손잡이 = room.archived
           ? `<button class="roomMore" type="button" data-room-unarchive="${esc(room.root)}" title="다시 꺼내기" aria-label="다시 꺼내기">↑</button>`
           : `<button class="roomMore" type="button" data-room-menu="${esc(room.root)}" aria-label="방 메뉴">⋯</button>`;
@@ -4825,7 +4902,7 @@ _MOBILE_HTML = r"""<!doctype html>
                                                   : (room.shortName || room.name || ""))}</button>
               <span class="metaRow">
                 <span class="roomMeta">${esc(막힘 ? 막힘 : roomStatusLabel(status) + where)}</span>
-                ${배지}
+                ${배지}${묶음}
               </span>
             </span>
           </div>
@@ -4848,7 +4925,8 @@ _MOBILE_HTML = r"""<!doctype html>
     // 어색했다 — 하위 목록(대화)·작업(이름·접기·삭제)·생성(＋Claude)은 관습상 여는 자리가 서로
     // 다르다. 작업은 renderRoomMenu 의 팝오버로 갈라 나갔다.
     function renderRoomAccordion(room, sources) {
-      const tabs = room.tabs || [];
+      const tabs = (room.tabs || []).filter(tab => !tab.roleOf);
+      const 역할들 = (room.tabs || []).filter(tab => tab.roleOf);
       // **새 대화를 시작할 길**이 여기 있어야 한다. 예전엔 세션 목록 안에만 있어서, 방 목록이
       // 첫 화면이 된 순간 대화가 하나도 없는 방(실측 28개 중 14개)이 막다른 길이 됐다 —
       // "대화를 시작해 보세요"라고 말해놓고 수단이 없었다.
@@ -4893,13 +4971,15 @@ _MOBILE_HTML = r"""<!doctype html>
             + `<button class="roomMore roomTabMore" type="button" data-chat-menu="${esc(key)}" aria-label="대화 메뉴">⋯</button>`;
         return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
       }).join("");
-      return 시작줄 + 가름줄 + `<div class="roomTabs">${strip}</div>`;
+      const 딸린 = 역할들.map(tab => `<div class="roleRow"><span>↳ 🔍</span><span class="grow">${esc(tab.roleOf.role === "reviewer" ? "리뷰어" : tab.roleOf.role)} <span class="st">· 읽기 전용</span></span><span class="st">진행 중</span></div>`).join("");
+      return 시작줄 + 가름줄 + `<div class="roomTabs">${strip}${딸린}</div>`;
     }
 
     // 대화 작업 — 그 대화 줄의 ⋯ 자리에 뜬다. 방 메뉴와 **같은 껍데기**(roomMenu)를 쓴다:
     // 두 메뉴가 다르게 생기면 같은 화면에서 같은 제스처가 다른 물건처럼 보인다.
     function renderChatMenu(key, tab) {
       return `<div class="roomMenu" role="menu">
+        ${tab && tab.chainEnabled ? `<button type="button" role="menuitem" class="hot" data-chain-request="${esc(key)}">🔁 리뷰 보내기</button>` : ""}
         <button type="button" role="menuitem" data-harness="${esc(key)}">어떻게 떴나</button>
         <button type="button" role="menuitem" data-restart-chat="${esc(key)}">다시 시작</button>
         <button type="button" role="menuitem" data-close-chat="${esc(key)}">끄기</button>
@@ -4919,6 +4999,18 @@ _MOBILE_HTML = r"""<!doctype html>
       </div>`;
     }
     // ROOM_TABS_END
+    // CHAIN_STRIP_START  (테스트가 이 블록을 vm 에 싣는다)
+    // 입력창 위 고정 줄 — 대화를 올려봐도 사라지지 않아 언제든 끝까지/멈추기(스펙 7.2).
+    function renderChainStrip(session) {
+      const c = session && session.chain;
+      if (!c || !["reviewing", "applying", "waiting"].includes(c.state)) return "";
+      const 바퀴 = `${esc(String(c.round || 1))}/${c.unlimited ? "∞" : esc(String(c.maxRounds || ""))}바퀴`;
+      const 단계 = c.state === "applying" ? " · 반영 중" : c.state === "waiting" ? " · 커밋 기다리는 중" : "";
+      return `<span>🔁</span><span class="grow"><b>리뷰 도는 중</b> · ${esc(String(c.role || "reviewer"))} · ${바퀴}${단계}</span>`
+        + `<button class="chipBtn${c.unlimited ? " on" : ""}" type="button" data-chain-action="unlimited">끝까지</button>`
+        + `<button class="chipBtn stop" type="button" data-chain-action="stop">멈추기</button>`;
+    }
+    // CHAIN_STRIP_END
 
     function draftKey(sessionKey=selectedSessionKey) {
       return `marinaMobileDraft:${sessionKey || selectedRoot() || "new"}`;
@@ -6405,6 +6497,7 @@ _MOBILE_HTML = r"""<!doctype html>
       renderThinkingSlot(session, optimisticWorking, runningActivities());   // 대화 안에서도 같은 사실을 보여준다
       renderDoneSlot(session);
       renderLiveQuestion(session);
+      { const html = renderChainStrip(session); chainStripEl.hidden = !html; if (chainStripEl.innerHTML !== html) chainStripEl.innerHTML = html; }
     }
     function sourceOptions(session) {
       return (state.agentOptions || {})[sessionSource(session)] || {models: [], efforts: [], manualModel: true};
@@ -7648,12 +7741,13 @@ _MOBILE_HTML = r"""<!doctype html>
     });
     // 아코디언은 roomList 안, 팝오버는 listView 안 — 둘의 공통 조상에 한 번만 건다.
     listView.addEventListener("click", async event => {
-      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restart-chat],[data-restore],[data-harness]");
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restart-chat],[data-restore],[data-harness],[data-chain-request]");
       if (!target) return;
       roomBusy = true;
       try { await handleRoomAction(target); } finally { roomBusy = false; closeRoomMenu(); }
     });
     async function handleRoomAction(target) {
+      { const html = renderChainStrip(session); chainStripEl.hidden = !html; if (chainStripEl.innerHTML !== html) chainStripEl.innerHTML = html; }
       if (target.hasAttribute("data-room-close")) { closeRoom(); return; }
       if (target.hasAttribute("data-room-code")) {
         await sendReloginCode(target.getAttribute("data-room-code"));
