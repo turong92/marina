@@ -370,7 +370,9 @@ _CHAT_FLAGS = [
 
 def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "",
                 profile: str = "", lean: bool = False) -> list[str]:
-    cmd = ["claude"]
+    # 첫 프롬프트는 **claude 바로 뒤**. --tools/--allowedTools 는 뒤따르는 값을 모두 삼키는 가변 인자라,
+    # 끝에 붙이면 lean(모델·effort 없음)에서 프롬프트가 도구 이름으로 먹힌다(실측 argv 2026-09-10).
+    cmd = ["claude", prompt] if prompt else ["claude"]
     if profile == "chat":
         cmd += _CHAT_FLAGS
     if lean:
@@ -381,8 +383,6 @@ def _claude_cli(sid: str, prompt: str = "", model: str = "", effort: str = "",
         cmd += ["--effort", effort]
     if sid:                 # sid 없음 = 새 세션(직접 launch) — resume 이 아니다
         cmd += ["--resume", sid]
-    if prompt:
-        cmd.append(prompt)
     return cmd
 
 

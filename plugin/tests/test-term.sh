@@ -17,8 +17,11 @@ import marina_term as mt
 
 # Agent options are argv-only and source-aware. Values are validated before
 # fork/exec so mobile settings cannot become CLI flags or shell syntax.
+# 첫 프롬프트는 claude 바로 뒤(2026-09-10). --tools/--allowedTools 같은 가변 인자 플래그가 뒤따르는 값을 삼켜서,
+# 끝에 두면 lean(모델·effort 없음)에서 프롬프트가 도구 이름으로 먹혔다. CLI 는 `claude [options] [command] [prompt]`
+# 라 위치 인자를 앞에 둬도 같게 읽고, --resume [value] 는 뒤따르는 sid 를 그대로 받는다.
 assert mt._agent_cli("claude", "sid0001", "hello", "opus", "high") == [
-    "claude", "--model", "opus", "--effort", "high", "--resume", "sid0001", "hello",
+    "claude", "hello", "--model", "opus", "--effort", "high", "--resume", "sid0001",
 ]
 assert mt._agent_cli("codex", "sid0001", "hello", "gpt-5.6-codex", "xhigh") == [
     "codex", "resume", "--model", "gpt-5.6-codex", "-c", 'model_reasoning_effort="xhigh"', "sid0001", "hello",

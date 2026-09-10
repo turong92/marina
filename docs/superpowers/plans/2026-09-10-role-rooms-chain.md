@@ -51,6 +51,7 @@
 **Files:**
 - Modify: `plugin/scripts/marina_term.py` (`_claude_cli` ~371, `_codex_cli` ~389)
 - Test: `plugin/tests/test-agent-cli-prompt-first.sh` (Create)
+- Modify: `plugin/tests/test-term.sh:20` (옛 argv 순서를 박아둔 정확-모양 단정을 새 순서로 — 실행 중 발견)
 
 **Interfaces:**
 - Produces: `_agent_cli(source, sid, prompt, model, effort, profile, lean) -> list[str]` — claude 는 `["claude", prompt, *flags]`(prompt 있을 때). 시그니처 불변
