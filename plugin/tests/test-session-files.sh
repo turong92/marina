@@ -92,6 +92,32 @@ for bad in (str(outside), "../secret.txt", "sub/../../secret.txt", str(root / "e
     else:
         raise AssertionError(f"탈출 허용됨: {bad!r}")
 
+# ---------- ③-b 형이 폰에서 올린 사진 ----------
+# 에이전트가 형의 사진을 보려고 Read 하면 그 경로가 타임라인 activity 로 남고, 채팅에서 넘기는
+# 목록에 끼어 이 서빙을 탄다. 사진은 ~/.marina/mobile-uploads 에 있어 워크트리 밖이라 400 이었다
+# (2026-09-10 형: "넘기다보면 흑백"). 같은 바이트는 이미 /mobile/api/file 이 폰에 준다 — 여기서
+# 막아도 지키는 게 없고 형만 자기 사진을 못 본다. 대신 **업로드 폴더를 핑계로 한 탈출**은 막는다.
+uploads = Path(os.environ["MARINA_HOME"]) / "mobile-uploads"
+uploads.mkdir(parents=True, exist_ok=True)
+shot = uploads / "0baa1772-image.png"
+shot.write_bytes(b"\x89PNG\r\n\x1a\n" + b"y" * 40)
+try:
+    data, media = ms.agent_session_file_bytes(root, str(shot))
+except ValueError as exc:
+    raise AssertionError(f"형이 올린 사진을 거절한다 — 채팅에서 넘기면 '열 수 없어요'가 뜬다: {exc}")
+assert media == "image/png" and data.startswith(b"\x89PNG"), media
+os.symlink(outside, uploads / "escape.png")                       # 폴더 안 심링크 → 밖
+evil = Path(os.environ["MARINA_HOME"]) / "mobile-uploads-evil"     # 이름 앞부분만 같은 옆 폴더
+evil.mkdir(exist_ok=True)
+(evil / "x.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+for bad in (str(uploads / "escape.png"), str(evil / "x.png"), str(uploads / ".." / "mobile-uploads-evil" / "x.png")):
+    try:
+        ms.agent_session_file_bytes(root, bad)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError(f"업로드 폴더를 핑계로 탈출 허용됨: {bad!r}")
+
 assert ".svg" not in ms._SESSION_FILE_IMAGE_TYPES, "svg 는 스크립트를 품을 수 있어 이미지 취급 금지"
 assert ms.session_file_in_root(root, str(root / "sub")) == (root / "sub").resolve()
 assert ms.session_file_in_root(root, str(outside)) is None

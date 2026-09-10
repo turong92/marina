@@ -36,7 +36,7 @@ from marina_sessions import (
 )
 from marina_login import api_retry, extract_login_url, login_stage
 from marina_paths import write_meta
-from marina_state import MARINA_HOME, PORT
+from marina_state import MARINA_HOME, MOBILE_UPLOADS_DIR, PORT
 from marina_term import (_agent_cli, _project_lean, _project_profile,
                          term_await_redraw, term_input, term_kill, term_list,
                          term_open, term_output_mark, term_tail)
@@ -1995,7 +1995,7 @@ def _apply_live_codex_settings(tid: str, model: str, effort: str) -> bool:
     return True
 
 
-MOBILE_UPLOADS_DIR = MARINA_HOME / "mobile-uploads"
+# MOBILE_UPLOADS_DIR 은 marina_state 에 산다(session-file 서빙도 같은 폴더를 알아야 해서).
 
 
 def upload_usage() -> dict[str, int]:

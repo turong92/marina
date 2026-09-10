@@ -34,6 +34,9 @@ MARINA_ATTACH = CONTROL_SCRIPT.parent / "attach-detached-subrepos.sh"
 
 # 글로벌 프로젝트 레지스트리 — 한 데몬이 등록된 모든 프로젝트의 worktree 를 관리 (marina-standardization)
 MARINA_HOME = Path(os.environ.get("MARINA_HOME", str(Path.home() / ".marina")))
+# 폰에서 올린 첨부. 여기 두는 이유: 서빙 규칙이 둘(marina_mobile 의 /mobile/api/file,
+# marina_sessions 의 session-file)이고, 뒤엣것이 앞엣것을 import 하면 순환이다.
+MOBILE_UPLOADS_DIR = MARINA_HOME / "mobile-uploads"
 
 PROJECTS_FILE = MARINA_HOME / "projects.json"
 

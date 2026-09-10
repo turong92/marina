@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 import importlib.util as _ilu
 
-from marina_state import CODEX_HOME, HOST, LIFECYCLE_BUSY, PORT, _claude_agents_all_cache, _claude_agents_cache, _codex_agents_all_cache, _codex_agents_cache, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_du_cache, _worktree_info_cache, busy_key
+from marina_state import CODEX_HOME, HOST, LIFECYCLE_BUSY, MOBILE_UPLOADS_DIR, PORT, _claude_agents_all_cache, _claude_agents_cache, _codex_agents_all_cache, _codex_agents_cache, _codex_titles_cache, _env, _session_titles_cache, _status_cache, _total_mem_mb_cache, _worktree_du_cache, _worktree_info_cache, busy_key
 from marina_logtext import redact_text
 from marina_cache import cache_category_mb, compose_build_image_items, disk_usage_mb, docker_disk_summary
 from marina_registry import default_attach_of, discover_all_roots, discover_roots, is_source_checkout, project_for, project_label, root_source, subrepos_of
@@ -2795,6 +2795,22 @@ def _chat_room_files(root: Path, 이미: set[str]) -> list[dict[str, Any]]:
     return out
 
 
+def _mobile_upload_path(raw: str) -> Path | None:
+    """형이 폰에서 올린 파일인가 — **resolve 한 경로**가 업로드 폴더 안일 때만 준다.
+
+    에이전트가 형의 사진을 보려고 Read 하면 그 경로가 타임라인에 남고, 채팅에서 넘기는 목록에
+    끼어 이 서빙을 탄다. 워크트리 밖이라 거절했더니 형이 자기 사진을 못 봤다(2026-09-10
+    "넘기다보면 흑백"). 같은 바이트를 /mobile/api/file 이 이미 폰에 주므로 새로 열리는 건 없다.
+    문자열 접두사로 비교하지 않는다 — `mobile-uploads-evil/` 같은 옆 폴더와 심링크 탈출이
+    그 틈으로 샌다. parents 비교는 경로 조각 단위라 그게 안 된다."""
+    try:
+        want = Path(raw).expanduser().resolve()
+        base = MOBILE_UPLOADS_DIR.resolve()
+    except OSError:
+        return None
+    return want if base in want.parents else None
+
+
 def _handed_over_file(root: Path, source: str, sid: str, raw: str) -> Path | None:
     """이 세션이 SendUserFile 로 건넨 파일인가 — 맞으면 그 경로를 준다."""
     try:
@@ -2823,6 +2839,8 @@ def agent_session_file_bytes(root: Path, raw_path: str,
     건네는 일이 실제로 있어서(2026-08-25), 그걸 막으면 형에게 주겠다고 한 결과물이 안 닿는다.
     아무 경로나 여는 게 아니라 **그 세션 기록에 남은 파일만** 이다 — 명시적 동의가 근거다."""
     resolved = session_file_in_root(root, raw_path or "")
+    if resolved is None:
+        resolved = _mobile_upload_path(raw_path or "")     # 싸서 먼저 — 아래는 세션 기록을 훑는다
     if resolved is None and source and sid:
         resolved = _handed_over_file(root, source, sid, raw_path or "")
     if resolved is None:
