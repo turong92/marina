@@ -373,7 +373,13 @@
     function renderTimelineMessage(item) {
       if (item && item.kind === "question") return renderAnsweredQuestion(item);
       const text = String(item.text || "");
-      const role = item.role === "user" ? "user" : item.role === "output" ? "output" : "assistant";
+      const role = item.role === "user" ? "user" : item.role === "output" ? "output"
+        : item.role === "peer" ? "peer" : "assistant";
+      // peer = **다른 Claude 세션이 보낸 메시지**(SendMessage). 형의 말풍선으로 그리면 남이 시킨 말이 형의
+      // 말이 되고, assistant 로 떨어지면 에이전트가 한 말처럼 보인다. 누가 보냈는지를 먼저 말한다.
+      // from 은 다른 세션이 정한 이름이라 믿을 수 없는 글자다 — 반드시 이스케이프.
+      const peerFrom = role === "peer"
+        ? `<div class="peerFrom">↘ ${esc(item.from || "다른 세션")} 세션이 보냄</div>` : "";
       const {items: attachments, stripped} = extractAttachments(text);
       const pendingActions = item.pending && item.id
         ? `<span class="pendingActions"><button class="pendingActionBtn" type="button" data-pending-retry="${esc(item.id)}">&#8635; 재시도</button><button class="pendingActionBtn" type="button" data-pending-cancel="${esc(item.id)}">&#10005; 취소</button></span>`
@@ -388,7 +394,7 @@
         : item.queued
         ? `<span class="queuedTag${item.queuedCancelled ? " consumed" : ""}">⏱ ${item.queuedCancelled ? "대기열에서 취소됨" : "대기열 · 대기 중"}</span>`
         : "";
-      return `<div class="turn ${role}${item.pending ? " pending" : ""}${item.queued ? " queued" : ""}" data-timeline-message-id="${esc(item.id || "")}">${queuedBadge}<div class="turnBody">${renderMarkdownBlocks(stripped)}</div>${renderTurnAttachments(attachments)}${renderTimelineImages(item)}${pendingState}</div>`;
+      return `<div class="turn ${role}${item.pending ? " pending" : ""}${item.queued ? " queued" : ""}" data-timeline-message-id="${esc(item.id || "")}">${peerFrom}${queuedBadge}<div class="turnBody">${renderMarkdownBlocks(stripped)}</div>${renderTurnAttachments(attachments)}${renderTimelineImages(item)}${pendingState}</div>`;
     }
     function timelineDetailAttrs(id) {
       const value = String(id || "detail");

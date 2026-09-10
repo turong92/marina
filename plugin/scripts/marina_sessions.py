@@ -1280,9 +1280,33 @@ def _reverse_json_objects(path: Path):
 # **영원히 작업중**에 고착된다(형: "무한으로 작업중이고 정지버튼 안먹었었어" — /model 직후).
 _CLAUDE_INJECT_PREFIXES = ("<task-notification>", "<system-reminder>",
                            "[SYSTEM NOTIFICATION", "<command-name>",
-                           "<local-command-stdout>", "<local-command-caveat>")
+                           "<local-command-stdout>", "<local-command-caveat>",
+                           # 다른 Claude 세션이 보낸 메시지(SendMessage). 대기열 복사본이 이 래퍼로 시작한다 —
+                           # 형이 친 말이 아니다. 배달된 쪽은 아래 _peer_messages 가 '보낸 세션' 말풍선으로 살린다.
+                           "<cross-session-message")
 _CODEX_INJECT_PREFIXES = ("# AGENTS.md instructions", "<INSTRUCTIONS>",
                           "<user_instructions>", "<environment_context>")
+
+# 세션간 메시지 — 배달되면 받는 쪽에 isMeta user 행으로 남는다(실측 2026-09-10):
+#   "Another Claude session sent a message:\n<cross-session-message … from-name="chat-fe" …>\n본문\n
+#    </cross-session-message>\n\nThis came from another Claude session — …(권한 경고 꼬리말)"
+# 주입이라 숨기면 형은 누가 무엇을 시켰는지 못 본다. 형의 말풍선으로 두면 남의 말이 형의 말이 된다.
+# 그래서 **보낸 세션 이름 + 본문만** 꺼내 따로 그린다. 래퍼 밖 꼬리말은 에이전트용 안내라 버린다.
+_PEER_MESSAGE_RE = re.compile(r"<cross-session-message\b([^>]*)>\n?(.*?)\n?</cross-session-message>", re.S)
+_PEER_FROM_RE = re.compile(r'\bfrom-name="([^"]*)"')
+
+
+def _peer_messages(texts: list[str]) -> list[tuple[str, str]]:
+    """배달된 세션간 메시지들 → [(보낸 세션 이름, 본문)]. 본문이 비면 뺀다."""
+    나온것: list[tuple[str, str]] = []
+    for text in texts:
+        for m in _PEER_MESSAGE_RE.finditer(text or ""):
+            본문 = m.group(2).strip("\n")
+            if not 본문.strip():
+                continue
+            이름 = _PEER_FROM_RE.search(m.group(1))
+            나온것.append(((이름.group(1) if 이름 else "") or "다른 세션", 본문))
+    return 나온것
 
 
 def _is_injected_user(obj: dict[str, Any], source: str, texts: list[str]) -> bool:
@@ -1772,6 +1796,15 @@ def _transcript_timeline_bounded(rows: list[tuple[int, dict[str, Any]]],
                 content = [{"type": "text", "text": content}] if content.strip() else []
             if not isinstance(content, list):
                 continue
+            # 배달된 세션간 메시지는 숨기지 않고 '보낸 세션' 말풍선으로 — _is_hidden_turn 보다 먼저 봐야 한다
+            # (isMeta 라 거기서 걸러진다). turns·작업중 판정은 여전히 주입으로 보므로 상태는 안 흔들린다.
+            if role == "user" and obj.get("isMeta"):
+                보낸것 = _peer_messages(_texts_of(content))
+                if 보낸것:
+                    for n, (이름, 본문) in enumerate(보낸것):
+                        timeline.append({"id": f"{source}:peer:{offset}:{n}", "kind": "message",
+                                         "role": "peer", "from": 이름, "text": 본문})
+                    continue
             if _is_hidden_turn(obj, role, source, _texts_of(content)):
                 continue                    # 주입 user + noop assistant 제외(turns 와 동일)
             message_model = str(message.get("model") or "") if role == "assistant" else ""

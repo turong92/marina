@@ -3121,6 +3121,10 @@ _MOBILE_HTML = r"""<!doctype html>
     .conversationSequence { display: flex; align-self: stretch; flex-direction: column; gap: 8px; }
     .turn { align-self: flex-start; max-width: 88%; padding: 9px 11px; border-radius: 8px; background: #eef2f7; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; }
     .turn.user { align-self: flex-end; background: #dcecff; }
+    /* 다른 Claude 세션이 보낸 메시지 — 형의 말(오른쪽 파랑)도, 에이전트 답(왼쪽 회색)도 아니다.
+       왼쪽에 두되 점선 테두리와 보라 기운으로 '밖에서 들어온 말'임을 먼저 보이게 한다. */
+    .turn.peer { background: #f5f0ff; border: 1px dashed #b9a6e8; }
+    .peerFrom { margin-bottom: 4px; font-size: 11px; font-weight: 800; color: #6b4fbf; }
     .turn.output { width: 100%; max-width: none; background: #111827; color: #e5e7eb; font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; }
     .turn.pending { opacity: .82; }
     .turnState { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 5px; color: #687083; font-size: 10px; font-weight: 750; }
@@ -3524,6 +3528,8 @@ _MOBILE_HTML = r"""<!doctype html>
       .source-badge.claude { background: #4b2b1e; color: #ffc09f; }
       .turn { background: #202838; }
       .turn.user { background: #182f4f; }
+      .turn.peer { background: #231d36; border-color: #4d3f7a; }
+      .peerFrom { color: #b7a3f0; }
       .turn.output { background: #080c12; }
       .turn a, .subagent-turn a { color: #78aaff; }
       .newMessagesBtn, .suggestions, .bottomSheet, .inboxGroup, .sessionControlBtn { background: #171d27; border-color: #303846; }

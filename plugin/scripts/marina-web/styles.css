@@ -1331,6 +1331,9 @@
     /* 공유 렌더러 마크업 스킨 — 클래스명은 chat-render.js 가 정한다(모바일과 동일) */
     .chat-turns .turn { margin-bottom: 12px; }
     .chat-turns .turn.user .turnBody { border-left: 2px solid var(--sys-cont-primary-default); padding-left: 9px; }
+    /* 다른 Claude 세션이 보낸 메시지 — 형의 말(실선)과 구별되게 점선, 누가 보냈는지 라벨을 위에. */
+    .chat-turns .turn.peer .turnBody { border-left: 2px dashed var(--st-boot); padding-left: 9px; }
+    .chat-turns .peerFrom { margin-bottom: 4px; font-size: 11px; font-weight: 700; opacity: .75; }
     .chat-turns .turnBody { font-size: 13px; line-height: 1.55; overflow-wrap: anywhere; }
     .chat-turns .turnBody pre { margin: 6px 0; padding: 8px 10px; border-radius: 6px; background: var(--sys-code-bg); color: hsl(220, 14%, 88%); overflow-x: auto; }
     .chat-turns .turnAttachments { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
