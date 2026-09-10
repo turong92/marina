@@ -19,6 +19,7 @@ CLI="$SCRIPT_DIR/marina_cli.py"
 AUTH_CLI="$SCRIPT_DIR/marina_auth_cli.py"
 REMOTE_CLI="$SCRIPT_DIR/marina_remote_cli.py"
 DOCKER_GC_CLI="$SCRIPT_DIR/marina_docker_gc_cli.py"
+CHAIN_CLI="$SCRIPT_DIR/marina_chain_cli.py"
 # shellcheck source=/dev/null
 source "$RESOLVE"
 
@@ -214,6 +215,9 @@ case "$command" in
     # 도커 GC — 워크트리에 안 묶인 산출물(빌드캐시·dangling·익명 볼륨·e2e 잔재) 정책 정리. 데몬이 주기 실행, 여기선 수동/정책.
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$DOCKER_GC_CLI" "$@"
     ;;
+  chain)
+      exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$CHAIN_CLI" "$@"
+      ;;
   auth|user)
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$AUTH_CLI" "$command" "$@"
     ;;

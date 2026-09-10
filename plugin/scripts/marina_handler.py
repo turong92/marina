@@ -1756,6 +1756,29 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception as exc:
                     self.send_json({"error": str(exc)}, 400)
                 return
+            if parsed.path in ("/mobile/api/chain/request", "/mobile/api/chain/unlimited", "/mobile/api/chain/stop"):
+                if not self._agent_api_ok(parsed, principal):
+                    self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                    return
+                try:
+                    from marina_chain_runtime import chain_trigger, set_unlimited, stop_chain
+                    body = self.read_json()
+                    root = safe_root(str(body.get("root", "")))
+                    if not self._require_root_access(root):
+                        return
+                    source, sid = str(body.get("source") or ""), str(body.get("sid") or "")
+                    if not agent_belongs_to_root(root, source, sid):
+                        self._forbidden()
+                        return
+                    if parsed.path.endswith("/request"):
+                        self.send_json(chain_trigger(root, source, sid, "button", force=True))
+                    elif parsed.path.endswith("/unlimited"):
+                        self.send_json(set_unlimited(source, sid, bool(body.get("on", True))))
+                    else:
+                        self.send_json(stop_chain(source, sid))
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                return
             if parsed.path == "/mobile/api/harness":
                 # 이 대화가 **어떤 하네스로 떴는지** — 읽기 전용. 마리나가 세션에 무엇을 넣고
                 # 있는지(훅·스킬·플래그·지시문)를 볼 길이 아예 없었다.
@@ -2096,6 +2119,31 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 from marina_events import poke
                 self.send_json({"ok": True, "watching": poke()})
+                return
+            if self.path == "/api/chain":
+                # `marina chain` CLI 전용. 로그인 없이 받되 **루프백 + 호출자 확인**(스펙 6.3) — 남의 방 대신 못 부른다.
+                if (not is_loopback_client(self)
+                        or self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host")):
+                    self.send_json({"error": "local only"}, 403)
+                    return
+                try:
+                    from marina_chain_runtime import chain_trigger, set_unlimited, stop_chain, verify_caller
+                    body = self.read_json()
+                    who = verify_caller(int(body.get("pid") or 0), str(body.get("sid") or ""), str(body.get("cwd") or ""))
+                    if who is None:
+                        self.send_json({"error": "caller not verified"}, 403)
+                        return
+                    action = str(body.get("action") or "")
+                    if action == "request":
+                        self.send_json(chain_trigger(who["root"], "claude", who["sid"], "command", force=True))
+                    elif action == "unlimited":
+                        self.send_json(set_unlimited("claude", who["sid"], True))
+                    elif action == "stop":
+                        self.send_json(stop_chain("claude", who["sid"]))
+                    else:
+                        self.send_json({"error": "unknown action"}, 400)
+                except Exception as exc:
+                    self.send_json({"error": str(exc)}, 400)
                 return
 
             # ── 터미널 탭 — PTY 셸 = 원격 코드 실행. 로컬 대시보드 전용: 게이트웨이/프록시 경유(X-Forwarded-*) 거부 ──

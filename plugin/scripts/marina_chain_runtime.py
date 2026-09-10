@@ -305,3 +305,47 @@ def submit_events(events: list[dict[str, Any]]) -> None:
             threading.Thread(target=_worker, daemon=True, name="marina-chains").start()
             _worker_started = True
     _events_q.put(list(events))
+
+
+# ── 호출자 확인(스펙 6.3) ────────────────────────────────────────────────────────────
+def _belongs(root: Path, source: str, sid: str) -> bool:
+    from marina_sessions import agent_belongs_to_root
+    return bool(agent_belongs_to_root(root, source, sid))
+
+
+def _proc_start_utc(pid: int) -> str:
+    """Claude 세션 파일의 procStart 는 UTC asctime 이다. ps lstart 는 로컬 시각이라 TZ=UTC 로 맞춘다."""
+    import os
+    import subprocess
+    try:
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", str(int(pid))], check=False, capture_output=True,
+                             text=True, timeout=1, env={**os.environ, "TZ": "UTC"})
+        return out.stdout.strip()
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return ""
+
+
+def verify_caller(pid: int, sid: str, cwd: str, sessions_dir: Path | None = None, pid_start=None) -> dict | None:
+    """pid 의 세션 파일이 sid 와 맞고, procStart 가 지금 그 pid 와 맞고(재사용 방지), sid 가 cwd 의 워크트리에 속할 때만."""
+    import subprocess
+    sessions_dir = sessions_dir or (Path.home() / ".claude" / "sessions")
+    if pid_start is None:
+        pid_start = _proc_start_utc
+    try:
+        data = json.loads((sessions_dir / f"{int(pid)}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        return None
+    if data.get("sessionId") != sid:
+        return None
+    recorded = str(data.get("procStart") or "")
+    if recorded and pid_start(int(pid)) != recorded:
+        return None
+    try:
+        top = subprocess.check_output(["git", "-C", cwd, "rev-parse", "--show-toplevel"], text=True,
+                                      stderr=subprocess.DEVNULL, timeout=5.0).strip()
+    except Exception:
+        return None
+    root = Path(top).resolve()
+    if not _belongs(root, "claude", sid):
+        return None
+    return {"root": root, "sid": sid}

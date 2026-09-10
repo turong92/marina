@@ -37,6 +37,7 @@ PUBLIC_PATHS = {
     # 아래 핸들러가 **루프백에서만** 받는다 — 아무것도 바꾸지 않는 신호지만 외부에 열어 두면
     # 상태 계산을 무한정 돌릴 수 있다.
     "/api/events-poke",
+    "/api/chain",          # marina chain CLI — 루프백 + 호출자 확인(marina_handler)
 }
 PUBLIC_PREFIXES = ("/web/",)
 AUTH_API_PREFIX = "/api/auth/"

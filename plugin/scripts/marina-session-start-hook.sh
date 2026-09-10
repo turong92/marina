@@ -126,4 +126,27 @@ EOF
 # 편집 위치 규칙(worktree 세션에서 attach 된 미러가 있을 때만)을 서버 규칙 뒤에 덧붙인다.
 [[ -n "$edit_rules" ]] && rules="$rules"$'\n'"$edit_rules"
 
+# 역할 방(스펙 6.4) — 이 프로젝트가 roles.reviewer 를 켰을 때만 한 줄.
+role_line="$(python3 - "$ROOT" <<'PY' 2>/dev/null || true
+import json, os, sys
+home = os.environ.get("MARINA_HOME") or os.path.expanduser("~/.marina")
+root = os.path.realpath(sys.argv[1])
+try:
+    projects = json.load(open(os.path.join(home, "projects.json"), encoding="utf-8")).get("projects", [])
+except Exception:
+    projects = []
+best = None
+for p in projects:
+    pr = os.path.realpath(os.path.expanduser(str(p.get("root") or "")))
+    if pr and (root == pr or root.startswith(pr + os.sep)) and (best is None or len(pr) > len(best[0])):
+        best = (pr, p)
+roles = (best[1].get("roles") if best else None) or {}
+if isinstance(roles, dict) and isinstance(roles.get("reviewer"), dict):
+    print("[marina] 이 방엔 리뷰어가 붙어 있다. 형이 리뷰를 부탁하면 `marina chain request`, 쭉 진행하라면 "
+          "`marina chain unlimited`, 멈추라면 `marina chain stop` 을 실행한다. 다른 세션이 보낸 리뷰 결과는 바로 "
+          "반영하고 커밋한다. `[보류]` 로 시작하는 줄은 참고만 하고 반영하지 않는다.")
+PY
+)"
+[[ -n "$role_line" ]] && rules="$rules"$'\n'"$role_line"
+
 emit_context "$rules"
