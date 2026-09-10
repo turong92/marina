@@ -93,3 +93,20 @@ MM._decorate_room_chain(off, [], False, RT.role_room_sid)
 assert off["chain"] is None and off["tabs"][0]["chainEnabled"] is False
 print("PASS: 방 조립 — 역할 방 sid 를 term 기록으로")
 PY
+
+# 훅 입양 전(또는 다른 프로세스 레지스트리) — term pid 의 Claude 세션 파일로 sid 를 찾는다.
+PYTHONPATH="$SCR" python3 - <<'PY'
+import json, tempfile
+from pathlib import Path
+import marina_chain_runtime as RT
+import marina_term
+d = Path(tempfile.mkdtemp())
+(d / "4242.json").write_text(json.dumps({"sessionId": "from-pid"}), encoding="utf-8")
+RT._claude_sessions_dir = lambda: d
+marina_term.term_list = lambda: {"sessions": [{"tid": "t1", "pid": 4242, "root": "/wt", "agent": {"source": "claude", "sid": ""}}]}
+chain = {"id": "c1", "state": "reviewing", "roleRoom": {"tid": "t1"}}
+assert RT.role_room_sid(chain) == "from-pid", "입양 전 역할 방 sid 를 pid 세션 파일로 못 찾는다"
+marina_term.term_list = lambda: {"sessions": [{"tid": "t1", "pid": 9999, "root": "/wt", "agent": {}}]}
+assert RT.role_room_sid(chain) == "", "세션 파일이 없는데 sid 를 지어냈다"
+print("PASS: 역할 방 sid — pid 세션 파일 폴백")
+PY

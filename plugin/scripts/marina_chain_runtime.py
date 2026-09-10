@@ -67,19 +67,48 @@ def _role_settings(root: Path) -> dict[str, Any] | None:
     return settings if isinstance(settings, dict) else None
 
 
+def _claude_sessions_dir() -> Path:
+    return Path.home() / ".claude" / "sessions"
+
+
+def _role_term(chain: dict[str, Any]) -> dict[str, Any] | None:
+    tid = (chain.get("roleRoom") or {}).get("tid")
+    if not tid:
+        return None
+    try:
+        from marina_term import term_list
+        for item in term_list().get("sessions", []):
+            if item.get("tid") == tid:
+                return item
+    except Exception:
+        pass
+    return None
+
+
+def _term_sid(item: dict[str, Any]) -> str:
+    """term 의 Claude sid. 훅 입양은 데몬 레지스트리만 채우므로, 없으면 Claude 가 pid 이름으로 쓰는 세션 파일을 본다
+    (term 은 셸이 exec 로 claude 가 되므로 term pid 가 곧 claude pid)."""
+    sid = str((item.get("agent") or {}).get("sid") or "")
+    if sid or not item.get("pid"):
+        return sid
+    try:
+        data = json.loads((_claude_sessions_dir() / f"{int(item['pid'])}.json").read_text(encoding="utf-8"))
+        return str(data.get("sessionId") or "")
+    except (OSError, ValueError, TypeError):
+        return ""
+
+
 def _role_transcript(chain: dict[str, Any]) -> Path | None:
     from marina_sessions import agent_transcript_path
-    from marina_term import term_list
-    tid = (chain.get("roleRoom") or {}).get("tid")
-    for item in term_list().get("sessions", []):
-        agent = item.get("agent") or {}
-        if item.get("tid") == tid and agent.get("sid"):
-            chain.setdefault("roleRoom", {})["sid"] = agent["sid"]
-            try:
-                return agent_transcript_path(Path(item.get("root") or ""), "claude", agent["sid"])
-            except Exception:
-                return None
-    return None
+    item = _role_term(chain)
+    sid = _term_sid(item) if item else ""
+    if not sid:
+        return None
+    chain.setdefault("roleRoom", {})["sid"] = sid
+    try:
+        return agent_transcript_path(Path(item.get("root") or ""), "claude", sid)
+    except Exception:
+        return None
 
 
 def _baseline_path(source: str, sid: str) -> Path:
@@ -237,17 +266,8 @@ def _role_sid_to_chain(sid: str) -> dict[str, Any] | None:
     for chain in C.list_chains():
         if chain.get("state") in C.TERMINAL:
             continue
-        room = chain.get("roleRoom") or {}
-        if room.get("sid") == sid:
+        if sid and role_room_sid(chain) == sid:
             return chain
-        if not room.get("sid") and room.get("tid"):
-            try:
-                from marina_term import term_list
-                for item in term_list().get("sessions", []):
-                    if item.get("tid") == room["tid"] and (item.get("agent") or {}).get("sid") == sid:
-                        return chain
-            except Exception:
-                continue
     return None
 
 
@@ -356,13 +376,5 @@ def role_room_sid(chain: dict[str, Any]) -> str:
     room = chain.get("roleRoom") or {}
     if room.get("sid"):
         return str(room["sid"])
-    if not room.get("tid"):
-        return ""
-    try:
-        from marina_term import term_list
-        for item in term_list().get("sessions", []):
-            if item.get("tid") == room["tid"]:
-                return str((item.get("agent") or {}).get("sid") or "")
-    except Exception:
-        pass
-    return ""
+    item = _role_term(chain)
+    return _term_sid(item) if item else ""
