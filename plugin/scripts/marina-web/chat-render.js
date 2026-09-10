@@ -539,7 +539,10 @@
         for (const img of (item.images || [])) {
           if (img && img.ref) out.push({type: "image", ref: img.ref, name: img.name || "대화 이미지"});
         }
-        if (item.kind === "activity" && item.path) {
+        // Read 로 본 그림은 바로 위에서 image 칸으로 들어갔다. path 로 또 넣으면 같은 그림이 두 칸이 되고,
+        // 그 경로는 대개 방 밖(스크래치패드)이라 서버가 400 → 뷰어엔 까만 칸이다
+        // (형 2026-09-10: "이미지 3갠데 왜 중간중간 까만게 끼냐고" — 실데이터 그림 6장이 12칸이었다).
+        if (item.kind === "activity" && item.path && !(item.images || []).length) {
           const path = String(item.path);
           const entry = {type: "file", path, name: path.split("/").pop() || path};
           const prev = fileAt.get(path);
