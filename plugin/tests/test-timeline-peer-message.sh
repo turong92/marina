@@ -71,5 +71,42 @@ assert not [it for it in tl_wait if it.get("kind") == "message" and it.get("role
 배달 = rows[3][1]
 assert ms._is_injected_user(배달, "claude", ms._texts_of(배달["message"]["content"])), "배달 행이 주입으로 안 잡힌다"
 
+# ⑤ 받는 쪽이 **작업 중**일 때 — 모양이 다르다(실측: 이 대화가 chat-37 의 "pong" 을 받을 때).
+#    isMeta user 행이 **없다.** enqueue(hop-chain 붙음) → attachment queued_command(origin.kind=peer,
+#    name, body) → remove. 앞 수정은 isMeta 행만 봐서, 작업 중에 온 답장은 형 말풍선으로 새진 않았지만
+#    **아무 데도 안 보였다.** 리뷰어 방에서 결과가 오는 순간 구현 방이 일하는 중이면 흔적이 사라진다.
+#    대기 복사본엔 hop-chain 이 붙고 배달 기록엔 없어 문자열로는 짝이 안 맞는다 — origin 필드로 본다.
+래퍼2 = ('<cross-session-message from="uds:/tmp/cc-socks/98279.sock" hop-chain="b2f67e7a" '
+         'from-name="chat-37" from-mode="prompting">\npong\n</cross-session-message>')
+래퍼2_배달 = ('<cross-session-message from="uds:/tmp/cc-socks/98279.sock" from-name="chat-37" '
+             'from-mode="prompting">\npong\n</cross-session-message>')
+rows_busy = [
+    (0, {"type": "user", "message": {"role": "user", "content": "형이 시킨 일"}}),
+    qop("enqueue", 래퍼2, 1),
+    (2, {"type": "attachment", "attachment": {
+        "type": "queued_command", "prompt": 래퍼2_배달, "commandMode": "prompt", "isMeta": True,
+        "origin": {"kind": "peer", "name": "chat-37", "body": "pong", "fromMode": "prompting"}}}),
+    qop("remove", 래퍼2_배달, 3),
+    (4, {"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": "받았어"}]}}),
+]
+m_busy = [it for it in ms._transcript_timeline(rows_busy, "claude") if it.get("kind") == "message"]
+busy_peers = [it for it in m_busy if it.get("role") == "peer"]
+assert len(busy_peers) == 1, f"작업 중에 받은 답장이 안 보인다(보낸 세션 말풍선 {len(busy_peers)}개): {m_busy}"
+assert busy_peers[0].get("from") == "chat-37" and busy_peers[0].get("text") == "pong", busy_peers[0]
+assert not [it for it in m_busy if it.get("role") == "user" and ("pong" in it.get("text", "") or "cross-session" in it.get("text", ""))], \
+    f"작업 중에 온 답장이 형 말풍선으로 샜다: {m_busy}"
+assert not [it for it in m_busy if it.get("queuedCancelled")], "소화된 답장이 '대기열에서 취소됨'으로 보인다"
+assert [it.get("role") for it in m_busy] == ["user", "peer", "assistant"], [it.get("role") for it in m_busy]
+
+# ⑥ 형이 작업 중에 친 **보통 메시지**의 attachment(origin 없음)는 peer 가 아니다 — 기존 '전달됨' 그대로.
+rows_mine = [
+    qop("enqueue", "뭐하니", 0),
+    (1, {"type": "attachment", "attachment": {"type": "queued_command", "prompt": "뭐하니", "commandMode": "prompt"}}),
+    qop("remove", "뭐하니", 2),
+]
+m_mine = [it for it in ms._transcript_timeline(rows_mine, "claude") if it.get("kind") == "message"]
+assert not [it for it in m_mine if it.get("role") == "peer"], f"형의 메시지를 다른 세션 것으로 그렸다: {m_mine}"
+assert [it for it in m_mine if it.get("role") == "user" and it.get("steered")], f"형의 끼어든 메시지가 사라졌다: {m_mine}"
+
 print("PASS: 세션간 메시지는 보낸 세션 말풍선으로, 형의 말풍선엔 안 샌다")
 PY

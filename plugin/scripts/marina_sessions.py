@@ -1788,6 +1788,19 @@ def _transcript_timeline_bounded(rows: list[tuple[int, dict[str, Any]]],
                             item["queuedCancelled"] = key in cancelled_queue
                         timeline.append(with_runtime(item))
                 continue
+            # 받는 쪽이 **작업 중**일 때 배달된 세션간 메시지 — isMeta user 행이 없고 attachment(queued_command)
+            # 로만 남는다(실측: 이 대화가 chat-37 의 "pong" 을 받을 때). 보낸 세션·본문이 origin 에 구조로 들어
+            # 있어 래퍼를 파싱할 필요도 없다. 대기 복사본(hop-chain 붙음)과 문자열이 달라 짝 맞추기는 안 쓴다.
+            # 쉬던 중 배달(isMeta user 행)엔 이 attachment 가 없다 — 두 모양이 겹치지 않아 말풍선이 두 번 안 뜬다.
+            if role == "attachment":
+                att = obj.get("attachment") if isinstance(obj.get("attachment"), dict) else {}
+                og = att.get("origin") if isinstance(att.get("origin"), dict) else {}
+                if att.get("type") == "queued_command" and og.get("kind") == "peer":
+                    본문 = str(og.get("body") or "").strip("\n")
+                    if 본문.strip():
+                        timeline.append({"id": f"{source}:peer:{offset}:a", "kind": "message", "role": "peer",
+                                         "from": str(og.get("name") or "") or "다른 세션", "text": 본문})
+                    continue
             message = obj.get("message") if isinstance(obj.get("message"), dict) else {}
             content = message.get("content")
             if role not in ("user", "assistant"):
