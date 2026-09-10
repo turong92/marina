@@ -1,0 +1,225 @@
+"""묶음 부수효과 층 — 역할 방 띄우기·입력·끄기, 트리거. 규칙은 marina_chains(순수)에 있다.
+
+모듈 전역 `_term_open` 등은 테스트가 갈아끼우는 이음새다. 실제 구현은 아래 기본값이다.
+"""
+from __future__ import annotations
+
+import json
+import threading
+import time
+from pathlib import Path
+from typing import Any
+
+import marina_chains as C
+from marina_roles import contract_prompt, load_role, role_cli
+
+ROLE = "reviewer"
+DEFAULT_MAX_ROUNDS = 2
+_lock = threading.RLock()
+
+
+def _term_open(root: Path, *args: Any, **kwargs: Any) -> dict[str, Any]:
+    from marina_term import term_open
+    return term_open(root, *args, **kwargs)
+
+
+def _term_kill(tid: str) -> None:
+    from marina_term import term_kill
+    try:
+        term_kill(tid)
+    except Exception:
+        pass
+
+
+def _deliver(tid: str, text: str) -> None:
+    from marina_mobile import _deliver_agent_input
+    _deliver_agent_input(tid, "claude", text)      # detached·죽은 PTY 면 ValueError
+
+
+def _repo_heads(root: Path) -> dict[str, str]:
+    return C.repo_heads(root)
+
+
+def _transcript_size(root: Path, source: str, sid: str) -> int:
+    from marina_sessions import agent_transcript_path
+    try:
+        return int(agent_transcript_path(root, source, sid).stat().st_size)
+    except Exception:
+        return 0
+
+
+def _socket_for(sid: str) -> str:
+    """~/.claude/sessions/<pid>.json 에서 그 세션의 메시지 소켓. 이름은 바뀌니 소켓을 쓴다."""
+    for f in (Path.home() / ".claude" / "sessions").glob("*.json"):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if data.get("sessionId") == sid and data.get("messagingSocketPath"):
+            return "uds:" + str(data["messagingSocketPath"])
+    return ""
+
+
+def _role_settings(root: Path) -> dict[str, Any] | None:
+    from marina_registry import project_for
+    project = project_for(Path(root)) or {}
+    settings = (project.get("roles") or {}).get(ROLE)
+    return settings if isinstance(settings, dict) else None
+
+
+def _role_transcript(chain: dict[str, Any]) -> Path | None:
+    from marina_sessions import agent_transcript_path
+    from marina_term import term_list
+    tid = (chain.get("roleRoom") or {}).get("tid")
+    for item in term_list().get("sessions", []):
+        agent = item.get("agent") or {}
+        if item.get("tid") == tid and agent.get("sid"):
+            chain.setdefault("roleRoom", {})["sid"] = agent["sid"]
+            try:
+                return agent_transcript_path(Path(item.get("root") or ""), "claude", agent["sid"])
+            except Exception:
+                return None
+    return None
+
+
+def _baseline_path(source: str, sid: str) -> Path:
+    return C.BASELINE_DIR / f"{source}-{''.join(ch for ch in sid if ch.isalnum() or ch == '-')}.json"
+
+
+def _baseline(source: str, sid: str) -> dict[str, str] | None:
+    last = C.last_chain_for(source, sid, ROLE)
+    if last:
+        return dict(last.get("reviewedHead") or {})
+    try:
+        return json.loads(_baseline_path(source, sid).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def _save_baseline(source: str, sid: str, heads: dict[str, str]) -> None:
+    path = _baseline_path(source, sid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(heads), encoding="utf-8")
+
+
+def _summary(chain: dict[str, Any]) -> str:
+    parts = [f"{r['n']}바퀴: 지적 {r.get('findings') or 0}건" for r in chain.get("rounds") or [] if r.get("resultAt")]
+    if chain.get("held"):
+        parts.append("보류: " + " / ".join(chain["held"]))
+    return "\n".join(parts)
+
+
+def _launch(chain: dict[str, Any], root: Path, base: dict[str, str], head: dict[str, str], previous: str = "") -> dict:
+    defn = load_role(root, ROLE)
+    if defn is None:
+        raise ValueError("역할 정의를 못 찾았어요: reviewer")
+    repos = {name: (base.get(name, "") or head.get(name, ""), sha) for name, sha in head.items()}
+    prompt = contract_prompt(role=ROLE, repos=repos, reply_socket=chain["implementer"]["socket"],
+                             round_no=chain["round"], unlimited=chain["unlimited"], previous=previous)
+    res = _term_open(root, 80, 24, agent_source="claude", agent_sid="", agent_prompt=prompt,
+                     agent_role=ROLE, agent_role_argv=role_cli(defn, prompt), agent_role_launch=role_cli(defn, ""))
+    chain["roleRoom"] = {"tid": str(res.get("tid") or ""), "model": str(defn.get("model") or "")}
+    chain["rounds"][-1]["roleAnchor"] = 0
+    return chain
+
+
+def _run_actions(chain: dict[str, Any], actions: list[dict], root: Path) -> dict[str, Any]:
+    tid = (chain.get("roleRoom") or {}).get("tid") or ""
+    for action in actions:
+        if action["do"] == "kill_role" and tid:
+            _term_kill(tid)
+        elif action["do"] == "request_round":
+            repos = {name: (action["base"].get(name, ""), sha) for name, sha in action["head"].items()}
+            prompt = contract_prompt(role=ROLE, repos=repos, reply_socket=chain["implementer"]["socket"],
+                                     round_no=action["round"], unlimited=chain["unlimited"])
+            path = _role_transcript(chain)
+            chain["rounds"][-1]["roleAnchor"] = int(path.stat().st_size) if path and path.exists() else 0
+            try:
+                _deliver(tid, prompt)
+            except Exception:
+                # 재시작 뒤 detached 거나 죽었다 — 새로 띄우고 지난 바퀴를 싣는다(스펙 5.5)
+                _launch(chain, root, action["base"], action["head"], previous=_summary(chain))
+        elif action["do"] == "nudge_role" and tid:
+            try:
+                _deliver(tid, f'결과를 SendMessage 로 보내 — to 는 정확히 "{chain["implementer"]["socket"]}"')
+            except Exception:
+                pass
+    return chain
+
+
+def apply_event(chain: dict[str, Any], event: dict[str, Any], now: float | None = None) -> dict[str, Any]:
+    now = time.time() if now is None else now
+    with _lock:
+        new, actions = C.next_state(chain, event, now)
+        new = _run_actions(new, actions, Path(new["implementer"]["root"]))
+        C.save_chain(new)
+        return new
+
+
+def chain_trigger(root: Path, source: str, sid: str, reason: str, force: bool = False,
+                  now: float | None = None) -> dict[str, Any]:
+    now = time.time() if now is None else now
+    if source != "claude":
+        return {"ok": False, "reason": "off"}
+    settings = _role_settings(root)
+    if settings is None and not force:
+        return {"ok": False, "reason": "off"}
+    settings = settings or {}
+    with _lock:
+        heads = _repo_heads(root)
+        open_chain = C.open_chain_for(source, sid, ROLE)
+        if open_chain:
+            if open_chain["state"] == "reviewing" and not C.head_advanced(open_chain["reviewedHead"], heads):
+                return {"ok": False, "reason": "in-progress", "chain": open_chain["id"]}
+            chain = on_implementer_turn_end(open_chain, root, now=now)
+            return {"ok": True, "started": False, "chain": chain["id"], "state": chain["state"]}
+        base = _baseline(source, sid)
+        if base is None and not force:
+            _save_baseline(source, sid, heads)
+            return {"ok": False, "reason": "baseline"}
+        if not force and not C.head_advanced(base or {}, heads):
+            return {"ok": False, "reason": "no-commit"}
+        implementer = {"root": str(root), "source": source, "sid": sid, "socket": _socket_for(sid)}
+        if not implementer["socket"]:
+            return {"ok": False, "reason": "no-socket"}
+        chain = C.new_chain(role=ROLE, implementer=implementer, base=base or heads, head=heads,
+                            max_rounds=int(settings.get("maxRounds") or DEFAULT_MAX_ROUNDS), unlimited=False,
+                            now=now, anchor=_transcript_size(root, source, sid))
+        chain = _launch(chain, root, base or heads, heads)
+        C.save_chain(chain)
+        return {"ok": True, "started": True, "chain": chain["id"], "reason": reason}
+
+
+def on_implementer_turn_end(chain: dict[str, Any], root: Path, now: float | None = None,
+                            force_round: bool = False) -> dict[str, Any]:
+    event = {"type": "implementer_turn_end", "head": _repo_heads(root),
+             "anchor": _transcript_size(root, chain["implementer"]["source"], chain["implementer"]["sid"])}
+    return apply_event(chain, event, now)
+
+
+def on_role_turn_end(chain: dict[str, Any], now: float | None = None) -> dict[str, Any]:
+    path = _role_transcript(chain)
+    rows = C.read_rows(path, int(chain["rounds"][-1].get("roleAnchor") or 0)) if path else []
+    result = C.parse_role_result(rows, chain["implementer"]["socket"])
+    imp = chain["implementer"]
+    anchor = _transcript_size(Path(imp["root"]), imp["source"], imp["sid"])
+    if result is None:
+        return apply_event(chain, {"type": "no_result", "anchor": anchor}, now)
+    return apply_event(chain, {"type": "result", "noneLeft": result["noneLeft"], "findings": result["findings"],
+                               "held": result["held"], "anchor": anchor}, now)
+
+
+def set_unlimited(source: str, sid: str, on: bool) -> dict[str, Any]:
+    chain = C.open_chain_for(source, sid, ROLE)
+    if not chain:
+        return {"ok": False, "reason": "no-chain"}
+    return {"ok": True, **apply_event(chain, {"type": "unlimited", "on": on})}
+
+
+def stop_chain(source: str, sid: str) -> dict[str, Any]:
+    chain = C.open_chain_for(source, sid, ROLE)
+    if not chain:
+        return {"ok": False, "reason": "no-chain"}
+    imp = chain["implementer"]
+    anchor = _transcript_size(Path(imp["root"]), imp["source"], imp["sid"])
+    return {"ok": True, **apply_event(chain, {"type": "stop", "anchor": anchor})}

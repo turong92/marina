@@ -89,6 +89,8 @@ def load_projects() -> list[dict[str, Any]]:
                 "profile": str(entry.get("profile") or ""),
                 # 가볍게 띄우기(도구·MCP 최소화). 따로 켜는 옵션이고 기본은 꺼짐.
                 "lean": bool(entry.get("lean")),
+                # 역할 방(스펙 6.5) — {"reviewer": {"on": "commit", "maxRounds": 2}}. 없으면 꺼짐.
+                "roles": dict(entry.get("roles") or {}) if isinstance(entry.get("roles"), dict) else {},
                 "composeFile": str(entry.get("composeFile") or "docker-compose.yml"),
                 "composeEnvVar": str(entry.get("composeEnvVar") or ""),
                 "composeEnvDefault": str(entry.get("composeEnvDefault") or "local"),
