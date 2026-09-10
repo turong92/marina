@@ -198,7 +198,7 @@ assert base["origin"] == "marina" and base["model"] == "claude-sonnet-5" and bas
 
 c = R.contract_prompt(role="reviewer", repos={"marina": ("cb675c6", "e04dc5f")},
                       reply_socket="uds:/tmp/cc-socks/3741.sock", round_no=1, unlimited=False)
-for need in ('to="uds:/tmp/cc-socks/3741.sock"', "cb675c6..e04dc5f", "새 지적 없음", "SendMessage", "고치지"):
+for need in ('"uds:/tmp/cc-socks/3741.sock"', "cb675c6..e04dc5f", "새 지적 없음", "SendMessage", "고치지"):   # 따옴표째 정확한 소켓 주소
     assert need in c, (need, c)
 assert "[보류]" not in c                                                         # 무제한일 때만
 c2 = R.contract_prompt(role="reviewer", repos={"a": ("1", "2"), "b/c": ("3", "4")}, reply_socket="uds:/x",
