@@ -3121,6 +3121,13 @@ def main() -> None:
         # 서비스워커가 가져갈 목록도 두 배가 된다.
         if not is_primary_notifier(PORT):
             return
+        # 역할 방 묶음(스펙 6.1) — **알림 필터보다 먼저.** 알림은 폰을 울릴 사건만 남기는데 조용한 커밋도
+        # 묶음을 움직여야 한다. 주 데몬만 넘긴다(둘이면 리뷰어도 둘이 뜬다).
+        try:
+            from marina_chain_runtime import submit_events
+            submit_events(events)
+        except Exception:
+            pass
         marks = (getattr(_WATCHER, "_previous", None) or {}).get("sessions") or {}
         now = time.time()
         alerts = [e for e in events

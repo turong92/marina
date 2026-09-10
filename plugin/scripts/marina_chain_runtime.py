@@ -223,3 +223,85 @@ def stop_chain(source: str, sid: str) -> dict[str, Any]:
     imp = chain["implementer"]
     anchor = _transcript_size(Path(imp["root"]), imp["source"], imp["sid"])
     return {"ok": True, **apply_event(chain, {"type": "stop", "anchor": anchor})}
+
+
+# ── 감시층 사건(스펙 6.1) ────────────────────────────────────────────────────────────
+import queue as _queue
+
+_last_status: dict[str, str] = {}
+_events_q: "_queue.Queue[list[dict]]" = _queue.Queue()
+_worker_started = False
+
+
+def _role_sid_to_chain(sid: str) -> dict[str, Any] | None:
+    for chain in C.list_chains():
+        if chain.get("state") in C.TERMINAL:
+            continue
+        room = chain.get("roleRoom") or {}
+        if room.get("sid") == sid:
+            return chain
+        if not room.get("sid") and room.get("tid"):
+            try:
+                from marina_term import term_list
+                for item in term_list().get("sessions", []):
+                    if item.get("tid") == room["tid"] and (item.get("agent") or {}).get("sid") == sid:
+                        return chain
+            except Exception:
+                continue
+    return None
+
+
+def on_events(events: list[dict[str, Any]], now: float | None = None) -> list[str]:
+    done: list[str] = []
+    for event in events or []:
+        if event.get("source") != "claude" or not event.get("sid"):
+            continue
+        ended = C.turn_ended(event, _last_status)
+        C.remember_status(event, _last_status)
+        if not ended:
+            continue
+        sid = str(event["sid"])
+        role_chain = _role_sid_to_chain(sid)
+        if role_chain is not None:
+            on_role_turn_end(role_chain, now=now)
+            done.append(f"role:{role_chain['id']}")
+            continue
+        open_chain = C.open_chain_for("claude", sid, ROLE)
+        root = Path(str(event.get("root") or ""))
+        if open_chain is not None:
+            on_implementer_turn_end(open_chain, root, now=now)
+            done.append(f"impl:{open_chain['id']}")
+            continue
+        settings = _role_settings(root)
+        if settings and settings.get("on") == "commit":
+            chain_trigger(root, "claude", sid, "commit", now=now)
+            done.append(f"trigger:{sid}")
+    tick_all(now)
+    return done
+
+
+def tick_all(now: float | None = None) -> None:
+    for chain in C.list_chains():
+        if chain.get("state") == "waiting":
+            apply_event(chain, {"type": "tick"}, now)
+
+
+def _worker() -> None:
+    while True:
+        batch = _events_q.get()
+        try:
+            on_events(batch)
+        except Exception:
+            pass           # 묶음이 망가져도 감시 루프·알림은 계속 돈다
+
+
+def submit_events(events: list[dict[str, Any]]) -> None:
+    """감시 스레드를 막지 않는다 — git·프로세스 띄우기는 작업 스레드에서."""
+    global _worker_started
+    if not events:
+        return
+    with _lock:
+        if not _worker_started:
+            threading.Thread(target=_worker, daemon=True, name="marina-chains").start()
+            _worker_started = True
+    _events_q.put(list(events))
