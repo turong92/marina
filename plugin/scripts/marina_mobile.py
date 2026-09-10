@@ -4411,6 +4411,19 @@ _MOBILE_HTML = r"""<!doctype html>
     let viewerList = [];
     let viewerIdx = 0;
     let viewerSeq = 0;   // 느린 텍스트 로드가 늦게 도착해 이미 넘어간 화면을 덮지 않게
+    // **그림을 못 받으면 말한다.** 예전엔 img.src 에 넣기만 하고 실패를 안 들어서, 서버가 거절한
+    // 그림(400)은 안 그려진 채 거의 검은 배경과 흰 파일명·n/N·흰 버튼만 남았다 — 형: "넘기다보면
+    // 흑백되거든". 채팅에서 넘기는 목록엔 그 대화가 만든 파일이 섞이는데, 워크트리 밖 파일
+    // (스크래치패드 스크린샷·~/.aside·업로드 폴더)은 서버가 막는다(실측 43건). 막는 건 맞고,
+    // 조용히 까매지는 게 틀렸다.
+    // 늦게 온 error 는 버린다: 닫혔거나(src 없음) 텍스트를 보는 중이면 멀쩡한 화면을 덮게 된다.
+    imageViewerImg.addEventListener("error", () => {
+      if (!viewerOpen() || !imageViewerImg.getAttribute("src")) return;
+      if (!viewerIsImage(viewerList[viewerIdx])) return;
+      imageViewerImg.style.display = "none";
+      viewerDead.style.display = "block";
+      viewerDead.textContent = "이 그림은 열 수 없어요 — 지워졌거나, 이 방 밖에 있어서 폰으로는 못 받아요";
+    });
 
     function closeImageViewer() {
       imageViewer.classList.remove("open");
