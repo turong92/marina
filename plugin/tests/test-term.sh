@@ -88,7 +88,13 @@ for bad in [("evil", "abcd1234"), ("claude", "../x"), ("claude", "a"), ("codex",
 mt._AGENT_CLIS["fake"] = lambda sid, prompt="", model="", effort="", profile="", lean=False: ["python3", "-c", "import sys,time; print('FAKE_'+sys.argv[1]+'_'+sys.argv[2]); time.sleep(2)", sid, prompt]   # argv 리스트(셸 문자열 조립 폐지)
 d6 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0001")
 assert not d6["reused"] and mt._by_tid[d3["tid"]].key == "" and mt._by_tid[d6["tid"]].key, "셸은 키 없음·에이전트만 키 보유"
-assert {s["tid"]: s for s in mt.term_list()["sessions"]}[d6["tid"]]["agent"] == {"source": "fake", "sid": "sid0001"}, "에이전트 세션은 agent 필드가 실려야"
+_ag6 = {s["tid"]: s for s in mt.term_list()["sessions"]}[d6["tid"]]["agent"]
+assert _ag6["source"] == "fake" and _ag6["sid"] == "sid0001", "에이전트 세션은 agent 필드가 실려야"
+# agent 에는 **뜰 때의 하네스**도 실린다(2026-09-10) — "이 대화 어떻게 떴나" 화면이 지금
+# 설정으로 되계산하지 않고 이걸 읽는다. 되계산하면 그 사이 설정이 바뀐 경우 화면이 거짓말을
+# 하고, 하필 "다시 띄워야 반영된다"는 사실을 가린다.
+assert _ag6["launch"] and _ag6["launch"][0] == "python3", _ag6
+assert _ag6["profile"] == "" and _ag6["lean"] is False, _ag6
 d7 = mt.term_open(Path(tmp), 80, 24, agent_source="fake", agent_sid="sid0001")
 assert d7["reused"] and d7["tid"] == d6["tid"], "같은 에이전트 재진입은 재사용"
 ag = mt._by_tid[d6["tid"]]

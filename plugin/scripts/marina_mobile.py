@@ -37,7 +37,8 @@ from marina_sessions import (
 from marina_login import api_retry, extract_login_url, login_stage
 from marina_paths import write_meta
 from marina_state import MARINA_HOME, PORT
-from marina_term import (_agent_cli, term_await_redraw, term_input, term_kill, term_list,
+from marina_term import (_agent_cli, _project_lean, _project_profile,
+                         term_await_redraw, term_input, term_kill, term_list,
                          term_open, term_output_mark, term_tail)
 
 
@@ -2215,6 +2216,132 @@ def mobile_send(body: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# ── 이 대화가 **어떤 하네스로 떴는지** 보여준다(읽기 전용). ─────────────────────────────
+# 마리나는 이미 하네스 노릇을 절반 하고 있다 — SessionStart 훅이 문맥 한 줄을 넣고, PreToolUse
+# 훅 넷이 Bash·보호파일·appdata 를 막고, 플러그인이 스킬·커맨드를 싣고, profile/lean 이 CLI
+# 플래그를 붙인다. 그런데 그게 **전부 안 보이는 데서** 일어나고 전 프로젝트가 같은 값을 쓴다.
+# 프로젝트마다 다르게 주려면 먼저 지금 뭘 주고 있는지 보여야 한다(형 2026-09-10: "안 써봐서
+# 확신이 안 서"). 그래서 이 화면이 먼저고, 편집은 여기 없다.
+_HARNESS_FLAG_LABEL = {
+    "--disallowedTools": "이 도구는 못 쓴다",
+    "--tools": "이 도구만 쓴다",
+    "--strict-mcp-config": "MCP 는 명시한 것만",
+    "--append-system-prompt": "지시문을 덧붙였다",
+    "--model": "모델",
+    "--effort": "생각 깊이",
+    "--resume": "이어붙인 세션",
+}
+
+
+def _plugin_dir() -> Path:
+    """플러그인 루트(hooks/·skills/·commands/ 가 있는 곳). scripts/ 의 부모다."""
+    return Path(__file__).resolve().parent.parent
+
+
+def _harness_hooks() -> list[dict[str, Any]]:
+    """hooks.json 이 거는 것들 — 이벤트별로 몇 개를 어디에 거는지. 못 읽으면 빈 목록(fail-open):
+    이 화면은 진단용이라, 한 칸을 못 채웠다고 나머지까지 감출 이유가 없다."""
+    try:
+        raw = (_plugin_dir() / "hooks" / "hooks.json").read_text(encoding="utf-8")
+        data = json.loads(raw)
+    except (OSError, ValueError):
+        return []
+    나온것: list[dict[str, Any]] = []
+    for event, groups in (data.get("hooks") or {}).items():
+        for group in groups if isinstance(groups, list) else []:
+            훅들 = group.get("hooks") if isinstance(group, dict) else None
+            for hook in 훅들 if isinstance(훅들, list) else []:
+                명령 = str((hook or {}).get("command") or "")
+                나온것.append({
+                    "event": str(event),
+                    "matcher": str((group or {}).get("matcher") or ""),
+                    # 경로 전체를 보여줄 이유가 없다 — 폰 화면에서 스크립트 이름이면 충분하다.
+                    "script": 명령.rstrip('"').rsplit("/", 1)[-1],
+                })
+    return 나온것
+
+
+def _harness_bundled() -> dict[str, list[str]]:
+    """플러그인이 세션에 싣는 스킬·커맨드 이름."""
+    묶음: dict[str, list[str]] = {"skills": [], "commands": []}
+    try:
+        묶음["skills"] = sorted(d.name for d in (_plugin_dir() / "skills").iterdir() if d.is_dir())
+    except OSError:
+        pass
+    try:
+        묶음["commands"] = sorted(f.stem for f in (_plugin_dir() / "commands").glob("*.md"))
+    except OSError:
+        pass
+    return 묶음
+
+
+def _harness_flags(launch: list[str]) -> tuple[list[dict[str, str]], str]:
+    """띄울 때 쓴 argv 를 (플래그 목록, 덧붙인 지시문) 으로 가른다.
+
+    지시문은 따로 뺀다 — 한 줄이 아니라 문단이라 플래그 목록에 섞으면 나머지가 안 보인다."""
+    플래그: list[dict[str, str]] = []
+    지시문 = ""
+    i = 1 if launch else 0            # [0] 은 엔진 이름
+    while i < len(launch):
+        낱말 = str(launch[i])
+        if not 낱말.startswith("-"):
+            i += 1
+            continue
+        값: list[str] = []
+        j = i + 1
+        while j < len(launch) and not str(launch[j]).startswith("-"):
+            값.append(str(launch[j]))
+            j += 1
+        if 낱말 == "--append-system-prompt":
+            지시문 = " ".join(값)
+            플래그.append({"flag": 낱말, "value": "", "label": _HARNESS_FLAG_LABEL.get(낱말, "")})
+        else:
+            플래그.append({"flag": 낱말, "value": " ".join(값),
+                           "label": _HARNESS_FLAG_LABEL.get(낱말, "")})
+        i = j
+    return 플래그, 지시문
+
+
+def mobile_harness(body: dict[str, Any]) -> dict[str, Any]:
+    """이 대화가 뜰 때의 하네스 + 지금 프로젝트 설정.
+
+    **되계산하지 않는다.** 뜰 때 쓴 argv 를 그대로 읽는다 — 하네스는 뜰 때 정해지고 도는
+    세션엔 안 붙으므로, 지금 설정으로 그려주면 화면이 거짓말을 한다. 그리고 그 거짓말이
+    하필 "바꿨으면 다시 띄워야 한다"는 사실을 가린다. 둘을 나란히 놓고 다르면 말해준다."""
+    root = safe_root(str(body.get("root") or ""))
+    source = str(body.get("source") or "")
+    if source not in ("claude", "codex"):
+        raise ValueError("source 는 claude 또는 codex")
+    sid = str(body.get("sid") or "")
+    agent: dict[str, Any] = {}
+    resolved = root.resolve()
+    for item in term_list().get("sessions", []):
+        후보 = item.get("agent") or {}
+        if (str(후보.get("source") or "") == source and str(후보.get("sid") or "") == sid
+                and str(item.get("root") or "") == str(resolved)):
+            agent = 후보
+            break
+    launch = [str(x) for x in (agent.get("launch") or [])]
+    플래그, 지시문 = _harness_flags(launch)
+    지금 = {"profile": _project_profile(root), "lean": _project_lean(root)}
+    떴을때 = {"profile": str(agent.get("profile") or ""), "lean": bool(agent.get("lean"))}
+    return {
+        # 마리나가 안 띄운 세션(손으로 띄워 입양된 것)은 argv 가 없다. 지어내지 않고 모른다고 한다.
+        "launched": bool(launch),
+        "engine": source,
+        "model": str(agent.get("model") or ""),
+        "effort": str(agent.get("effort") or ""),
+        "flags": 플래그,
+        "systemPrompt": 지시문,
+        "atLaunch": 떴을때,
+        "now": 지금,
+        # 뜰 때와 지금이 다르면 **다시 띄워야** 반영된다 — 화면이 그걸 말하게 한다.
+        "stale": bool(launch) and 떴을때 != 지금,
+        "hooks": _harness_hooks(),
+        "bundled": _harness_bundled(),
+    }
+
+
 def mobile_restart_chat(body: dict[str, Any]) -> dict[str, Any]:
     """이 대화를 끄고 같은 자리에 새로 띄운다 — **한 번 눌러서**.
 
@@ -2872,6 +2999,27 @@ _MOBILE_HTML = r"""<!doctype html>
                  border: 1px dashed var(--line); border-radius: 999px;
                  background: transparent; color: inherit; font-family: inherit; cursor: pointer; }
     .roomRow.archived { opacity: .55; }
+    /* 하네스 패널 — 읽기 전용 진단 화면. 값은 골라 읽는 것이라 등폭으로 쓴다. */
+    .harnessBody { padding: 4px 14px 18px; overflow-y: auto; }
+    .hSec { margin: 14px 0 0; }
+    .hSec:first-child { margin-top: 4px; }
+    .hSecTitle { font-size: 11px; font-weight: 850; letter-spacing: .3px; color: #747d8b;
+                 margin-bottom: 6px; }
+    .hRow { display: flex; gap: 8px; align-items: baseline; padding: 5px 0;
+            border-bottom: 1px solid var(--line); font-size: 13px; }
+    .hRow:last-child { border-bottom: 0; }
+    .hKey { flex: 0 0 auto; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            font-size: 12px; }
+    .hVal { flex: 1 1 auto; min-width: 0; word-break: break-all;
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+    .hNote { flex: 0 0 auto; font-size: 11px; opacity: .65; }
+    .hPrompt { margin-top: 4px; padding: 9px 11px; border: 1px solid var(--line);
+               border-radius: 9px; background: var(--panel); font-size: 12px; line-height: 1.5;
+               white-space: pre-wrap; }
+    .hEmpty { padding: 10px 0; font-size: 13px; opacity: .7; line-height: 1.6; }
+    /* 뜰 때 값 ≠ 지금 값 — 다시 띄워야 반영된다는 걸 이 배지가 말한다. */
+    .hStale { margin: 10px 0 0; padding: 9px 11px; border: 1px solid #d29922;
+              border-radius: 9px; background: #fff8e6; font-size: 12px; line-height: 1.55; }
     /* 목록의 **바닥**. 방 카드보다 낮고 흐리게 — 방이 아니라 목록에 딸린 손잡이라는 뜻이다.
        (Slack 의 "Show archived channels", 노션 휴지통이 같은 자리에 같은 무게로 있다.) */
     .roomArchivedRow { display: flex; align-items: center; gap: 8px; width: 100%;
@@ -3329,6 +3477,7 @@ _MOBILE_HTML = r"""<!doctype html>
          떠서 그 카드 글씨가 통째로 안 보인다(형: "그냥 허얘"). 어두운 쪽 색을 따로 준다. */
       .roomRow.here, .roomCard.here { background: #16233a; box-shadow: inset 3px 0 0 #4b8fe0; }
       .roomRow.open .countChip { border-color: #3c5f8f; background: #1b2942; }
+      .hStale { border-color: #7a5c12; background: #2a2312; }
       /* 밝은 쪽에서 잘 보이라고 --line 보다 진하게 잡은 값(#d6dde6)이 어두운 쪽에선 거꾸로
          너무 밝다 — 여기선 테두리색으로 되돌린다. */
       .roomAccSplit { border-top-color: #303846; }
@@ -3510,6 +3659,14 @@ _MOBILE_HTML = r"""<!doctype html>
       <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="inboxSheetTitle">
         <div class="sheetHeader"><strong id="inboxSheetTitle">받은 작업</strong><button class="iconBtn sheetClose" id="inboxCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
         <div class="inboxList" id="inboxList"></div>
+      </section>
+    </div>
+    <!-- 이 대화가 어떤 하네스로 떴나 (읽기 전용). 편집은 일부러 없다 — 먼저 보이게 하는 게
+         목적이고, 무엇을 바꾸고 싶은지는 이 화면을 보고 정한다. -->
+    <div class="sheetBackdrop" id="harnessSheet" aria-hidden="true">
+      <section class="bottomSheet" role="dialog" aria-modal="true" aria-labelledby="harnessSheetTitle">
+        <div class="sheetHeader"><strong id="harnessSheetTitle">어떻게 떴나</strong><button class="iconBtn sheetClose" id="harnessCloseBtn" type="button" title="닫기" aria-label="닫기">&#215;</button></div>
+        <div class="harnessBody" id="harnessBody"></div>
       </section>
     </div>
     <div class="sheetBackdrop" id="servicesSheet" aria-hidden="true">
@@ -4708,6 +4865,7 @@ _MOBILE_HTML = r"""<!doctype html>
     // 두 메뉴가 다르게 생기면 같은 화면에서 같은 제스처가 다른 물건처럼 보인다.
     function renderChatMenu(key, tab) {
       return `<div class="roomMenu" role="menu">
+        <button type="button" role="menuitem" data-harness="${esc(key)}">어떻게 떴나</button>
         <button type="button" role="menuitem" data-restart-chat="${esc(key)}">다시 시작</button>
         <button type="button" role="menuitem" data-close-chat="${esc(key)}">끄기</button>
         <button type="button" role="menuitem" class="danger" data-forget="${esc(key)}">지우기</button>
@@ -5865,6 +6023,93 @@ _MOBILE_HTML = r"""<!doctype html>
       servicesSheet.setAttribute("aria-hidden", "false");
       loadServices(true);
     }
+    // ── 하네스 시트 (읽기 전용) ──
+    // "이 대화는 어떤 규칙으로 떠 있나"를 볼 길이 아예 없었다. 마리나는 훅 11개를 걸고 스킬을
+    // 싣고 플래그와 지시문을 붙이는데 그게 전부 안 보이는 데서 일어난다. 편집은 여기 없다 —
+    // 무엇을 바꾸고 싶은지는 이 화면을 보고 정한다.
+    // HARNESS_VIEW_START  (테스트가 이 블록을 vm 에 싣는다)
+    function harnessRow(key, value, note) {
+      return `<div class="hRow"><span class="hKey">${esc(key)}</span>`
+        + `<span class="hVal">${esc(value)}</span>`
+        + (note ? `<span class="hNote">${esc(note)}</span>` : "") + `</div>`;
+    }
+    function harnessSection(title, rows) {
+      return rows ? `<div class="hSec"><div class="hSecTitle">${esc(title)}</div>${rows}</div>` : "";
+    }
+    function renderHarness(data) {
+      const d = data || {};
+      // **마리나가 안 띄운 세션**은 argv 가 없다. 지금 설정으로 메워서 보여주면 안 뜬 값을 뜬
+      // 것처럼 말하게 된다 — 모르면 모른다고 한다.
+      if (!d.launched) {
+        return `<div class="hEmpty">이 대화는 마리나가 띄우지 않았어요(직접 띄운 걸 입양했거나,
+          마리나를 다시 켠 뒤라 기록이 없어요). 그래서 <b>무슨 플래그로 떴는지는 알 수 없어요.</b><br />
+          아래 훅·스킬은 이 대화에도 그대로 걸려 있어요.</div>`
+          + harnessSection("걸린 훅", (d.hooks || []).map(h =>
+              harnessRow(h.event, h.script, h.matcher)).join(""))
+          + harnessSection("실린 스킬·커맨드",
+              ((d.bundled || {}).skills || []).map(x => harnessRow("스킬", x, "")).join("")
+              + ((d.bundled || {}).commands || []).map(x => harnessRow("커맨드", "/" + x, "")).join(""));
+      }
+      const 떴을때 = d.atLaunch || {}, 지금 = d.now || {};
+      const 기본 = harnessRow("엔진", d.engine || "", "")
+        + harnessRow("모델", d.model || "CLI 기본값", "")
+        + harnessRow("생각 깊이", d.effort || "CLI 기본값", "")
+        + harnessRow("프로필", 떴을때.profile || "(개발 방)", "")
+        + harnessRow("가볍게", 떴을때.lean ? "켜짐" : "꺼짐", "");
+      // 뜰 때와 지금이 다르면 그대로 말한다 — 하네스는 뜰 때 정해지고 도는 세션엔 안 붙는다.
+      const 어긋남 = d.stale
+        ? `<div class="hStale"><b>지금 프로젝트 설정과 달라요.</b><br />
+             지금: 프로필 ${esc(지금.profile || "(개발 방)")} · 가볍게 ${지금.lean ? "켜짐" : "꺼짐"}<br />
+             하네스는 <b>뜰 때 정해져요</b> — 바꾼 걸 적용하려면 이 대화를 다시 시작해야 해요.</div>`
+        : "";
+      const 플래그 = (d.flags || []).map(f =>
+        harnessRow(f.flag, f.value || "", f.label || "")).join("");
+      const 지시문 = d.systemPrompt
+        ? `<div class="hSec"><div class="hSecTitle">덧붙인 지시문</div>
+             <div class="hPrompt">${esc(d.systemPrompt)}</div></div>`
+        : "";
+      return harnessSection("이 대화", 기본) + 어긋남
+        + harnessSection("붙은 플래그", 플래그)
+        + 지시문
+        + harnessSection("걸린 훅", (d.hooks || []).map(h =>
+            harnessRow(h.event, h.script, h.matcher)).join(""))
+        + harnessSection("실린 스킬·커맨드",
+            ((d.bundled || {}).skills || []).map(x => harnessRow("스킬", x, "")).join("")
+            + ((d.bundled || {}).commands || []).map(x => harnessRow("커맨드", "/" + x, "")).join(""));
+    }
+    // HARNESS_VIEW_END
+    const harnessSheet = document.getElementById("harnessSheet");
+    const harnessBody = document.getElementById("harnessBody");
+    const harnessCloseBtn = document.getElementById("harnessCloseBtn");
+    function closeHarness() {
+      harnessSheet.classList.remove("open");
+      harnessSheet.setAttribute("aria-hidden", "true");
+    }
+    harnessCloseBtn.onclick = () => closeHarness();
+    harnessSheet.addEventListener("click", event => {
+      if (event.target === harnessSheet) closeHarness();
+    });
+    // key = "source:sid" (대화 메뉴가 쓰는 것과 같은 모양). root 는 지금 펼친 방이다 —
+    // restartChatProcess·closeChatProcess 와 **같은 규칙**을 쓴다. 여기만 다르게 쪼개면
+    // 같은 메뉴 안에서 항목마다 다른 대화를 가리키게 된다.
+    async function openHarness(key) {
+      const source = String(key || "").slice(0, String(key).indexOf(":"));
+      const sid = String(key || "").slice(String(key).indexOf(":") + 1);
+      if (!source || !sid) return;
+      closeDrawer();
+      harnessBody.innerHTML = '<div class="hEmpty">불러오는 중...</div>';
+      harnessSheet.classList.add("open");
+      harnessSheet.setAttribute("aria-hidden", "false");
+      try {
+        const r = await fetch("/mobile/api/harness", {method: "POST", headers: headers(true),
+          body: JSON.stringify({root: openRoomRoot, source, sid})});
+        if (!r.ok) throw new Error(await responseError(r));
+        harnessBody.innerHTML = renderHarness(await r.json());
+      } catch (error) {
+        harnessBody.innerHTML = `<div class="hEmpty">못 불러왔어요 · ${esc(String(error))}</div>`;
+      }
+    }
+
     // ── 로그·깃 시트 (읽기 전용) ──
     // 모바일엔 둘 다 없어서 밖에서 "빌드 깨졌나"를 확인할 방법이 없었다. 서버는 웹과 같은 함수를
     // 쓰고(/mobile/api/logs/*, /mobile/api/git-*), 여기는 표시만 한다. 쓰기(커밋·푸시·머지)는 없다.
@@ -7368,7 +7613,7 @@ _MOBILE_HTML = r"""<!doctype html>
     });
     // 아코디언은 roomList 안, 팝오버는 listView 안 — 둘의 공통 조상에 한 번만 건다.
     listView.addEventListener("click", async event => {
-      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restart-chat],[data-restore]");
+      const target = event.target.closest && event.target.closest("[data-tab],[data-rename],[data-archive],[data-room-close],[data-room-launch],[data-unhide],[data-room-relogin],[data-room-code],[data-room-delete],[data-forget],[data-close-chat],[data-restart-chat],[data-restore],[data-harness]");
       if (!target) return;
       roomBusy = true;
       try { await handleRoomAction(target); } finally { roomBusy = false; closeRoomMenu(); }
@@ -7393,6 +7638,10 @@ _MOBILE_HTML = r"""<!doctype html>
       }
       if (target.hasAttribute("data-restart-chat")) {
         await restartChatProcess(target.getAttribute("data-restart-chat"));
+        return;
+      }
+      if (target.hasAttribute("data-harness")) {
+        await openHarness(target.getAttribute("data-harness"));
         return;
       }
       if (target.hasAttribute("data-close-chat")) {
@@ -7965,6 +8214,7 @@ _MOBILE_HTML = r"""<!doctype html>
     // 한 번을 **삼키고** 채팅 상태를 다시 밀어 넣는다(드로어가 원래 쓰던 방식 그대로).
     function 위에뜬것닫기() {
       if (viewerOpen()) { closeImageViewer(); return true; }
+      if (harnessSheet.classList.contains("open")) { closeHarness(); return true; }
       if (subagentSheet.classList.contains("open")) { closeSubagents(); return true; }
       if (navOpen) { closeNav(); return true; }
       if (drawerOpen()) { closeDrawer(); return true; }
