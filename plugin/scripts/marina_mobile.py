@@ -2765,8 +2765,32 @@ _MOBILE_HTML = r"""<!doctype html>
     .roomIcon { width: 22px; flex: 0 0 22px; text-align: center; font-weight: 700; }
     .roomBody { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
     /* 이름은 한 줄 — 넘치면 말줄임. 서버가 이미 줄이지만 화면 폭은 기기마다 다르다. */
-    .roomName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .roomMeta { font-size: 12px; opacity: .7; }
+    /* 이름은 **진짜 버튼**이다(카드는 div 라 스크린리더·키보드가 여기로 온다). 전역 버튼
+       규칙(테두리·배경·min-height 42px)을 전부 되돌려 글자처럼 보이게 한다. */
+    .roomName { overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+                border: 0; background: transparent; color: inherit; font: inherit;
+                min-height: 0; padding: 0; text-align: left; cursor: pointer; }
+    .roomMeta { font-size: 12px; opacity: .7; min-width: 0; overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
+    /* 부제줄 = 상태글 + 펼침 배지. 좁은 폰에서 둘이 겹치면 **상태글이 줄고 배지는 남는다**
+       (배지는 손잡이라 줄면 못 누른다). 그래서 상태글에만 말줄임을 건다. */
+    .metaRow { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    /* 펼침 손잡이. 글자가 있어 무엇이 열리는지 말하고, 과녁도 아이콘 칸보다 넓다.
+       세로 padding 을 넉넉히 잡아 손가락 높이를 확보한다(줄 높이는 카드가 이미 잡는다). */
+    /* min-height 를 **되돌린다**: 전역 규칙(select, button { min-height: 42px })을 그대로 받으면
+       배지가 부제줄을 42px 로 밀어 카드 한 줄이 63px→93px 로 커진다(실측). 목록이 30% 짧아지는
+       값이다. 대신 보이는 크기는 작게 두고 **과녁만 ::after 로 넓힌다** — 눈은 배지 크기를,
+       손가락은 42px 를 만난다. */
+    .countChip { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px;
+                 position: relative; min-height: 0; padding: 3px 9px;
+                 border: 1px solid var(--line); border-radius: 999px;
+                 background: transparent; color: inherit; font: inherit; font-size: 12px;
+                 line-height: 1; font-weight: 650; cursor: pointer; }
+    .countChip::after { content: ""; position: absolute; inset: -9px -6px; }
+    .chipCaret { font-size: 10px; opacity: .75; transition: transform .12s ease; }
+    .roomRow.open .countChip { border-color: #9db6d8; background: #eaf1fb; }
+    .roomRow.open .chipCaret { transform: rotate(180deg); }
+    @media (prefers-reduced-motion: reduce) { .chipCaret { transition: none; } }
     /* 상태는 글자로도 말하지만, 색이 있어야 목록을 훑을 때 급한 것이 먼저 눈에 걸린다. */
     .roomRow { display: flex; align-items: stretch; border-bottom: 1px solid var(--line); }
     .roomRow .roomCard { border-bottom: 0; flex: 1 1 auto; min-width: 0; }
@@ -2790,9 +2814,9 @@ _MOBILE_HTML = r"""<!doctype html>
        원래 이름이 보여야 한다(예전엔 패널 머리가 그 몫이었다). */
     .roomRow.open .roomName { white-space: normal; overflow: visible; }
     .roomRow.open .roomCard { background: var(--panel); }
-    .roomExpand { transition: transform .12s ease; }
-    .roomRow.open .roomExpand { transform: rotate(180deg); }
-    @media (prefers-reduced-motion: reduce) { .roomExpand { transition: none; } }
+    /* 아코디언 안 가름줄 — 위는 "새로 시작", 아래는 "이미 있는 대화". 실선을 쓰면 상자가
+       하나 더 생긴 것처럼 읽혀서 점선으로 얕게만 나눈다. */
+    .roomAccSplit { border-top: 1px dashed #d6dde6; margin: 0 8px 8px; }
     /* ⋯ 메뉴 — 누른 버튼 바로 아래. listView 기준 절대배치라 목록과 같이 스크롤된다. */
     .roomTabMore { flex: 0 0 32px; font-size: 15px; }
     .roomMenuPop { position: absolute; z-index: 40; }
@@ -2840,9 +2864,13 @@ _MOBILE_HTML = r"""<!doctype html>
     .reloginRow { display: flex; gap: 6px; }
     .reloginCode { flex: 1 1 auto; min-width: 0; padding: 8px; border: 1px solid var(--line);
                    border-radius: 8px; background: transparent; color: inherit; font: inherit; }
-    .roomStartRow { display: flex; gap: 8px; padding: 0 8px 10px; }
-    .roomStart { flex: 1 1 0; padding: 10px; border: 1px dashed var(--line); border-radius: 8px;
-                 background: transparent; color: inherit; font: inherit; cursor: pointer; }
+    /* 시작 버튼이 **맨 위로 올라오면서 작아졌다.** 줄을 반씩 채우던 42px 짜리 두 개를 그대로
+       올리면, 늘 보고 싶은 것(이미 있는 대화)보다 큰 덩어리가 위에 앉는다. 자리는 앞이되
+       무게는 뒤로 — 점선 + 작은 칩으로 낮춘다. */
+    .roomStartRow { display: flex; gap: 6px; padding: 4px 8px 8px; flex-wrap: wrap; }
+    .roomStart { flex: 0 0 auto; min-height: 30px; padding: 0 11px; font-size: 12px;
+                 border: 1px dashed var(--line); border-radius: 999px;
+                 background: transparent; color: inherit; font-family: inherit; cursor: pointer; }
     .roomRow.archived { opacity: .55; }
     /* 목록 화면에서만 보이는 헤더 아이콘(＋·검색·더보기). */
     .listOnly { display: none; }
@@ -3287,6 +3315,10 @@ _MOBILE_HTML = r"""<!doctype html>
       /* '지금 방' 강조 — 밝은 화면용 연파랑(#eef4ff)을 그대로 두면 어두운 배경에 흰 판이
          떠서 그 카드 글씨가 통째로 안 보인다(형: "그냥 허얘"). 어두운 쪽 색을 따로 준다. */
       .roomRow.here, .roomCard.here { background: #16233a; box-shadow: inset 3px 0 0 #4b8fe0; }
+      .roomRow.open .countChip { border-color: #3c5f8f; background: #1b2942; }
+      /* 밝은 쪽에서 잘 보이라고 --line 보다 진하게 잡은 값(#d6dde6)이 어두운 쪽에선 거꾸로
+         너무 밝다 — 여기선 테두리색으로 되돌린다. */
+      .roomAccSplit { border-top-color: #303846; }
       .wtAction { color: #e8edf4; }
       .fileThumb, .fileIcon { background: #222c3a; }
       .fileBadge { background: #1e3a2a; color: #7fd6a2; }
@@ -4509,8 +4541,6 @@ _MOBILE_HTML = r"""<!doctype html>
       });
       return sorted.map(room => {
         const tabs = room.tabs || [];
-        // 대화가 하나면 개수를 말하지 않는다 — 방=대화 묶음이라는 건 여럿일 때만 뜻이 있다.
-        const count = tabs.length > 1 ? " · 대화 " + tabs.length + "개" : "";
         // 이름이 같은 방이 실제로 있다(실측: 'ZZe2e' 두 개). 프로젝트를 안 고른 동안에는
         // 그게 유일한 구별 단서라 부제에 넣는다.
         const where = (!projectId && room.project ? " · " + room.project : "")
@@ -4519,24 +4549,41 @@ _MOBILE_HTML = r"""<!doctype html>
         // 기다리기만 하는데, 실제로는 형이 뭘 해야 풀리는 상태다.
         const 막힘 = statusReasonText(room.blockedReason);
         const status = String(room.status || "대기");
-        // 카드 몸통 = 바로 그 대화로. **손잡이는 둘로 갈린다**: ⌄ 는 이 방의 대화를 펼치고
-        // (하위 목록 → 부모 밑), ⋯ 는 방 작업 메뉴를 손가락 자리에 띄운다(작업 → 팝오버).
-        // 예전엔 ⋯ 하나가 둘을 겸해서, 다른 대화를 보려다 삭제 버튼까지 늘 같이 펼쳐졌다.
-        // 버튼 안에 버튼을 넣을 수 없어 형제로 두고 줄로 감싼다.
         const 펼침 = !room.archived && String(openRoot || "") === String(room.root);
+        // **오른쪽 모서리엔 손잡이가 하나다.** 펼치기는 부제줄의 "대화 N개" 배지가 맡는다 —
+        // macOS 메일이 스레드 개수 배지로 펼치는 방식이고, 우리 부제가 이미 그 개수를 글자로
+        // 말하고 있었다. 예전엔 ⌄ 와 ⋯ 가 같은 모서리에 나란히 붙어 있었는데(형: "2개 같이
+        // 있지않고"), 둘 다 아이콘뿐이라 눌러봐야 뭐가 뭔지 알았다. 배지는 무엇이 열리는지
+        // 미리 말하고 과녁도 44px 칸보다 넓다. 한 줄에 손잡이 둘을 **같은 쪽에** 붙여둔 예는
+        // 다른 데도 없다 — 노션은 양끝으로 갈랐고, 폰에서는 아예 롱프레스로 숨긴다.
+        // 대화가 없는 방엔 배지도 없다: 펼칠 것이 없는데 손잡이만 있으면 거짓말이고, 그런
+        // 방은 카드를 누르면 바로 펼쳐진다(고를 대화가 없으니 openRoom 으로 간다).
+        const 배지 = (room.archived || !tabs.length) ? ""
+          : `<button class="countChip" type="button" data-room-expand="${esc(room.root)}"`
+            + ` aria-expanded="${펼침 ? "true" : "false"}"`
+            + ` aria-label="${펼침 ? "대화 접기" : "대화 보기"}">대화 ${tabs.length}개`
+            + `<span class="chipCaret" aria-hidden="true">⌄</span></button>`;
         const 손잡이 = room.archived
           ? `<button class="roomMore" type="button" data-room-unarchive="${esc(room.root)}" title="다시 꺼내기" aria-label="다시 꺼내기">↑</button>`
-          : `<button class="roomMore roomExpand" type="button" data-room-expand="${esc(room.root)}" aria-expanded="${펼침 ? "true" : "false"}" aria-label="${펼침 ? "대화 접기" : "대화 보기"}">⌄</button>`
-            + `<button class="roomMore" type="button" data-room-menu="${esc(room.root)}" aria-label="방 메뉴">⋯</button>`;
+          : `<button class="roomMore" type="button" data-room-menu="${esc(room.root)}" aria-label="방 메뉴">⋯</button>`;
+        // 카드는 **버튼이 아니라 div** 다 — 배지가 카드 안 부제줄에 앉아야 하는데 버튼 안에
+        // 버튼을 넣을 수 없다. 대신 **이름이 진짜 버튼**(roomOpen)이 되어 키보드·스크린리더를
+        // 받고, 손가락은 카드 아무 데나 눌러도 위임 처리로 같은 곳에 간다. div 에 role="button"
+        // 을 씌우는 길도 있지만 그건 버튼 안에 버튼을 넣는 것과 같은 위반이다.
+        // 이름 버튼엔 data-room 을 **안** 붙인다: 클릭은 어차피 카드로 올라가고, 붙이면 한 방에
+        // data-room 이 둘이 되어 "몇 번째 방인가"를 세는 쪽(목록 순서 테스트)이 어긋난다.
         return `<div class="roomRow st-${esc(status)}${room.archived ? " archived" : ""}${펼침 ? " open" : ""}">
-          <button class="roomCard" type="button" data-room="${esc(room.root)}">
+          <div class="roomCard" data-room="${esc(room.root)}">
             <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
             <span class="roomBody">
-              <span class="roomName">${esc(펼침 ? (room.name || room.shortName || "")
-                                                  : (room.shortName || room.name || ""))}</span>
-              <span class="roomMeta">${esc(막힘 ? 막힘 + count : roomStatusLabel(status) + count + where)}</span>
+              <button class="roomName" type="button">${esc(펼침 ? (room.name || room.shortName || "")
+                                                  : (room.shortName || room.name || ""))}</button>
+              <span class="metaRow">
+                <span class="roomMeta">${esc(막힘 ? 막힘 : roomStatusLabel(status) + where)}</span>
+                ${배지}
+              </span>
             </span>
-          </button>
+          </div>
           ${손잡이}
         </div>` + (펼침
           ? `<div class="roomAcc" data-room-acc="${esc(room.root)}">${renderRoomAccordion(room, sources)}</div>`
@@ -4571,7 +4618,13 @@ _MOBILE_HTML = r"""<!doctype html>
              <button class="roomStart" type="button" data-room-relogin="${esc(room.root)}">로그인 하기</button>
            </div>`
         : 막힘글 ? `<div class="roomBlocked">${esc(막힘글)}</div>` : "";
+      // **시작줄은 언제나 맨 위**, 곧 누른 카드 바로 밑이다(형 지시 2026-09-10). 예전엔 대화가
+      // 있는 방에서만 아래로 내려가서, 같은 ＋ 버튼이 방마다 자리가 달랐다 — 대화가 없는 방은
+      // 위(여기 이 분기), 있는 방은 맨 밑. 대화가 늘수록 ＋ 는 더 멀어지고 스크롤을 부른다.
+      // 위로 고정하면 몇 개짜리 방이든 손가락이 가는 곳이 같다.
       const 시작줄 = (로그인줄 || "") + (시작 ? `<div class="roomStartRow">${시작}</div>` : "");
+      const 가름줄 = 시작 ? '<div class="roomAccSplit"></div>' : "";
+      // 빈 방엔 가름줄이 없다 — 아래가 목록이 아니라 안내글이라 나눌 것이 없다.
       if (!tabs.length) {
         return 시작줄 + '<div class="roomEmpty">아직 대화가 없어요.</div>';
       }
@@ -4595,7 +4648,7 @@ _MOBILE_HTML = r"""<!doctype html>
             + `<button class="roomMore roomTabMore" type="button" data-chat-menu="${esc(key)}" aria-label="대화 메뉴">⋯</button>`;
         return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
       }).join("");
-      return `<div class="roomTabs">${strip}</div>` + 시작줄;
+      return 시작줄 + 가름줄 + `<div class="roomTabs">${strip}</div>`;
     }
 
     // 대화 작업 — 그 대화 줄의 ⋯ 자리에 뜬다. 방 메뉴와 **같은 껍데기**(roomMenu)를 쓴다:

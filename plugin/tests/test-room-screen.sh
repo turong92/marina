@@ -59,10 +59,14 @@ for (const word of ["blocked", "worktree", "session", "completed", "idle"]) {
   assert.ok(!html.includes(word), `개발 용어가 화면에 나왔다: ${word}`);
 }
 
-// ④ 대화가 여럿이면 몇 개인지 보인다(방 = 대화 묶음이라는 걸 알려줘야 한다).
+// ④ 대화가 몇 개인지 보인다(방 = 대화 묶음이라는 걸 알려줘야 한다).
 assert.match(html, /대화 2개/);
-// 하나뿐이면 굳이 말하지 않는다 — 정보가 없는 글자는 목록을 흐리게만 한다.
-assert.doesNotMatch(html, /대화 1개/);
+// **하나뿐이어도 말한다** — 2026-09-10 에 규칙이 뒤집혔다. 예전엔 "정보 없는 글자"라 뺐지만,
+// 이제 이 개수는 글자가 아니라 **펼침 손잡이**(countChip)다. 하나뿐인 방에서 배지를 빼면
+// 그 방은 아코디언을 열 길이 없어지고, 거기 사는 ＋Claude·되살리기·로그인 줄이 통째로
+// 잠긴다 — "대화가 없는 방이 막다른 길이 됐다"던 옛 버그와 같은 모양이다.
+assert.match(html, /대화 1개/);
+assert.match(html, /class="countChip"[^>]*>대화 1개/);
 
 // ⑤ 방을 누를 수 있어야 한다 — 그게 유일한 진입로다.
 assert.match(html, /data-room="\/b"/);
