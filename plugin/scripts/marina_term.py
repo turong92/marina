@@ -130,6 +130,7 @@ def _persist_term(term: _Term) -> None:
             "effort": str(agent.get("effort") or ""),
             "profile": str(agent.get("profile") or ""),
             "lean": bool(agent.get("lean")),
+            "role": str(agent.get("role") or ""),
             "key": term.key or "",
             "created": term.created,
         }
@@ -256,6 +257,8 @@ def _reconstruct_registry() -> None:
                         agent[칸] = str(meta.get(칸))
                 if meta.get("lean"):
                     agent["lean"] = True
+                if meta.get("role"):
+                    agent["role"] = str(meta.get("role"))
             term = _Term(tid, cwd, -1, pid, key, agent, detached=True, pid_start=pid_start)
             created = meta.get("created")
             if isinstance(created, (int, float)):
@@ -441,7 +444,9 @@ def _project_lean(root: Path) -> bool:
 def term_open(root: Path, cols: int = 80, rows: int = 24,
               agent_source: str = "", agent_sid: str = "",
               agent_prompt: str = "", agent_model: str = "",
-              agent_effort: str = "") -> dict[str, Any]:
+              agent_effort: str = "", agent_role: str = "",
+              agent_role_argv: list[str] | None = None,
+              agent_role_launch: list[str] | None = None) -> dict[str, Any]:
     """root 워크트리에 새 PTY 세션을 연다(셸은 매번 새로 — 같은 워크트리에 여러 개 가능).
     기본은 $SHELL -il, agent_source/sid 를 주면 그 CLI 세션에 resume 으로 붙는다(살아있으면 재사용 — 이중 실행 방지)."""
     _reconstruct_registry()
@@ -456,26 +461,35 @@ def term_open(root: Path, cols: int = 80, rows: int = 24,
         # 방 종류(profile)와 무게(lean)는 **다른 축**이다. 채팅방이라고 도구를 떼지 않는다 —
         # 떼는 건 lean 을 켠 프로젝트뿐이고, resume 에도 같은 값을 붙인다(안 그러면 같은 방이
         # 열 때마다 무게가 널뛴다).
-        프로필, 가볍게 = _project_profile(root), _project_lean(root)
-        cmd = _agent_cli(agent_source, agent_sid, agent_prompt, agent_model, agent_effort,
-                         프로필, 가볍게)
-        # **뜰 때 무엇으로 떴는지를 남긴다.** 나중에 지금 설정에서 되계산하면 안 된다 — 하네스는
-        # 뜰 때 정해지고 도는 세션엔 안 붙으므로, 그 사이 설정이 바뀌면 화면이 거짓말을 한다.
-        # 그 거짓말이 하필 "다시 띄워야 반영된다"는 사실을 가린다.
-        #
-        # 프롬프트는 **다시 만들어서** 뺀다(꼬리를 잘라내지 않는다). 슬라이스는 인자 순서가
-        # 바뀌는 날 조용히 형이 보낸 말을 설정 화면에 흘린다 — 같은 함수에 빈 프롬프트를 주면
-        # 그런 실수가 원천적으로 불가능하다.
-        launch = _agent_cli(agent_source, agent_sid, "", agent_model, agent_effort,
-                            프로필, 가볍게)
+        if agent_role_argv:
+            # **역할 방은 자기 하네스만 입는다.** 프로젝트 profile(chat 의 --append-system-prompt 등)을 겹치면
+            # 같은 플래그가 두 번 들어가고 역할 정의가 흐려진다. 저장본은 호출자가 빈 프롬프트로 다시 만든 것.
+            프로필, 가볍게 = "", False
+            cmd = list(agent_role_argv)
+            launch = list(agent_role_launch or [])
+        else:
+            프로필, 가볍게 = _project_profile(root), _project_lean(root)
+            cmd = _agent_cli(agent_source, agent_sid, agent_prompt, agent_model, agent_effort,
+                             프로필, 가볍게)
+            # **뜰 때 무엇으로 떴는지를 남긴다.** 나중에 지금 설정에서 되계산하면 안 된다 — 하네스는
+            # 뜰 때 정해지고 도는 세션엔 안 붙으므로, 그 사이 설정이 바뀌면 화면이 거짓말을 한다.
+            # 그 거짓말이 하필 "다시 띄워야 반영된다"는 사실을 가린다.
+            #
+            # 프롬프트는 **다시 만들어서** 뺀다(꼬리를 잘라내지 않는다). 슬라이스는 인자 순서가
+            # 바뀌는 날 조용히 형이 보낸 말을 설정 화면에 흘린다 — 같은 함수에 빈 프롬프트를 주면
+            # 그런 실수가 원천적으로 불가능하다.
+            launch = _agent_cli(agent_source, agent_sid, "", agent_model, agent_effort,
+                                프로필, 가볍게)
         # 재사용 키는 **같은 세션의 이중 resume** 을 막는 장치다. sid 가 없으면(새 세션 launch) 막을
         # 대상 자체가 없으므로 키를 만들지 않는다 — 안 그러면 ＋Claude 두 번이 한 PTY 로 합쳐진다.
         #
         # prompt attach(모바일 전송)는 **매 전송이 새 턴**이라 재사용하지 않는다 — CLI 의 prompt
         # 인자로 시작하므로 이미 돌고 있는 TUI 에 붙일 수가 없다. 그래서 키를 비운다(의도된 동작).
-        key = "" if (agent_prompt or not agent_sid) else f"{cwd}::agent:{agent_source}:{agent_sid}"
+        key = "" if (agent_role_argv or agent_prompt or not agent_sid) else f"{cwd}::agent:{agent_source}:{agent_sid}"
         agent = {"source": agent_source, "sid": agent_sid, "launch": launch,
                  "profile": 프로필, "lean": bool(가볍게)}
+        if agent_role:
+            agent["role"] = agent_role
         # 프롬프트를 **싣고** 떴는가. 아직 sid 가 안 붙은 PTY 가 둘로 갈리기 때문에 필요하다:
         # ＋Claude 가 띄운 빈 자리표시자(첫 메시지를 기다리는 중)와, 그 첫 메시지를 argv 로
         # 받아 막 일을 시작한 것. 앞엣것은 접어도 잃을 게 없지만 뒤엣것을 접으면 방금 시킨
