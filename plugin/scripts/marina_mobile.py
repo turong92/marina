@@ -3174,7 +3174,7 @@ _MOBILE_HTML = r"""<!doctype html>
     .chainDone .held { color: #8a5a00; font-weight: 700; }
     .chainStrip { display: flex; align-items: center; gap: 8px; margin: 0 0 6px; padding: 8px 10px; border-radius: 10px;
                   background: #efe9ff; border: 1px solid #d6c9f5; font-size: 12px; color: #43308a; }
-    .chainStrip .grow { flex: 1; min-width: 0; }
+    .chainStrip .grow { flex: 1; min-width: 0; word-break: keep-all; }
     .chipBtn { min-height: 0; padding: 4px 9px; border-radius: 999px; border: 1px solid #b9a6e8; background: #fff; color: #43308a; font-size: 11.5px; font-weight: 700; }
     .chipBtn.on { background: #43308a; color: #fff; border-color: #43308a; }
     .chipBtn.stop { border-color: #e3b3b3; color: #a33; }
@@ -3598,6 +3598,7 @@ _MOBILE_HTML = r"""<!doctype html>
       .chipBtn { background: #171d27; color: #d7c9ff; border-color: #4d3f7a; }
       .roomChainBadge { background: #2a2145; color: #d7c9ff; }
       .roleRow { background: #1d1830; border-color: #4d3f7a; color: #c9b8f5; }
+      .roomMenu button.hot { background: #2a2145; color: #d7c9ff; }
       .peerFrom { color: #b7a3f0; }
       .turn.output { background: #080c12; }
       .turn a, .subagent-turn a { color: #78aaff; }
@@ -3884,11 +3885,12 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!v.startsWith("agent:")) return;
       const [, source, sid] = v.split(":");
       const action = b.getAttribute("data-chain-action");
+      const on = !b.classList.contains("on");    // 끝까지는 켜고 끄는 토글
       try {
         const r = await fetch(`/mobile/api/chain/${action}`, {method: "POST", headers: headers(true),
-          body: JSON.stringify({root: sessionRoot(), source, sid, on: true})});
+          body: JSON.stringify({root: sessionRoot(), source, sid, on})});
         if (!r.ok) throw new Error(await responseError(r));
-        showToast(action === "stop" ? "리뷰를 멈췄어요" : "끝까지 돌려요");
+        showToast(action === "stop" ? "리뷰를 멈췄어요" : on ? "끝까지 돌려요" : "바퀴 제한으로 돌아가요");
         load({quiet: true}).catch(() => {});
       } catch (error) {
         showToast(`리뷰 조작 실패 · ${String(error)}`);
@@ -5005,7 +5007,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const c = session && session.chain;
       if (!c || !["reviewing", "applying", "waiting"].includes(c.state)) return "";
       const 바퀴 = `${esc(String(c.round || 1))}/${c.unlimited ? "∞" : esc(String(c.maxRounds || ""))}바퀴`;
-      const 단계 = c.state === "applying" ? " · 반영 중" : c.state === "waiting" ? " · 커밋 기다리는 중" : "";
+      const 단계 = c.state === "applying" ? " · 반영\u00a0중" : c.state === "waiting" ? " · 커밋\u00a0기다리는\u00a0중" : "";
       return `<span>🔁</span><span class="grow"><b>리뷰 도는 중</b> · ${esc(String(c.role || "reviewer"))} · ${바퀴}${단계}</span>`
         + `<button class="chipBtn${c.unlimited ? " on" : ""}" type="button" data-chain-action="unlimited">끝까지</button>`
         + `<button class="chipBtn stop" type="button" data-chain-action="stop">멈추기</button>`;
@@ -7747,7 +7749,15 @@ _MOBILE_HTML = r"""<!doctype html>
       try { await handleRoomAction(target); } finally { roomBusy = false; closeRoomMenu(); }
     });
     async function handleRoomAction(target) {
-      { const html = renderChainStrip(session); chainStripEl.hidden = !html; if (chainStripEl.innerHTML !== html) chainStripEl.innerHTML = html; }
+      if (target.hasAttribute("data-chain-request")) {
+        const key = target.getAttribute("data-chain-request");
+        const source = key.slice(0, key.indexOf(":")), sid = key.slice(key.indexOf(":") + 1);
+        const r = await fetch("/mobile/api/chain/request", {method: "POST", headers: headers(true), body: JSON.stringify({root: openRoomRoot, source, sid})});
+        const body = await r.json().catch(() => ({}));
+        showToast(r.ok && body.ok ? "리뷰어를 불렀어요" : `리뷰 못 보냄 · ${body.reason || body.error || r.status}`);
+        await load({force: true});
+        return;
+      }
       if (target.hasAttribute("data-room-close")) { closeRoom(); return; }
       if (target.hasAttribute("data-room-code")) {
         await sendReloginCode(target.getAttribute("data-room-code"));

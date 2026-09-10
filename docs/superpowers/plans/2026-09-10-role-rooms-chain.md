@@ -2284,7 +2284,7 @@ def _session_chain_summary(source: str, sid: str, now: float | None = None) -> d
       const c = session && session.chain;
       if (!c || !["reviewing", "applying", "waiting"].includes(c.state)) return "";
       const 바퀴 = `${esc(String(c.round || 1))}/${c.unlimited ? "∞" : esc(String(c.maxRounds || ""))}바퀴`;
-      const 단계 = c.state === "applying" ? " · 반영 중" : c.state === "waiting" ? " · 커밋 기다리는 중" : "";
+      const 단계 = c.state === "applying" ? " · 반영\u00a0중" : c.state === "waiting" ? " · 커밋\u00a0기다리는\u00a0중" : "";
       return `<span>🔁</span><span class="grow"><b>리뷰 도는 중</b> · ${esc(String(c.role || "reviewer"))} · ${바퀴}${단계}</span>`
         + `<button class="chipBtn${c.unlimited ? " on" : ""}" type="button" data-chain-action="unlimited">끝까지</button>`
         + `<button class="chipBtn stop" type="button" data-chain-action="stop">멈추기</button>`;

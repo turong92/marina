@@ -55,3 +55,18 @@ console.log("PASS: 배지·딸린 줄·메뉴·고정 줄");
 PY
 bash "$HERE/test-mobile-element-refs.sh" >/dev/null && echo "PASS: 엘리먼트 참조"
 bash "$HERE/test-room-accordion.sh" >/dev/null && echo "PASS: 기존 아코디언 계약"
+
+# 방 메뉴 처리기 — vm 블록 밖이라 정적으로 본다. 한때 첫 줄에 정의 안 된 session 을 읽어 모든 방 동작이 죽었다.
+python3 - "$SCR" <<'PY'
+import re, sys
+from pathlib import Path
+src = (Path(sys.argv[1]) / "marina_mobile.py").read_text(encoding="utf-8")
+a = src.index("    async function handleRoomAction(target) {")
+body = src[a:src.index("\n    }\n", a)]
+assert 'target.hasAttribute("data-chain-request")' in body, "리뷰 보내기 분기 없음"
+assert "renderChainStrip(" not in body and not re.search(r"\bsession\b(?!s)", body.split("\n", 1)[1].split("\n", 1)[0]), "처리기 첫 줄이 session 을 읽는다"
+strip = src[src.index('chainStripEl.addEventListener("click"'):]
+strip = strip[:strip.index("\n    });\n")]
+assert 'classList.contains("on")' in strip and "on})" in strip, "끝까지가 켜기만 한다(토글 아님)"
+print("PASS: 방 메뉴 처리기·끝까지 토글")
+PY
