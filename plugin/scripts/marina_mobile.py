@@ -2872,6 +2872,16 @@ _MOBILE_HTML = r"""<!doctype html>
                  border: 1px dashed var(--line); border-radius: 999px;
                  background: transparent; color: inherit; font-family: inherit; cursor: pointer; }
     .roomRow.archived { opacity: .55; }
+    /* 목록의 **바닥**. 방 카드보다 낮고 흐리게 — 방이 아니라 목록에 딸린 손잡이라는 뜻이다.
+       (Slack 의 "Show archived channels", 노션 휴지통이 같은 자리에 같은 무게로 있다.) */
+    .roomArchivedRow { display: flex; align-items: center; gap: 8px; width: 100%;
+                       min-height: 0; padding: 13px 12px; border: 0;
+                       border-bottom: 1px solid var(--line); background: transparent;
+                       color: inherit; font: inherit; font-size: 13px; font-weight: 400;
+                       text-align: left; opacity: .62; cursor: pointer; }
+    .roomArchivedRow:active { background: var(--panel); }
+    .roomArchivedRow.on { opacity: .85; }
+    .roomArchivedRow .cv { margin-left: auto; font-size: 12px; }
     /* 목록 화면에서만 보이는 헤더 아이콘(＋·검색·더보기). */
     .listOnly { display: none; }
     #mobileApp[data-view="list"] .listOnly { display: inline-flex; }
@@ -3289,6 +3299,9 @@ _MOBILE_HTML = r"""<!doctype html>
     .status { font-size: 12px; color: #596070; min-height: 18px; }
     .toast { position: fixed; left: 50%; bottom: max(18px, env(safe-area-inset-bottom)); z-index: 20; display: none; width: max-content; max-width: calc(100vw - 32px); padding: 9px 12px; transform: translateX(-50%); border-radius: 8px; background: #17191f; color: #fff; font-size: 12px; box-shadow: 0 8px 24px rgb(0 0 0 / 24%); }
     .toast.show { display: block; }
+    .toastUndo { margin-left: 10px; min-height: 0; padding: 3px 9px; border: 1px solid #4b5563;
+                 border-radius: 999px; background: transparent; color: #9ec5ff; font: inherit;
+                 font-size: 12px; font-weight: 800; cursor: pointer; }
     @media (prefers-color-scheme: dark) {
       :root { --st-run: #34c98e; --st-boot: #f0a132; --st-err: #e5484d; --st-stop: #5a5f6a;
               --line: #303846; --panel: #171d27; }
@@ -4017,6 +4030,10 @@ _MOBILE_HTML = r"""<!doctype html>
     let pinnedRoots = new Set();
     let hiddenSessions = new Set();   // "source:sid" — 서버 저장
     let showAll = false;
+    // 접어둔 방을 목록에 붙여 볼지 — **방 전용 스위치**다. 헤더의 전체보기(showAll)는 오래된·
+    // 숨긴 *세션*을 여는 넓은 것이라 성격이 다르다. 한 스위치가 둘을 겸하면 줄이 "숨기기"라고
+    // 말해놓고 눌러도 안 숨는 상태가 생긴다(전체보기가 켜져 있을 때).
+    let showArchivedRooms = false;
     let servicesRoot = "";            // 서비스 시트가 지금 보여주는 워크트리(전역 root 가 아니다)              // 전체보기: 7일 넘은 세션 + 숨긴 세션까지   // 서버 저장(핀) — 폰에서 꽂은 게 웹에도 보여야 한다
     let listDensity = localStorage.getItem("marinaMobileDensity") === "detail" ? "detail" : "simple";
     let turnsStructureKey = "";
@@ -4423,6 +4440,25 @@ _MOBILE_HTML = r"""<!doctype html>
       toastEl.classList.add("show");
       toastTimer = setTimeout(() => toastEl.classList.remove("show"), 1800);
     }
+    // 되돌릴 수 있는 일을 알릴 때. 보통 토스트보다 **오래 머문다**(1.8초는 손이 올라오기도
+    // 전에 사라진다). textContent 를 쓰지 않고 노드를 직접 붙인다 — 문구를 HTML 로 이어
+    // 붙이면 방 이름 같은 남의 글자가 마크업이 되는 길이 열린다.
+    function showUndoToast(message, undo) {
+      clearTimeout(toastTimer);
+      toastEl.textContent = message;
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "toastUndo";
+      btn.textContent = "되돌리기";
+      btn.onclick = () => {
+        clearTimeout(toastTimer);
+        toastEl.classList.remove("show");
+        try { undo(); } catch (error) { showToast(`되돌리기 실패 · ${String(error)}`); }
+      };
+      toastEl.appendChild(btn);
+      toastEl.classList.add("show");
+      toastTimer = setTimeout(() => toastEl.classList.remove("show"), 6000);
+    }
     function syncVisualViewport() {
       const viewport = window.visualViewport;
       const height = viewport ? viewport.height : window.innerHeight;
@@ -4506,8 +4542,13 @@ _MOBILE_HTML = r"""<!doctype html>
       return ROOM_LABEL[status] || ROOM_LABEL["대기"];
     }
 
-    // withArchived 는 "전체보기"에서 켜진다. 접은 방을 다시 볼 길이 없으면 접는 순간
-    // 잃어버린 것과 같다 — 접기는 치우는 것이지 버리는 게 아니다.
+    // withArchived 는 **목록 끝의 "접어둔 방" 줄**이 켠다(예전엔 헤더 ⋯ 의 "전체보기"였다).
+    // 자리를 옮긴 이유: 헤더의 ＋·검색·⋯ 는 `listOnly` 라 채팅 뷰에서 숨는데, 그 화면에서
+    // 좌측 드로어를 열면 방 목록은 보이면서 전체보기로 갈 문만 사라진다 — 접은 방을 꺼낼
+    // 길이 아예 없었다(형 캡처 2026-09-10). 프로젝트 칩도 같은 이유로 목록 안으로 옮긴 적이
+    // 있다(#listView 주석 참고). 목록 안에 두면 두 화면이 저절로 같아진다.
+    // 접은 방을 다시 볼 길이 없으면 접는 순간 잃어버린 것과 같다 — 접기는 치우는 것이지
+    // 버리는 게 아니다.
     // openRoot = 지금 펼친 방. **아코디언은 이 함수가 그린다** — 예전엔 `#roomOpen` 이라는
     // 고정 상자가 목록 맨 위에 따로 있어서, 어느 카드를 눌러도 패널이 저 위에 열렸다.
     // 코드가 그걸 알고 scrollIntoView 로 화면을 끌어올렸지만, 그건 원인이 아니라 증상을 덮은
@@ -4515,8 +4556,10 @@ _MOBILE_HTML = r"""<!doctype html>
     // 참고한 관습(Slack·Discord·Notion·Telegram·Gmail): 하위 목록은 부모 바로 밑에서 펼친다.
     function renderRooms(rooms, now, withArchived, query, projectId, openRoot, sources) {
       const q = String(query || "").trim().toLowerCase();
-      const live = (rooms || []).filter(room => {
-        if (!withArchived && room.archived) return false;
+      // 접기 여부는 **나중에** 가른다 — 지금 화면(프로젝트·검색)에 걸린 것 중 몇 개가 접혀
+      // 있는지 세어야 줄이 정직한 숫자를 말한다. 다른 프로젝트의 접힌 방까지 세면 눌렀을 때
+      // 아무것도 안 나온다.
+      const 통과 = (rooms || []).filter(room => {
         // 프로젝트 칩·검색창은 화면에 그대로 보인다 — 방 목록에 안 먹으면 UI 가 거짓말을 한다
         // (칩이 개수를 광고하는데 눌러도 28개 그대로였다).
         if (projectId && String(room.projectId || "") !== projectId) return false;
@@ -4525,10 +4568,20 @@ _MOBILE_HTML = r"""<!doctype html>
           .concat((room.tabs || []).map(tab => tab.title));
         return 안.some(value => String(value || "").toLowerCase().includes(q));
       });
+      const 접힌수 = 통과.filter(room => room.archived).length;
+      const live = 통과.filter(room => withArchived || !room.archived);
+      // 접힌 게 없으면 줄도 없다 — 눌러도 아무 일 없는 줄은 목록만 길게 한다.
+      const 접힘줄 = !접힌수 ? "" :
+        `<button class="roomArchivedRow${withArchived ? " on" : ""}" type="button"`
+        + ` data-archived-toggle="1" aria-expanded="${withArchived ? "true" : "false"}">`
+        + (withArchived ? "접어둔 방 숨기기" : `접어둔 방 ${접힌수}개`)
+        + `<span class="cv" aria-hidden="true">${withArchived ? "⌃" : "›"}</span></button>`;
       if (!live.length) {
-        return q || projectId
+        // 다 접어둔 상태에서도 **줄은 남는다** — 그게 유일한 출구다.
+        return (q || projectId
           ? '<div class="roomEmpty">찾는 게 없어요.</div>'
-          : '<div class="roomEmpty">아직 방이 없어요.<br />새 일감을 만들면 여기 나와요.</div>';
+          : '<div class="roomEmpty">아직 방이 없어요.<br />새 일감을 만들면 여기 나와요.</div>')
+          + 접힘줄;
       }
       // **최근 소식 순.** 진짜 채팅방처럼(형 결정 2026-08-23). 예전엔 상태부터 줄을 세웠는데
       // (문제 > 응답필요 > 작업중 > 완료 > 대기), 그러면 방금 답이 온 방이 며칠 전 "문제" 방
@@ -4588,7 +4641,7 @@ _MOBILE_HTML = r"""<!doctype html>
         </div>` + (펼침
           ? `<div class="roomAcc" data-room-acc="${esc(room.root)}">${renderRoomAccordion(room, sources)}</div>`
           : "");
-      }).join("");
+      }).join("") + 접힘줄;
     }
     // ROOM_LIST_END
 
@@ -7187,7 +7240,7 @@ _MOBILE_HTML = r"""<!doctype html>
       // renderRoomList 를 불러 한 바퀴 더 돈다. 상태만 정리하고 아래에서 한 번에 그린다.
       if (openRoomRoot && !roomByRoot(openRoomRoot)) { openRoomRoot = ""; closeRoomMenu(); }
       const 스크롤 = listView.scrollTop;     // 폴 재렌더가 보던 자리를 잃지 않게
-      roomList.innerHTML = renderRooms(방들, Date.now() / 1000, showAll,
+      roomList.innerHTML = renderRooms(방들, Date.now() / 1000, showArchivedRooms,
                                        sessionSearch.value, selectedProjectId,
                                        openRoomRoot, launchSources());
       listView.scrollTop = 스크롤;
@@ -7290,6 +7343,10 @@ _MOBILE_HTML = r"""<!doctype html>
     // 방 카드를 누르면 **바로 그 방의 대화로** 간다. 대부분의 방은 대화가 하나뿐이라,
     // 여기서 한 번 더 고르게 하면 흔한 경우에 손가락이 한 번 더 든다.
     roomList.addEventListener("click", event => {
+      // 접어둔 방 여닫기 — 서버에 다시 묻지 않는다. 상태엔 접힌 방까지 이미 다 들어 있고
+      // (mobile_state 는 rooms 를 거르지 않고 archived 만 표시한다), 거르는 건 여기다.
+      const 접힘 = event.target.closest && event.target.closest("[data-archived-toggle]");
+      if (접힘) { showArchivedRooms = !showArchivedRooms; renderRoomList(true); return; }
       const back = event.target.closest && event.target.closest("[data-room-unarchive]");
       if (back) { unarchiveRoom(back.getAttribute("data-room-unarchive")); return; }
       const menu = event.target.closest && event.target.closest("[data-room-menu]");
@@ -7376,7 +7433,10 @@ _MOBILE_HTML = r"""<!doctype html>
                                                       body: JSON.stringify({root, archived: true})});
         if (!r.ok) throw new Error(await responseError(r));
         closeRoom();
-        showToast("접어뒀어요 · 다시 부르면 올라와요");
+        // **되돌리기를 그 자리에 준다**(Gmail 방식). 예전 문구는 "다시 부르면 올라와요"였는데,
+        // 그건 언젠가 저절로 펴진다는 말이지 지금 물릴 수단이 아니다 — 잘못 접었을 때 형은
+        // 목록 끝의 "접어둔 방" 줄까지 내려가야 했다. 흔한 실수는 흔한 자리에서 물려야 한다.
+        showUndoToast("접어뒀어요", () => unarchiveRoom(root));
         await load({force: true});   // 접었는데 그대로 있으면 안 먹은 걸로 보인다
       } catch (error) {
         showToast(`접기 실패 · ${String(error)}`);
@@ -7553,6 +7613,7 @@ _MOBILE_HTML = r"""<!doctype html>
         const r = await fetch("/mobile/api/archive", {method: "POST", headers: headers(true),
                                                       body: JSON.stringify({root, archived: false})});
         if (!r.ok) throw new Error(await responseError(r));
+        showToast("다시 꺼냈어요");
         await load({force: true});
       } catch (error) {
         showToast(`꺼내기 실패 · ${String(error)}`);
