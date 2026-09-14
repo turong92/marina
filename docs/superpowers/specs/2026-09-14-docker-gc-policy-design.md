@@ -39,6 +39,7 @@
 | `build_cache_keep_days` | `7` | 이보다 오래 안 쓴(LastUsedAt) 빌드캐시를 지운다. `0` = 이 단계 끔 |
 | `dangling_images` | `true` | `<none>:<none>` 이미지 중 어떤 컨테이너도 안 쓰는 것 |
 | `anonymous_volumes` | `true` | 어떤 컨테이너에도 안 붙은 **익명** 볼륨만(명명 볼륨은 절대 아님) |
+| `anonymous_volume_grace_days` | `3` | 익명 볼륨이 이 일수 넘게 **계속** dangling 이어야 지운다. `marina stop`(compose down) 직후엔 살아 있는 서비스의 익명 볼륨도 잠깐 dangling 으로 보이기 때문(코드리뷰 지적). 0=즉시 |
 | `stale_test_artifacts_days` | `3` | e2e 산출물(컨테이너·이미지·네트워크) 중 이보다 오래된 것. `0` = 끔 |
 | `stale_test_artifact_names` | `["marina-*-e2e-*"]` | e2e 산출물로 보는 이름 글롭. 라벨 `marina.e2e=1` 은 항상 포함 |
 
@@ -68,7 +69,9 @@
 2. **dangling** — `docker images -f dangling=true --format json` 중 어떤 컨테이너(`docker ps -a`, 실행 여부 무관)도
    `Image`/`ImageID` 로 안 쓰는 것. 실행: `docker image prune -f` (도커 자체가 사용 중은 제외).
 3. **volumes** — `docker volume ls -f dangling=true --format json` 중 이름이 64자 hex(익명) 인 것. 크기는
-   `system df -v` 의 `Volumes`. 실행: `docker volume prune -f` (`--all` 없음 → 익명만, 도커가 사용 중 제외).
+   `system df -v` 의 `Volumes`. 처음 dangling 으로 본 시각을 `~/.marina/docker-gc-volumes-seen.json` 에 적어 두고,
+   `anonymous_volume_grace_days` 넘게 계속 떠 있던 것만 대상. 목록에서 빠진(다시 붙은) 볼륨은 기록도 지운다.
+   실행: 대상마다 `docker volume rm <name>` (`prune -f` 는 나이를 못 가리므로 안 씀; 사용 중이면 도커가 거부 → 그 볼륨만 오류, 나머지 계속).
 4. **e2e** — 라벨 `marina.e2e=1` **또는** 이름이 글롭에 맞는 것. 나이는 `docker inspect --format '{{.Id}} {{.Created}}'`.
    - 컨테이너: `State != running` 이고 오래된 것 → `docker rm <id>` (**`-f` 없음** — 도는 것은 오류로 튕긴다).
    - 이미지: 컨테이너 단계 뒤 다시 센 `docker ps -a` 의 이미지에 안 잡히고 오래된 것 → `docker image rm <id>`

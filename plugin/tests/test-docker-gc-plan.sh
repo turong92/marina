@@ -48,7 +48,9 @@ class FakeDocker:
         if s == "image prune -f": return "Total reclaimed space: 400MB\n"
         if s == "volume ls -f dangling=true --format json":
             return nd([{"Name": "a" * 64, "Driver": "local"}, {"Name": "proj_data", "Driver": "local"}])
-        if s == "volume prune -f": return "Total reclaimed space: 100MB\n"
+        if s == "volume prune -f": raise AssertionError("volume prune 은 유예를 못 가리므로 쓰면 안 된다")
+        if a[:2] == ["volume", "rm"]:
+            assert len(a) == 3 and a[2] == "a" * 64, a; return a[2] + "\n"
         if s == "ps -a -q": return "\n".join(self.containers) + "\n"
         if a[:1] == ["inspect"] and a[1] == "--format":
             return "".join(f"{cid}\t{v[0]}\t{v[1]}\t{v[2]}\t{v[4]}\t{json.dumps(v[3])}\n" for cid, v in self.containers.items() if cid in a[3:])
@@ -76,7 +78,7 @@ class FakeDocker:
         raise AssertionError(f"예상 밖 docker 호출: {a}")
 
 def mutating(calls):
-    return [c for c in calls if c[:1] in (["rm"], ["prune"]) or c[:2] in (["image", "rm"], ["network", "rm"], ["builder", "prune"], ["image", "prune"], ["volume", "prune"])]
+    return [c for c in calls if c[:1] in (["rm"], ["prune"]) or c[:2] in (["image", "rm"], ["network", "rm"], ["volume", "rm"], ["builder", "prune"], ["image", "prune"], ["volume", "prune"])]
 
 # ── 시간 파싱 ──
 assert gc.parse_docker_time("2026-09-14 11:36:49 +0900 KST") == datetime(2026, 9, 14, 2, 36, 49, tzinfo=timezone.utc).timestamp()
@@ -95,7 +97,9 @@ steps = {s["name"]: s for s in rep["steps"]}
 assert list(steps) == ["build-cache", "dangling", "volumes", "e2e"], list(steps)
 assert steps["build-cache"]["reclaimedMb"] == 2048 + 300, steps["build-cache"]        # InUse·최근 제외, LastUsedAt 없으면 CreatedAt
 assert steps["dangling"]["reclaimedMb"] == 400 and len(steps["dangling"]["items"]) == 1, steps["dangling"]   # 컨테이너가 쓰는 bbbb 제외
-assert steps["volumes"]["reclaimedMb"] == 100 and len(steps["volumes"]["items"]) == 1, steps["volumes"]     # 명명 볼륨 제외
+assert steps["volumes"]["reclaimedMb"] == 0 and steps["volumes"]["items"] == [] and steps["volumes"]["waiting"] == 1, steps["volumes"]   # 처음 본 익명 볼륨은 유예(3일) 대기
+seen = json.loads(gc.VOLUMES_SEEN_FILE.read_text())
+assert set(seen) == {"a" * 64} and seen["a" * 64] == NOW, seen                                             # 명명 볼륨(proj_data)은 기록조차 안 함
 e2e = steps["e2e"]
 assert e2e["counts"] == {"containers": 2, "images": 2, "networks": 1}, e2e["counts"]
 items = "\n".join(e2e["items"])
@@ -106,9 +110,21 @@ assert "proj-9-weaveapp" in items and "marina-foo-e2e-bar" in items, items      
 assert "young-e2e" not in items and "redis:7-alpine" not in items, items
 assert "marina-a-e2e-b_default" in items and "mdce2e9-featbr_default" not in items, items   # 사용 중 네트워크 제외
 assert e2e["reclaimedMb"] == 300 + 700, e2e
-assert rep["reclaimedMb"] == 2348 + 400 + 100 + 1000, rep["reclaimedMb"]
+assert rep["reclaimedMb"] == 2348 + 400 + 0 + 1000, rep["reclaimedMb"]
 assert not gc.STATE_FILE.exists()                                                           # dry-run 은 상태 안 씀
 assert "would reclaim" in gc.LOG_FILE.read_text() and "cli/dry" in gc.LOG_FILE.read_text(), gc.LOG_FILE.read_text()
+
+# ── 유예 지남: 처음 본 시각이 grace 보다 오래면 대상, 목록에서 빠진(다시 붙은) 볼륨은 기록 삭제 ──
+gc.VOLUMES_SEEN_FILE.write_text(json.dumps({"a" * 64: NOW - 4 * 86400, "f" * 64: NOW - 30 * 86400}))
+fake = FakeDocker()
+rep = gc.plan(policy, now=NOW, run=fake)
+steps = {s["name"]: s for s in rep["steps"]}
+assert steps["volumes"]["reclaimedMb"] == 100 and len(steps["volumes"]["items"]) == 1 and steps["volumes"]["waiting"] == 0, steps["volumes"]
+assert set(json.loads(gc.VOLUMES_SEEN_FILE.read_text())) == {"a" * 64}, "더는 dangling 아닌 볼륨 기록은 지운다"
+assert mutating(fake.calls) == [], mutating(fake.calls)
+fake = FakeDocker()
+rep = gc.plan({**policy, "anonymous_volume_grace_days": 0}, now=NOW + 1, run=fake)          # 유예 0 = 즉시
+assert {s["name"]: s for s in rep["steps"]}["volumes"]["reclaimedMb"] == 100
 
 # ── 단계 끄기 ──
 fake = FakeDocker()
@@ -121,7 +137,7 @@ fake = FakeDocker()
 rep = gc.collect(policy, source="auto", now=NOW, run=fake)
 assert rep["dryRun"] is False and rep["error"] is None, rep
 got = mutating(fake.calls)
-assert got == [["builder", "prune", "-f", "--filter", "until=168h"], ["image", "prune", "-f"], ["volume", "prune", "-f"],
+assert got == [["builder", "prune", "-f", "--filter", "until=168h"], ["image", "prune", "-f"], ["volume", "rm", "a" * 64],
                ["rm", "c2"], ["rm", "c5"], ["image", "rm", "dddddddddddd"], ["image", "rm", "ffffffffffff"], ["network", "rm", "n2"]], got
 assert all("-f" not in c for c in got if c[0] in ("rm",) or c[:2] in (["image", "rm"], ["network", "rm"])), got
 steps = {s["name"]: s for s in rep["steps"]}
@@ -132,6 +148,7 @@ assert state["finishedAt"] >= NOW and state["reclaimedMb"] == rep["reclaimedMb"]
 log = gc.LOG_FILE.read_text().splitlines()
 assert log[-1].split()[1] == "auto" and "reclaimed 4.0GB" in log[-1] and "e2e" in log[-1], log[-1]
 assert gc.due(policy, state, now=NOW + 3600) is False and gc.due(policy, state, now=NOW + 25 * 3600) is True
+assert json.loads(gc.VOLUMES_SEEN_FILE.read_text()) == {}, "지운 볼륨은 기록에서도 빠진다"
 
 # ── 단계 실패 → 다음 단계 계속, 오류 기록 ──
 fake = FakeDocker(fail_builder=True)

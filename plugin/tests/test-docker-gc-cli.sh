@@ -28,7 +28,7 @@ import json, sys
 d = json.loads(sys.argv[1]); assert d["dryRun"] is True and [s["name"] for s in d["steps"]] == ["build-cache", "dangling", "volumes", "e2e"], d
 assert d["reclaimedMb"] == 1024, d["reclaimedMb"]      # 가짜 df 의 오래된 빌드캐시 1GB
 PY
-grep -qE '^(builder prune|image prune|volume prune|rm |image rm|network rm)' "$FAKE_DOCKER_LOG" && fail "dry-run 이 삭제 명령을 냈다: $(cat "$FAKE_DOCKER_LOG")"
+grep -qE '^(builder prune|image prune|volume prune|volume rm|rm |image rm|network rm)' "$FAKE_DOCKER_LOG" && fail "dry-run 이 삭제 명령을 냈다: $(cat "$FAKE_DOCKER_LOG")"
 [ ! -e "$MARINA_HOME/docker-gc-state.json" ] || fail "dry-run 이 상태를 썼다"
 grep -q 'would reclaim' "$MARINA_HOME/docker-gc.log" || fail "dry-run 로그 없음"
 out="$(m --dry-run)"; grep -q '1.0GB' <<<"$out" || fail "사람용 dry-run 출력에 회수량이 없다: $out"

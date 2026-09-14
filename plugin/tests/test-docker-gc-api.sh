@@ -35,7 +35,7 @@ code="$(curl -s -o /dev/null -w '%{http_code}' "${hdr[@]}" -d '{"key":"nope","va
 : > "$FAKE_DOCKER_LOG"
 out="$(curl -sf "${hdr[@]}" -d '{"dryRun":true}' "$base/api/docker-gc/run")" || fail "POST run dry"
 python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['dryRun'] is True and d['reclaimedMb']==1024, d" "$out" || fail "dry 응답: $out"
-grep -qE '^(builder prune|image prune|volume prune)' "$FAKE_DOCKER_LOG" && fail "dry-run 이 삭제 명령을 냈다"
+grep -qE '^(builder prune|image prune|volume prune|volume rm)' "$FAKE_DOCKER_LOG" && fail "dry-run 이 삭제 명령을 냈다"
 
 out="$(curl -sf "${hdr[@]}" -d '{}' "$base/api/docker-gc/run")" || fail "POST run"
 python3 -c "import json,sys; d=json.loads(sys.argv[1]); assert d['dryRun'] is False and d['source']=='dashboard', d" "$out" || fail "run 응답: $out"

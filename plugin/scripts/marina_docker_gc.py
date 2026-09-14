@@ -32,7 +32,8 @@ from marina_state import MARINA_HOME, _bin
 POLICY_FILE = MARINA_HOME / "docker-gc.json"
 STATE_FILE = MARINA_HOME / "docker-gc-state.json"
 LOG_FILE = MARINA_HOME / "docker-gc.log"
-LOCK_FILE = MARINA_HOME / "docker-gc.lock"   # 프로세스 간 직렬화(데몬 자동 ↔ CLI --now ↔ 대시보드) — flock
+LOCK_FILE = MARINA_HOME / "docker-gc.lock"
+VOLUMES_SEEN_FILE = MARINA_HOME / "docker-gc-volumes-seen.json"   # 익명 볼륨을 "처음 dangling 으로 본 시각" — 유예 판정용   # 프로세스 간 직렬화(데몬 자동 ↔ CLI --now ↔ 대시보드) — flock
 
 
 @contextlib.contextmanager
@@ -62,6 +63,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "build_cache_keep_days": 7,
     "dangling_images": True,
     "anonymous_volumes": True,
+    "anonymous_volume_grace_days": 3,
     "stale_test_artifacts_days": 3,
     "stale_test_artifact_names": ["marina-*-e2e-*"],
 }
@@ -71,6 +73,7 @@ _POLICY_TYPES: dict[str, str] = {
     "build_cache_keep_days": "int",
     "dangling_images": "bool",
     "anonymous_volumes": "bool",
+    "anonymous_volume_grace_days": "int",
     "stale_test_artifacts_days": "int",
     "stale_test_artifact_names": "globs",
 }
@@ -282,6 +285,21 @@ def _is_e2e(name: str, labels: dict[str, str], globs: list[str]) -> bool:
 _ANON_VOLUME_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
+def _load_volumes_seen() -> dict[str, float]:
+    try:
+        data = json.loads(VOLUMES_SEEN_FILE.read_text(encoding="utf-8"))
+        return {str(k): float(v) for k, v in data.items()} if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_volumes_seen(seen: dict[str, float]) -> None:
+    try:
+        _atomic_write_json(VOLUMES_SEEN_FILE, seen)
+    except OSError:
+        pass
+
+
 # ─────────────────────────── 판정·실행 ───────────────────────────
 
 _RUN_LOCK = threading.Lock()          # 데몬 자동 + 대시보드 "지금" 겹침 방지(같은 프로세스 안)
@@ -383,24 +401,47 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
         except Exception as exc:
             st["error"] = str(exc)
 
-    # ③ 익명 볼륨 — 붙은 컨테이너 없는(dangling) 64hex 이름만. 명명 볼륨은 절대 아님(--all 안 씀).
+    # ③ 익명 볼륨 — 붙은 컨테이너 없는(dangling) 64hex 이름만. 명명 볼륨은 절대 아님.
+    #    유예(코드리뷰 지적): `marina stop --all`(= compose down) 직후엔 살아 있는 서비스의 익명 볼륨도 dangling 으로 보인다.
+    #    그래서 "처음 dangling 으로 본 시각"을 기록해 grace_days 넘게 계속 떠 있던 것만 지운다. 다시 붙은 볼륨은 기록도 지운다.
+    #    prune -f 는 나이를 못 가리므로 안 쓰고, 이름을 집어 `volume rm` 한다(도커가 사용 중이면 스스로 거부).
     st = _step("volumes"); steps.append(st)
+    st["waiting"] = 0
+    grace_days = int(policy.get("anonymous_volume_grace_days", DEFAULT_POLICY["anonymous_volume_grace_days"]) or 0)
     if not policy.get("anonymous_volumes", True):
         st["skipped"] = True
     else:
         try:
             sizes = {str(v.get("Name")): _size_mb(v.get("Size")) for v in dk.df().get("Volumes") or []}
+            dangling: list[str] = []
             for vol in _ndjson(run(["volume", "ls", "-f", "dangling=true", "--format", "json"])):
                 name = str(vol.get("Name") or "")
-                if not _ANON_VOLUME_RE.match(name):
-                    continue
+                if _ANON_VOLUME_RE.match(name):
+                    dangling.append(name)
+            before = _load_volumes_seen()
+            seen = {name: float(before.get(name) or now) for name in dangling}
+            _save_volumes_seen(seen)
+            cutoff = now - grace_days * 86400
+            doomed = [name for name in dangling if seen[name] <= cutoff]
+            st["waiting"] = len(dangling) - len(doomed)
+            for name in doomed:
                 size = sizes.get(name, 0)
                 st["reclaimedMb"] += size
                 st["items"].append(f"volume {name[:12]}… {fmt_mb(size)}")
-            if not dry_run:
-                got = parse_reclaimed_mb(run(["volume", "prune", "-f"]))
-                if got is not None:
-                    st["reclaimedMb"] = got
+            if not dry_run and doomed:
+                removed: set[str] = set()
+                errors: list[str] = []
+                for name in doomed:
+                    try:
+                        run(["volume", "rm", name])
+                        removed.add(name)
+                    except Exception as exc:          # 하나가 막혀도(사용 중 등) 나머지는 계속
+                        errors.append(f"{name[:12]}…: {exc}")
+                if removed:
+                    _save_volumes_seen({n: t for n, t in seen.items() if n not in removed})
+                    st["reclaimedMb"] = sum(sizes.get(n, 0) for n in removed)
+                if errors:
+                    st["error"] = "; ".join(errors)
         except Exception as exc:
             st["error"] = str(exc)
 
