@@ -86,6 +86,19 @@ assert mc.parse_xmarina("services:\n  app:\n    build: .\n") == {}
 assert calls == [], ("x-marina 없는 텍스트는 docker 를 부르지 않는다", calls)
 assert mc.parse_xmarina(TEXT)["forward"] == {"6379": "redis"}
 assert len(calls) == 1 and calls[0][-6:] == mc._COMPOSE_CONFIG_FLAGS, calls
+# (리뷰) 블록 스칼라 본문 안의 `6379:` 는 키가 아니다 — 따옴표 삽입 금지. 리스트 첫 키 `- 6379:` 는 잡는다
+BS = "services: {}\nx-marina:\n  note: |\n    6379: redis is the default port\n    second line\n  cmd: >-\n    8080: not a key\n  items:\n    - 6379: foo\n      other: bar\n  after: 1\n"
+xb = mc.parse_xmarina(BS)
+assert xb["note"] == "6379: redis is the default port\nsecond line\n" and xb["cmd"] == "8080: not a key", xb
+assert xb["items"] == [{"6379": "foo", "other": "bar"}] and xb["after"] == 1, xb
+# (리뷰) BOM · quoted "name" · CRLF
+assert mc.parse_xmarina("\ufeffx-marina:\n  a: 1\nservices: {}\n") == {"a": 1}
+assert "include" not in mc.load_compose("\ufeffinclude:\n  - ../x.yml\nservices: {}\n")
+assert mc.load_compose('"name": fixed\nservices: {}\n').get("name") == "fixed"
+crlf = "services:\r\n  app:\r\n    build: .\r\nx-marina:\r\n  a: 1\r\n"
+rc = mc.replace_xmarina_block(crlf, {"a": 2, "b": [1]})
+assert rc == "services:\r\n  app:\r\n    build: .\r\nx-marina:\r\n  a: 2\r\n  b:\r\n  - 1\r\n", repr(rc)
+assert mc.load_compose(rc)["x-marina"] == {"a": 2, "b": [1]}
 # services 쪽이 깨져도 x-marina 블록은 읽힌다(블록만 넘기므로)
 assert mc.parse_xmarina("services:\n  web:\n    image: x\n   bad indent\nx-marina:\n  a: 1\n") == {"a": 1}
 mc.subprocess.run = _real_run
@@ -115,6 +128,11 @@ assert "emptyl: []" in out, out                                     # 쓰기 자
 assert 'yes_str: "yes"' in out and 'num_str: "123"' in out and 'plain: node_modules' in out, out
 assert "- k: v" in out and "    l:" in out, out                    # 시퀀스 안 매핑의 들여쓰기
 assert mc.dump_yaml({}) == "{}\n" and mc.dump_yaml([]) == "[]\n"
+# (리뷰) YAML 1.1 float 리터럴 모양의 문자열은 인용 — plain 이면 숫자로 변질되거나 compose 가 +Inf 로 죽는다
+sp = {"a": ".5", "b": ".inf", "c": ".NaN", "d": ".venv", "e": "-.inf"}
+back_sp = mc.load_compose(mc.dump_yaml({"x-marina": sp}))["x-marina"]
+assert back_sp == sp, back_sp
+assert "d: .venv" in mc.dump_yaml(sp) and 'a: ".5"' in mc.dump_yaml(sp), mc.dump_yaml(sp)
 
 # ── 4) replace_xmarina_block: 위치 보존·주석 보존·없으면 끝에·빈 dict 면 제거 ──
 DOC = "# top\nservices:\n  app:\n    build: .   # keep me\nx-marina:\n  old: 1\nvolumes:\n  data: {}\n"
@@ -162,6 +180,9 @@ assert "ghost" not in got
 assert "# 문자열" not in o.split("a:")[1].split("b:")[0] or True                     # 승격하며 그 줄 주석은 사라져도 된다
 assert "dockerfile: Dockerfile.local" in o and "x-marina:\n  prebuild: {}" in o, o    # 나머지 원문 보존
 assert mc.inject_build_args_text(SVC, {}) == SVC
+# (리뷰) 따옴표 서비스 키도 같은 서비스 — 조용히 버리지 않는다
+oq = mc.inject_build_args_text('services:\n  "a":\n    build: ./a\n', {"a": {"P": "1"}})
+assert mc.load_compose(oq)["services"]["a"]["build"] == {"context": "./a", "args": {"P": "1"}}, oq
 try:
     mc.inject_build_args_text("services:\n  a:\n    build: {context: ./a}\n", {"a": {"P": "1"}}); raise SystemExit("FAIL: flow build 통과")
 except ValueError as exc:
