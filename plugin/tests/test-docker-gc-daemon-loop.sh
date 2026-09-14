@@ -14,6 +14,11 @@ def fake(args):
     calls.append(list(args)); return ""          # 모든 조회가 빈 결과 → 지울 것 없음
 
 NOW = 1_700_000_000.0
+# 기록(dashboard-bind.env)이 없으면 어느 포트든 자동 실행 안 함 — 격리 홈 프리뷰가 실 도커를 지우던 사고 방지
+assert gc.recorded_daemon_port() is None
+assert gc.daemon_tick(3900, now=NOW, run=fake) == "skipped:not-primary"
+assert gc.daemon_tick(3901, now=NOW, run=fake) == "skipped:not-primary"
+assert calls == []
 # primary 아님 → 아무것도 안 함
 assert gc.daemon_tick(3901, now=NOW, run=fake, primary=False) == "skipped:not-primary"
 assert calls == [] and not gc.STATE_FILE.exists()

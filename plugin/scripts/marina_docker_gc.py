@@ -528,15 +528,29 @@ def status(with_disk: bool = True, now: float | None = None, refresh: bool = Fal
 
 # ─────────────────────────── 데몬 틱 ───────────────────────────
 
+def recorded_daemon_port() -> int | None:
+    """marina dashboard start 가 적어둔 포트(dashboard-bind.env). 없거나 못 읽으면 None."""
+    try:
+        for line in (MARINA_HOME / "dashboard-bind.env").read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "MARINA_CONTROL_PORT":
+                return int(value.strip())
+    except (OSError, ValueError):
+        return None
+    return None
+
+
 def daemon_tick(port: int, now: float | None = None, run: Runner | None = None, primary: bool | None = None) -> str:
     """데몬 폴링 루프의 한 틱. 예외를 절대 밖으로 안 낸다 — 반환 문자열로만 보고한다.
 
-    프리뷰(:3901)·리뷰 인스턴스가 같은 ~/.marina 를 보며 이중 실행하지 않도록 **기록된 데몬**(dashboard-bind.env)
-    만 자동 실행한다 — 푸시 알림과 같은 규칙(marina_notify.is_primary_notifier)."""
+    **기록된 데몬**(dashboard-bind.env 의 포트)만 자동 실행한다. 푸시 알림(is_primary_notifier)보다 엄격하다 —
+    거기선 기록이 없으면 "막지 않음" 이지만, 여기선 기록이 없으면 **안 돈다**. 실측(2026-09-14): 격리 홈으로 띄운
+    리뷰 프리뷰(:3940)가 기록이 없어 primary 로 잡혀, 부팅 60초 뒤 실 도커의 빌드캐시 9.2GB 를 자동으로 지웠다.
+    도커는 호스트 하나를 모든 인스턴스가 공유하므로, 자동 정리는 정식으로 설치된 데몬 하나만 해야 한다."""
     try:
         if primary is None:
-            from marina_notify import is_primary_notifier
-            primary = is_primary_notifier(port)
+            recorded = recorded_daemon_port()
+            primary = recorded is not None and recorded == int(port)
         if not primary:
             return "skipped:not-primary"
         policy = load_policy()

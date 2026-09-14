@@ -3015,7 +3015,7 @@ def main() -> None:
     _threading.Thread(target=_warm_loop, daemon=True, name="worktree-warm").start()
 
     # 도커 GC — 정책 주기(기본 24h)로 워크트리에 안 묶인 산출물을 회수한다. 틱 함수가 예외를 전부 삼키므로
-    # GC 가 어떻게 실패해도 데몬은 영향이 없다. 기록된 데몬(dashboard-bind.env)만 돈다 — 프리뷰 인스턴스는 건너뜀.
+    # GC 가 어떻게 실패해도 데몬은 영향이 없다. 기록된 데몬(dashboard-bind.env 의 포트)만 돈다 — 기록 없는 프리뷰·격리 인스턴스는 건너뜀(도커는 호스트 공유).
     def _gc_loop() -> None:
         _time.sleep(60)                         # 부팅 직후엔 도커·화면 채우기가 우선
         while True:
