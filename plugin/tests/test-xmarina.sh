@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # x-marina 파서/직렬화 왕복: compose YAML 의 x-marina 확장(prebuild·links·forward·gateway)을
 # dict 로 읽고(parse_xmarina), 다시 compose YAML 로 쓴 뒤(serialize_xmarina) 재파싱하면 동일.
-# docker 비의존(PyYAML 직접) — 팀원 붙여넣기 blob 도 docker 없이 검증 가능해야 함.
+# 읽기는 `docker compose config`(stdlib only, PyYAML 없음) — docker CLI 만 있으면 데몬 없이도 blob 검증 가능.
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
@@ -51,13 +51,12 @@ NOXM = "services:\n  app:\n    build: .\n"
 assert mc.parse_xmarina(NOXM) == {}, ("x-marina 없으면 {} 여야", mc.parse_xmarina(NOXM))
 
 # 3) serialize_xmarina 왕복: (services, xmarina) → YAML → 재파싱 동일
-import yaml
-services = yaml.safe_load(COMPOSE)["services"]
+services = mc.load_compose(COMPOSE)["services"]        # compose 가 편 정규형(expose 등 그대로) — 쓰기 입력으로도 유효
 out = mc.serialize_xmarina(services, EXPECTED)
 assert isinstance(out, str) and out.strip(), "serialize_xmarina 는 비지 않은 str"
 assert mc.parse_xmarina(out) == EXPECTED, ("왕복 x-marina 불일치", mc.parse_xmarina(out))
 # services 도 보존(유효 compose)
-assert yaml.safe_load(out)["services"] == services, ("왕복 services 불일치", yaml.safe_load(out).get("services"))
+assert mc.load_compose(out)["services"] == services, ("왕복 services 불일치", mc.load_compose(out).get("services"))
 
 # 4) 빈 x-marina 직렬화 → 재파싱 {}
 out0 = mc.serialize_xmarina(services, {})

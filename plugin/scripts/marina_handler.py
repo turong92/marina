@@ -2415,7 +2415,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError(f"디렉토리 없음: {body.get('root', '')}")
                 if not blob.strip():
                     raise ValueError("blob(공유 compose 블록) 필요")
-                try:                                  # x-marina 파싱 가능 검증(PyYAML 부재·깨진 YAML → 4xx, 등록 전에 차단)
+                try:                                  # x-marina 파싱 가능 검증(docker CLI 부재·깨진 YAML → 4xx, 등록 전에 차단)
                     _mc().parse_xmarina(blob)
                 except Exception as exc:
                     raise ValueError(f"compose/x-marina 파싱 실패: {exc}")

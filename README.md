@@ -773,7 +773,8 @@ x-marina:
 - **Caddy v2.7 이상** (게이트웨이 전용, **선택**) — `brew install caddy` / `apt install caddy`,
   `caddy version` 으로 확인(실측 v2.11). 표준 Caddyfile 지시어만 쓰므로 v2 면 대체로 동작하나 2.7 미만은
   미검증. 없으면 게이트웨이만 비활성(안내 출력)되고 marina 나머지는 정상.
-- **python3**(표준 라이브러리만)·**bash**·**git** — 별도 pip 설치 없음.
+- **python3**(표준 라이브러리만)·**bash**·**git** — 별도 pip 설치 없음. compose YAML 은 PyYAML 없이 `docker compose config`
+  로 읽는다(붙여넣기 blob 검증도 마찬가지 — Docker **CLI** 만 있으면 되고 데몬이 떠 있을 필요는 없다). 쓰기는 자체 직렬화.
 - 단일 포트만 지원(포트 **범위**는 거부). `network_mode: host` 는 격리를 깨므로 **거부**된다(명확한 에러).
   `container_name` 은 격리를 위해 overlay 에서 **자동 제거**된다(`!reset`, 경고). `external` 네트워크·볼륨은 경고만.
 - `start --<svc>`와 `restart --<svc>`는 기존 이미지로 `up`을 실행하고, stale image가 감지되면

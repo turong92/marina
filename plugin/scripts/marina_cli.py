@@ -126,7 +126,7 @@ def _subrepo_java_homes(root: Path) -> dict[str, str]:
         stored = MARINA_HOME / pid / (proj.get("composeFile") or "docker-compose.yml")
         src = source_root_for(root)                # Dockerfile 은 소스(main)에 항상 있음(워크트리는 미apply 일 수 있음)
         mc = _mc()
-        data = mc._yaml().safe_load(Path(stored).read_text(encoding="utf-8")) or {}
+        data = mc.load_compose_file(stored) or {}             # build.context 는 compose 가 항상 dict 로 편다
         for _name, svc in (data.get("services") or {}).items():   # 1) Dockerfile FROM → 서브레포별 JDK
             if not isinstance(svc, dict):
                 continue

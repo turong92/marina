@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """marina-compose.py — compose-kind 실행 헬퍼 (런타임 경로는 stdlib only).
 
-예외: x-marina 파싱/직렬화(parse_xmarina·serialize_xmarina)는 PyYAML 을 쓴다(보편 설치).
-런타임 읽기(xmarina_for_stored)는 PyYAML 없거나 파싱 실패해도 {} 로 best-effort —
-실행 흐름을 절대 깨지 않는다. 쓰기 경로(import/wizard)에서만 PyYAML 부재가 명시 에러로 드러난다.
+YAML 도 stdlib only(README "의존성 0"): 읽기는 `docker compose config --format json`(load_compose — 앵커·머지키·
+!override 도 compose 가 푼다), 쓰기는 dump_yaml(블록 매핑/시퀀스 + JSON 인용 스칼라 = 유효 YAML). PyYAML 은 안 쓴다.
+런타임 읽기(xmarina_for_stored)는 docker 없거나 파싱 실패해도 {} 로 best-effort — 실행 흐름을 절대 깨지 않는다.
+쓰기 경로(import/wizard)에서만 파싱 실패가 명시 에러로 드러난다. 붙여넣기 blob 검증도 docker CLI 를 쓴다(데몬 불필요).
 
 워크트리별 격리 docker compose. 포트는 marina 가 정하지도 기록하지도 않는다:
 정적 overlay 로 published 를 ephemeral(127.0.0.1::<target>)로 덮어 → Docker 가 빈 호스트포트 자동할당,
@@ -66,27 +67,344 @@ def compose_project_name(project_id: str, session: str) -> str:
     return name or "marina"
 
 
-# ── x-marina 확장 ───────────────────────────────────────────────────────────
-# 프로젝트 marina 설정(prebuild·links·forward·gateway)을 compose YAML 의 top-level
-# `x-marina` 키에 담는다. docker 는 `x-*` 를 무시 → 유효 compose, marina 만 읽는다.
-# 공유 단위 = compose+x-marina 한 블록(팀원 복붙). 파싱은 PyYAML 직접 = docker 비의존
-# (붙여넣기 blob 을 docker 없이 검증·왕복).
+# ── compose YAML 읽기/쓰기 — 표준 라이브러리만 ────────────────────────────────
+# 프로젝트 marina 설정(prebuild·links·forward·gateway)은 compose YAML 의 top-level `x-marina` 키에 담는다.
+# docker 는 `x-*` 를 무시 → 유효 compose, marina 만 읽는다. 공유 단위 = compose+x-marina 한 블록(팀원 복붙).
+# 읽기는 docker compose config 에 맡긴다(README 요구사항 Docker 안에서 해결, PyYAML 없음). 데몬은 안 떠 있어도 된다.
 
-def _yaml():
-    """PyYAML lazy import. 없으면 명확한 에러(x-marina 는 YAML 직렬화 필요)."""
+_COMPOSE_CONFIG_FLAGS = ["config", "--format", "json", "--no-interpolate", "--no-normalize", "--no-path-resolution"]
+_INCLUDE_LINE_RE = re.compile(r"^include\s*:")
+_XM_NUM_KEY_RE = re.compile(r"^(\s+)(\d+)(\s*):(?=\s|$)")
+_COMPOSE_FILE_CACHE: dict = {}          # path → (mtime_ns, size, dict)   폴링 경로(세션 상태·캐시)가 매번 docker 를 부르지 않게
+_XM_FILE_CACHE: dict = {}               # path → (mtime_ns, size, x-marina dict)
+
+
+def _yaml_docker() -> str:
+    """YAML 읽기에 쓸 docker 바이너리. MARINA_YAML_DOCKER 가 있으면 그것 — 테스트가 가짜 docker 를 PATH 에 올린 채로도
+    YAML 은 진짜 docker 로 읽게(harness 가 지정). 운영에선 비어 있어 PATH 의 docker."""
+    return os.environ.get("MARINA_YAML_DOCKER") or "docker"
+
+
+def _is_top_level_key_line(line: str) -> bool:
+    return bool(line.strip()) and not line[:1].isspace() and not line.lstrip().startswith("#") and not line.startswith("---")
+
+
+def _top_level_sections(text: str) -> list:
+    """[(key_or_None, start, end)] — 줄 단위 top-level 구간. key=None 은 첫 키 앞 머리말(주석·---)."""
+    lines = text.splitlines(keepends=True)
+    out, cur_key, cur_start = [], None, 0
+    for i, line in enumerate(lines):
+        if _is_top_level_key_line(line):
+            if i > cur_start or cur_key is not None or i == 0:
+                out.append((cur_key, cur_start, i))
+            cur_key, cur_start = line.split(":", 1)[0].strip().strip('"\''), i
+    out.append((cur_key, cur_start, len(lines)))
+    return [(k, a, b) for k, a, b in out if b > a]
+
+
+def _prepare_for_compose(text: str) -> str:
+    """compose config 에 넣기 전 손질: ① top-level include 제거(PyYAML 시절처럼 '이 파일만' 읽는다 — 미attach 외부 레포
+    include 가 파싱을 막지 않게) ② x-marina 블록의 맨 숫자 키(6379:)에 따옴표(compose 는 x-* 의 비-string 키를 거부하지만
+    PyYAML 시절엔 받아서 저장 때 문자열로 고쳤다 — 붙여넣기 호환 유지)."""
+    lines = text.splitlines(keepends=True)
+    out = []
+    for key, a, b in _top_level_sections(text):
+        if key == "include":
+            continue
+        chunk = lines[a:b]
+        if key == "x-marina":
+            chunk = [chunk[0]] + [_XM_NUM_KEY_RE.sub(r'\1"\2"\3:', l) for l in chunk[1:]]
+        out.extend(chunk)
+    return "".join(out)
+
+
+def load_compose(text: str, project_dir: str | None = None) -> dict:
+    """compose YAML 텍스트 → dict (`docker compose config --format json`). 빈 텍스트 → {}.
+    보간 안 함(${VAR} 원문 유지), 정규화 안 함, 경로 해석 안 함. 단 ports/volumes/depends_on 같은 축약형은
+    compose 가 항상 긴 형식으로 편다(판정용으론 그게 더 편하다). compose 가 붙이는 `name` 은 원문에 없으면 뗀다.
+    실패는 RuntimeError(compose 의 마지막 stderr 줄) — docker CLI 없음도 여기."""
+    if not (text or "").strip():
+        return {}
+    argv = [_yaml_docker(), "compose", "-f", "-"]
+    if project_dir:
+        argv += ["--project-directory", str(project_dir)]
+    argv += _COMPOSE_CONFIG_FLAGS
     try:
-        import yaml  # noqa: PLC0415 — 선택 의존, 호출 시점 import
-        return yaml
-    except ImportError:
-        raise RuntimeError("x-marina 처리에 PyYAML 필요 — `pip install pyyaml`")
+        r = subprocess.run(argv, input=_prepare_for_compose(text), capture_output=True, text=True, timeout=60,
+                           cwd=str(project_dir) if project_dir and os.path.isdir(str(project_dir)) else None)
+    except FileNotFoundError:
+        raise RuntimeError("compose YAML 을 읽으려면 docker CLI 가 필요하다(README 요구사항: Docker)")
+    except subprocess.TimeoutExpired:
+        raise RuntimeError("docker compose config 응답 없음(60s)")
+    if r.returncode != 0:
+        errs = [l for l in (r.stderr or r.stdout or "").splitlines() if l.strip() and "level=warning" not in l]
+        raise RuntimeError(f"compose 파싱 실패: {errs[-1].strip() if errs else 'docker compose config 실패'}")
+    try:
+        data = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"compose config 출력 해석 실패: {exc}")
+    if not isinstance(data, dict):
+        return {}
+    if "name" in data and not re.search(r"^name\s*:", text, re.M):
+        data.pop("name", None)
+    return data
+
+
+def load_compose_file(path) -> dict:
+    """파일 경로 → load_compose. (mtime, size) 캐시 — 폴링 경로에서 재호출 비용 0. 반환은 사본(호출자가 고쳐도 캐시 무변)."""
+    p = str(path)
+    st = os.stat(p)
+    hit = _COMPOSE_FILE_CACHE.get(p)
+    if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return json.loads(hit[2])
+    with open(p, encoding="utf-8") as f:
+        text = f.read()
+    data = load_compose(text, project_dir=os.path.dirname(p) or None)
+    _COMPOSE_FILE_CACHE[p] = (st.st_mtime_ns, st.st_size, json.dumps(data))
+    return json.loads(_COMPOSE_FILE_CACHE[p][2])
+
+
+_PLAIN_SCALAR_RE = re.compile(r"^[A-Za-z_.][A-Za-z0-9_./-]*(?::[A-Za-z0-9_./-]+)*$")   # 내부 콜론(gateway:be·URL)은 plain 으로 유효
+_YAML_RESERVED = {"", "~", "true", "false", "null", "yes", "no", "on", "off", "y", "n"}
+
+
+def _yaml_scalar(v) -> str:
+    """스칼라 하나. 애매하면 JSON 인용(YAML 은 JSON 상위집합) — 'yes'·'123'·'a: b'·'#'·유니코드 전부 안전."""
+    if v is None:
+        return "null"
+    if v is True:
+        return "true"
+    if v is False:
+        return "false"
+    if isinstance(v, int):
+        return str(v)
+    if isinstance(v, float):
+        return repr(v) if v == v and v not in (float("inf"), float("-inf")) else json.dumps(str(v))
+    sv = str(v)
+    if _PLAIN_SCALAR_RE.match(sv) and sv.lower() not in _YAML_RESERVED:
+        return sv
+    return json.dumps(sv, ensure_ascii=False)
+
+
+def _yaml_mapping(d: dict, ind: int, out: list) -> None:
+    pad = " " * ind
+    for k, v in d.items():
+        key = _yaml_scalar(str(k))
+        if isinstance(v, dict):
+            if v:
+                out.append(f"{pad}{key}:"); _yaml_mapping(v, ind + 2, out)
+            else:
+                out.append(f"{pad}{key}: {{}}")
+        elif isinstance(v, (list, tuple)):
+            if v:
+                out.append(f"{pad}{key}:"); _yaml_sequence(list(v), ind, out)   # 대시 줄은 key 와 같은 들여쓰기(PyYAML 관례 — 기존 파일·폼 파서와 동일)
+            else:
+                out.append(f"{pad}{key}: []")
+        else:
+            out.append(f"{pad}{key}: {_yaml_scalar(v)}")
+
+
+def _yaml_sequence(items: list, ind: int, out: list) -> None:
+    pad = " " * ind
+    for item in items:
+        if isinstance(item, dict) and item:
+            sub: list = []; _yaml_mapping(item, ind + 2, sub)
+            out.append(f"{pad}- {sub[0][ind + 2:]}"); out.extend(sub[1:])
+        elif isinstance(item, (list, tuple)) and item:
+            sub = []; _yaml_sequence(list(item), ind + 2, sub)
+            out.append(f"{pad}- {sub[0][ind + 2:]}"); out.extend(sub[1:])
+        elif isinstance(item, dict):
+            out.append(f"{pad}- {{}}")
+        elif isinstance(item, (list, tuple)):
+            out.append(f"{pad}- []")
+        else:
+            out.append(f"{pad}- {_yaml_scalar(item)}")
+
+
+def dump_yaml(doc) -> str:
+    """dict/list/스칼라 → 블록 스타일 YAML(키 순서 보존, 주석 없음). PyYAML safe_dump(sort_keys=False, default_flow_style=False) 와
+    같은 모양(리스트 대시 줄 = 부모 key 들여쓰기) — 기존 보관 compose 와 diff 가 안 나고, 대시보드 폼 파서가 그 모양을 기대한다.
+    왕복 불변: load_compose(dump_yaml(d)) 의 x-marina == d['x-marina'](키가 문자열일 때)."""
+    out: list = []
+    if isinstance(doc, dict):
+        if not doc:
+            return "{}\n"
+        _yaml_mapping(doc, 0, out)
+    elif isinstance(doc, (list, tuple)):
+        if not doc:
+            return "[]\n"
+        _yaml_sequence(list(doc), 0, out)
+    else:
+        return _yaml_scalar(doc) + "\n"
+    return "\n".join(out) + "\n"
+
+
+def split_xmarina_block(text: str):
+    """(head, block, tail) — top-level `x-marina:` 구간을 줄 단위로 떼어낸다. 없으면 block=''. 나머지 텍스트(주석·앵커
+    포함)는 글자 그대로 보존 — ruamel 없이 사용자 주석을 살리는 방법."""
+    lines = text.splitlines(keepends=True)
+    for key, a, b in _top_level_sections(text):
+        if key == "x-marina":
+            return "".join(lines[:a]), "".join(lines[a:b]), "".join(lines[b:])
+    return text, "", ""
+
+
+_KEY_LINE_RE = re.compile(r"""^(?:"([^"]*)"|'([^']*)'|([^\s:#][^:]*?))\s*:""")
+
+
+def _reorder_like(obj, lines: list, start: int, end: int, indent: int):
+    """obj(dict) 의 키 순서를 lines[start:end](같은 블록의 옛 텍스트, 자식 들여쓰기 indent) 에 나온 순서대로 — 재귀.
+    옛 텍스트에 없는 키는 뒤에 원래 순서대로. compose config 가 정렬해 돌려준 dict 를 사용자가 쓴 순서로 되돌린다."""
+    if not isinstance(obj, dict) or not obj:
+        return obj
+    def ind(l: str) -> int:
+        return len(l) - len(l.lstrip(" "))
+    def code(l: str) -> bool:
+        return bool(l.strip()) and not l.lstrip().startswith("#")
+    order, spans, i = [], {}, start
+    while i < end:
+        l = lines[i]
+        if code(l) and ind(l) == indent and not l.lstrip().startswith("- "):
+            m = _KEY_LINE_RE.match(l.lstrip())
+            if m:
+                k = m.group(1) if m.group(1) is not None else (m.group(2) if m.group(2) is not None else m.group(3))
+                j = i + 1
+                while j < end and (not code(lines[j]) or ind(lines[j]) > indent or (ind(lines[j]) == indent and lines[j].lstrip().startswith("- "))):
+                    j += 1
+                order.append(k); spans[k] = (i + 1, j); i = j; continue
+        i += 1
+    out = {}
+    for k in order:
+        if k in obj and k not in out:
+            a, b = spans[k]
+            child = next((ind(lines[x]) for x in range(a, b) if code(lines[x]) and not lines[x].lstrip().startswith("- ")), indent + 2)
+            out[k] = _reorder_like(obj[k], lines, a, b, child)
+    for k, v in obj.items():
+        if k not in out:
+            out[k] = v
+    return out
+
+
+def replace_xmarina_block(text: str, xmarina: dict) -> str:
+    """텍스트의 x-marina 블록만 새 dict 로 바꿔 끼운다(위치 보존, 없으면 끝에 추가, 빈 dict 면 제거). 키는 전부 문자열."""
+    head, block, tail = split_xmarina_block(text or "")
+    xm = _stringify_keys(xmarina) if xmarina else {}
+    if block and xm:
+        bl = block.splitlines()
+        child = next((len(l) - len(l.lstrip(" ")) for l in bl[1:] if l.strip() and not l.lstrip().startswith("#")), 2)
+        xm = _reorder_like(xm, bl, 1, len(bl), child)         # 사용자가 쓴 키 순서 유지(첫 편집 때 블록이 통째로 뒤집히지 않게)
+    new_block = dump_yaml({"x-marina": xm}) if xm else ""
+    if not block and (text or "").lstrip().startswith("{"):    # JSON/flow 문서 — 블록을 이어 붙일 수 없으니 전체를 다시 쓴다
+        data = load_compose(text)
+        data.pop("x-marina", None)
+        if xmarina:
+            data["x-marina"] = _stringify_keys(xmarina)
+        return dump_yaml(data)
+    if not block and not new_block:
+        return text or ""                          # 건드릴 게 없으면 원문 그대로(끝 개행까지)
+    if head and not head.endswith("\n"):
+        head += "\n"
+    return head + new_block + tail
+
+
+def inject_build_args_text(text: str, build_args: dict) -> str:
+    """services.<svc>.build.args 에 {K:V} 를 텍스트로 끼운다(원문·주석 보존). 위저드 스텝1 build-args·레거시 build-args.json 통합용.
+    다루는 모양: `build: <ctx>`(문자열 → 블록으로 승격) · `build:` 블록(args 있으면 병합, 없으면 추가) · build 없음(args 만 추가).
+    flow 스타일(`build: {…}`·`args: {…}`)은 텍스트로 안전하게 못 고치므로 ValueError — 사용자에게 블록 형식을 요청한다."""
+    if not build_args:
+        return text
+    lines = (text or "").splitlines(keepends=True)
+    secs = {k: (a, b) for k, a, b in _top_level_sections(text or "")}
+    if "services" not in secs:
+        raise ValueError("services 섹션이 없어 build args 를 넣을 수 없다")
+    sa, sb = secs["services"]
+
+    def indent(l: str) -> int:
+        return len(l) - len(l.lstrip(" "))
+
+    def is_code(l: str) -> bool:
+        return bool(l.strip()) and not l.lstrip().startswith("#")
+
+    def block_end(start: int, limit: int, base: int) -> int:
+        """start 줄(들여쓰기 base) 의 자식 블록 끝 — base 이하 들여쓰기의 첫 코드 줄."""
+        for i in range(start + 1, limit):
+            if is_code(lines[i]) and indent(lines[i]) <= base:
+                return i
+        return limit
+
+    def child_indent(start: int, limit: int, base: int) -> int:
+        for i in range(start + 1, limit):
+            if is_code(lines[i]) and indent(lines[i]) > base:
+                return indent(lines[i])
+        return base + 2
+
+    svc_indent = child_indent(sa, sb, 0)
+    for svc, args in build_args.items():
+        if not isinstance(args, dict) or not args:
+            continue
+        kv = {str(k): str(v) for k, v in args.items()}
+        si = next((i for i in range(sa + 1, sb) if is_code(lines[i]) and indent(lines[i]) == svc_indent
+                   and re.match(rf"^\s*{re.escape(str(svc))}\s*:\s*(#.*)?$", lines[i])), None)
+        if si is None:
+            continue                                   # 없는 서비스는 기존 동작대로 무시
+        se = block_end(si, sb, svc_indent)
+        ci = child_indent(si, se, svc_indent)
+        bi = next((i for i in range(si + 1, se) if is_code(lines[i]) and indent(lines[i]) == ci
+                   and re.match(r"^\s*build\s*:", lines[i])), None)
+        nl = "\n"
+        if bi is None:                                 # build 없음 → build: / args:  (기존 dict 경로와 동일: context 없이 args 만)
+            ins = [f"{' ' * ci}build:{nl}", f"{' ' * (ci + 2)}args:{nl}"] + [f"{' ' * (ci + 4)}{_yaml_scalar(k)}: {_yaml_scalar(v)}{nl}" for k, v in kv.items()]
+            lines[si + 1:si + 1] = ins; sb += len(ins); continue
+        rest = lines[bi].split(":", 1)[1].split("#", 1)[0].strip()
+        if rest.startswith("{"):
+            raise ValueError(f"services.{svc}.build 가 flow 스타일({{…}})이라 build args 를 텍스트로 못 넣는다 — 블록 형식으로 써주세요")
+        be = block_end(bi, se, ci)
+        if rest:                                       # build: <ctx> → 블록 승격
+            ctx = rest
+            ins = [f"{' ' * ci}build:{nl}", f"{' ' * (ci + 2)}context: {ctx}{nl}", f"{' ' * (ci + 2)}args:{nl}"] + \
+                  [f"{' ' * (ci + 4)}{_yaml_scalar(k)}: {_yaml_scalar(v)}{nl}" for k, v in kv.items()]
+            lines[bi:bi + 1] = ins; sb += len(ins) - 1; continue
+        bci = child_indent(bi, be, ci)
+        ai = next((i for i in range(bi + 1, be) if is_code(lines[i]) and indent(lines[i]) == bci
+                   and re.match(r"^\s*args\s*:", lines[i])), None)
+        if ai is None:                                 # args 없음 → build: 바로 아래 추가
+            ins = [f"{' ' * bci}args:{nl}"] + [f"{' ' * (bci + 2)}{_yaml_scalar(k)}: {_yaml_scalar(v)}{nl}" for k, v in kv.items()]
+            lines[bi + 1:bi + 1] = ins; sb += len(ins); continue
+        arest = lines[ai].split(":", 1)[1].split("#", 1)[0].strip()
+        if arest:
+            raise ValueError(f"services.{svc}.build.args 가 flow/리스트 스타일이라 텍스트로 못 합친다 — 블록 매핑으로 써주세요")
+        ae = block_end(ai, be, bci)
+        aci = child_indent(ai, ae, bci)
+        existing = {}
+        for i in range(ai + 1, ae):
+            if is_code(lines[i]) and indent(lines[i]) == aci:
+                m = re.match(r"^\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s:#][^:#]*?))\s*:", lines[i])
+                if m:
+                    existing[m.group(1) or m.group(2) or m.group(3)] = i
+        for k, v in kv.items():
+            if k in existing:
+                lines[existing[k]] = f"{' ' * aci}{_yaml_scalar(k)}: {_yaml_scalar(v)}{nl}"
+        add = [f"{' ' * aci}{_yaml_scalar(k)}: {_yaml_scalar(v)}{nl}" for k, v in kv.items() if k not in existing]
+        if add:
+            lines[ae:ae] = add; sb += len(add)
+    return "".join(lines)
 
 
 def parse_xmarina(compose_text: str) -> dict:
-    """compose YAML 텍스트의 top-level `x-marina` 블록 → dict. 없으면 {}."""
-    data = _yaml().safe_load(compose_text or "") or {}
-    if not isinstance(data, dict):
+    """compose YAML 텍스트의 top-level `x-marina` 블록 → dict. 없으면 {} (docker 호출도 없음 — 빠른 경로).
+    블록만 떼어 읽는다(services 쪽 오류·미attach include 와 무관, 50ms 한 번). 블록이 앵커 등으로 홀로 못 읽히면 전체로 재시도."""
+    text = compose_text or ""
+    if "x-marina" not in text:
         return {}
-    xm = data.get("x-marina")
+    head, block, tail = split_xmarina_block(text)
+    if block:
+        try:
+            data = load_compose(block)
+        except RuntimeError:
+            data = load_compose(text)
+    else:                                          # JSON/flow 형 문서(compose config 출력을 그대로 보관한 경우) — 전체로 읽는다
+        data = load_compose(text)
+    xm = data.get("x-marina") if isinstance(data, dict) else None
     return xm if isinstance(xm, dict) else {}
 
 
@@ -189,33 +507,18 @@ def serialize_xmarina(services: dict, xmarina: dict) -> str:
     doc = {"services": services or {}}
     if xmarina:
         doc["x-marina"] = _stringify_keys(xmarina)
-    return _yaml().safe_dump(doc, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    return dump_yaml(doc)
 
 
 def _edit_xmarina_block(stored: str, mutate) -> bool:
     """보관 compose 의 x-marina 블록만 파싱 → mutate(xm) 제자리 수정 → 재직렬화. 위쪽 services/volumes
-    텍스트(=사용자 주석)는 원본 보존(ruamel 없이 주석 살림). 대시보드의 x-marina 편집(links·gateway) 공용."""
+    텍스트(=사용자 주석·앵커)는 원본 보존(ruamel 없이 주석 살림). 대시보드의 x-marina 편집(links·gateway) 공용."""
     with open(stored, encoding="utf-8") as f:
-        lines = f.read().splitlines(keepends=True)
-    xi = next((i for i, l in enumerate(lines) if l.startswith("x-marina:")), None)
-    xj = len(lines)
-    if xi is not None:
-        for i in range(xi + 1, len(lines)):
-            l = lines[i]
-            if l.strip() and not l[0].isspace() and not l.lstrip().startswith("#"):
-                xj = i
-                break
-        xm = parse_xmarina("".join(lines[xi:xj]))
-        head, tail = "".join(lines[:xi]), "".join(lines[xj:])
-    else:
-        xm = {}
-        head, tail = "".join(lines), ""
-        if head and not head.endswith("\n"):
-            head += "\n"
+        text = f.read()
+    xm = parse_xmarina(text)
     mutate(xm)
-    new_block = _yaml().safe_dump({"x-marina": _stringify_keys(xm)}, sort_keys=False, allow_unicode=True, default_flow_style=False) if xm else ""
     with open(stored, "w", encoding="utf-8") as f:
-        f.write(head + new_block + (tail if not tail.startswith("\n") else tail))
+        f.write(replace_xmarina_block(text, xm))
     return True
 
 def set_xmarina_link(stored: str, subrepo: str, glob: str, mode: str = "symlink", remove: bool = False) -> bool:
@@ -313,12 +616,17 @@ def set_xmarina_expose(stored: str, consumer: str, var: str, target: str = "", m
 
 def xmarina_for_stored(stored: str) -> dict:
     """보관 compose 파일 경로 → x-marina dict. forward·prebuild·gateway 소비처가 이걸로 읽는다.
-    best-effort — 어떤 실패든(파일 없음·PyYAML 없음·YAML 파싱 에러·compose 커스텀 태그 !reset/!override
-    같은 ConstructorError) {} 로 떨어져 실행 흐름(marina start)을 절대 깨지 않는다. 그래서 의도적으로
+    best-effort — 어떤 실패든(파일 없음·docker 없음·YAML 파싱 에러) {} 로 떨어져 실행 흐름(marina start)을 절대 깨지 않는다. 그래서 의도적으로
     광범위 except: x-marina 미적용은 허용되는 degrade 지만 start 크래시는 안 된다."""
     try:
+        st = os.stat(stored)
+        hit = _XM_FILE_CACHE.get(str(stored))
+        if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+            return json.loads(hit[2])
         with open(stored, encoding="utf-8") as f:
-            return parse_xmarina(f.read())
+            xm = parse_xmarina(f.read())
+        _XM_FILE_CACHE[str(stored)] = (st.st_mtime_ns, st.st_size, json.dumps(xm))
+        return json.loads(_XM_FILE_CACHE[str(stored)][2])
     except Exception:
         return {}
 

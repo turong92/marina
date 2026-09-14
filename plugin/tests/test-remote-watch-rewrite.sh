@@ -117,13 +117,12 @@ class RemoteTests(unittest.TestCase):
 
     def test_paths_are_quoted_so_yaml_cannot_mangle_them(self):
         # `#` 는 주석으로 잘리고 `: ` 는 파싱을 깨뜨린다. 이 파일 관례대로 경로는 인용해야 한다.
-        import yaml
         for bad in ["/p/my libs #1/build", "/p/a: b/build"]:
             cfg = {"services": {"svc": {"build": {"context": "/p"},
                 "volumes": [{"type": "bind", "source": bad, "target": "/app/libs"}],
                 "develop": {"watch": [{"path": bad, "action": "restart"}]}}}}
-            out = mctl.build_overlay(cfg, target=RemoteTarget("ssh://box")).replace("!override", "").replace("!reset ", "")
-            got = yaml.safe_load(out)["services"]["svc"]["develop"]["watch"][0]
+            out = mctl.build_overlay(cfg, target=RemoteTarget("ssh://box"))
+            got = mctl.load_compose(out)["services"]["svc"]["develop"]["watch"][0]
             self.assertEqual(got["path"], bad, f"경로가 깨짐: {bad}")
             self.assertEqual(got["target"], "/app/libs")
 
@@ -131,8 +130,7 @@ class RemoteTests(unittest.TestCase):
         self.assertIn("watch: !override", self._service_block("user-api"))
 
     def _watch(self, name):
-        import yaml
-        d = yaml.safe_load(self.out.replace("!override", "").replace("!reset ", ""))
+        d = mctl.load_compose(self.out)
         return d["services"][name]["develop"]["watch"]
 
     # ── 헬퍼 ──

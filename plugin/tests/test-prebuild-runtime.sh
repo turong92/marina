@@ -81,15 +81,15 @@ mrun start --all > "$TMP/all.log" 2>&1
   echo "FAIL: startGroup prebuild selection"; cat "$TMP/all.log"; exit 1;
 }
 
-python3 - "$MARINA_HOME/project/docker-compose.yml" "$CAPTURE" <<'PY'
-import sys, yaml
-path, capture = sys.argv[1:]
-data = yaml.safe_load(open(path, encoding="utf-8"))
-data["x-marina"]["prebuild"] = {
-    "be-api": f"printf legacy >> '{capture}'",
-    "unused": "false",
-}
-open(path, "w", encoding="utf-8").write(yaml.safe_dump(data, sort_keys=False))
+python3 - "$MARINA_HOME/project/docker-compose.yml" "$CAPTURE" "$HERE/../scripts/marina-compose.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("mc", sys.argv[-1]); mc = importlib.util.module_from_spec(spec); spec.loader.exec_module(mc)
+def _set_prebuild(path, prebuild):
+    text = open(path, encoding="utf-8").read()
+    xm = mc.parse_xmarina(text); xm["prebuild"] = prebuild
+    open(path, "w", encoding="utf-8").write(mc.replace_xmarina_block(text, xm))
+path, capture = sys.argv[1:3]
+_set_prebuild(path, {"be-api": f"printf legacy >> '{capture}'", "unused": "false"})
 PY
 : > "$CAPTURE"
 mrun start --user-api > "$TMP/legacy.log" 2>&1
@@ -97,14 +97,14 @@ mrun start --user-api > "$TMP/legacy.log" 2>&1
   echo "FAIL: legacy prebuild selection"; cat "$TMP/legacy.log"; exit 1;
 }
 
-python3 - "$MARINA_HOME/project/docker-compose.yml" <<'PY'
-import sys, yaml
-path = sys.argv[1]
-data = yaml.safe_load(open(path, encoding="utf-8"))
-data["x-marina"]["prebuild"] = {
-    "user-api": {"cwd": "be-api", "command": "API_TOKEN=prebuild-secret-value; exit 9"},
-}
-open(path, "w", encoding="utf-8").write(yaml.safe_dump(data, sort_keys=False))
+python3 - "$MARINA_HOME/project/docker-compose.yml" "$HERE/../scripts/marina-compose.py" <<'PY'
+import importlib.util, sys
+spec = importlib.util.spec_from_file_location("mc", sys.argv[-1]); mc = importlib.util.module_from_spec(spec); spec.loader.exec_module(mc)
+def _set_prebuild(path, prebuild):
+    text = open(path, encoding="utf-8").read()
+    xm = mc.parse_xmarina(text); xm["prebuild"] = prebuild
+    open(path, "w", encoding="utf-8").write(mc.replace_xmarina_block(text, xm))
+_set_prebuild(sys.argv[1], {"user-api": {"cwd": "be-api", "command": "API_TOKEN=prebuild-secret-value; exit 9"}})
 PY
 : > "$DOCKER_LOG"
 if mrun start --user-api > "$TMP/fail.log" 2>&1; then

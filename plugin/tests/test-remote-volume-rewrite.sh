@@ -139,14 +139,13 @@ class RemoteRewriteTests(unittest.TestCase):
         self.assertLess(line.index("/app/libs"), line.index("/app/last"))
 
     def test_overlay_with_preserved_entries_is_valid_yaml(self):
-        import yaml
         cfg = {"services": {"svc": {"build": {"context": "/p"}, "volumes": [
             {"type": "bind", "source": "/p/libs", "target": "/app/libs"},
             {"type": "tmpfs", "target": "/tmp/scratch"},
         ]}}}
-        out = mctl.build_overlay(cfg, target=self.target).replace("!override", "").replace("!reset ", "")
-        vols = yaml.safe_load(out)["services"]["svc"]["volumes"]
-        self.assertEqual(vols[0], "marina_svc_app_libs:/app/libs")
+        out = mctl.build_overlay(cfg, target=self.target)
+        vols = mctl.load_compose(out)["services"]["svc"]["volumes"]   # compose 가 !override 태그째 읽고 긴 형식으로 편다
+        self.assertEqual((vols[0]["source"], vols[0]["target"], vols[0]["type"]), ("marina_svc_app_libs", "/app/libs", "volume"))
         self.assertEqual(vols[1].get("type"), "tmpfs")
 
     def test_file_mount_disappears_from_overlay(self):

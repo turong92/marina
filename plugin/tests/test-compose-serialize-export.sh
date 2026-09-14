@@ -41,7 +41,7 @@ spec=importlib.util.spec_from_file_location('mc', sys.argv[1]); mc=importlib.uti
 xm=mc.parse_xmarina(r['yaml'])
 assert xm.get('forward')=={'6379':{'target':'host'}}, ('forward 키 string', xm)
 assert (xm.get('links') or {}).get('symlink')==['node_modules'], xm
-import yaml; assert 'app' in yaml.safe_load(r['yaml'])['services'], r['yaml']
+assert 'app' in mc.load_compose(r['yaml'])['services'], r['yaml']
 print('serialize ok')
 " "$HERE/../scripts/marina-compose.py" || { echo "FAIL: compose-serialize"; exit 1; }
 

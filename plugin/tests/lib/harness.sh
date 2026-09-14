@@ -34,3 +34,10 @@ unset _marina_test_home_root
 # 테스트가 정리를 빠뜨려도(compose down 은 빌드 이미지를 안 지운다, 실측 383개 누수) 도커 GC 정책의
 # stale_test_artifacts_days 규칙이 라벨로 찾아 회수한다. 테스트가 직접 치는 `docker run` 은 --label marina.e2e=1 을 붙일 것.
 export MARINA_E2E=1
+
+# YAML 읽기는 진짜 docker 로. marina 는 compose YAML 을 `docker compose config --format json` 으로 읽는다(PyYAML 없음).
+# 테스트가 라이프사이클 흉내용 가짜 docker 를 PATH 앞에 올려도(up/ps/config 픽스처) YAML 파싱은 그 가짜가 아니라
+# 진짜 CLI 를 타야 한다 — 가짜의 `config --format json` 픽스처가 x-marina 로 둔갑하거나(prebuild-runtime), 가짜가
+# 모르는 호출이라 exit 99 로 죽어(entrypoint-lifecycle-env) x-marina 가 {} 로 사라진다. 위의 MARINA_* 초기화 뒤에 세운다.
+MARINA_YAML_DOCKER="$(command -v docker 2>/dev/null || true)"
+export MARINA_YAML_DOCKER

@@ -68,7 +68,7 @@ def _load_stored_compose(root: Path) -> tuple[dict[str, Any] | None, dict[str, A
     if path is None:
         return project, {}
     try:
-        data = _mc()._yaml().safe_load(path.read_text(encoding="utf-8")) or {}
+        data = _mc().load_compose_file(path) or {}       # docker compose config JSON(mtime 캐시) — PyYAML 없음
     except Exception:
         return project, {}
     return project, data if isinstance(data, dict) else {}

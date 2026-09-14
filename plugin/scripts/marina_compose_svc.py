@@ -781,46 +781,38 @@ def _migrate_to_xmarina(pid) -> dict:
         xm["links"] = {"symlink": sym, "copy": []}
     return xm
 
+def _effective_build_args(services: dict, build_args) -> dict:
+    """{svc:{K:V}} 중 실제 서비스가 있고 비어 있지 않은 것만(str 화). services 는 compose config 가 편 dict."""
+    out = {}
+    for svc, args in (build_args or {}).items():
+        if svc in (services or {}) and isinstance(args, dict) and args:
+            out[str(svc)] = {str(k): str(v) for k, v in args.items()}
+    return out
+
 def unified_compose_yaml(root: Path, project: dict) -> str:
     """stored compose + 유효 x-marina(있으면 그것, 없으면 레거시 마이그레이션) + build-args.json(→build.args)
-    을 하나의 compose YAML 로 직렬화 = '하나의 정규 설정'(공유용 복사·고급뷰 단일 소스). PyYAML 필요(쓰기 경로)."""
+    을 하나의 compose YAML 로 = '하나의 정규 설정'(공유용 복사·고급뷰 단일 소스).
+    원문 텍스트를 보존하고(주석·앵커·top-level 섹션 그대로) x-marina 블록과 build.args 만 텍스트로 끼운다 — PyYAML 없음."""
     pid = str(project.get("id", ""))
     cfile = project.get("composeFile", "docker-compose.yml")
-    text = (MARINA_HOME / pid / cfile).read_text(encoding="utf-8")
+    stored = MARINA_HOME / pid / cfile
+    text = stored.read_text(encoding="utf-8")
     mc = _mc()
-    data = mc._yaml().safe_load(text) or {}
-    services = data.get("services") or {}
-    ba = _read_marina_json(pid, "build-args.json")               # 레거시 build-args.json → services[svc].build.args 통합
-    if isinstance(ba, dict):
-        for svc, args in ba.items():
-            if svc in services and isinstance(args, dict) and args:
-                b = services[svc].get("build")
-                b = {"context": b} if isinstance(b, str) else (b if isinstance(b, dict) else {})
-                b.setdefault("args", {})
-                b["args"].update({str(k): str(v) for k, v in args.items()})
-                services[svc]["build"] = b
+    data = mc.load_compose_file(stored) or {}
+    ba = _effective_build_args(data.get("services") or {}, _read_marina_json(pid, "build-args.json"))   # 레거시 build-args.json → build.args
+    out = mc.inject_build_args_text(text, ba) if ba else text
     xm = mc.parse_xmarina(text) or _migrate_to_xmarina(pid)      # x-marina(SoT) 우선, 없으면 레거시 마이그레이션
-    data["services"] = services                                  # 로드한 문서를 in-place 갱신 — networks/volumes/secrets/include 등 top-level 보존
-    if xm:
-        data["x-marina"] = mc._stringify_keys(xm)               # x-marina 키 string 화(docker x-* 호환)
-    return mc._yaml().safe_dump(data, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    return mc.replace_xmarina_block(out, xm)                     # x-marina 키 string 화는 replace 안에서(docker x-* 호환)
 
 def merge_xmarina_into_yaml(yaml_text: str, xmarina: dict, build_args: dict = None) -> str:
     """services YAML 텍스트 + x-marina dict (+ build_args {svc:{K:V}}) → 하나의 compose YAML.
-    top-level 섹션 보존, x-marina 키 string 화. 위저드 검토단계 미리보기용. PyYAML 필요."""
+    사용자 텍스트·top-level 섹션 보존, x-marina 키 string 화. 위저드 검토단계 미리보기용. 텍스트가 깨졌으면 RuntimeError."""
     mc = _mc()
-    data = mc._yaml().safe_load(yaml_text or "") or {}
-    if not isinstance(data, dict):
-        data = {}
-    services = data.get("services") or {}
-    for svc, args in (build_args or {}).items():        # build-args → services[svc].build.args (위저드 스텝1 입력)
-        if svc in services and isinstance(args, dict) and args:
-            b = services[svc].get("build")
-            b = {"context": b} if isinstance(b, str) else (b if isinstance(b, dict) else {})
-            b.setdefault("args", {})
-            b["args"].update({str(k): str(v) for k, v in args.items()})
-            services[svc]["build"] = b
-    data["services"] = services
-    if xmarina:
-        data["x-marina"] = mc._stringify_keys(xmarina)
-    return mc._yaml().safe_dump(data, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    text = yaml_text or ""
+    data = mc.load_compose(text) or {}
+    services = data.get("services") if isinstance(data.get("services"), dict) else None
+    if services is None:
+        text = ("services: {}\n" + text) if text.strip() else "services: {}\n"   # 기존 동작: services 키는 항상 있다
+    ba = _effective_build_args(services or {}, build_args)
+    out = mc.inject_build_args_text(text, ba) if ba else text
+    return mc.replace_xmarina_block(out, xmarina or {})

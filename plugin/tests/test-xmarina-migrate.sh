@@ -47,8 +47,7 @@ back = m._mc().parse_xmarina(yml)
 assert back.get("prebuild")=={"be-api":"./gradlew assemble"}, back
 assert back.get("forward")=={"6379":{"target":"host"}}, back
 assert back.get("hostForward")==["3306"], back
-import yaml
-doc = yaml.safe_load(yml)
+doc = m._mc().load_compose(yml)
 svcs = doc["services"]
 assert svcs["be"]["build"]["args"]=={"PROFILE":"local"}, ("build-args 통합", svcs["be"])  # build-args.json → build.args
 assert (doc.get("networks") or {}).get("backend"), ("top-level networks 보존", doc.get("networks"))  # codex P2: top-level 섹션 안 드롭
