@@ -81,7 +81,7 @@
       if (dirtyTotal > 0) {
         if (!confirm(`'${alias}' 에 미커밋 변경·untracked 파일이 있어요(${dirtyTotal}건).\n폐기하고 정리할까요? (브랜치는 이미 머지되어 보존 불필요)`)) return;
         force = true;
-      } else if (!confirm(`'${alias}' 워크트리를 정리할까요? (머지된 브랜치 — 삭제 후 되돌릴 수 없음)\n${root}`)) {
+      } else if (!confirm(`'${alias}' 워크트리를 정리할까요? (머지된 브랜치 — 삭제 후 되돌릴 수 없음. compose 이미지·볼륨(DB 데이터 포함)도 함께 회수)\n${root}`)) {
         return;
       }
       try {

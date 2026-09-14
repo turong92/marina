@@ -3113,6 +3113,9 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
         branch = repo_branch(repo)
         if branch:
             branches[repo_name] = branch
+    last_commit_ts = last_ts   # 커밋만(세션 폴더 mtime 제외) — 유휴 정리 판정용. 세션 폴더는 데몬이 부팅 때
+    # ensure_current_log 로 건드려 mtime 이 "지금"이 된다(실측 2026-09-14: 재시작 후 6개 전부 당일) —
+    # 그걸 활동으로 보면 재시작할 때마다 모든 워크트리가 K일간 활성으로 보여 정리가 영영 안 된다.
     sdir = session_dir(root)
     if sdir.exists():
         try:
@@ -3163,6 +3166,7 @@ def worktree_info(root: Path, refresh: bool = False) -> dict[str, Any]:
         "dockerDisk": docker_disk,
         "idleDays": idle_days,
         "lastTs": last_ts,   # 최근 활동(커밋·세션 mtime) — 좌측 카드 최근순 정렬용
+        "lastCommitTs": last_commit_ts,   # 커밋만 — 유휴 정리(marina_worktree_gc) 판정용(세션 폴더 mtime 은 데몬 부팅에 오염됨)
         "ahead": ahead,
         "aheadTotal": ahead_total,
         "branches": branches,

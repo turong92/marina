@@ -19,7 +19,7 @@ import importlib.util as _ilu
 import threading
 
 from marina_state import LIFECYCLE_BUSY, MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_du_cache, _worktree_info_cache, busy_key
-from marina_cache import cache_items_by_category, compose_build_image_items, disk_usage_mb, docker_image_rm, docker_volume_rm
+from marina_cache import cache_items_by_category, compose_build_image_items, compose_project_volume_items, disk_usage_mb, docker_image_rm, docker_volume_rm
 from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
@@ -365,7 +365,53 @@ def stash_before_delete(root: Path, room_name: str = "") -> dict[str, Any]:
     return {"branch": branch, "saved": bool(성공한곳), "subrepos": 보관}
 
 
-def remove_worktree(root: Path, force: bool = False) -> dict[str, Any]:
+def reclaim_worktree_docker(root: Path) -> dict[str, Any]:
+    """워크트리를 지울 때 그 compose 프로젝트의 **이미지·볼륨을 함께** 회수한다.
+
+    실측(2026-09-14): 워크트리 28개 중 22개가 세션·프로세스 0 인데도 워크트리당 이미지 3~6GB
+    × 서비스 수가 그대로 붙어 있었다 — 삭제가 stop_all(compose down) 만 하고 이미지는 안 지웠기
+    때문이다. 컨테이너는 이미 down 됐으니 이미지 rm 이 "in use" 로 막힐 일은 없다.
+
+    **항목 하나가 실패해도 계속 간다** — 회수는 부가 작업이라 워크트리 삭제 자체를 막으면 안 된다.
+    실패는 errors 에 담아 결과에 실어 보낸다(조용히 삼키지 않는다)."""
+    out: dict[str, Any] = {"images": [], "volumes": [], "freedMb": 0, "errors": []}
+    try:
+        images = compose_build_image_items(root)
+    except Exception as exc:
+        images = []
+        out["errors"].append(f"images: {exc}")
+    for item in images:
+        image_id = str(item.get("imageId") or "")
+        if not image_id:
+            continue
+        try:
+            docker_image_rm(image_id)
+            out["images"].append(image_id)
+            out["freedMb"] += int(item.get("sizeMb") or 0)
+        except Exception as exc:
+            out["errors"].append(f"image {image_id[:19]}: {str(exc)[-160:]}")
+    try:
+        volumes = compose_project_volume_items(root)
+    except Exception as exc:
+        volumes = []
+        out["errors"].append(f"volumes: {exc}")
+    for item in volumes:
+        name = str(item.get("volume") or "")
+        if not name:
+            continue
+        try:
+            docker_volume_rm(name)
+            out["volumes"].append(name)
+            out["freedMb"] += int(item.get("sizeMb") or 0)
+        except Exception as exc:
+            out["errors"].append(f"volume {name}: {str(exc)[-160:]}")
+    _worktree_du_cache.pop(str(root), None)
+    return out
+
+
+def remove_worktree(root: Path, force: bool = False, keep_images: bool = False) -> dict[str, Any]:
+    """워크트리 삭제. keep_images=False(기본)면 그 compose 프로젝트의 이미지·볼륨도 함께 회수한다
+    (결과 `reclaim` — freedMb·errors). 회수가 실패해도 삭제는 진행한다."""
     # 전역 대시보드는 프로젝트 worktree 밖(marina 레포)에서 돌므로 "자기 세션 삭제" 가드 불요.
     # 원본(main) 보호 — 레지스트리 root 일치(subrepos=[] 단일레포도 커버) 또는 서브레포 .git 존재.
     project = project_for(root)
@@ -391,6 +437,12 @@ def remove_worktree(root: Path, force: bool = False) -> dict[str, Any]:
     except Exception:
         root_branch = ""
     results: dict[str, Any] = {"subrepos": {}, "branches": {}, "root": None}
+    if not keep_images:
+        # 워크트리 폴더가 사라지기 **전에** — compose images 조회가 --project-directory(=root)를 쓴다.
+        try:
+            results["reclaim"] = reclaim_worktree_docker(root)
+        except Exception as exc:
+            results["reclaim"] = {"images": [], "volumes": [], "freedMb": 0, "errors": [str(exc)[-200:]]}
     for repo in subrepos_of(root):
         target = root / repo
         source_repo = main_checkout / repo
