@@ -683,8 +683,18 @@ def host_forward_warning(connectivity, target):
               "해당 인프라를 박스에 띄우세요.")
 
 
+E2E_LABEL = "marina.e2e"     # marina_docker_gc.E2E_LABEL 과 동일 — 테스트 하네스(MARINA_E2E=1)가 만든 산출물 표식
+
+
+def e2e_extra_labels(env=None):
+    """테스트 하네스가 띄운 compose 면 라벨 {marina.e2e: "1"} — 도커 GC 가 3일 뒤 회수할 근거. 평소엔 None(오버레이 불변)."""
+    env = os.environ if env is None else env
+    return {E2E_LABEL: "1"} if str(env.get("MARINA_E2E") or "") == "1" else None
+
+
 def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict = None,
-                  connectivity: dict = None, expose_env: dict = None, target=None) -> str:
+                  connectivity: dict = None, expose_env: dict = None, target=None,
+                  extra_labels: dict = None) -> str:
     """resolved config → overlay YAML. 워크트리 격리를 위해 *비침투적으로* 덮는다(앱·외부 레포 불변):
     ① published ports → 127.0.0.1::<target> (호스트포트 Docker 자동할당)
     ② container_name → 제거(!reset, 워크트리별 자동명명 — 다중 인스턴스 충돌 방지)
@@ -692,6 +702,8 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
     ④ build args 주입(build_args={svc:{K:V}}; BUILD_ENV 등 — include 서비스에도 머지, app compose 불변)
     ⑤ 엮기(connectivity={forward:{port:target}}): 앱(build) 서비스마다 socat 사이드카 1개로 그 컨테이너의
        localhost:<port> 를 타겟(host=host.docker.internal / 서비스명=컨테이너 DNS)으로 중계. 자기 서빙 포트 제외.
+    ⑧ extra_labels: 모든 서비스(+사이드카)의 컨테이너 labels, build 서비스의 이미지 labels, external 아닌 네트워크 labels 에
+       덧붙인다 — 테스트 하네스 표식(marina.e2e=1) 용. 없으면 아무 것도 안 바뀐다.
     덮을 게 하나도 없으면 빈 문자열. 포트값·비밀번호는 안 들어감."""
     services = (config or {}).get("services") or {}
     build_args, connectivity, expose_env = build_args or {}, connectivity or {}, expose_env or {}
@@ -759,7 +771,8 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
         bcfg = svc.get("build") if isinstance(svc.get("build"), dict) else {}
         df = _dockerfile_case_fix(svc.get("build"))
         margs = build_args.get(name) or {}
-        if (df or margs) and bcfg.get("context"):          # scalar `build: ./dir` 병합 시 context 유실 방지 — resolved context 명시
+        blabels = extra_labels if (extra_labels and svc.get("build")) else {}   # ⑧ 이미지 라벨 — build 서비스만
+        if (df or margs or blabels) and bcfg.get("context"):   # scalar `build: ./dir` 병합 시 context 유실 방지 — resolved context 명시
             build_block.append(f"      context: {json.dumps(str(bcfg['context']))}")
         if df:
             build_block.append(f"      dockerfile: {df}")
@@ -767,8 +780,16 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
             build_block.append("      args:")
             for k in sorted(margs):
                 build_block.append(f"        {k}: {json.dumps(str(margs[k]))}")
+        if blabels:
+            build_block.append("      labels:")
+            for k in sorted(blabels):
+                build_block.append(f"        {json.dumps(str(k))}: {json.dumps(str(blabels[k]))}")
         if build_block:
             body += ["    build:", *build_block]
+        if extra_labels:                                        # ⑧ 컨테이너 라벨 — 모든 서비스
+            body.append("    labels:")
+            for k in sorted(extra_labels):
+                body.append(f"      {json.dumps(str(k))}: {json.dumps(str(extra_labels[k]))}")
         # profile 후보 build arg 는 런타임 environment 로도 미러링 — stored 의 하드코딩 env 를
         # overlay 머지에서 덮어 profile 이 런타임에도 적용되게(ai-api 케이스). stored compose 불변.
         prof_env = {k: margs[k] for k in margs if is_profile_var(k)}
@@ -804,6 +825,9 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
                 for t, proto in specs
             )
             out.append(f"    ports: !override [{entries}]")
+        if extra_labels:                                          # ⑧ 사이드카도 e2e 표식
+            out.append("    labels:")
+            out += [f"      {json.dumps(str(k))}: {json.dumps(str(extra_labels[k]))}" for k in sorted(extra_labels)]
         if any(t == "host" for _, t in bind_pairs[fname]):
             # netns 를 빌리던 시절엔 extra_hosts 가 무시돼 런타임 탐색에 의존했다. 이제 평범한
             # 컨테이너라 명시할 수 있다(리눅스에서 host 타겟 신뢰성↑). 스크립트 폴백은 그대로 둔다.
@@ -825,6 +849,15 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
         out.append("volumes:")
         out += [f"  {v}:" for v in sorted(new_volumes)]
         any_ = True
+    if extra_labels:                                              # ⑧ 네트워크 라벨 — external(남의 것)은 건드리지 않는다
+        nets_cfg = (config or {}).get("networks") if isinstance((config or {}).get("networks"), dict) else {}
+        names = [n for n, c in nets_cfg.items() if not (isinstance(c, dict) and c.get("external"))] or (["default"] if not nets_cfg else [])
+        if names:
+            out.append("networks:")
+            for n in sorted(names):
+                out += [f"  {n}:", "    labels:"]
+                out += [f"      {json.dumps(str(k))}: {json.dumps(str(extra_labels[k]))}" for k in sorted(extra_labels)]
+            any_ = True
     return ("\n".join(out) + "\n") if any_ else ""
 
 
@@ -1921,7 +1954,8 @@ def cmd_up(a):
         _up_target = load_runtime_target(a.session_dir)
         overlay_text = build_overlay(config, build_args=build_args,
                                      connectivity=overlay_conn, expose_env=exp_env,
-                                     target=_up_target)                              # P2/P3/P4 + build args + 엮기 + expose + ⑦ 런타임 타깃
+                                     target=_up_target,
+                                     extra_labels=e2e_extra_labels())               # P2/P3/P4 + build args + 엮기 + expose + ⑦ 런타임 타깃 + ⑧ e2e 라벨
         _hw = host_forward_warning(overlay_conn, _up_target)   # host 엮기는 원격에서 가리키는 기계가 바뀐다
         if _hw:
             sys.stderr.write(_hw + "\n")

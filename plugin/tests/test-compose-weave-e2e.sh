@@ -17,7 +17,7 @@ mrun() { (cd "$P" && MARINA_HOME="$MARINA_HOME" bash "$SH" "$@"); }
 cleanup() { mrun stop --all >/dev/null 2>&1 || true; docker rm -f "$RED" >/dev/null 2>&1 || true; rm -rf "$TMP"; }
 trap cleanup EXIT
 
-docker run -d --rm --name "$RED" -p 6379 redis:7-alpine >/dev/null         # host 공유 redis — docker 가 빈 호스트포트 할당(고정포트 충돌 회피, 코덱스 리뷰 P3)
+docker run -d --rm --label marina.e2e=1 --name "$RED" -p 6379 redis:7-alpine >/dev/null         # host 공유 redis — docker 가 빈 호스트포트 할당(고정포트 충돌 회피, 코덱스 리뷰 P3)
 RPORT="$(docker port "$RED" 6379/tcp | head -1 | sed 's/.*://')"           # 할당된 호스트 포트 (host.docker.internal 로 도달)
 [ -n "$RPORT" ] || { echo "FAIL: redis 호스트포트 할당 못 읽음"; docker port "$RED"; exit 1; }
 

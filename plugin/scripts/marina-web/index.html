@@ -20,6 +20,11 @@
     <div class="toolbar">
       <span id="remotePublicStatus" class="remote-public-status" hidden>PUBLIC</span>
       <div class="mem" id="mem" hidden title="Docker는 실행 중인 컨테이너의 관측 사용량이고, Host available은 OS가 지금 사용할 수 있는 메모리예요. Host 여유가 4GB 미만이면 적색 + 서비스 시작 차단"><button class="mem-target" id="memTarget" hidden></button><span id="memDocker" hidden></span><span class="mem-separator" id="memSeparator" hidden>·</span><span id="memHost" hidden></span><span class="mem-bar"><i id="memBar"></i></span></div>
+      <!-- Docker 디스크 배지 — images+build cache+volumes 합. 클릭=GC 정책 팝오버(마지막 실행·정책·미리보기·지금 정리). admin 만. -->
+      <div class="dgc" id="dgc" hidden>
+        <button id="dgcBtn" class="dgc-btn" type="button" aria-expanded="false" aria-label="Docker 디스크·정리"><i aria-hidden="true">▣</i><span id="dgcSize">—</span></button>
+        <div id="dgcMenu" class="settings-menu dgc-menu" hidden></div>
+      </div>
       <div class="agent-inbox-wrap" id="agentInboxWrap">
         <button id="agentInboxBtn" title="에이전트 Inbox" aria-label="에이전트 Inbox" aria-expanded="false">▤<span id="agentInboxCount" hidden></span></button>
         <div id="agentInboxPanel" class="agent-inbox-panel" hidden></div>
@@ -334,6 +339,7 @@
   <script src="/web/app-6c-users.js"></script>
   <script src="/web/app-6d-remote.js"></script>
   <script src="/web/app-6e-mobile.js"></script>
+  <script src="/web/app-6f-docker-gc.js"></script>
   <script src="/web/app-8-git.js"></script>
   <script src="/web/app-8b-git-commit.js"></script>
   <script src="/web/app-9-connections.js"></script>

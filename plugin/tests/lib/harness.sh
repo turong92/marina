@@ -29,3 +29,8 @@ rm -rf "$MARINA_HOME"
 mkdir -p "$MARINA_HOME"
 export MARINA_HOME
 unset _marina_test_home_root
+
+# e2e 산출물 표식 — marina-compose.py up 이 이 값을 보고 오버레이에 라벨 marina.e2e=1 을 붙인다(컨테이너·이미지·네트워크).
+# 테스트가 정리를 빠뜨려도(compose down 은 빌드 이미지를 안 지운다, 실측 383개 누수) 도커 GC 정책의
+# stale_test_artifacts_days 규칙이 라벨로 찾아 회수한다. 테스트가 직접 치는 `docker run` 은 --label marina.e2e=1 을 붙일 것.
+export MARINA_E2E=1

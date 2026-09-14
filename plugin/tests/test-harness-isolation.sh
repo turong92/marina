@@ -40,7 +40,7 @@ leaked="$(bash -c '
   export MARINA_CONTROL_HOST=0.0.0.0 MARINA_CONTROL_PORT=44444 MARINA_TERM=1 MARINA_GATEWAY_PORT=9999
   export MARINA_HOME=/definitely/not/isolated
   . "$1/lib/harness.sh"
-  env | grep "^MARINA_" | grep -v "^MARINA_HOME=" || true
+  env | grep "^MARINA_" | grep -v "^MARINA_HOME=" | grep -v "^MARINA_E2E=" || true
 ' _ "$HERE")"
 [ -z "$leaked" ] || { echo "FAIL: 하네스가 상속된 MARINA_* 를 남겼다 — $leaked"; exit 1; }
 

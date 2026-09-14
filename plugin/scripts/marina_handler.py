@@ -67,6 +67,7 @@ from marina_remote_service import RemoteService
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
 
 _ADMIN_GET_PATHS = {
+    "/api/docker-gc",
     "/api/browse", "/api/repo-candidates", "/api/compose-detect", "/api/compose-config",
     "/api/compose-export", "/api/compose-scaffold",
 }
@@ -81,6 +82,7 @@ _ADMIN_POST_PATHS = {
     "/api/compose-register", "/api/compose-import", "/api/remove-project",
     "/api/restart-dashboard", "/api/update-claude", "/api/update-codex",
     "/api/set-default-attach", "/api/forward-set", "/api/expose-set", "/api/runtime-target",
+    "/api/docker-gc/run", "/api/docker-gc/policy",
 }
 _ROOT_POST_PATHS = {
     "/api/config", "/api/link-set", "/api/meta", "/api/stop-all", "/api/start-all",
@@ -1117,6 +1119,12 @@ class Handler(BaseHTTPRequestHandler):
             if not origin_allowed(self.headers.get("origin"), False):
                 self.send_json({"error": "forbidden origin"}, 403)
                 return
+
+        if parsed.path == "/api/docker-gc":   # 헤더 Docker 디스크 배지 — 정책·마지막 실행·system df 요약(60s 캐시)
+            import marina_docker_gc
+            refresh = urllib.parse.parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"   # 정리 직후 배지 합계 즉시 갱신
+            self.send_json(marina_docker_gc.status(refresh=refresh))
+            return
 
         if parsed.path == "/api/sessions":
             memory = memory_snapshot()
@@ -2413,6 +2421,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(update_codex())
                 return
 
+            if self.path == "/api/docker-gc/policy":   # 배지 팝오버의 정책 편집 — 한 키씩, 검증은 엔진이
+                import marina_docker_gc
+                try:
+                    policy = marina_docker_gc.set_policy(str(body.get("key", "")), body.get("value"))
+                except ValueError as exc:
+                    self.send_json({"error": str(exc)}, 400)
+                    return
+                self.send_json({"ok": True, "policy": policy})
+                return
+
+            if self.path == "/api/docker-gc/run":      # "지금 정리" / "미리보기"(dryRun) — 데몬 자동 실행과 같은 엔진, 프로세스 내 락으로 직렬화
+                import marina_docker_gc
+                self.send_json(marina_docker_gc.collect(marina_docker_gc.load_policy(), source="dashboard",
+                                                        dry_run=bool(body.get("dryRun"))))
+                return
+
             if self.path == "/api/runtime-target":   # 서버 현황 영역에서 런타임 타깃(로컬/박스) 전환.
                 kind = str(body.get("kind", "")).strip()          # local | remote | inherit
                 host = str(body.get("host", "")).strip()
@@ -3039,6 +3063,20 @@ def main() -> None:
             print(f"marina reaper: {marina_reaper.min_age_s() / 3600:g}h 넘은 고아 정리 · 로그 {marina_reaper.log_path()}")
     except Exception as exc:                  # noqa: BLE001 — 청소 기능이 데몬 기동을 막으면 본말전도
         print(f"[marina] reaper 기동 실패(무시): {exc!r}")
+
+    # 도커 GC — 정책 주기(기본 24h)로 워크트리에 안 묶인 산출물을 회수한다. 틱 함수가 예외를 전부 삼키므로
+    # GC 가 어떻게 실패해도 데몬은 영향이 없다. 기록된 데몬(dashboard-bind.env 의 포트)만 돈다 — 기록 없는 프리뷰·격리 인스턴스는 건너뜀(도커는 호스트 공유).
+    def _gc_loop() -> None:
+        _time.sleep(60)                         # 부팅 직후엔 도커·화면 채우기가 우선
+        while True:
+            try:
+                from marina_docker_gc import daemon_tick
+                daemon_tick(PORT)
+            except Exception:
+                pass
+            _time.sleep(600)
+
+    _threading.Thread(target=_gc_loop, daemon=True, name="docker-gc").start()
 
     # 변화 감지 — 화면에 밀어주고(SSE), 사람을 불러야 하면 폰을 깨운다(푸시).
     # 이 루프가 없으면 폰은 계속 3초마다 물어봐야 하고, "방금 바뀌었다"를 아는 곳이 없어
