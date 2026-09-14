@@ -938,6 +938,7 @@
       .toolbar .mem { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; gap: 4px 8px; line-height: 1.35; white-space: normal; }
       .toolbar .mem > span:not(.mem-bar) { white-space: nowrap; }
       .toolbar .mem-bar { display: none; }
+      .toolbar .dgc-menu { right: auto; left: 0; max-width: calc(100vw - 24px); }
     }
     .tool-label { color: var(--sys-cont-neutral-lightest); font-size: 12px; }
     .ghost-chip { color: var(--sys-cont-neutral-light); }
@@ -967,6 +968,26 @@
     .orphan-head { color: var(--sys-cont-neutral-light); font-size: 12px; line-height: 1.6; }
     .mem.warn { color: var(--sys-cont-negative-default); font-weight: 700; }
     .mem.warn .mem-bar i { background: var(--sys-cont-negative-default); }
+    /* ── Docker 디스크 배지 + GC 팝오버 — 메모리 게이지 옆, 글리프 버튼 하나(컴팩트·아이콘화). 상태는 색으로만: 꺼짐=흐림, 실패=적색 ── */
+    .dgc { position: relative; }
+    .dgc-btn { display: inline-flex; align-items: center; gap: 5px; height: 26px; padding: 0 8px; border: 1px solid var(--sys-cont-neutral-light); border-radius: 10px; background: transparent; color: var(--sys-cont-neutral-light); font-size: 12px; line-height: 1; white-space: nowrap; }
+    .dgc-btn:hover { border-color: currentColor; }
+    .dgc-btn > i { font-style: normal; font-size: 11px; }
+    .dgc.off .dgc-btn { opacity: .55; border-style: dashed; }
+    .dgc.warn .dgc-btn { color: var(--sys-cont-negative-default); border-color: var(--sys-cont-negative-default); font-weight: 700; }
+    .dgc-menu { min-width: 300px; }
+    .dgc-status { padding: 6px 8px; font-size: 12px; color: var(--sys-cont-neutral-default); line-height: 1.4; }
+    .dgc-status b { font-weight: 600; }
+    .dgc-status.err { color: var(--sys-cont-negative-default); }
+    .dgc-sep { height: 1px; margin: 4px 2px; background: var(--sys-style-neutral-light); }
+    .dgc-menu .settings-row { font-size: 12px; padding: 3px 8px; }
+    .dgc-menu .settings-row input[type=number] { width: 58px; height: 24px; text-align: right; }
+    .dgc-menu .settings-row input[type=checkbox] { width: 16px; height: 16px; margin: 0; }
+    .dgc-menu .settings-row .dgc-unit { color: var(--sys-cont-neutral-lightest); margin-left: 4px; font-weight: 400; }
+    .dgc-actions { display: flex; gap: 6px; justify-content: flex-end; padding: 4px 6px 2px; }
+    .dgc-actions button { height: 26px; padding: 0 10px; }
+    .dgc-result { margin: 2px 6px 4px; padding: 6px 8px; border-radius: 6px; background: var(--sys-bg-surface-hover); font-size: 11.5px; line-height: 1.45; max-height: 220px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--sys-cont-neutral-default); }
+    .dgc-result .dim { color: var(--sys-cont-neutral-lightest); }
     .orphans { padding: 14px 14px 0; }
     .orphans > details { border: 1px solid var(--sys-style-neutral-light); border-radius: 8px; background: var(--sys-bg-surface); padding: 10px 12px; margin: 0; }
     .orphans > details > summary { font-size: 12px; font-weight: 700; line-height: 1.6; color: var(--sys-cont-neutral-default); }

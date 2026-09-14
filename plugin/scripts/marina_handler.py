@@ -1121,7 +1121,8 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/docker-gc":   # 헤더 Docker 디스크 배지 — 정책·마지막 실행·system df 요약(60s 캐시)
             import marina_docker_gc
-            self.send_json(marina_docker_gc.status())
+            refresh = urllib.parse.parse_qs(parsed.query).get("refresh", ["0"])[0] == "1"   # 정리 직후 배지 합계 즉시 갱신
+            self.send_json(marina_docker_gc.status(refresh=refresh))
             return
 
         if parsed.path == "/api/sessions":

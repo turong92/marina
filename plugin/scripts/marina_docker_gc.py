@@ -515,13 +515,13 @@ def docker_disk(force: bool = False) -> dict[str, int]:
     return dict(_DISK_CACHE["value"])
 
 
-def status(with_disk: bool = True, now: float | None = None) -> dict[str, Any]:
+def status(with_disk: bool = True, now: float | None = None, refresh: bool = False) -> dict[str, Any]:
     policy = load_policy()
     state = load_state()
     now = time.time() if now is None else now
     return {
         "policy": policy, "state": state, "due": due(policy, state, now), "nextRunAt": next_run_at(policy, state),
-        "running": _RUNNING["active"], "disk": docker_disk() if with_disk else None,
+        "running": _RUNNING["active"], "disk": docker_disk(force=refresh) if with_disk else None,
         "logFile": str(LOG_FILE), "policyFile": str(POLICY_FILE),
     }
 
