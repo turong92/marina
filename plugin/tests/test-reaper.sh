@@ -171,3 +171,11 @@ echo "$out" | grep -q "pid=$P3 reason=claude-task-output" || { echo "FAIL: CLI d
 kill -0 "$P3" 2>/dev/null || { echo "FAIL: CLI dry-run killed the process"; exit 1; }
 grep -q "dry-run pid=$P3" "$MARINA_HOME/reaper.log" || { echo "FAIL: CLI dry-run should log to \$MARINA_HOME/reaper.log"; exit 1; }
 echo "PASS: marina reap --dry-run CLI lists candidates without killing"
+
+# ── 8) 설치 shim 경로(marina-entrypoint.sh) 로도 닿는다 — 배포 첫날 `marina reap` 이 usage 만 찍던 회귀 방지 ──
+# entrypoint 는 그룹 명령을 marina.sh 에 위임하는 허용 목록을 갖고 있어, 새 명령은 여기 빠지면 shim 에서 사라진다.
+out="$(bash "$SCRIPTS/marina-entrypoint.sh" reap --dry-run --min-age-hours 0 2>&1)" || { echo "FAIL: entrypoint reap --dry-run exit $?: $out"; exit 1; }
+echo "$out" | grep -q "pid=$P3 reason=claude-task-output" || { echo "FAIL: entrypoint should route reap to marina.sh (got usage?): $out"; exit 1; }
+kill -0 "$P3" 2>/dev/null || { echo "FAIL: entrypoint dry-run killed the process"; exit 1; }
+kill "$P3" 2>/dev/null || true
+echo "PASS: marina-entrypoint.sh routes reap"
