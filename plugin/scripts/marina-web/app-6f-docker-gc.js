@@ -15,6 +15,7 @@
     ['dangling_images', 'dangling 이미지', 'bool', ''],
     ['anonymous_volumes', '익명 볼륨', 'bool', ''],
     ['stale_test_artifacts_days', 'e2e 잔재', 'int', '일'],
+    ['stale_test_artifact_names', 'e2e 이름 글롭', 'text', ''],   // 라벨 없는 옛 누수(mdce2e*·proj-*-weaveapp) 도 여기 글롭을 더하면 같은 규칙으로 회수
   ];
   const TITLES = {
     enabled: '데몬이 주기대로 자동 실행. 꺼도 "지금 정리"·CLI --now 는 된다',
@@ -22,7 +23,8 @@
     build_cache_keep_days: '이보다 오래 안 쓴 빌드캐시를 지운다. 0=끔',
     dangling_images: '<none>:<none> 이미지 중 어떤 컨테이너도 안 쓰는 것',
     anonymous_volumes: '어떤 컨테이너에도 안 붙은 익명 볼륨만(명명 볼륨은 절대 아님)',
-    stale_test_artifacts_days: '라벨 marina.e2e=1 또는 이름 marina-*-e2e-* 인 컨테이너·이미지·네트워크 중 이보다 오래된 것. 0=끔',
+    stale_test_artifacts_days: '라벨 marina.e2e=1 또는 이름 글롭에 맞는 컨테이너·이미지·네트워크 중 이보다 오래된 것. 0=끔',
+    stale_test_artifact_names: 'e2e 산출물로 볼 이름 글롭(쉼표 구분). 라벨 marina.e2e=1 은 항상 포함. 예: marina-*-e2e-*,mdce2e*',
   };
   let state = null;   // 마지막 /api/docker-gc 응답
   let lastResult = null;   // 미리보기/실행 결과(팝오버 안 표)
@@ -69,7 +71,9 @@
     const rows = POLICY_ROWS.map(([key, label, kind, unit]) => {
       const ctl = kind === 'bool'
         ? `<input type="checkbox" data-dgc-key="${key}" ${pol[key] ? 'checked' : ''} />`
-        : `<span><input type="number" min="0" step="1" data-dgc-key="${key}" value="${escapeHtml(pol[key] ?? '')}" /><span class="dgc-unit">${unit}</span></span>`;
+        : kind === 'text'
+          ? `<input type="text" class="dgc-text" data-dgc-key="${key}" value="${escapeHtml(Array.isArray(pol[key]) ? pol[key].join(',') : (pol[key] ?? ''))}" spellcheck="false" />`
+          : `<span><input type="number" min="0" step="1" data-dgc-key="${key}" value="${escapeHtml(pol[key] ?? '')}" /><span class="dgc-unit">${unit}</span></span>`;
       return `<label class="settings-row" title="${escapeHtml(TITLES[key] || '')}"><span>${label}</span>${ctl}</label>`;
     }).join('');
     const warn = (pol.warnings || []).length ? `<div class="dgc-status err">${(pol.warnings || []).map(escapeHtml).join('<br>')}</div>` : '';

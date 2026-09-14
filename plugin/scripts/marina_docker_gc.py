@@ -13,6 +13,8 @@
 """
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import fnmatch
 import json
 import os
@@ -30,6 +32,27 @@ from marina_state import MARINA_HOME, _bin
 POLICY_FILE = MARINA_HOME / "docker-gc.json"
 STATE_FILE = MARINA_HOME / "docker-gc-state.json"
 LOG_FILE = MARINA_HOME / "docker-gc.log"
+LOCK_FILE = MARINA_HOME / "docker-gc.lock"   # 프로세스 간 직렬화(데몬 자동 ↔ CLI --now ↔ 대시보드) — flock
+
+
+@contextlib.contextmanager
+def _file_lock():
+    """같은 호스트의 다른 marina 프로세스와 실행·정책 쓰기를 직렬화한다(코덱스 리뷰: threading.Lock 은 프로세스 안에서만).
+    잠금 파일을 못 만들면(권한 등) 잠그지 않고 진행 — GC 가 락 때문에 멈추는 쪽이 더 나쁘다."""
+    try:
+        LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o600)
+    except OSError:
+        yield
+        return
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
 
 E2E_LABEL = "marina.e2e"          # 테스트 하네스가 e2e 산출물에 붙이는 라벨(값 "1")
 
@@ -130,12 +153,15 @@ def _atomic_write_json(path: Path, data: Any) -> None:
 
 
 def set_policy(key: str, value: Any) -> dict[str, Any]:
-    """한 키를 검증해 바꾸고 원자적으로 쓴다. 틀리면 ValueError 이고 파일은 안 건드린다."""
+    """한 키를 검증해 바꾸고 원자적으로 쓴다. 틀리면 ValueError 이고 파일은 안 건드린다.
+    읽기-수정-쓰기 전체를 파일 락으로 감싼다 — _atomic_write_json 은 "쓰기" 만 원자적이라, 락 없이는 CLI 와 대시보드가
+    동시에 다른 키를 바꿀 때 한쪽 변경이 덮어써진다."""
     coerced = _coerce(key, value)          # 파일 읽기 전에 검증 — 실패해도 파일 무변경
-    current = load_policy()
-    data = {k: current[k] for k in DEFAULT_POLICY}
-    data[key] = coerced
-    _atomic_write_json(POLICY_FILE, data)
+    with _file_lock():
+        current = load_policy()
+        data = {k: current[k] for k in DEFAULT_POLICY}
+        data[key] = coerced
+        _atomic_write_json(POLICY_FILE, data)
     return load_policy()
 
 
@@ -470,7 +496,7 @@ def collect(policy: dict[str, Any], source: str = "cli", dry_run: bool = False,
     """네 단계를 순서대로. 단계 하나가 실패해도 다음으로 간다. dry_run 이면 삭제 명령 0회·상태 파일 무변경."""
     run = run or _docker_run
     started = time.time() if now is None else now
-    with _RUN_LOCK:
+    with _RUN_LOCK, _file_lock():          # 프로세스 안(스레드) + 프로세스 간(flock) — 같은 대상을 두 번 지우려다 한쪽이 오류로 남지 않게
         _RUNNING["active"] = True
         try:
             steps = _run_steps(policy, dry_run, started, run)
