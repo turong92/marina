@@ -524,3 +524,26 @@ def status(with_disk: bool = True, now: float | None = None) -> dict[str, Any]:
         "running": _RUNNING["active"], "disk": docker_disk() if with_disk else None,
         "logFile": str(LOG_FILE), "policyFile": str(POLICY_FILE),
     }
+
+
+# ─────────────────────────── 데몬 틱 ───────────────────────────
+
+def daemon_tick(port: int, now: float | None = None, run: Runner | None = None, primary: bool | None = None) -> str:
+    """데몬 폴링 루프의 한 틱. 예외를 절대 밖으로 안 낸다 — 반환 문자열로만 보고한다.
+
+    프리뷰(:3901)·리뷰 인스턴스가 같은 ~/.marina 를 보며 이중 실행하지 않도록 **기록된 데몬**(dashboard-bind.env)
+    만 자동 실행한다 — 푸시 알림과 같은 규칙(marina_notify.is_primary_notifier)."""
+    try:
+        if primary is None:
+            from marina_notify import is_primary_notifier
+            primary = is_primary_notifier(port)
+        if not primary:
+            return "skipped:not-primary"
+        policy = load_policy()
+        if not due(policy, load_state(), now):
+            return "skipped:not-due"
+        report = collect(policy, source="auto", now=now, run=run)
+        return "ran" if not report.get("error") else f"ran:{report['error']}"
+    except Exception as exc:
+        _append_log(f"{datetime.now().astimezone().isoformat(timespec='seconds')} auto      FAILED {exc}")
+        return f"failed:{exc}"

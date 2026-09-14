@@ -18,6 +18,7 @@ RESOLVE="$SCRIPT_DIR/marina-resolve.sh"
 CLI="$SCRIPT_DIR/marina_cli.py"
 AUTH_CLI="$SCRIPT_DIR/marina_auth_cli.py"
 REMOTE_CLI="$SCRIPT_DIR/marina_remote_cli.py"
+DOCKER_GC_CLI="$SCRIPT_DIR/marina_docker_gc_cli.py"
 # shellcheck source=/dev/null
 source "$RESOLVE"
 
@@ -58,6 +59,9 @@ usage (marina = 전역 CLI):
     marina gateway start|stop|status|config|install|uninstall
   링크 (main checkout 의 deps·빌드산출물·설정을 워크트리로):
     marina link
+  docker GC (워크트리에 안 묶인 산출물 — 빌드캐시·dangling 이미지·익명 볼륨·e2e 잔재, 데몬이 정책 주기로 자동 실행):
+    marina docker gc [--dry-run] [--now] [--json]   # 인자 없으면 주기가 됐을 때만 실행
+    marina docker gc status | policy [<key> <value>] # 정책: ~/.marina/docker-gc.json
   dashboard (:3900):
     marina dashboard [start|stop|restart|status|open]    # 무인자 marina = dashboard start
   mobile:
@@ -203,6 +207,10 @@ shift || true
 case "$command" in
   remote)
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$REMOTE_CLI" "$@"
+    ;;
+  docker)
+    # 도커 GC — 워크트리에 안 묶인 산출물(빌드캐시·dangling·익명 볼륨·e2e 잔재) 정책 정리. 데몬이 주기 실행, 여기선 수동/정책.
+    exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$DOCKER_GC_CLI" "$@"
     ;;
   auth|user)
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$AUTH_CLI" "$command" "$@"
