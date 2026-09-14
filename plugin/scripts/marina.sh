@@ -103,6 +103,8 @@ usage (marina.sh = 내부 launcher; 평소엔 `marina <명령>` 래퍼로 — �
     marina.sh project add <path> --compose <file> [--env-var NAME --env-default VAL]   # compose 등록(파일을 marina 로 복사. 또는 대시보드 위저드)
     marina.sh project add <path> --external name=path # 외부 git 레포를 서비스로(워크트리마다 격리 attach)
     marina.sh project infer <path> | ls | rm <id> | default <id> <a,b,c>
+  reap (고아 백그라운드 프로세스 정리 — 데몬이 주기적으로 돌리는 것과 같은 판정):
+    marina.sh reap [--dry-run] [--min-age-hours N]   # ppid=1 + Claude tasks/*.output 출력 | cwd 사라짐, N시간(기본 6) 넘은 것만
 
 note:
   start/stop/restart 는 대상 필수 — 전체는 --all (무인자 = 실수 방지 가드). compose 서비스는 --<service> 플래그로 지정합니다.
@@ -434,6 +436,9 @@ print(f"런타임: 원격 ({t.host})" if t.is_remote else "런타임: 로컬")
 ' "$(session_dir)" ;;
         *) die "remote: use|off|inherit|status 중 하나 (받은 값: $_rsub)" ;;
       esac ;;
+    reap)
+      # 고아 백그라운드 프로세스 정리(Claude 태스크 출력 고아·cwd 사라진 고아). 데몬도 주기적으로 돌린다. marina reap [--dry-run] [--min-age-hours N]
+      MARINA_HOME="$MARINA_HOME" exec python3 "$SCRIPT_DIR/marina_reaper.py" "$@" ;;
     gateway)
       # 호스트 브라우저 게이트웨이 caddy 제어 — 설치 사용자도 PATH 의 marina 로 도달(코덱스 P2). marina gateway {start|stop|status|install|uninstall}
       exec bash "$SCRIPT_DIR/marina-gateway-control.sh" "$@" ;;

@@ -2990,6 +2990,16 @@ def main() -> None:
 
     _threading.Thread(target=_warm_loop, daemon=True, name="worktree-warm").start()
 
+    # 고아 백그라운드 프로세스 리퍼 — Claude 세션이 남긴 ppid=1 고아(태스크 출력·사라진 cwd)를 N시간 뒤 정리.
+    # 판정·로그는 marina_reaper 에(`marina reap --dry-run` 과 같은 코드). MARINA_REAPER=0 으로 끈다.
+    try:
+        import marina_reaper
+        if marina_reaper.enabled():
+            _threading.Thread(target=marina_reaper.run_forever, daemon=True, name="marina-reaper").start()
+            print(f"marina reaper: {marina_reaper.min_age_s() / 3600:g}h 넘은 고아 정리 · 로그 {marina_reaper.log_path()}")
+    except Exception as exc:                  # noqa: BLE001 — 청소 기능이 데몬 기동을 막으면 본말전도
+        print(f"[marina] reaper 기동 실패(무시): {exc!r}")
+
     # 변화 감지 — 화면에 밀어주고(SSE), 사람을 불러야 하면 폰을 깨운다(푸시).
     # 이 루프가 없으면 폰은 계속 3초마다 물어봐야 하고, "방금 바뀌었다"를 아는 곳이 없어
     # 알림을 보낼 근거 자체가 생기지 않는다.
