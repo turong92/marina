@@ -516,6 +516,9 @@
       const riskSlot = card.querySelector('[data-risk-slot]');
       if (riskSlot) {
         const riskPills = [];
+        if (wt && !wt.isMain && wt.gcIdle) {   // 유휴 = 붙은 세션 0 + cwd 프로세스 0 + 커밋·파일 mtime 모두 K일↑ (marina_worktree_gc)
+          riskPills.push(`<button class="pill-stat warn" data-gc-idle title="세션·프로세스 없음 · 커밋·파일 변화 ${wt.gcDays}일↑ 없음 — 클릭=유휴 정리(일괄 선택 삭제)">유휴 ${Math.round(wt.gcIdleDays)}일</button>`);
+        }
         if (wt && !wt.isMain && wt.verdict === 'stale') {
           riskPills.push('<span class="pill-stat danger" title="clean · 미머지 0 · 7일↑ 미활동 — 지워도 안전">삭제 권장</span>');
         }
@@ -532,6 +535,8 @@
           riskPills.push(`<span class="pill-stat danger" title="다른 세션과 포트가 겹칩니다">${conflictText}</span>`);
         }
         riskSlot.innerHTML = riskPills.length ? `<div class="risk-row">${riskPills.join('')}</div>` : '';
+        const gcIdleBtn = riskSlot.querySelector('[data-gc-idle]');   // 유휴 칩 → 유휴 정리 모달(이 워크트리 미리 체크)
+        if (gcIdleBtn) gcIdleBtn.onclick = (e) => { e.stopPropagation(); if (typeof openWorktreeGc === 'function') openWorktreeGc(session.root); };
         const branchGitBtn = riskSlot.querySelector('[data-branch-git]');   // 불일치 칩 → 깃 탭(그 워크트리 브랜치 필터)
         if (branchGitBtn) branchGitBtn.onclick = (e) => { e.stopPropagation(); openGitTab(session.root, wt?.branches?.[wt?.projectLabel] || domBranch); };
       }

@@ -288,6 +288,35 @@ def compose_build_image_items(root: Path) -> list[dict[str, Any]]:
                 })
     return items
 
+def compose_project_name_for(root: Path) -> str:
+    """이 워크트리의 docker compose -p 값(없으면 빈 문자열) — 프로젝트 단위 자원(볼륨 라벨) 조회 키."""
+    project = project_for(root)
+    if not project or project.get("kind", "compose") != "compose":
+        return ""
+    return _mc().compose_project_name(str(project.get("id") or ""), session_id(root))
+
+def compose_project_volume_items(root: Path) -> list[dict[str, Any]]:
+    """이 워크트리 compose 프로젝트가 만든 **모든** named volume(캐시·DB 데이터 가리지 않음).
+
+    _compose_cache_volumes 는 compose 파일을 읽어 캐시성 볼륨만 고르지만, 워크트리를 지울 땐
+    그 프로젝트 소속 볼륨이 전부 고아가 된다 — compose 가 볼륨에 붙이는
+    `com.docker.compose.project` 라벨로 docker 에 직접 묻는다(파일에서 빠진 볼륨도 잡힌다)."""
+    name = compose_project_name_for(root)
+    if not name:
+        return []
+    try:
+        out = subprocess.check_output(
+            _docker_cmd("volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={name}"),
+            text=True, stderr=subprocess.DEVNULL, timeout=15,
+        )
+    except Exception:
+        return []
+    names = sorted({line.strip() for line in out.splitlines() if line.strip()})
+    if not names:
+        return []
+    sizes = docker_volume_sizes_mb(names)
+    return [{"type": "volume", "category": "project", "volume": n, "sizeMb": sizes.get(n, 0)} for n in names]
+
 def _compose_cache_volumes(root: Path, project: dict[str, Any] | None, data: dict[str, Any]) -> list[dict[str, Any]]:
     if not project:
         return []

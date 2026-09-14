@@ -51,10 +51,11 @@ from marina_update import _serving_sha, update_claude, update_codex, update_stat
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
 from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_escape, mobile_harness, mobile_interrupt, mobile_launch, mobile_clear_uploads, mobile_close_chat, mobile_restart_chat, mobile_forget_chat, mobile_relogin, mobile_remove_room, mobile_rename_room, mobile_request_ok, mobile_set_archived, mobile_set_hidden, mobile_set_pin, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
-from marina_sessions import agent_activity, agent_belongs_to_root, agent_session_file_bytes, agent_session_files, agent_transcript, agent_transcript_image, agent_transcript_images, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
+from marina_sessions import _live_agent_cwds, agent_activity, agent_belongs_to_root, agent_session_file_bytes, agent_session_files, agent_transcript, agent_transcript_image, agent_transcript_images, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
 from marina_git import git_commit, git_commit_info, git_diff, git_fetch, git_graph, git_merge, git_pull, git_push, git_rebase, git_stash, git_wip_stat
 from marina_rooms import change_summary as _change_summary, preview_service as _preview_service
+from marina_worktree_gc import GC_DAYS_DEFAULT, gc_plan, gc_remove, idle_verdict
 from marina_lifecycle import _gateway_snapshot, attach_subrepo_action, cleanup_session, clear_worktree_cache, clear_worktree_images, clean_rebuild_service, detach_subrepo_action, rebuild_service, refresh_gateway, remove_worktree, restart_service, start_all, start_service, stop_all, stop_external, stop_service
 from marina_auth_http import AUTH_DENIED, auth_controller
 from marina_access import AccessPolicy, canonical_agent, canonical_root
@@ -1142,6 +1143,7 @@ class Handler(BaseHTTPRequestHandler):
             # root 끼리 독립이니 병렬 프리컴퓨트(실측 14 roots 4.4s→0.8s). 오버레이는 캐시 히트라 직렬 유지.
             with ThreadPoolExecutor(max_workers=8) as pool:
                 infos = list(pool.map(lambda r: dict(worktree_info(r, refresh)), roots))
+            live_cwds = _live_agent_cwds(refresh)   # 유휴 배지 — 세션 liveness 와 같은 신호(5s 캐시)
             worktrees = []
             for root, info in zip(roots, infos):
                 entry = titles.get(str(root))
@@ -1152,6 +1154,7 @@ class Handler(BaseHTTPRequestHandler):
                     info["sessionTitle"] = codex_titles[str(root)]
                     info["titleSource"] = "codex"
                 agents = agents_payload(root, refresh)   # status/reachable/승격 다 resolve_session_liveness 경유(activate_agent_payloads 는 이제 이 경로엔 불필요)
+                all_agents = agents   # 유휴 판정은 정책 필터 **전** 목록으로 — 남의 세션이 붙어 있어도 유휴가 아니다(gc_plan 과 같은 기준)
                 if principal is not None and principal.user.role != "admin":
                     visible_agents = []
                     for agent in agents:
@@ -1162,6 +1165,11 @@ class Handler(BaseHTTPRequestHandler):
                     agents = visible_agents
                 if agents:
                     info["agents"] = agents
+                if not info.get("isMain"):
+                    try:   # "유휴 N일" 배지 — 붙은 세션 0 + cwd 프로세스 0 + 커밋·파일 mtime 모두 K일 초과
+                        info.update(idle_verdict(root, info, all_agents, live_cwds))
+                    except Exception:
+                        pass
                 worktrees.append(info)
             projects = []
             for project in load_projects():
@@ -1374,6 +1382,15 @@ class Handler(BaseHTTPRequestHandler):
                 chosen = dfs[0]
             self.send_json({"ok": True, "yaml": _compose_scaffold_service(
                 target, subrepo, dockerfile=chosen, build_context=ctx)})
+            return
+
+        if parsed.path == "/api/worktree-gc":   # 유휴 정리 계획(쓰기 0) — 대시보드 모달·CLI dry-run 과 같은 판정
+            query = urllib.parse.parse_qs(parsed.query)
+            days_text = query.get("days", [""])[0]
+            days = int(days_text) if days_text.isdigit() else None
+            items = gc_plan(days, refresh=query.get("refresh", ["0"])[0] == "1",
+                            can_root=lambda r: self._policy().can_root(principal, r))
+            self.send_json({"days": items[0]["gcDays"] if items else (days or GC_DAYS_DEFAULT), "items": items})
             return
 
         if parsed.path == "/api/worktree-changes":
@@ -2412,6 +2429,29 @@ class Handler(BaseHTTPRequestHandler):
                     write_target(str(session_dir(safe_root(str(body.get("root", ""))))), kind, host or None)
                 self.send_json({"ok": True, "runtimeTarget": _runtime_target_describe(body.get("root") or None),
                                 "needsRestart": True})   # 이미 도는 컨테이너는 그 기계에 남는다
+                return
+
+            if self.path == "/api/worktree-gc":   # 유휴 워크트리 선택 삭제 — 가드 적용 후 remove_worktree(이미지·볼륨 회수 포함)
+                roots_body = body.get("roots")
+                if not isinstance(roots_body, list) or not roots_body or not all(isinstance(r, str) for r in roots_body):
+                    raise ValueError("roots must be a non-empty list of strings")
+                roots = [safe_root(r) for r in roots_body]
+                for r in roots:
+                    if not self._require_root_access(r):
+                        return
+                days_body = body.get("days")
+                days = int(days_body) if isinstance(days_body, int) and days_body > 0 else None
+                results = gc_remove(roots, days)
+                actor_id = principal.user.id if principal is not None else None
+                for item in results:
+                    if item.get("removed"):
+                        parent_key = canonical_root(item["root"])
+                        controller.store.remove_resources_by_parent("worktree", parent_key, actor_user_id=actor_id)
+                        controller.store.remove_resource_owner("worktree", parent_key, actor_user_id=actor_id)
+                    if principal is not None:
+                        controller.store.audit_action("worktree.gc", "ok" if item.get("removed") else "skipped",
+                                                      actor_id, "worktree", canonical_root(item["root"]))
+                self.send_json({"results": results, "freedMb": sum(int(i.get("freedMb") or 0) for i in results)})
                 return
 
             root = safe_root(str(body.get("root", "")))

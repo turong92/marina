@@ -261,8 +261,8 @@
         force = true;
       }
       const delMsg = session.worktreeStatus?.broken
-        ? `${session.alias || session.id} — git 링크가 깨진 고아 워크트리야. 폐기될 변경 없음(이미 git 추적 끊김). 폴더 정리 삭제할까?\n\n${session.root}`
-        : `${session.alias || session.id} worktree 를 삭제할까?\n\n${session.root}`;
+        ? `${session.alias || session.id} — git 링크가 깨진 고아 워크트리야. 폐기될 변경 없음(이미 git 추적 끊김). 폴더 정리 삭제할까? (compose 이미지·볼륨도 회수)\n\n${session.root}`
+        : `${session.alias || session.id} worktree 를 삭제할까?\n이 워크트리의 compose 이미지·볼륨(DB 데이터 포함)도 함께 회수돼. 미머지 브랜치는 보존.\n\n${session.root}`;
       if (!confirm(delMsg)) return;
       await api('/api/remove-worktree', {
         method: 'POST', headers: {'content-type': 'application/json'},
