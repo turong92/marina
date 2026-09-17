@@ -130,6 +130,7 @@ def _spawn_lifecycle(
         try:
             fn()
             LIFECYCLE_BUSY.pop(key, None)
+            invalidate_remote_ps(None)   # 게이트웨이 스냅샷보다 먼저 — 원격 캐시의 기동 전 행으로 라우트를 만들지 않게
             refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh 훅의 gateway-ensure 가 단일 처리 — CLI·대시보드 공통)
         except subprocess.CalledProcessError as exc:
             detail = redact_text(str(exc.output or ""))[-500:]

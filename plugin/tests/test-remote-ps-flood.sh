@@ -71,7 +71,9 @@ class RemotePsTests(unittest.TestCase):
         results = []
         ts = [threading.Thread(target=lambda: results.append(mcs.compose_ps(self.root, "p"))) for _ in range(8)]
         for t in ts: t.start()
-        time.sleep(0.2); gate.set()
+        deadline = time.time() + 2                                    # 리더가 실제로 조회에 들어갈 때까지(고정 sleep 대신)
+        while not self.calls and time.time() < deadline: time.sleep(0.01)
+        time.sleep(0.1); gate.set()
         for t in ts: t.join(3)
         self.assertEqual(len(self.calls), 1, "이벤트·게이트웨이·대시보드가 동시에 불러도 접속은 하나")
         self.assertEqual(len(results), 8)
@@ -112,6 +114,49 @@ class RemotePsTests(unittest.TestCase):
         mcs.compose_ps(self.root, "p")
         self.assertEqual(mcs.remote_ps_health()["ssh://a"]["fails"], 2)
         self.assertGreater(mcs.remote_ps_health()["ssh://a"]["retryInS"], 50)
+
+    def test_invalidate_during_inflight_does_not_resurrect_old_rows(self):
+        _make_remote(self.root)
+        started, release = threading.Event(), threading.Event()
+
+        def slow_old():
+            started.set(); release.wait(2)
+            return '[{"Service": "web", "State": "exited"}]'     # 조작 전 상태
+        self.behaviour = slow_old
+        t = threading.Thread(target=lambda: mcs.compose_ps(self.root, "p")); t.start()
+        started.wait(2)
+        mcs.invalidate_remote_ps(self.root)                         # 그 사이 start 가 끝남
+        release.set(); t.join(3)
+        self.behaviour = lambda: '[{"Service": "web", "State": "running"}]'
+        self.assertEqual(mcs.compose_ps(self.root, "p"), [{"Service": "web", "State": "running"}],
+                         "무효화 전에 출발한 조회가 옛 행을 캐시에 되살렸다")
+        self.assertEqual(len(self.calls), 2)
+
+    def test_local_cause_does_not_back_off_the_box(self):
+        _make_remote(self.root)
+        other = Path(self.tmp.name, "wt3"); other.mkdir(); _make_remote(other)
+        mcs._REMOTE_PS_TTL_S = 0.0
+
+        def missing_cwd():
+            raise FileNotFoundError("worktree gone")
+        self.behaviour = missing_cwd
+        self.assertEqual(mcs.compose_ps(self.root, "p"), [])
+        self.behaviour = lambda: "[]"
+        mcs.compose_ps(other, "q")
+        self.assertEqual(len(self.calls), 2, "로컬 원인 실패로 같은 박스의 다른 프로젝트까지 쉬면 안 된다")
+        self.assertNotIn("ssh://box", mcs.remote_ps_health())
+
+    def test_box_failure_pauses_every_project_on_that_box(self):
+        _make_remote(self.root)
+        other = Path(self.tmp.name, "wt4"); other.mkdir(); _make_remote(other)
+        mcs._REMOTE_PS_TTL_S = 0.0
+
+        def hung():
+            raise subprocess.TimeoutExpired("docker", 5)
+        self.behaviour = hung
+        mcs.compose_ps(self.root, "p")
+        mcs.compose_ps(other, "q")
+        self.assertEqual(len(self.calls), 1, "멈춘 박스는 프로젝트가 달라도 같이 쉰다(고아는 박스 단위로 생긴다)")
 
     def test_invalidate_clears_cache_and_backoff(self):
         _make_remote(self.root)

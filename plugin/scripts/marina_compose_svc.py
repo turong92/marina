@@ -216,6 +216,7 @@ def build_compose_services(ps_rows: list) -> list:
 # 그래서 원격은 ① TTL 동안 결과를 재사용하고 ② 같은 키 동시 호출은 한 번으로 합치며 ③ 실패하면 그 박스를 지수
 # 백오프로 쉬게 하고(마지막 값을 stale 로 돌려준다) ④ 타임아웃이면 docker CLI 의 자식 ssh 까지 프로세스 그룹째 끊는다.
 # 로컬 타깃은 캐시·백오프 없이 지금처럼 매번 부른다(소켓 호출이라 싸고, 즉시성이 기대되는 동작이다).
+import signal
 import threading as _threading
 
 _REMOTE_PS_TTL_S = float(os.environ.get("MARINA_REMOTE_PS_TTL", "15") or "15")
@@ -226,6 +227,7 @@ _remote_ps_lock = _threading.Lock()
 _remote_ps_cache: dict = {}        # (host, project) → (monotonic ts, rows)
 _remote_ps_inflight: dict = {}     # (host, project) → threading.Event
 _remote_health: dict = {}          # host → {"fails": n, "until": monotonic ts}
+_remote_ps_gen: dict = {}          # host → 세대. invalidate 가 올린다 — 무효화 전에 출발한 조회는 결과를 캐시에 못 쓴다
 
 
 def _ps_exec(argv: list, cwd: str, env: dict | None, timeout: float) -> str:
@@ -237,7 +239,7 @@ def _ps_exec(argv: list, cwd: str, env: dict | None, timeout: float) -> str:
         out, _ = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         try:
-            os.killpg(proc.pid, 9)
+            os.killpg(proc.pid, signal.SIGKILL)
         except OSError:
             pass
         proc.communicate()
@@ -287,6 +289,7 @@ def _remote_compose_ps(root: Path, project_name: str, host: str, env: dict) -> l
         waiter = _remote_ps_inflight.get(key)
         if waiter is None:
             _remote_ps_inflight[key] = _threading.Event()
+            gen = _remote_ps_gen.get(host, 0)
     if waiter is not None:                            # 다른 스레드가 이미 묻는 중 — 기다렸다 그 결과를 쓴다
         waiter.wait(timeout=_PS_TIMEOUT_S + 1)
         with _remote_ps_lock:
@@ -297,14 +300,24 @@ def _remote_compose_ps(root: Path, project_name: str, host: str, env: dict) -> l
                        str(root), env, _PS_TIMEOUT_S)
         rows = _parse_ps_rows(out)
         with _remote_ps_lock:
-            _remote_ps_cache[key] = (time.monotonic(), rows)
-            _remote_health.pop(host, None)
+            if _remote_ps_gen.get(host, 0) == gen:      # 조회 중에 start/stop 이 무효화했으면 옛 결과로 캐시를 되살리지 않는다
+                _remote_ps_cache[key] = (time.monotonic(), rows)
+                _remote_health.pop(host, None)
         return rows
-    except Exception:
+    except (subprocess.TimeoutExpired, subprocess.CalledProcessError):
+        # 박스 쪽 증상만 백오프한다(타임아웃·ssh/데몬 연결 실패). **박스 단위**인 게 의도다 — 고아는 박스 데몬이 멈춘
+        # 동안 생기므로 그 박스의 모든 프로젝트 폴링을 같이 쉬게 해야 누수가 멈춘다. `compose -p X ps` 는 없는 프로젝트도
+        # 0 으로 끝나므로 프로젝트 하나 때문에 비정상 종료가 나는 경우는 거의 없다.
         with _remote_ps_lock:
-            h = _remote_health.setdefault(host, {"fails": 0, "until": 0.0})
-            h["fails"] += 1
-            h["until"] = time.monotonic() + min(_REMOTE_BACKOFF_MAX_S, _REMOTE_BACKOFF_MIN_S * (2 ** (h["fails"] - 1)))
+            if _remote_ps_gen.get(host, 0) == gen:
+                h = _remote_health.setdefault(host, {"fails": 0, "until": 0.0})
+                h["fails"] += 1
+                h["until"] = time.monotonic() + min(_REMOTE_BACKOFF_MAX_S, _REMOTE_BACKOFF_MIN_S * (2 ** (h["fails"] - 1)))
+            stale = _remote_ps_cache.get(key)
+        return stale[1] if stale else []
+    except Exception:
+        # 로컬 원인(워크트리 경로 없음·docker CLI 없음 등) — 박스를 쉬게 하지 않는다
+        with _remote_ps_lock:
             stale = _remote_ps_cache.get(key)
         return stale[1] if stale else []
     finally:
@@ -315,16 +328,20 @@ def _remote_compose_ps(root: Path, project_name: str, host: str, env: dict) -> l
 
 
 def invalidate_remote_ps(root: Path | None = None) -> None:
-    """수명 조작(start/stop/restart) 직후 다음 폴링이 바로 새로 보게 캐시·백오프를 비운다. root 없으면 전부."""
+    """수명 조작(start/stop/restart) 직후 다음 폴링이 바로 새로 보게 캐시·백오프를 비운다. root 가 있으면 그 워크트리의
+    박스 전체, 없으면 전부. 세대를 올려, 이미 출발한 조회가 조작 전 결과를 캐시에 다시 쓰지 못하게 한다."""
     with _remote_ps_lock:
         if root is None:
+            for h in {k[0] for k in _remote_ps_cache} | set(_remote_health) | set(_remote_ps_gen):
+                _remote_ps_gen[h] = _remote_ps_gen.get(h, 0) + 1
             _remote_ps_cache.clear(); _remote_health.clear(); return
         try:
             from marina_runtime_target import docker_env_for_root
             host = (docker_env_for_root(root) or {}).get("DOCKER_HOST")
         except Exception:
             host = None
-        if host:
+        if host:                                      # 박스 단위로 비운다 — 같은 박스의 다른 프로젝트는 한 번 더 물을 뿐(싸다)
+            _remote_ps_gen[host] = _remote_ps_gen.get(host, 0) + 1
             for k in [k for k in _remote_ps_cache if k[0] == host]:
                 _remote_ps_cache.pop(k, None)
             _remote_health.pop(host, None)
