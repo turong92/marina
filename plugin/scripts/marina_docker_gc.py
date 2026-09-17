@@ -5,7 +5,8 @@
 의미 없다, marina 에서 컨트롤돼야 한다" — 정책도 실행도 marina 가 쥔다.
 
 **범위 밖.** 워크트리 소유 이미지(remove_worktree → clear_worktree_images, marina_lifecycle) 는 여기서
-다루지 않는다. 명명 볼륨(사용자 데이터일 수 있다)과 사용 중인 어떤 것도.
+다루지 않는다 — 단 marina 밖에서 지워진 워크트리의 이미지·정지 컨테이너는 ⑤ orphans 가 회수한다.
+명명 볼륨(사용자 데이터일 수 있다)과 사용 중인 어떤 것도 **어느 단계에서도** 지우지 않는다.
 
 **구조.** 도커 호출은 전부 `run(args) -> str` 하나를 통해 나간다 — 테스트는 가짜 run 을 주입해 명령·순서·
 판정을 검증하고, 실 도커를 만지는 테스트는 dry-run 경로만 탄다.
@@ -66,6 +67,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "anonymous_volume_grace_days": 3,
     "stale_test_artifacts_days": 3,
     "stale_test_artifact_names": ["marina-*-e2e-*"],
+    "orphan_worktree_days": 7,
 }
 _POLICY_TYPES: dict[str, str] = {
     "enabled": "bool",
@@ -76,6 +78,7 @@ _POLICY_TYPES: dict[str, str] = {
     "anonymous_volume_grace_days": "int",
     "stale_test_artifacts_days": "int",
     "stale_test_artifact_names": "globs",
+    "orphan_worktree_days": "int",
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -234,8 +237,10 @@ def _size_mb(value: Any) -> int:
 
 
 def parse_reclaimed_mb(text: str) -> int | None:
-    """prune 계열 출력의 `Total reclaimed space: 2.5GB` → MB. 없으면 None(예상치를 쓴다)."""
-    m = re.search(r"Total reclaimed space:\s*([0-9.]+\s*[KMGT]?i?B)", text or "", re.IGNORECASE)
+    """prune 계열 출력의 회수량 → MB. 없으면 None.
+    image/volume prune 은 `Total reclaimed space: 2.5GB`, builder prune 은 `Total:\t2.5GB` 로 낸다(실측 2026-09-17 —
+    예전엔 앞 형식만 읽어 builder prune 결과를 못 읽고 실행 전 추정치를 '회수량' 으로 기록했다)."""
+    m = re.search(r"(?:Total reclaimed space|^Total):\s*([0-9.]+\s*[KMGT]?i?B)", text or "", re.IGNORECASE | re.MULTILINE)
     return _size_mb(m.group(1).replace(" ", "")) if m else None
 
 
@@ -304,7 +309,7 @@ def _save_volumes_seen(seen: dict[str, float]) -> None:
 
 _RUN_LOCK = threading.Lock()          # 데몬 자동 + 대시보드 "지금" 겹침 방지(같은 프로세스 안)
 _RUNNING = {"active": False}
-_STEP_NAMES = ("build-cache", "dangling", "volumes", "e2e")
+_STEP_NAMES = ("build-cache", "dangling", "volumes", "e2e", "orphans")
 
 
 def _step(name: str) -> dict[str, Any]:
@@ -372,11 +377,16 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
                 size = _size_mb(entry.get("Size"))
                 st["reclaimedMb"] += size
                 st["items"].append(f"build-cache {entry.get('ID', '?')} {fmt_mb(size)}")
-            if not dry_run:
-                out = run(["builder", "prune", "-f", "--filter", f"until={keep_days * 24}h"])
+            if dry_run:
+                # 레코드별 LastUsedAt 로 센 값은 **상한**이다 — 오래된 레코드라도 최근 빌드가 참조하면 buildkit 이 안 지운다.
+                st["estimate"] = "upper"
+            else:
+                # --all 필수: 없으면 buildkit 은 어디에도 안 걸린(dangling) 캐시만 지워 일반 캐시가 영영 남는다(실측 0B).
+                out = run(["builder", "prune", "--all", "-f", "--filter", f"until={keep_days * 24}h"])
                 got = parse_reclaimed_mb(out)
-                if got is not None:
-                    st["reclaimedMb"] = got
+                st["reclaimedMb"] = got if got is not None else 0   # 실행 결과만 기록 — 못 읽으면 0(추정치로 부풀리지 않는다)
+                if got is None:
+                    st["note"] = "회수량을 읽지 못함"
         except Exception as exc:
             st["error"] = str(exc)
 
@@ -500,7 +510,100 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
                     st["counts"]["networks"] += 1
         except Exception as exc:
             st["error"] = str(exc)
+
+    # ⑤ 사라진 워크트리의 잔재 — marina 밖(git·Claude 앱)에서 지운 워크트리는 워크트리 GC 의 회수를 못 타서 그 compose
+    #    프로젝트의 이미지(수 GB)·정지 컨테이너가 남는다(2026-09-14 mdc-main 이미지 28개·50GB 가 이 경우).
+    #    **명명 볼륨은 지우지 않는다**(코드리뷰 Critical): 워크트리 이름을 바꾸거나 디스크가 잠시 빠지면 살아 있는 워크트리도
+    #    발견에서 사라져 고아로 보인다(실측 재현). 지우는 건 다시 만들 수 있는 것(정지 컨테이너·이미지)뿐 — 오판의 대가는 재빌드.
+    #    판정: compose 프로젝트 라벨이 **등록 프로젝트 id 로 시작**(marina 가 만든 것)하는데 지금 발견되는 어느 워크트리의
+    #    프로젝트명과도 안 맞고, days 넘게 오래된 것. 그 프로젝트에 **실행 중 컨테이너가 하나라도 있으면 통째로 건너뛴다**.
+    #    프로젝트 루트가 사라진(옮겨진) 프로젝트는 발견이 비므로 믿지 않고 건너뛴다 — 전부 고아로 오판해 지우는 사고 방지.
+    st = _step("orphans"); steps.append(st)
+    st["counts"] = {"projects": 0, "containers": 0, "images": 0}
+    days = int(policy.get("orphan_worktree_days") or 0)
+    if days <= 0:
+        st["skipped"] = True
+    else:
+        try:
+            live = _live_compose_projects()
+            if live is None:
+                st["skipped"] = True
+                st["note"] = "등록 프로젝트를 읽지 못해 건너뜀"
+            else:
+                live_names, owner_prefixes = live
+                cutoff = now - days * 86400
+
+                def orphan(project: str) -> bool:
+                    return bool(project) and project not in live_names and any(project.startswith(p) for p in owner_prefixes)
+
+                containers = dk.containers()
+                by_project: dict[str, list] = {}
+                for c in containers:
+                    proj = c["labels"].get("com.docker.compose.project", "")
+                    if orphan(proj):
+                        by_project.setdefault(proj, []).append(c)
+                busy = {p for p, cs in by_project.items() if any(c["status"] in ("running", "paused", "restarting") for c in cs)}
+                projects: set[str] = set()
+                for proj, cs in sorted(by_project.items()):
+                    if proj in busy:
+                        continue
+                    for c in cs:
+                        st["items"].append(f"container {c['name'].lstrip('/')} ({c['status']}) [{proj}]")
+                        if not dry_run:
+                            run(["rm", c["id"]])            # -f 없음
+                        st["counts"]["containers"] += 1
+                        projects.add(proj)
+                remaining = dk.containers() if not dry_run else [c for c in containers
+                                                                 if c["labels"].get("com.docker.compose.project", "") not in by_project
+                                                                 or c["labels"].get("com.docker.compose.project", "") in busy]
+                imgs = _ndjson(run(["image", "ls", "--filter", "label=com.docker.compose.project", "--format", "json"]))
+                img_proj: dict[str, str] = {}
+                if imgs:
+                    for line in run(["image", "inspect", "--format", '{{.Id}}\t{{index .Config.Labels "com.docker.compose.project"}}',
+                                     *[str(i.get("ID")) for i in imgs if i.get("ID")]]).splitlines():
+                        parts = line.split("\t")
+                        if len(parts) >= 2:
+                            img_proj[parts[0].removeprefix("sha256:")] = parts[1]
+                for img in imgs:
+                    iid = str(img.get("ID") or "")
+                    proj = next((v for k, v in img_proj.items() if k.startswith(iid) or iid.startswith(k)), "")
+                    ts = parse_docker_time(img.get("CreatedAt"))
+                    if not iid or not orphan(proj) or proj in busy or ts is None or ts >= cutoff or _image_used(iid, remaining):
+                        continue
+                    size = _size_mb(img.get("Size"))
+                    st["items"].append(f"image {img.get('Repository')}:{img.get('Tag')} {fmt_mb(size)} [{proj}]")
+                    if not dry_run:
+                        run(["image", "rm", iid])           # -f 없음 — 사용 중이면 도커가 거부
+                    st["reclaimedMb"] += size
+                    st["counts"]["images"] += 1
+                    projects.add(proj)
+                st["counts"]["projects"] = len(projects)
+        except Exception as exc:
+            st["error"] = str(exc)
     return steps
+
+
+def _compose_project_prefix(project_id: str) -> str:
+    """marina-compose.compose_project_name 과 같은 정규화 + '-'. 등록 프로젝트가 만든 compose 프로젝트인지 가르는 접두사."""
+    return re.sub(r"[^a-z0-9_-]+", "-", str(project_id).lower()).strip("-_") + "-"
+
+
+def _live_compose_projects():
+    """(지금 발견되는 모든 워크트리의 compose 프로젝트명, 믿을 수 있는 등록 프로젝트 접두사들). 못 읽으면 None.
+    루트가 없는 프로젝트는 접두사에서 뺀다 — 발견이 비어 그 프로젝트 전부가 고아로 보이는 것을 막는다. 테스트가 바꾸는 이음매."""
+    from marina_registry import discover_all_roots, load_projects, project_for
+    from marina_paths import session_id
+    projects = load_projects()
+    if not projects:
+        return None
+    prefixes = [_compose_project_prefix(p["id"]) for p in projects if Path(p["root"]).is_dir()]
+    from marina_state import _mc
+    mc = _mc()
+    live: set[str] = set()
+    for root in discover_all_roots(refresh=True):
+        proj = project_for(root) or {}
+        live.add(mc.compose_project_name(str(proj.get("id", "")), session_id(root)))   # 실행 경로와 같은 함수 — 규칙이 갈라지지 않게
+    return live, prefixes
 
 
 def _log_line(report: dict[str, Any]) -> str:
@@ -515,6 +618,11 @@ def _log_line(report: dict[str, Any]) -> str:
         if s["name"] == "e2e":
             c = s.get("counts") or {}
             piece = f"e2e ≈{fmt_mb(s['reclaimedMb'])}({c.get('containers', 0)} containers, {c.get('images', 0)} images, {c.get('networks', 0)} networks)"
+        elif s["name"] == "orphans":
+            c = s.get("counts") or {}
+            piece = f"orphans {fmt_mb(s['reclaimedMb'])}({c.get('projects', 0)} projects: {c.get('containers', 0)} containers, {c.get('images', 0)} images)"
+        elif s["name"] == "build-cache" and s.get("estimate") == "upper":
+            piece = f"build-cache ≤{fmt_mb(s['reclaimedMb'])}"
         parts.append(piece)
     line = f"{when} {src:<9} {verb} {fmt_mb(report['reclaimedMb'])}  {' · '.join(parts) or '(모든 단계 꺼짐)'}"
     for s in report["steps"]:

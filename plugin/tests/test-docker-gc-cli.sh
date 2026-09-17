@@ -25,7 +25,7 @@ set +e; m policy interval_hours abc >/dev/null 2>&1; rc=$?; set -e; [ "$rc" = 2 
 out="$(m --dry-run --json)" || fail "dry-run 실패"
 python3 - "$out" <<'PY' || fail "dry-run JSON 형태"
 import json, sys
-d = json.loads(sys.argv[1]); assert d["dryRun"] is True and [s["name"] for s in d["steps"]] == ["build-cache", "dangling", "volumes", "e2e"], d
+d = json.loads(sys.argv[1]); assert d["dryRun"] is True and [s["name"] for s in d["steps"]] == ["build-cache", "dangling", "volumes", "e2e", "orphans"], d
 assert d["reclaimedMb"] == 1024, d["reclaimedMb"]      # 가짜 df 의 오래된 빌드캐시 1GB
 PY
 grep -qE '^(builder prune|image prune|volume prune|volume rm|rm |image rm|network rm)' "$FAKE_DOCKER_LOG" && fail "dry-run 이 삭제 명령을 냈다: $(cat "$FAKE_DOCKER_LOG")"
@@ -41,7 +41,7 @@ grep -qi '꺼' <<<"$out" || fail "비활성 안내가 없다: $out"
 
 # ── --now: 정책 무관 실행 → prune 호출·상태 기록 ──
 out="$(m --now --json)" || fail "--now 실패"
-grep -q '^builder prune -f --filter until=168h$' "$FAKE_DOCKER_LOG" || fail "--now 가 builder prune 을 안 냈다: $(cat "$FAKE_DOCKER_LOG")"
+grep -q '^builder prune --all -f --filter until=168h$' "$FAKE_DOCKER_LOG" || fail "--now 가 builder prune 을 안 냈다: $(cat "$FAKE_DOCKER_LOG")"
 python3 -c "import json; s=json.load(open('$MARINA_HOME/docker-gc-state.json')); assert s['source']=='cli' and s['reclaimedMb']==1024, s" || fail "상태 기록"
 m policy enabled true >/dev/null
 

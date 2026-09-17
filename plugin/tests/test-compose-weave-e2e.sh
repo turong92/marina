@@ -14,7 +14,12 @@ TMP="$(mktemp -d)"; export MARINA_HOME="$TMP/home"
 P="$TMP/proj-$$"; mkdir -p "$P"; P="$(cd "$P" && pwd -P)"
 RED="marina-weave-e2e-redis-$$"
 mrun() { (cd "$P" && MARINA_HOME="$MARINA_HOME" bash "$SH" "$@"); }
-cleanup() { mrun stop --all >/dev/null 2>&1 || true; docker rm -f "$RED" >/dev/null 2>&1 || true; rm -rf "$TMP"; }
+cleanup() {
+  mrun stop --all >/dev/null 2>&1 || true; docker rm -f "$RED" >/dev/null 2>&1 || true
+  # 빌드한 이미지도 지운다 — stop 만 하면 proj-<pid>-main-weaveapp 이미지가 실행마다 남았다(2026-09-17 6개 발견)
+  docker images -q --filter "label=com.docker.compose.project=$(basename "$P")-main" | xargs -r docker image rm >/dev/null 2>&1 || true
+  rm -rf "$TMP"
+}
 trap cleanup EXIT
 
 docker run -d --rm --label marina.e2e=1 --name "$RED" -p 6379 redis:7-alpine >/dev/null         # host 공유 redis — docker 가 빈 호스트포트 할당(고정포트 충돌 회피, 코덱스 리뷰 P3)

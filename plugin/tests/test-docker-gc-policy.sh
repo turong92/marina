@@ -19,6 +19,7 @@ p = gc.load_policy()
 assert p["enabled"] is True and p["interval_hours"] == 24 and p["build_cache_keep_days"] == 7, p
 assert p["dangling_images"] is True and p["anonymous_volumes"] is True and p["anonymous_volume_grace_days"] == 3
 assert p["stale_test_artifacts_days"] == 3 and p["stale_test_artifact_names"] == ["marina-*-e2e-*"], p
+assert p["orphan_worktree_days"] == 7, p
 assert p["warnings"] == [], p
 
 # ── 부분 파일 머지 + 틀린 타입은 그 키만 기본값(경고) ──

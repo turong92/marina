@@ -41,6 +41,7 @@
 | `anonymous_volumes` | `true` | 어떤 컨테이너에도 안 붙은 **익명** 볼륨만(명명 볼륨은 절대 아님) |
 | `anonymous_volume_grace_days` | `3` | 익명 볼륨이 이 일수 넘게 **계속** dangling 이어야 지운다. `marina stop`(compose down) 직후엔 살아 있는 서비스의 익명 볼륨도 잠깐 dangling 으로 보이기 때문(코드리뷰 지적). 0=즉시 |
 | `stale_test_artifacts_days` | `3` | e2e 산출물(컨테이너·이미지·네트워크) 중 이보다 오래된 것. `0` = 끔 |
+| `orphan_worktree_days` | `7` | marina 밖에서 지운 워크트리의 compose 이미지·정지 컨테이너(⑤, 명명 볼륨 제외). 0=끔 |
 | `stale_test_artifact_names` | `["marina-*-e2e-*"]` | e2e 산출물로 보는 이름 글롭. 라벨 `marina.e2e=1` 은 항상 포함 |
 
 읽기: 파일 없음/깨짐/모르는 키/틀린 타입 → 그 키만 기본값(경고를 실행 로그에 남김). 쓰기: 원자적(`tempfile+os.replace`),
@@ -62,10 +63,11 @@
 
 ### 단계(고정 순서)와 판정
 
-1. **build-cache** — `docker system df -v --format json` 의 `BuildCache` 항목 중 `InUse=false` 이고
-   `LastUsedAt`(없으면 `CreatedAt`) 이 `keep_days` 전보다 오래된 것의 `Size` 합 = 예상 회수량.
-   실행: `docker builder prune -f --filter until=<keep_days*24>h`. 실제 회수량은 출력의
-   `Total reclaimed space:` 를 파싱(없으면 예상치).
+1. **build-cache** — `docker system df -v --format json` 의 `BuildCache` 항목 중 `InUse=false` 이고 keep_days 넘게 안 쓴 것
+   (LastUsedAt, 없으면 CreatedAt). 이 합은 **상한 추정**이다 — 오래된 레코드라도 최근 빌드가 참조하면 buildkit 이 안 지운다.
+   실행: `docker builder prune --all -f --filter until=<keep_days×24>h`. **`--all` 필수** — 없으면 dangling 캐시만 지워 일반 캐시가
+   영영 남는다. 회수량은 출력의 `Total:` 를 읽고, 못 읽으면 0 으로 기록한다(추정치로 부풀리지 않는다).
+   (2026-09-17 수정 전: `--all` 없이 0B 를 지우면서 `Total reclaimed space:` 만 찾아 추정치 9.2GB 를 매일 '회수' 로 기록했다.)
 2. **dangling** — `docker images -f dangling=true --format json` 중 어떤 컨테이너(`docker ps -a`, 실행 여부 무관)도
    `Image`/`ImageID` 로 안 쓰는 것. 실행: `docker image prune -f` (도커 자체가 사용 중은 제외).
 3. **volumes** — `docker volume ls -f dangling=true --format json` 중 이름이 64자 hex(익명) 인 것. 크기는
@@ -77,6 +79,12 @@
    - 이미지: 컨테이너 단계 뒤 다시 센 `docker ps -a` 의 이미지에 안 잡히고 오래된 것 → `docker image rm <id>`
      (`-f` 없음). `Size` 합이 회수량(공유 레이어 탓에 근사 — 로그에 `≈`).
    - 네트워크: `docker network inspect` 의 `Containers` 가 비었고 오래된 것 → `docker network rm`.
+5. **orphans** — marina 밖(git·Claude 앱)에서 지운 워크트리의 compose 프로젝트 잔재. compose 프로젝트 라벨이 등록 프로젝트
+   id 접두사로 시작하는데 지금 발견되는 어느 워크트리의 프로젝트명(`compose_project_name`)과도 안 맞고 `orphan_worktree_days`
+   (기본 7) 넘게 오래된 **정지 컨테이너 → 이미지**. 실행 중 컨테이너가 하나라도 있는 프로젝트는 통째 제외, 루트가 없는 등록
+   프로젝트는 접두사에서 빼고, 레지스트리를 못 읽으면 단계 전체를 건너뛴다. 전부 `-f` 없이.
+   **명명 볼륨은 지우지 않는다**(리뷰 Critical, 실측 재현): 워크트리 이름을 바꾸거나 디스크가 잠시 빠지면 살아 있는 워크트리도
+   발견에서 사라져 고아로 보인다. 그래서 다시 만들 수 있는 것만 지운다 — 오판의 대가는 재빌드로 한정.
 
 "실행 중 컨테이너가 쓰는 것" 보호는 세 겹이다: ① 판정에서 제외, ② `-f` 를 쓰지 않아 도커가 거부,
 ③ 단계 하나가 실패해도 다음 단계로 간다(단계별 `error` 기록).

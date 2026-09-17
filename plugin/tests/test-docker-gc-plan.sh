@@ -9,6 +9,7 @@ PYTHONPATH="$HERE/../scripts" python3 - <<'PY'
 import json, os
 from datetime import datetime, timezone
 import marina_docker_gc as gc
+gc._live_compose_projects = lambda: None      # 이 파일은 네 단계만 본다 — 고아 단계는 test-docker-gc-orphans
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc).timestamp()
 OLD, RECENT, ANCIENT = "2026-09-01T00:00:00Z", "2026-09-13T06:00:00Z", "2026-08-01T00:00:00Z"
@@ -39,9 +40,9 @@ class FakeDocker:
     def __call__(self, args):
         a = list(args); self.calls.append(a); s = " ".join(a)
         if s == "system df -v --format json": return json.dumps(DF)
-        if s == "builder prune -f --filter until=168h":
+        if s == "builder prune --all -f --filter until=168h":
             if self.fail_builder: raise RuntimeError("Cannot connect to the Docker daemon")
-            return "Deleted build cache objects:\nbcA\n\nTotal reclaimed space: 2.5GB\n"
+            return "ID\t\t\t\t\t\tRECLAIMABLE\tSIZE\t\tLAST ACCESSED\nbcA\ttrue\t2.5GB\t2 weeks ago\nTotal:\t2.5GB\n"   # 실측 형식
         if s == "images -f dangling=true --format json":
             return nd([{"ID": "aaaaaaaaaaaa", "Repository": "<none>", "Tag": "<none>", "Size": "400MB", "CreatedAt": dk(OLD)},
                        {"ID": "bbbbbbbbbbbb", "Repository": "<none>", "Tag": "<none>", "Size": "600MB", "CreatedAt": dk(OLD)}])
@@ -86,6 +87,8 @@ assert gc.parse_docker_time("2026-07-30 10:12:52.788215376 +0000 UTC") == dateti
 assert gc.parse_docker_time("2026-09-14T02:36:49.729117876Z") == datetime(2026, 9, 14, 2, 36, 49, tzinfo=timezone.utc).timestamp()
 assert gc.parse_docker_time("garbage") is None
 assert gc.parse_reclaimed_mb("x\nTotal reclaimed space: 2.5GB\n") == 2560 and gc.parse_reclaimed_mb("nothing") is None
+assert gc.parse_reclaimed_mb("ID\tRECLAIMABLE\nabc\ttrue\nTotal:\t9.2GB\n") == 9420, "builder prune 형식"
+assert gc.parse_reclaimed_mb("Total:\t0B\n") == 0, "0B 도 읽혀야 추정치로 부풀리지 않는다"
 assert gc.fmt_mb(2560) == "2.5GB" and gc.fmt_mb(512) == "512MB" and gc.fmt_mb(0) == "0B"
 
 # ── dry-run(plan): 판정만, 삭제 0회 ──
@@ -94,7 +97,8 @@ fake = FakeDocker()
 rep = gc.plan(policy, now=NOW, run=fake)
 assert rep["dryRun"] is True and mutating(fake.calls) == [], mutating(fake.calls)
 steps = {s["name"]: s for s in rep["steps"]}
-assert list(steps) == ["build-cache", "dangling", "volumes", "e2e"], list(steps)
+assert list(steps) == ["build-cache", "dangling", "volumes", "e2e", "orphans"], list(steps)
+assert steps["orphans"]["skipped"], "레지스트리 이음매를 None 으로 막았으니 건너뛴다"
 assert steps["build-cache"]["reclaimedMb"] == 2048 + 300, steps["build-cache"]        # InUse·최근 제외, LastUsedAt 없으면 CreatedAt
 assert steps["dangling"]["reclaimedMb"] == 400 and len(steps["dangling"]["items"]) == 1, steps["dangling"]   # 컨테이너가 쓰는 bbbb 제외
 assert steps["volumes"]["reclaimedMb"] == 0 and steps["volumes"]["items"] == [] and steps["volumes"]["waiting"] == 1, steps["volumes"]   # 처음 본 익명 볼륨은 유예(3일) 대기
@@ -137,7 +141,7 @@ fake = FakeDocker()
 rep = gc.collect(policy, source="auto", now=NOW, run=fake)
 assert rep["dryRun"] is False and rep["error"] is None, rep
 got = mutating(fake.calls)
-assert got == [["builder", "prune", "-f", "--filter", "until=168h"], ["image", "prune", "-f"], ["volume", "rm", "a" * 64],
+assert got == [["builder", "prune", "--all", "-f", "--filter", "until=168h"], ["image", "prune", "-f"], ["volume", "rm", "a" * 64],
                ["rm", "c2"], ["rm", "c5"], ["image", "rm", "dddddddddddd"], ["image", "rm", "ffffffffffff"], ["network", "rm", "n2"]], got
 assert all("-f" not in c for c in got if c[0] in ("rm",) or c[:2] in (["image", "rm"], ["network", "rm"])), got
 steps = {s["name"]: s for s in rep["steps"]}

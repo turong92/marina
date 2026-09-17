@@ -17,6 +17,7 @@
     ['anonymous_volume_grace_days', '익명 볼륨 유예', 'int', '일'],
     ['stale_test_artifacts_days', 'e2e 잔재', 'int', '일'],
     ['stale_test_artifact_names', 'e2e 이름 글롭', 'text', ''],   // 라벨 없는 옛 누수(mdce2e*·proj-*-weaveapp) 도 여기 글롭을 더하면 같은 규칙으로 회수
+    ['orphan_worktree_days', '사라진 워크트리 잔재', 'int', '일'],
   ];
   const TITLES = {
     enabled: '데몬이 주기대로 자동 실행. 꺼도 "지금 정리"·CLI --now 는 된다',
@@ -26,6 +27,7 @@
     anonymous_volumes: '어떤 컨테이너에도 안 붙은 익명 볼륨만(명명 볼륨은 절대 아님)',
     anonymous_volume_grace_days: '익명 볼륨이 이 일수 넘게 계속 떠 있어야 지운다 — marina stop 직후 잠깐 떨어진 볼륨 보호. 0=즉시',
     stale_test_artifacts_days: '라벨 marina.e2e=1 또는 이름 글롭에 맞는 컨테이너·이미지·네트워크 중 이보다 오래된 것. 0=끔',
+    orphan_worktree_days: 'marina 밖(git·Claude 앱)에서 지운 워크트리의 compose 프로젝트 이미지·정지 컨테이너 중 이보다 오래된 것(명명 볼륨은 안 지움). 실행 중 컨테이너가 있는 프로젝트는 건너뜀. 0=끔',
     stale_test_artifact_names: 'e2e 산출물로 볼 이름 글롭(쉼표 구분). 라벨 marina.e2e=1 은 항상 포함. 예: marina-*-e2e-*,mdce2e*',
   };
   let state = null;   // 마지막 /api/docker-gc 응답

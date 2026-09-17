@@ -41,7 +41,7 @@ if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
   snapshot() { { docker ps -aq --no-trunc; docker images -q --no-trunc; docker volume ls -q; docker network ls -q --no-trunc; } | sort -u; }
   before="$(snapshot)"
   bash "$HERE/../scripts/marina-entrypoint.sh" docker gc --dry-run --json > "$MARINA_HOME/dry.json" || fail "실 도커 dry-run 실패"
-  python3 -c "import json; d=json.load(open('$MARINA_HOME/dry.json')); assert d['dryRun'] is True and len(d['steps'])==4, d" || fail "실 dry-run 형태"
+  python3 -c "import json; d=json.load(open('$MARINA_HOME/dry.json')); assert d['dryRun'] is True and len(d['steps'])==5, d" || fail "실 dry-run 형태"
   after="$(snapshot)"
   gone="$(comm -23 <(echo "$before") <(echo "$after") || true)"
   [ -z "$gone" ] || fail "dry-run 이 실 도커에서 지운 것이 있다: $gone"
