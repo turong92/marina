@@ -26,7 +26,7 @@ from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
 from marina_logtext import redact_text
 from marina_sessions import git_output, session_payload, worktree_status
 from marina_memory import acquire_memory_reservation, release_memory_reservation
-from marina_compose_svc import _compose_services, compose_start_targets
+from marina_compose_svc import _compose_services, compose_start_targets, invalidate_remote_ps
 
 def stop_external(root: Path, service: str, port: int) -> dict[str, Any]:
     """'외부 :<port>'(marina 컨테이너가 아닌 호스트 프로세스가 서비스 포트 점유 — IDE/터미널 직접 실행) 정지.
@@ -89,6 +89,7 @@ def stop_service(root: Path, service: str) -> dict[str, Any]:
     except subprocess.CalledProcessError as exc:
         raise ValueError(f"stop failed: {(exc.output or '')[-500:]}")
     _clear_busy_error(busy_key(root, service))
+    invalidate_remote_ps(root)   # 원격 ps 캐시 — 정지 결과를 TTL 안 기다리고 보이게
     refresh_gateway()   # 이벤트 즉시반영
     return {"stopped": True, "output": out[-1000:]}
 
@@ -99,6 +100,7 @@ def stop_all(root: Path) -> dict[str, Any]:
         raise ValueError(f"stop-all failed: {(exc.output or '')[-500:]}")
     for k in [k for k in LIFECYCLE_BUSY if k.startswith(f"{root}::")]:
         _clear_busy_error(k)
+    invalidate_remote_ps(root)
     refresh_gateway()   # 이벤트 즉시반영
     return {"stoppedAll": True, "output": out[-1000:]}
 
@@ -128,6 +130,7 @@ def _spawn_lifecycle(
         try:
             fn()
             LIFECYCLE_BUSY.pop(key, None)
+            invalidate_remote_ps(None)   # 게이트웨이 스냅샷보다 먼저 — 원격 캐시의 기동 전 행으로 라우트를 만들지 않게
             refresh_gateway()   # 라우트 반영(자동 기동은 marina.sh 훅의 gateway-ensure 가 단일 처리 — CLI·대시보드 공통)
         except subprocess.CalledProcessError as exc:
             detail = redact_text(str(exc.output or ""))[-500:]
@@ -138,6 +141,10 @@ def _spawn_lifecycle(
             LIFECYCLE_BUSY[key] = {"op": op, "error": redact_text(str(exc))[-500:], "endedTs": time.time()}
         finally:
             release_memory_reservation(reservation_token)
+            try:                  # 원격 compose ps 캐시·백오프 비움 — 방금 띄운/내린 결과가 TTL(15s) 기다리지 않고 보이게
+                invalidate_remote_ps(None)
+            except Exception:
+                pass
 
     try:
         threading.Thread(target=_run, daemon=True, name=f"lifecycle-{op}").start()
