@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from datetime import datetime, timezone
 import os
 import re
 import subprocess
@@ -33,11 +34,11 @@ import time
 from pathlib import Path
 from typing import Any
 
-from marina_state import _env
+from marina_state import MARINA_HOME, _env
 from marina_registry import discover_all_roots, is_source_checkout, project_label, source_root_for
 from marina_paths import read_meta, session_id
 
-GC_DAYS_DEFAULT = int(_env("GC_DAYS", "14"))
+GC_DAYS_DEFAULT = int(_env("GC_DAYS", "7"))      # 2026-09-17 형: "7일 사용 안 한 거 자동 gc" (배지·CLI·자동 정리가 같은 기준)
 LIVE_AGENT_STATUSES = ("working", "blocked", "waiting")
 MTIME_TTL = 600.0          # 파일 mtime 스캔은 stat 수만 번 — 10분 캐시(폴링마다 돌지 않게)
 _mtime_cache: dict[str, tuple[float, int]] = {}
@@ -54,6 +55,88 @@ def _git(repo: Path, *args: str, timeout: float = 60) -> tuple[int, str]:
 def _git_ok(repo: Path, *args: str, timeout: float = 60) -> str:
     code, text = _git(repo, *args, timeout=timeout)
     return text if code == 0 else ""
+
+
+# (d) gitignore 된 로컬 파일 — git 이 모르니 (a)(b)(c) 어디에도 안 걸리고 백업도 못 만든다. 코드리뷰 Critical + 실측
+#     (2026-09-17 mdc-main compaction-skill-control 워크트리의 gitignore 된 tasks/…/research.md·progress.md 과업 노트).
+#     다시 만들 수 있는 것은 뺀다: 빌드 산출물·의존성 폴더, 마리나 관리 폴더(.workspace), 로그, 심링크,
+#     원본 체크아웃의 같은 경로와 내용이 같은 파일(links copy 로 들어온 .env*.local·*local.yml 등).
+_REGENERABLE_DIRS = {"node_modules", ".next", "dist", "build", "out", "target", ".gradle", ".venv", "venv", "__pycache__",
+                     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".turbo", ".cache", "coverage", ".parcel-cache",
+                     ".nuxt", ".svelte-kit", ".expo", "DerivedData", "Pods", ".workspace"}
+_REGENERABLE_FILES = {".DS_Store"}
+_IGNORED_WALK_LIMIT = 400
+
+
+def _ignored_entries(repo: Path) -> list[str]:
+    try:
+        out = subprocess.run(["git", "-C", str(repo), "ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z"],
+                             capture_output=True, text=True, timeout=120)
+    except Exception:
+        return ["<git ls-files 실패>"]
+    if out.returncode != 0:
+        return ["<git ls-files 실패>"]
+    return [e for e in out.stdout.split("\0") if e]
+
+
+def _regenerable_path(rel: str) -> bool:
+    parts = [p for p in rel.split("/") if p]
+    return (not parts or any(p in _REGENERABLE_DIRS for p in parts) or parts[-1] in _REGENERABLE_FILES
+            or parts[-1].endswith(".log"))
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    import filecmp
+    try:
+        return b.is_file() and a.stat().st_size == b.stat().st_size and filecmp.cmp(str(a), str(b), shallow=False)
+    except OSError:
+        return False
+
+
+def unrecoverable_ignored(root: Path, limit: int = 20) -> list[str]:
+    """워크트리를 지우면 영영 사라지는 gitignore 파일(최대 limit 개 경로). 판단 불가(git 실패·너무 많음)도 항목으로 돌려준다
+    — '모르면 안전하지 않다'."""
+    try:
+        source = source_root_for(root)
+    except Exception:
+        source = root
+    nested = nested_repos(root)
+    found: list[str] = []
+    for repo_rel in [""] + list(nested):
+        repo = root / repo_rel if repo_rel else root
+        src_repo = source / repo_rel if repo_rel else source
+        for entry in _ignored_entries(repo):
+            rel = entry.rstrip("/")
+            full = f"{repo_rel}/{rel}" if repo_rel else rel
+            if entry.startswith("<"):
+                found.append(f"{full or '.'}: 판단 불가")
+                continue
+            if not repo_rel and any(rel == n or rel.startswith(n + "/") for n in nested):
+                continue                                   # 중첩 레포는 자기 차례에 본다
+            if _regenerable_path(rel):
+                continue
+            p = repo / rel
+            if p.is_symlink():
+                continue
+            if p.is_file():
+                if not _same_file(p, src_repo / rel):
+                    found.append(full)
+            elif p.is_dir():
+                walked = 0
+                for f in sorted(p.rglob("*")):
+                    walked += 1
+                    if walked > _IGNORED_WALK_LIMIT:
+                        found.append(f"{full}/ (파일이 너무 많아 판단 불가)")
+                        break
+                    frel = f.relative_to(repo).as_posix()
+                    if f.is_symlink() or not f.is_file() or _regenerable_path(frel):
+                        continue
+                    if not _same_file(f, src_repo / frel):
+                        found.append(f"{full}/")
+                        break
+            if len(found) >= limit:
+                return found
+    return found
 
 
 def nested_repos(root: Path) -> list[str]:
@@ -204,7 +287,7 @@ def _preserve_into(main_repo: Path, src_repo: Path, sha: str, name: str, apply: 
     return item
 
 
-def guard_report(root: Path, apply: bool = False, date: str | None = None) -> dict[str, Any]:
+def guard_report(root: Path, apply: bool = False, date: str | None = None, strict: bool = False) -> dict[str, Any]:
     """삭제 전 가드 (a)(b)(c). apply=False 면 계획만(쓰기 0). eligible=False 면 삭제 대상에서 뺀다."""
     out: dict[str, Any] = {"eligible": True, "reasons": [], "backups": []}
     try:
@@ -226,6 +309,14 @@ def guard_report(root: Path, apply: bool = False, date: str | None = None) -> di
     if modified:
         out["eligible"] = False
         out["reasons"].append(f"미커밋 수정 {len(modified)}개: " + ", ".join(modified[:3]) + (" …" if len(modified) > 3 else ""))
+
+    # (d) 다시 못 만드는 gitignore 파일 — strict(자동 정리)면 제외, 아니면(사람이 고를 때) 경고로만 싣는다
+    lost = unrecoverable_ignored(root)
+    if lost:
+        out["ignoredLocal"] = lost
+        if strict:
+            out["eligible"] = False
+            out["reasons"].append(f"gitignore 된 로컬 파일 {len(lost)}개(자동 삭제 제외): " + ", ".join(lost[:3]) + (" …" if len(lost) > 3 else ""))
 
     # (a) detached HEAD — 어느 ref 에서도 못 닿으면 이름을 붙여 둔다(폴더가 사라지면 sha 를 잃는다)
     head = _git_ok(root, "rev-parse", "--verify", "-q", "HEAD")
@@ -271,7 +362,7 @@ def guard_report(root: Path, apply: bool = False, date: str | None = None) -> di
 # ── 계획/실행 ────────────────────────────────────────────────────────────────
 
 def gc_plan(days: int | None = None, roots: list[Path] | None = None, apply: bool = False,
-            refresh: bool = False, can_root=None) -> list[dict[str, Any]]:
+            refresh: bool = False, can_root=None, strict: bool = False) -> list[dict[str, Any]]:
     """유휴 워크트리 목록(가드 포함). apply=True 면 가드 (a)(b) 를 실제로 적용(백업 브랜치 생성).
     삭제는 여기서 하지 않는다."""
     from marina_sessions import _live_agent_cwds, agents_payload, worktree_info
@@ -294,17 +385,17 @@ def gc_plan(days: int | None = None, roots: list[Path] | None = None, apply: boo
                  "projectId": info.get("projectId") or project_label(root),
                  "diskMb": info.get("diskMb"), "imageMb": info.get("imageMb"), "cacheMb": info.get("cacheMb"),
                  "aheadTotal": info.get("aheadTotal"), "lastTs": info.get("lastTs"), **verdict}
-        entry.update(guard_report(root, apply=apply))
+        entry.update(guard_report(root, apply=apply, strict=strict))
         entries.append(entry)
     return entries
 
 
-def gc_remove(roots: list[Path], days: int | None = None) -> list[dict[str, Any]]:
+def gc_remove(roots: list[Path], days: int | None = None, volumes: str = "all", strict: bool = False) -> list[dict[str, Any]]:
     """대시보드 일괄 삭제 — 고른 root 마다 **지금** 다시 유휴인지 보고, 가드를 적용한 뒤 지운다.
     하나가 실패해도 나머지는 계속. 결과에 회수 용량(reclaim)을 싣는다."""
     from marina_lifecycle import remove_worktree
     results: list[dict[str, Any]] = []
-    plan = {e["root"]: e for e in gc_plan(days, roots=roots, apply=True, refresh=True)}
+    plan = {e["root"]: e for e in gc_plan(days, roots=roots, apply=True, refresh=True, strict=strict)}
     for root in roots:
         entry = plan.get(str(root))
         item: dict[str, Any] = {"root": str(root), "id": session_id(root), "removed": False, "freedMb": 0}
@@ -318,7 +409,7 @@ def gc_remove(roots: list[Path], days: int | None = None) -> list[dict[str, Any]
             results.append(item)
             continue
         try:
-            res = remove_worktree(root, force=False)
+            res = remove_worktree(root, force=False, volumes=volumes)
             root_res = res.get("root") if isinstance(res, dict) else None
             item["removed"] = isinstance(root_res, dict) and ("removed" in root_res or "missing" in root_res)
             item["result"] = res
@@ -332,6 +423,91 @@ def gc_remove(roots: list[Path], days: int | None = None) -> list[dict[str, Any]
             item["reason"] = str(exc)[-300:]
         results.append(item)
     return results
+
+
+# ── 자동 정리(데몬) ─────────────────────────────────────────────────────────────
+# 형(2026-09-17): "워크트리 남은 건 까먹을 것 같다 — 7일 사용 안 한 거 자동 gc". 판정·가드는 대시보드 일괄 정리와 같다
+# (세션·프로세스 0 + 커밋·파일 7일↑, 미push 커밋은 backup/ 브랜치로 보존, 진짜 미커밋 파일 있으면 제외).
+# 자동이라 다른 점 두 가지: ① 명명 볼륨은 캐시성만 지운다(개발 DB 보존) ② 한 번에 AUTO_MAX 개까지만 — 발견이 잘못돼
+# 멀쩡한 워크트리가 한꺼번에 유휴로 보이는 사고의 폭을 제한한다(남은 건 다음 주기에).
+AUTO_MAX_PER_RUN = int(_env("WORKTREE_AUTO_MAX", "5"))
+AUTO_STATE_FILE = MARINA_HOME / "worktree-gc-state.json"
+
+
+def _auto_state() -> dict[str, Any]:
+    try:
+        data = json.loads(AUTO_STATE_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def auto_tick(port: int, now: float | None = None, primary: bool | None = None,
+              plan_fn=None, remove_fn=None) -> str:
+    """데몬 루프 한 틱. 예외를 밖으로 안 낸다. 도커 GC 와 같은 정책 파일(worktree_auto_days, interval_hours)·같은 '기록된
+    데몬만' 규칙을 쓴다 — 격리 프리뷰가 실 워크트리를 지우면 안 된다. plan_fn/remove_fn 은 테스트 이음매."""
+    import marina_docker_gc as dgc
+    now = time.time() if now is None else now
+    try:
+        if primary is None:
+            recorded = dgc.recorded_daemon_port()
+            primary = recorded is not None and recorded == int(port)
+        if not primary:
+            return "skipped:not-primary"
+        policy = dgc.load_policy()
+        days = int(policy.get("worktree_auto_days") or 0)
+        if not policy.get("enabled", True) or days <= 0:
+            return "skipped:off"
+        prev = _auto_state()
+        last = prev.get("finishedAt")
+        if isinstance(last, (int, float)) and now < float(last) + float(policy.get("interval_hours") or 24) * 3600:
+            return "skipped:not-due"
+        plan_fn = plan_fn or gc_plan
+        remove_fn = remove_fn or gc_remove
+        eligible = [e for e in plan_fn(days, apply=False, refresh=True, strict=True) if e.get("eligible")]
+        eligible.sort(key=lambda e: -(e.get("gcIdleDays") or 0))       # 오래 쉰 것부터
+        picked = eligible[:max(0, AUTO_MAX_PER_RUN)]
+        when = datetime.fromtimestamp(now, timezone.utc).astimezone().isoformat(timespec="seconds")
+        if not prev.get("armedAt"):
+            # 첫 실행은 **예고만**(코드리뷰): 켜자마자(배포 60초 뒤) 지우지 않고, 다음 주기에 지울 목록을 기록해 보여준다.
+            armed = {"armedAt": now, "finishedAt": now, "days": days, "removed": 0, "freedMb": 0, "eligible": len(eligible),
+                     "wouldRemove": [{"id": e.get("id"), "root": e.get("root"), "idleDays": e.get("gcIdleDays")} for e in picked]}
+            try:
+                dgc._atomic_write_json(AUTO_STATE_FILE, armed)
+            except OSError:
+                pass
+            dgc._append_log(f"{when} worktree  armed — 다음 주기부터 자동 삭제, 지금 기준 대상 {len(picked)}개 "
+                            f"[{', '.join(str(e.get('id')) for e in picked) or '-'}]")
+            return f"armed:{len(picked)}"
+        results = remove_fn([Path(e["root"]) for e in picked], days, volumes="cache", strict=True) if picked else []
+        removed = [r for r in results if r.get("removed")]
+        freed = sum(int(r.get("freedMb") or 0) for r in removed)
+        backups = [b for r in removed for b in (r.get("backups") or [])]
+        state = {"armedAt": prev.get("armedAt"), "finishedAt": now, "days": days, "eligible": len(eligible), "removed": len(removed),
+                 "deferred": max(0, len(eligible) - len(picked)), "freedMb": freed,
+                 "items": [{"id": r.get("id"), "root": r.get("root"), "removed": bool(r.get("removed")),
+                            "freedMb": int(r.get("freedMb") or 0), "reason": r.get("reason"),
+                            "backups": [f"{b.get('repo')}:{b.get('branch')}" for b in (r.get("backups") or [])],
+                            "keptVolumes": ((r.get("result") or {}).get("reclaim") or {}).get("keptVolumes", [])}
+                           for r in results]}
+        try:
+            dgc._atomic_write_json(AUTO_STATE_FILE, state)
+        except OSError:
+            pass
+        names = ", ".join(str(r.get("id")) for r in removed) or "-"
+        line = (f"{when} worktree  removed {len(removed)}/{len(eligible)} idle>{days}d  freed {dgc.fmt_mb(freed)}  [{names}]"
+                + (f"  backups {len(backups)}" if backups else "") + (f"  deferred {state['deferred']}" if state["deferred"] else ""))
+        failed = [r for r in results if not r.get("removed")]
+        if failed:
+            line += "  SKIPPED " + "; ".join(f"{r.get('id')}: {str(r.get('reason') or '')[:80]}" for r in failed)
+        dgc._append_log(line)
+        return f"ran:{len(removed)}"
+    except Exception as exc:
+        try:
+            dgc._append_log(f"{datetime.now().astimezone().isoformat(timespec='seconds')} worktree  FAILED {exc}")
+        except Exception:
+            pass
+        return f"failed:{exc}"
 
 
 # ── CLI ──────────────────────────────────────────────────────────────────────

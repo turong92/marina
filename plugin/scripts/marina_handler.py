@@ -3134,6 +3134,11 @@ def main() -> None:
                 daemon_tick(PORT)
             except Exception:
                 pass
+            try:                                # 유휴 워크트리 자동 정리(worktree_auto_days, 기본 7) — 같은 정책·같은 '기록된 데몬만'
+                from marina_worktree_gc import auto_tick
+                auto_tick(PORT)
+            except Exception:
+                pass
             _time.sleep(600)
 
     _threading.Thread(target=_gc_loop, daemon=True, name="docker-gc").start()

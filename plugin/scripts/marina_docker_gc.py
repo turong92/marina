@@ -68,6 +68,7 @@ DEFAULT_POLICY: dict[str, Any] = {
     "stale_test_artifacts_days": 3,
     "stale_test_artifact_names": ["marina-*-e2e-*"],
     "orphan_worktree_days": 7,
+    "worktree_auto_days": 7,
 }
 _POLICY_TYPES: dict[str, str] = {
     "enabled": "bool",
@@ -79,6 +80,7 @@ _POLICY_TYPES: dict[str, str] = {
     "stale_test_artifacts_days": "int",
     "stale_test_artifact_names": "globs",
     "orphan_worktree_days": "int",
+    "worktree_auto_days": "int",
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -698,7 +700,16 @@ def status(with_disk: bool = True, now: float | None = None, refresh: bool = Fal
         "policy": policy, "state": state, "due": due(policy, state, now), "nextRunAt": next_run_at(policy, state),
         "running": _RUNNING["active"], "disk": docker_disk(force=refresh) if with_disk else None,
         "logFile": str(LOG_FILE), "policyFile": str(POLICY_FILE),
+        "worktreeAuto": _read_json(MARINA_HOME / "worktree-gc-state.json"),
     }
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 # ─────────────────────────── 데몬 틱 ───────────────────────────

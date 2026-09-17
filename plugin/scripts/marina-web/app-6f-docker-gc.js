@@ -18,6 +18,7 @@
     ['stale_test_artifacts_days', 'e2e 잔재', 'int', '일'],
     ['stale_test_artifact_names', 'e2e 이름 글롭', 'text', ''],   // 라벨 없는 옛 누수(mdce2e*·proj-*-weaveapp) 도 여기 글롭을 더하면 같은 규칙으로 회수
     ['orphan_worktree_days', '사라진 워크트리 잔재', 'int', '일'],
+    ['worktree_auto_days', '유휴 워크트리 자동 삭제', 'int', '일'],
   ];
   const TITLES = {
     enabled: '데몬이 주기대로 자동 실행. 꺼도 "지금 정리"·CLI --now 는 된다',
@@ -27,6 +28,7 @@
     anonymous_volumes: '어떤 컨테이너에도 안 붙은 익명 볼륨만(명명 볼륨은 절대 아님)',
     anonymous_volume_grace_days: '익명 볼륨이 이 일수 넘게 계속 떠 있어야 지운다 — marina stop 직후 잠깐 떨어진 볼륨 보호. 0=즉시',
     stale_test_artifacts_days: '라벨 marina.e2e=1 또는 이름 글롭에 맞는 컨테이너·이미지·네트워크 중 이보다 오래된 것. 0=끔',
+    worktree_auto_days: '세션·프로세스 없고 커밋·파일 변경이 이 일수 넘게 없는 워크트리를 자동 삭제. 미push 커밋은 backup/ 브랜치로 보존, 미커밋 파일 있으면 건너뜀, 개발 DB 볼륨은 남김, 한 번에 5개까지. 0=끔',
     orphan_worktree_days: 'marina 밖(git·Claude 앱)에서 지운 워크트리의 compose 프로젝트 이미지·정지 컨테이너 중 이보다 오래된 것(명명 볼륨은 안 지움). 실행 중 컨테이너가 있는 프로젝트는 건너뜀. 0=끔',
     stale_test_artifact_names: 'e2e 산출물로 볼 이름 글롭(쉼표 구분). 라벨 marina.e2e=1 은 항상 포함. 예: marina-*-e2e-*,mdce2e*',
   };
@@ -48,7 +50,21 @@
     const s = st?.state || {};
     if (!s.finishedAt) return '아직 정리한 적 없음';
     const base = `마지막 정리 <b>${ago(s.finishedAt)}</b> · 회수 <b>${fmt(s.reclaimedMb)}</b> <span class="dim">(${escapeHtml(s.source || '')})</span>`;
-    return s.error ? `${base}<br>실패: ${escapeHtml(s.error)}` : base;
+    const w = st?.worktreeAuto || {};
+    let wt = '';
+    if (w.finishedAt && !w.items && w.armedAt) {
+      const names = (w.wouldRemove || []).map(x => escapeHtml(String(x.id))).join(', ');
+      wt = `<br>워크트리 자동 삭제 <b>켜짐</b> — 다음 주기부터 · 지금 기준 대상 ${ (w.wouldRemove || []).length }개${names ? ` <span class="dim">(${names})</span>` : ''}`;
+    } else if (w.finishedAt) {
+      const gone = (w.items || []).filter(x => x.removed).map(x => escapeHtml(String(x.id))).join(', ');
+      const kept = (w.items || []).flatMap(x => x.keptVolumes || []).length;
+      const backups = (w.items || []).flatMap(x => x.backups || []);
+      wt = `<br>워크트리 자동 삭제 <b>${ago(w.finishedAt)}</b> · ${w.removed || 0}개 · 회수 <b>${fmt(w.freedMb)}</b>`
+         + (gone ? ` <span class="dim">(${gone})</span>` : '')
+         + (backups.length ? `<br><span class="dim">백업 브랜치: ${backups.map(escapeHtml).join(', ')}</span>` : '')
+         + (kept ? `<br><span class="dim">남긴 DB 볼륨 ${kept}개</span>` : '');
+    }
+    return (s.error ? `${base}<br>실패: ${escapeHtml(s.error)}` : base) + wt;
   }
 
   function renderDockerGc(st) {

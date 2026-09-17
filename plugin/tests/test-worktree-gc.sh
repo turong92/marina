@@ -169,8 +169,11 @@ assert d["dryRun"] is True and d["days"] == 14, d
 ids = sorted(e["id"] for e in d["items"])
 assert ids == ["wt-idle", "wt-nested-dirty", "wt-untracked"], ids
 idle = next(e for e in d["items"] if e["id"] == "wt-idle")
-# 루트 detached 는 위 python 절에서 이미 보존됐으니(ref 에서 닿음) 여기선 서브레포 백업만 남는다
-assert idle["eligible"] and [b.get("subrepo") for b in idle["backups"]] == ["sub"] and idle["backups"][0]["existed"], idle
+# 루트 detached 는 위 python 절에서 이미 보존됐으니(ref 에서 닿음) 여기선 서브레포 백업만 남는다.
+# `existed` 는 보지 않는다 — 위 절은 날짜를 20260914 로 고정해 브랜치를 만들고 CLI 는 오늘 날짜로 이름을 짓는다.
+# 그래서 9/15 부터 이 줄이 날짜 때문에 실패했다(가드는 정상). 날짜와 무관한 사실만 확인한다.
+assert idle["eligible"] and [b.get("subrepo") for b in idle["backups"]] == ["sub"], idle
+assert idle["backups"][0].get("sha") and not idle["backups"][0].get("error"), idle
 PY
 text="$(bash "$SH" worktree gc --dry-run --days 14)"
 grep -q "유휴 워크트리 3개" <<<"$text" || { echo "FAIL: CLI 요약 줄 없음: $text"; exit 1; }

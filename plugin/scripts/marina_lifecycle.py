@@ -372,7 +372,7 @@ def stash_before_delete(root: Path, room_name: str = "") -> dict[str, Any]:
     return {"branch": branch, "saved": bool(성공한곳), "subrepos": 보관}
 
 
-def reclaim_worktree_docker(root: Path) -> dict[str, Any]:
+def reclaim_worktree_docker(root: Path, volumes: str = "all") -> dict[str, Any]:
     """워크트리를 지울 때 그 compose 프로젝트의 **이미지·볼륨을 함께** 회수한다.
 
     실측(2026-09-14): 워크트리 28개 중 22개가 세션·프로세스 0 인데도 워크트리당 이미지 3~6GB
@@ -397,14 +397,28 @@ def reclaim_worktree_docker(root: Path) -> dict[str, Any]:
             out["freedMb"] += int(item.get("sizeMb") or 0)
         except Exception as exc:
             out["errors"].append(f"image {image_id[:19]}: {str(exc)[-160:]}")
+    # volumes="all"(사람이 골라 지울 때) = 그 프로젝트의 명명 볼륨 전부. volumes="cache"(자동 GC) = node_modules·.next 같은
+    # 캐시성 볼륨만 — 일주일 쉰 워크트리를 자동으로 지울 때 개발 DB 데이터까지 날리면 안 된다(2026-09-17 형 결정: 7일 자동 정리).
+    keep: set[str] = set()
+    if volumes == "cache":
+        try:
+            from marina_cache import cache_items_by_category
+            cache_names = {str(i.get("volume")) for items in cache_items_by_category(root).values()
+                           for i in items if i.get("type") == "volume" and i.get("volume")}
+        except Exception as exc:
+            cache_names = set()
+            out["errors"].append(f"cache volumes: {exc}")
     try:
-        volumes = compose_project_volume_items(root)
+        vol_items = compose_project_volume_items(root)
     except Exception as exc:
-        volumes = []
+        vol_items = []
         out["errors"].append(f"volumes: {exc}")
-    for item in volumes:
+    for item in vol_items:
         name = str(item.get("volume") or "")
         if not name:
+            continue
+        if volumes == "cache" and name not in cache_names:
+            keep.add(name)
             continue
         try:
             docker_volume_rm(name)
@@ -412,11 +426,13 @@ def reclaim_worktree_docker(root: Path) -> dict[str, Any]:
             out["freedMb"] += int(item.get("sizeMb") or 0)
         except Exception as exc:
             out["errors"].append(f"volume {name}: {str(exc)[-160:]}")
+    if keep:
+        out["keptVolumes"] = sorted(keep)
     _worktree_du_cache.pop(str(root), None)
     return out
 
 
-def remove_worktree(root: Path, force: bool = False, keep_images: bool = False) -> dict[str, Any]:
+def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, volumes: str = "all") -> dict[str, Any]:
     """워크트리 삭제. keep_images=False(기본)면 그 compose 프로젝트의 이미지·볼륨도 함께 회수한다
     (결과 `reclaim` — freedMb·errors). 회수가 실패해도 삭제는 진행한다."""
     # 전역 대시보드는 프로젝트 worktree 밖(marina 레포)에서 돌므로 "자기 세션 삭제" 가드 불요.
@@ -447,7 +463,7 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False) 
     if not keep_images:
         # 워크트리 폴더가 사라지기 **전에** — compose images 조회가 --project-directory(=root)를 쓴다.
         try:
-            results["reclaim"] = reclaim_worktree_docker(root)
+            results["reclaim"] = reclaim_worktree_docker(root, volumes=volumes)
         except Exception as exc:
             results["reclaim"] = {"images": [], "volumes": [], "freedMb": 0, "errors": [str(exc)[-200:]]}
     for repo in subrepos_of(root):
