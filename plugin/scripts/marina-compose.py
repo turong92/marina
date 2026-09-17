@@ -129,7 +129,7 @@ def _prepare_for_compose(text: str) -> str:
     return "".join(out)
 
 
-def load_compose(text: str, project_dir: str | None = None) -> dict:
+def load_compose(text: str, project_dir=None) -> dict:   # 3.9 호환: PEP 604(X | None) 금지 — 데몬은 CLT python3.9 로 돈다
     """compose YAML 텍스트 → dict (`docker compose config --format json`). 빈 텍스트 → {}.
     보간 안 함(${VAR} 원문 유지), 정규화 안 함, 경로 해석 안 함. 단 ports/volumes/depends_on 같은 축약형은
     compose 가 항상 긴 형식으로 편다(판정용으론 그게 더 편하다). compose 가 붙이는 `name` 은 원문에 없으면 뗀다.
