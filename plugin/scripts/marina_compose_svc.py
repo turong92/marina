@@ -207,22 +207,48 @@ def build_compose_services(ps_rows: list) -> list:
     out.sort(key=lambda s: s["service"])
     return out
 
-def compose_ps(root: Path, project_name: str) -> list:
-    """docker compose -p <name> ps --all --format json → 행 리스트. docker 없거나 실패 시 [].
-    --all 로 정지 컨테이너도 포함(대시보드에서 재기동 가능)."""
-    # 이 워크트리의 데몬을 본다 — 원격 스택을 로컬 데몬에서 찾으면 "안 도는 것"으로 보이고,
-    # 게이트웨이 upstream 이 아예 안 생겨 `<wt>.<proj>.localhost` 가 열리지 않는다.
-    from marina_runtime_target import docker_env_for_root
-    delta = docker_env_for_root(root)
+# ── compose ps — 원격 타깃은 캐시·합치기·백오프 ─────────────────────────────────────────
+# **왜.** 원격(DOCKER_HOST=ssh://)이면 docker 호출 한 번이 ssh 접속 하나 + 박스의 `docker system dial-stdio` 하나다.
+# 이벤트 루프(구독자 있으면 3초)·게이트웨이 루프(5초)·대시보드가 워크트리마다 compose ps 를 부르므로, 원격 워크트리
+# 하나에 시간당 수백 번 접속한다(격리 데몬 실측: 구독자 1명 → 워크트리당 시간당 ~630). 박스 데몬이 멈춘 동안에는
+# 그 호출마다 dial-stdio 가 데몬 소켓에 묶인 채 sshd 만 끝나 **부모 PID 1 고아로 남는다** — 2026-09-17 사무실
+# 박스(192.168.0.251)에 1,507개가 쌓였고 접속 주체는 원격 타깃을 쓰는 팀원 맥 두 대였다(sshd 키 지문으로 특정).
+# 그래서 원격은 ① TTL 동안 결과를 재사용하고 ② 같은 키 동시 호출은 한 번으로 합치며 ③ 실패하면 그 박스를 지수
+# 백오프로 쉬게 하고(마지막 값을 stale 로 돌려준다) ④ 타임아웃이면 docker CLI 의 자식 ssh 까지 프로세스 그룹째 끊는다.
+# 로컬 타깃은 캐시·백오프 없이 지금처럼 매번 부른다(소켓 호출이라 싸고, 즉시성이 기대되는 동작이다).
+import threading as _threading
+
+_REMOTE_PS_TTL_S = float(os.environ.get("MARINA_REMOTE_PS_TTL", "15") or "15")
+_REMOTE_BACKOFF_MIN_S = 30.0
+_REMOTE_BACKOFF_MAX_S = 300.0
+_PS_TIMEOUT_S = 5
+_remote_ps_lock = _threading.Lock()
+_remote_ps_cache: dict = {}        # (host, project) → (monotonic ts, rows)
+_remote_ps_inflight: dict = {}     # (host, project) → threading.Event
+_remote_health: dict = {}          # host → {"fails": n, "until": monotonic ts}
+
+
+def _ps_exec(argv: list, cwd: str, env: dict | None, timeout: float) -> str:
+    """docker 한 번. 타임아웃이면 **프로세스 그룹째** 죽인다 — check_output 은 직계(docker CLI)만 죽여서
+    원격일 때 그 자식 ssh 가 남을 수 있다. 실패는 예외로(호출부가 원격 백오프를 판단)."""
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                            text=True, start_new_session=True)
     try:
-        out = subprocess.check_output(
-            _docker_cmd("compose", "-p", project_name, "ps", "--all", "--format", "json"),
-            cwd=str(root), text=True, stderr=subprocess.DEVNULL, timeout=5,
-            env={**os.environ, **delta} if delta else None,
-        )
-    except Exception:
-        return []
-    out = out.strip()
+        out, _ = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, 9)
+        except OSError:
+            pass
+        proc.communicate()
+        raise
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, argv, out)
+    return out
+
+
+def _parse_ps_rows(out: str) -> list:
+    out = (out or "").strip()
     if not out:
         return []
     try:
@@ -238,6 +264,88 @@ def compose_ps(root: Path, project_name: str) -> list:
                 except json.JSONDecodeError:
                     pass
         return rows
+
+
+def remote_ps_health() -> dict:
+    """박스별 백오프 상태(관측·테스트용). {host: {fails, retryInS}}"""
+    now = time.monotonic()
+    with _remote_ps_lock:
+        return {h: {"fails": v["fails"], "retryInS": max(0.0, round(v["until"] - now, 1))}
+                for h, v in _remote_health.items()}
+
+
+def _remote_compose_ps(root: Path, project_name: str, host: str, env: dict) -> list:
+    key = (host, project_name)
+    now = time.monotonic()
+    with _remote_ps_lock:
+        cached = _remote_ps_cache.get(key)
+        health = _remote_health.get(host)
+        if cached and now - cached[0] < _REMOTE_PS_TTL_S:
+            return cached[1]
+        if health and now < health["until"]:
+            return cached[1] if cached else []       # 박스가 쉬는 중 — 마지막으로 본 값(없으면 빈 목록)
+        waiter = _remote_ps_inflight.get(key)
+        if waiter is None:
+            _remote_ps_inflight[key] = _threading.Event()
+    if waiter is not None:                            # 다른 스레드가 이미 묻는 중 — 기다렸다 그 결과를 쓴다
+        waiter.wait(timeout=_PS_TIMEOUT_S + 1)
+        with _remote_ps_lock:
+            got = _remote_ps_cache.get(key)
+        return got[1] if got else []
+    try:
+        out = _ps_exec(_docker_cmd("compose", "-p", project_name, "ps", "--all", "--format", "json"),
+                       str(root), env, _PS_TIMEOUT_S)
+        rows = _parse_ps_rows(out)
+        with _remote_ps_lock:
+            _remote_ps_cache[key] = (time.monotonic(), rows)
+            _remote_health.pop(host, None)
+        return rows
+    except Exception:
+        with _remote_ps_lock:
+            h = _remote_health.setdefault(host, {"fails": 0, "until": 0.0})
+            h["fails"] += 1
+            h["until"] = time.monotonic() + min(_REMOTE_BACKOFF_MAX_S, _REMOTE_BACKOFF_MIN_S * (2 ** (h["fails"] - 1)))
+            stale = _remote_ps_cache.get(key)
+        return stale[1] if stale else []
+    finally:
+        with _remote_ps_lock:
+            ev = _remote_ps_inflight.pop(key, None)
+        if ev is not None:
+            ev.set()
+
+
+def invalidate_remote_ps(root: Path | None = None) -> None:
+    """수명 조작(start/stop/restart) 직후 다음 폴링이 바로 새로 보게 캐시·백오프를 비운다. root 없으면 전부."""
+    with _remote_ps_lock:
+        if root is None:
+            _remote_ps_cache.clear(); _remote_health.clear(); return
+        try:
+            from marina_runtime_target import docker_env_for_root
+            host = (docker_env_for_root(root) or {}).get("DOCKER_HOST")
+        except Exception:
+            host = None
+        if host:
+            for k in [k for k in _remote_ps_cache if k[0] == host]:
+                _remote_ps_cache.pop(k, None)
+            _remote_health.pop(host, None)
+
+
+def compose_ps(root: Path, project_name: str) -> list:
+    """docker compose -p <name> ps --all --format json → 행 리스트. docker 없거나 실패 시 [].
+    --all 로 정지 컨테이너도 포함(대시보드에서 재기동 가능). 원격 타깃은 위 캐시·백오프를 탄다."""
+    # 이 워크트리의 데몬을 본다 — 원격 스택을 로컬 데몬에서 찾으면 "안 도는 것"으로 보이고,
+    # 게이트웨이 upstream 이 아예 안 생겨 `<wt>.<proj>.localhost` 가 열리지 않는다.
+    from marina_runtime_target import docker_env_for_root
+    delta = docker_env_for_root(root)
+    host = (delta or {}).get("DOCKER_HOST") or ""
+    if host:
+        return _remote_compose_ps(root, project_name, host, {**os.environ, **delta})
+    try:
+        out = _ps_exec(_docker_cmd("compose", "-p", project_name, "ps", "--all", "--format", "json"),
+                       str(root), None, _PS_TIMEOUT_S)
+    except Exception:
+        return []
+    return _parse_ps_rows(out)
 
 def compose_service_names(root: Path, project: dict) -> tuple:
     """compose 워크트리의 서비스 이름들 = 보관 compose 정의 ∪ ps 라이브 — log_targets_for/safe_service 검증용.

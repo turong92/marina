@@ -55,15 +55,17 @@ class ComposePsRoutingTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
         self.seen = []
-        self._orig = mcs.subprocess.check_output
+        self._orig = mcs._ps_exec
+        mcs.invalidate_remote_ps(None)
 
-        def fake(args, **kw):
-            self.seen.append(kw.get("env"))
+        def fake(argv, cwd, env, timeout):
+            self.seen.append(env)
             return "[]"
-        mcs.subprocess.check_output = fake
+        mcs._ps_exec = fake
 
     def tearDown(self):
-        mcs.subprocess.check_output = self._orig
+        mcs._ps_exec = self._orig
+        mcs.invalidate_remote_ps(None)
         self.tmp.cleanup()
 
     def test_local_passes_no_docker_host(self):
