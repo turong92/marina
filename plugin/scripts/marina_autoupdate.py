@@ -12,7 +12,9 @@
 **사전 검증이 핵심이다.** 2026-09-17 배포 직후 `str | None` 한 줄로 3.9 데몬에서 marina-compose.py import 가 통째로
 실패했다. 자동 업데이트가 그걸 모두에게 퍼뜨리면 팀 전체 대시보드가 동시에 죽는다. 그래서 설치 **전에** 새 코드를 데몬과
 같은 인터프리터(sys.executable)로 격리 홈에서 import 해 보고, 실패하면 설치하지 않고 그 SHA 를 기록해 다시 시도하지 않는다.
-기동·재시작 중인 서비스(LIFECYCLE_BUSY)가 있으면 재시작을 다음 틱으로 미룬다.
+기동·재시작 중인 서비스(LIFECYCLE_BUSY)가 있으면 재시작을 다음 틱으로 미룬다. **marina 터미널이 하나라도 살아 있으면
+재시작하지 않는다(기한 없음)** — 재시작하면 pty 가 닫혀 안의 claude·codex 세션이 죽는다. 설치는 해 두고, 터미널이 다
+닫힌 뒤 첫 틱에 재시작한다(대시보드 배너엔 '재시작 필요'로 보인다).
 
 끄기: MARINA_AUTO_UPDATE=0 (환경변수). 로그: ~/.marina/auto-update.log, 상태: ~/.marina/auto-update-state.json.
 """
@@ -134,6 +136,18 @@ def _lifecycle_busy() -> bool:
         return False
 
 
+def _live_terminals() -> int:
+    """데몬이 pty 로 띄운 살아 있는 터미널 수. **재시작하면 이것들은 죽는다** — 데몬이 내려가며 pty master 가 닫히면
+    안의 프로그램(claude·codex·셸)은 조용하든 출력 중이든 즉시 종료된다(2026-09-22 재현). AbandonProcessGroup 은 launchd 가
+    죽이는 것만 막을 뿐 pty 가 닫혀 죽는 건 못 막는다. 그래서 하나라도 있으면 재시작하지 않는다 — 기한 없이."""
+    try:
+        import marina_term
+        with marina_term._lock:
+            return sum(1 for t in marina_term._by_tid.values() if getattr(t, "alive", False))
+    except Exception:
+        return 0
+
+
 def _clients_connected() -> bool:
     """대시보드 SSE·등록된 폰이 붙어 있나 — 재시작하면 그 연결이 끊긴다(터미널 프로세스는 pty 라 산다)."""
     try:
@@ -162,10 +176,12 @@ def _default_restart() -> tuple[int, str]:
 
 
 def _gated_restart(state: dict[str, Any], now: float, installed: str | None, busy_fn, clients_fn, preflight_fn,
-                   restart_fn, installed_dir_fn) -> str:
+                   restart_fn, installed_dir_fn, terms_fn=None) -> str:
     """재시작 직전 게이트. 반환: restarted / deferred:* / rejected:installed / gave-up / failed:restart."""
     if busy_fn():
         return "deferred:busy"                                      # 빌드·기동 중 — 끊지 않는다
+    if (terms_fn or _live_terminals)() > 0:
+        return "deferred:terminals"                                 # 터미널 세션이 죽는다 — 기한 없이 미룬다(6시간 상한 없음)
     if clients_fn():
         since = state.get("clientDeferSince") or now
         state["clientDeferSince"] = since
@@ -197,7 +213,8 @@ def auto_update_tick(port: int, now: float | None = None, primary: bool | None =
                      restart_fn: Callable[[], tuple[int, str]] | None = None,
                      busy_fn: Callable[[], bool] | None = None,
                      clients_fn: Callable[[], bool] | None = None,
-                     installed_dir_fn: Callable[[], Path | None] | None = None) -> str:
+                     installed_dir_fn: Callable[[], Path | None] | None = None,
+                     terms_fn: Callable[[], int] | None = None) -> str:
     """데몬 루프 한 틱. 예외를 밖으로 안 낸다. 나머지 인자는 테스트 이음매."""
     now = time.time() if now is None else now
     try:
@@ -223,7 +240,7 @@ def auto_update_tick(port: int, now: float | None = None, primary: bool | None =
         busy_fn = busy_fn or _lifecycle_busy
         clients_fn = clients_fn or _clients_connected
         installed_dir_fn = installed_dir_fn or installed_scripts_dir
-        gate = lambda inst: _gated_restart(state, now, inst, busy_fn, clients_fn, preflight_fn, restart_fn, installed_dir_fn)
+        gate = lambda inst: _gated_restart(state, now, inst, busy_fn, clients_fn, preflight_fn, restart_fn, installed_dir_fn, terms_fn)
         keep_due = lambda: {**state, "checkedAt": last if isinstance(last, (int, float)) else 0}   # 미룰 땐 주기를 소모하지 않는다
 
         st = status_fn() or {}

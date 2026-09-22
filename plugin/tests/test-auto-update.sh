@@ -24,7 +24,7 @@ def status(kind, serving="aaa111", installed="aaa111", origin="bbb222"):
     return lambda: {"state": kind, "serving": serving, "installed": installed, "origin": origin}
 def tick(**kw):
     base = dict(port=3900, now=NOW, primary=True, run_fn=run_fn, restart_fn=restart_fn, busy_fn=lambda: False, preflight_fn=ok_pre,
-                clients_fn=lambda: False, installed_dir_fn=lambda: Path("/installed/scripts"))
+                clients_fn=lambda: False, installed_dir_fn=lambda: Path("/installed/scripts"), terms_fn=lambda: 0)
     base.update(kw); return au.auto_update_tick(**base)
 def reset():
     cmds.clear(); restarts.clear()
@@ -71,6 +71,14 @@ assert tick(status_fn=status("stale", installed="bbb222"), clients_fn=lambda: Tr
 assert tick(status_fn=status("stale", installed="bbb222"), clients_fn=lambda: True, now=NOW + 3 * 3600) == "deferred:clients"
 assert tick(status_fn=status("stale", installed="bbb222"), clients_fn=lambda: True, now=NOW + 7 * 3600) == "restarted", "6시간 넘으면 한다"
 
+# marina 터미널이 살아 있으면 기한 없이 미룬다(재시작하면 pty 가 닫혀 안의 세션이 죽는다) — 6시간 상한도 안 통한다
+reset()
+assert tick(status_fn=status("new"), terms_fn=lambda: 2) == "installed:deferred:terminals" and not restarts
+for h in (1, 7, 30):
+    assert tick(status_fn=status("stale", installed="bbb222"), terms_fn=lambda: 1, clients_fn=lambda: True,
+                now=NOW + h * 3600) == "deferred:terminals" and not restarts
+assert tick(status_fn=status("stale", installed="bbb222"), now=NOW + 31 * 3600) == "restarted", "터미널이 다 닫히면 그때"
+
 # 재시작해도 안 바뀌면 3번에서 멈춘다(매시간 재시작 루프 방지)
 reset()
 for i in range(3):
@@ -102,6 +110,16 @@ assert tick(status_fn=status("new"), run_fn=lambda a: (1, "network down")) == "f
 def boom(): raise RuntimeError("status broke")
 reset()
 assert tick(status_fn=boom).startswith("failed:") and "FAILED status broke" in au.LOG_FILE.read_text().splitlines()[-1]
+# 실제 marina_term 레지스트리를 센다(살아 있는 것만)
+import marina_term
+class _T:
+    def __init__(self, alive): self.alive = alive
+with marina_term._lock:
+    saved = dict(marina_term._by_tid); marina_term._by_tid.clear()
+    marina_term._by_tid.update({"t1": _T(True), "t2": _T(False)})
+assert au._live_terminals() == 1
+with marina_term._lock:
+    marina_term._by_tid.clear(); marina_term._by_tid.update(saved)
 print("ok")
 PY
 

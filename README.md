@@ -744,8 +744,9 @@ x-marina:
 - **Codex** — `codex plugin marketplace upgrade`.
 - **데몬 자동 업데이트(기본 켜짐)** — marina 데몬이 1시간마다 새 커밋을 확인하고, 있으면 받아서 **스스로 재시작**한다
   (`claude plugin marketplace update` → 사전 검증 → `claude plugin update` → 재시작). 새 코드를 데몬과 같은 Python 으로
-  먼저 import 해 보고 실패하면 설치하지 않는다(그 SHA 는 다시 시도하지 않음). 서비스 기동 중이면 미루고, 대시보드·폰이
-  붙어 있으면 최대 6시간 미룬다. 기록: `~/.marina/auto-update.log`.
+  먼저 import 해 보고 실패하면 설치하지 않는다(그 SHA 는 다시 시도하지 않음). **marina 터미널이 하나라도 살아 있으면
+  재시작하지 않는다**(재시작하면 터미널 안 claude·codex 세션이 죽는다) — 설치만 해 두고 터미널이 다 닫힌 뒤 재시작한다.
+  서비스 기동 중이면 미루고, 대시보드·폰만 붙어 있으면 최대 6시간 미룬다(브라우저는 재연결된다). 기록: `~/.marina/auto-update.log`.
   **주의:** main 에 push 한 코드가 한 시간 안에 이 데몬을 쓰는 모든 맥에서 실행된다. 끄려면 `MARINA_AUTO_UPDATE=0`
   (데몬 환경변수), 주기는 `MARINA_AUTO_UPDATE_HOURS`.
 
