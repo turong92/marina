@@ -3139,6 +3139,11 @@ def main() -> None:
                 auto_tick(PORT)
             except Exception:
                 pass
+            try:                                # 강제 자동 업데이트(기본 1시간, MARINA_AUTO_UPDATE=0 으로 끔) — 설치 전 사전 검증
+                from marina_autoupdate import auto_update_tick
+                auto_update_tick(PORT)
+            except Exception:
+                pass
             _time.sleep(600)
 
     _threading.Thread(target=_gc_loop, daemon=True, name="docker-gc").start()
