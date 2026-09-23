@@ -74,6 +74,14 @@ assert.deepEqual(잘린것.slice(0, 4).map(x => x.key), ["a","b","c","d"], "방�
 assert.ok(잘린것.some(x => x.key === "f"), "물어봐 놓고 기다리는 대화를 놓쳤다");
 assert.ok(!잘린것.some(x => x.key === "e"), "가장 오래 안 본 것이 자리를 안 냈다");
 
+// ④-0 waiting(턴 끝내고 프롬프트에서 쉬는 중)은 급한 게 아니다 — 살아 있는 세션 대부분이 이 상태라,
+// 끌어올리면 오래전에 연 대화가 "최근"을 밀어낸다(형 신고 2026-09-23).
+{
+  const 쉬는중 = [{key:"a",status:"idle"},{key:"b",status:"idle"},{key:"c",status:"idle"},
+    {key:"d",status:"idle"},{key:"e",status:"idle"},{key:"옛날",status:"waiting"},{key:"옛날2",status:"waiting"}];
+  assert.deepEqual(navRecent(쉬는중, 5).map(x => x.key), ["a","b","c","d","e"], "쉬는 옛 대화가 최근을 밀어냈다");
+}
+
 // ④-1 급한 게 많아도 목록을 통째로 갈아치우지는 않는다 — 최근순이 아예 사라지면 뜻이 없다.
 const 급한게많음 = [{key:"a",status:"idle"},{key:"b",status:"idle"},
   {key:"x",status:"blocked"},{key:"y",status:"blocked"},{key:"z",status:"blocked"}];

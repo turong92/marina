@@ -7596,7 +7596,10 @@ _MOBILE_HTML = r"""<!doctype html>
     function navRecent(entries, limit) {
       const 전부 = (entries || []).slice();
       const 앞 = 전부.slice(0, limit);
-      const 급함 = (x) => ["blocked", "waiting"].includes(String((x || {}).status || ""));
+      // **blocked 만** 급하다(권한·질문에 막힌 것). waiting 은 "턴을 끝내고 프롬프트에서 쉬는 중"이라
+      // 살아 있는 세션 대부분이 이 상태다 — 이걸 끌어올리면 몇 주 전에 열었던 대화가 상한 밖에서
+      // 줄줄이 올라와 "최근 아닌 게 올라온다"가 된다(형 신고 2026-09-23, 방문순만 쓰게 고친 뒤에도 남던 원인).
+      const 급함 = (x) => String((x || {}).status || "") === "blocked";
       const 밖의급한것 = 전부.slice(limit).filter(급함);
       let 바꿀수있는만큼 = Math.max(0, Math.floor(limit / 2));
       for (const 항목 of 밖의급한것) {
