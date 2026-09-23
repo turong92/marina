@@ -3148,6 +3148,24 @@ def main() -> None:
 
     _threading.Thread(target=_gc_loop, daemon=True, name="docker-gc").start()
 
+    # 데스크톱 앱이 연 대화를 놓아 준다(한 대화 = 한 주인). 폴링에 얹지 않는다 — 형이 데스크톱만 보고
+    # 있으면 marina 로 폴링이 안 와서 영영 안 놓는다. 5초면 "열었더니 곧 쓸 수 있게 됨" 으로 느껴진다.
+    def _handoff_loop() -> None:
+        _time.sleep(15)
+        while True:
+            try:
+                from marina_desktop_handoff import tick
+                tick()
+            except Exception as exc:            # 삼키되 남긴다 — 조용히 안 놓으면 원인을 못 찾는다
+                try:
+                    from marina_desktop_handoff import _log
+                    _log(f"tick failed: {exc!r}")
+                except Exception:
+                    pass
+            _time.sleep(5)
+
+    _threading.Thread(target=_handoff_loop, daemon=True, name="desktop-handoff").start()
+
     # 변화 감지 — 화면에 밀어주고(SSE), 사람을 불러야 하면 폰을 깨운다(푸시).
     # 이 루프가 없으면 폰은 계속 3초마다 물어봐야 하고, "방금 바뀌었다"를 아는 곳이 없어
     # 알림을 보낼 근거 자체가 생기지 않는다.

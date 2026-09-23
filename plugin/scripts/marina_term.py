@@ -63,6 +63,7 @@ class _Term:
         self.alive = True
         self.created = time.time()
         self.last = time.time()
+        self.last_input = self.created   # marina 가 이 세션에 **입력한** 마지막 시각(출력은 안 셈) — 데스크톱 인계 판정용
         # 사이드바 이름용 — 마지막으로 친 명령. 스크롤백에서 파싱하지 않는 이유:
         # zsh ZLE 가 좁은 칸에서 명령을 CR·EL·커서이동으로 다시 그려서(45칼럼에선 `npm run b`+`uild` 로
         # 두 줄에 걸친다) 어느 한 줄에도 원문이 없다. 복원하려면 터미널 에뮬레이터를 새로 써야 한다.
@@ -263,6 +264,10 @@ def _reconstruct_registry() -> None:
             created = meta.get("created")
             if isinstance(created, (int, float)):
                 term.created = float(created)
+            # 입력 시각은 디스크에 없다(입력마다 쓰면 키 입력마다 IO). 모르는 값을 **재시작 시각**으로 두면
+            # 데스크톱 인계가 "marina 가 방금 썼다"로 오판해 영영 안 놓는다 — 매시간 자동 업데이트 재시작마다
+            # 기능이 조용히 죽는다(리뷰 지적). 아는 가장 이른 값(생성 시각)을 쓴다.
+            term.last_input = term.created
             term.last = time.time()   # 복원 시점 기준 — 유휴 TTL 로 살아있는 에이전트를 SIGHUP 하지 않게
             _by_tid[tid] = term
             if key and key not in _by_key:
@@ -619,7 +624,7 @@ def term_input(tid: str, data: str) -> dict[str, Any]:
         raise ValueError("이 세션은 marina 재시작으로 조작할 수 없어요 — 작업이 끝난 뒤 다시 시도하세요")
     os.write(term.fd, data.encode("utf-8"))
     _note_typed(term, data)
-    term.last = time.time()
+    term.last = term.last_input = time.time()
     return {"ok": True}
 
 

@@ -88,6 +88,11 @@ else:
     agent = s.get("agent") or {}
     if agent.get("source") != "claude" or agent.get("sid") != "sid-alive-0001":
         fails.append(f"reconstructed agent meta lost: {agent}")
+    # 입력 시각은 디스크에 없다 — 재시작 시각으로 두면 데스크톱 인계가 "marina 가 방금 썼다"로 오판해
+    # 매시간 자동 업데이트 재시작마다 영영 안 놓는다(리뷰 지적 2026-09-23). 생성 시각으로 되살린다.
+    rt = mt._by_tid.get(live_tid)
+    if rt is None or rt.last_input != 1000.0:
+        fails.append(f"reconstructed last_input must fall back to created(1000.0), got {getattr(rt, 'last_input', None)}")
 
 # reuse-by-key: 같은 agent 로 term_open → 재구성된 detached term 을 재사용해야 한다(이중 resume 방지).
 d = mt.term_open(Path(wt), 80, 24, agent_source="claude", agent_sid="sid-alive-0001")
