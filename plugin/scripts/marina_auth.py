@@ -617,7 +617,11 @@ class AuthStore:
             self._audit(conn, "user.reset_password", "unclaimed", actor_user_id, "user", username)
             return self._user(conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone())
 
-    def authenticate(self, username: str, password: str) -> User:
+    def authenticate(self, username: str, password: str, meta: str = "") -> User:
+        """meta = 어디서 들어온 로그인인지(주소·브라우저). **왜 남기나:** 로그인이 자꾸 풀린다는 말이
+        나오면 서버는 "쿠키를 다시 안 보내더라"까지밖에 못 말한다. 주소가 매번 다른 건지(호스트가 다르면
+        쿠키도 다른 쿠키다) 같은 주소인데 브라우저가 버리는 건지를 가르려면 그 두 가지가 필요하고,
+        그걸 쓰는 사람한테 브라우저 설정을 뒤지게 하는 건 답이 아니다(형, 2026-09-23)."""
         self.initialize()
         username = self._username(username)
         password = str(password or "")
@@ -636,6 +640,7 @@ class AuthStore:
                     None,
                     "user",
                     username,
+                    meta or None,
                 )
                 if retry_after is not None:
                     raise AuthError(
@@ -658,6 +663,7 @@ class AuthStore:
                     int(row["id"]),
                     "user",
                     username,
+                    meta or None,
                 )
                 if retry_after is not None:
                     raise AuthError(
@@ -681,7 +687,7 @@ class AuthStore:
                     "password_hash=?, updated_at=? WHERE id=?",
                     (algorithm, iterations, salt, password_hash, self.clock(), row["id"]),
                 )
-            self._audit(conn, "auth.login", "ok", int(row["id"]), "user", username)
+            self._audit(conn, "auth.login", "ok", int(row["id"]), "user", username, meta or None)
             return self._user(conn.execute("SELECT * FROM users WHERE id=?", (row["id"],)).fetchone())
 
     def list_users(self) -> list[User]:

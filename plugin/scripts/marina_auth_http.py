@@ -128,6 +128,22 @@ class AuthHTTPController:
             headers = [(name, value + "; Secure") for name, value in headers]
         return headers
 
+    def _login_meta(self, handler: Any) -> str:
+        """이 로그인이 **어느 주소로, 어떤 브라우저로** 들어왔나. 쿠키는 호스트마다 따로라서, 주소가
+        바뀌면 그것만으로도 '로그인이 풀린' 것처럼 보인다 — 서버가 그걸 알고 있어야 나중에 가른다."""
+        get = getattr(handler, "headers", None)
+        def h(name: str) -> str:
+            try:
+                return str(get.get(name) or "")[:160]
+            except Exception:
+                return ""
+        parts = [f"host={h('host')}", f"scheme={'https' if self._is_https(handler) else 'http'}"]
+        if h("origin"):
+            parts.append(f"origin={h('origin')}")
+        if h("user-agent"):
+            parts.append(f"ua={h('user-agent')}")
+        return " ".join(parts)[:400]
+
     def _clear_cookie_headers(self, handler: Any) -> list[tuple[str, str]]:
         secure = self._is_https(handler)
         headers = [
@@ -282,7 +298,8 @@ class AuthHTTPController:
                 if not self._origin_allowed(handler):
                     raise AuthError("forbidden_origin", "Request origin is not allowed.", 403)
                 body = handler.read_json()
-                user = self.store.authenticate(body.get("username", ""), body.get("password", ""))
+                user = self.store.authenticate(body.get("username", ""), body.get("password", ""),
+                                               meta=self._login_meta(handler))
                 issued = self.store.create_session(user.id)
                 handler.send_json({"user": user.to_dict()}, headers=self._session_headers(handler, issued.token, issued.csrf_token))
                 return True
