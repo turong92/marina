@@ -7089,20 +7089,6 @@ _MOBILE_HTML = r"""<!doctype html>
       insertSuggestion(item.getAttribute("data-insert") || "");
     };
     suggestionsEl.onmousedown = event => event.preventDefault();
-    // PC 에서 휠로도 프로젝트 줄을 넘긴다 — 가로 스크롤인데 일반 마우스 휠은 세로만 굴려서
-    // 손이 닿지 않는다(형 신고 2026-09-23. 트랙패드는 가로 제스처가 있지만 휠에는 없다).
-    // 끝에 닿으면 페이지 스크롤을 도로 내준다 — 안 그러면 줄 위에서 휠이 통째로 먹힌다.
-    (function 가로휠(el) {
-      el.addEventListener("wheel", event => {
-        if (event.deltaX) return;                 // 트랙패드 가로 제스처는 건드리지 않는다
-        const 여유 = el.scrollWidth - el.clientWidth;
-        if (여유 <= 0) return;
-        const 다음 = Math.max(0, Math.min(여유, el.scrollLeft + event.deltaY));
-        if (다음 === el.scrollLeft) return;
-        el.scrollLeft = 다음;
-        event.preventDefault();
-      }, {passive: false});
-    })(projectTabs);
     projectTabs.onclick = event => {
       const btn = event.target.closest("[data-project]");
       if (!btn || !projectTabs.contains(btn)) return;
