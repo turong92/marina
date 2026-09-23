@@ -32,9 +32,10 @@ const ctx = {};
 vm.createContext(ctx);
 vm.runInContext(`${src}
 this.navBadge = navBadge; this.navRecent = navRecent;
-this.navTriggerLabel = navTriggerLabel; this.renderNavSections = renderNavSections;`,
+this.navTriggerLabel = navTriggerLabel; this.renderNavSections = renderNavSections;
+this.navVisited = navVisited;`,
   ctx, {filename: "marina_mobile::nav"});
-const {navBadge, navRecent, navTriggerLabel, renderNavSections} = ctx;
+const {navBadge, navRecent, navTriggerLabel, renderNavSections, navVisited} = ctx;
 
 // ① 가장 센 상태 하나 + 개수. 우선순위는 문제 > 응답필요 > 작업중.
 assert.equal(navBadge([{status:"working"},{status:"failed"},{status:"blocked"}]).label, "문제");
@@ -49,6 +50,15 @@ assert.equal(navTriggerLabel("결제 플로우", "결제 플로우"), "결제 �
 assert.equal(navTriggerLabel("결제 플로우", "기본"), "결제 플로우 · 기본");
 assert.equal(navTriggerLabel("", "기본"), "기본");
 assert.equal(navTriggerLabel("결제 플로우", ""), "결제 플로우");
+
+// ③-0 최근의 재료는 **내가 연 것만**. 안 열어 본 대화로 빈자리를 채우면 방을 가리지 않고
+// 남의 대화가 "최근"에 섞인다(형 신고 2026-09-23). 자리가 남으면 비워 둔다.
+{
+  const 세션들 = [{key:"a"}, {key:"b"}, {key:"안본것"}];
+  assert.deepEqual(navVisited(["b","a"], 세션들).map(x => x.key), ["b","a"], "연 순서가 아니다");
+  assert.deepEqual(navVisited([], 세션들), [], "안 열어 본 대화가 최근으로 올라왔다");
+  assert.deepEqual(navVisited(["없어진키","a"], 세션들).map(x => x.key), ["a"], "사라진 대화를 지웠어야 한다");
+}
 
 // ③ 최근 대화 = 내가 마지막으로 **연** 순서. 서버 활동순이 아니다 —
 // 활동순이면 내가 안 건드린 게 위로 튀어오른다.

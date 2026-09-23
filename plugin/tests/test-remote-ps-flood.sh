@@ -16,6 +16,16 @@ import marina_compose_svc as mcs
 import marina_paths
 
 
+def _tsv(project="p", service="web", state="running", status="Up 2 minutes", ports=""):
+    """박스가 돌려주는 `docker ps --format <탭>` 한 줄. 원격 조회는 이제 박스 단위 `docker ps` 다."""
+    return "\t".join([f"{project}-{service}-1", state, status, ports, project, service]) + "\n"
+
+
+def _row(project="p", service="web", state="running", health="", exit_code=None, pubs=None):
+    return {"Service": service, "Name": f"{project}-{service}-1", "State": state,
+            "Health": health, "ExitCode": exit_code, "Publishers": pubs or []}
+
+
 def _make_remote(root: Path, host="ssh://box"):
     sd = marina_paths.session_dir(root)
     sd.mkdir(parents=True, exist_ok=True)
@@ -27,7 +37,7 @@ class RemotePsTests(unittest.TestCase):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name, "wt"); self.root.mkdir()
         self.calls = []
-        self.behaviour = lambda: '[{"Service": "web", "State": "running"}]'
+        self.behaviour = lambda: _tsv()
         self._orig = mcs._ps_exec
         self._ttl = mcs._REMOTE_PS_TTL_S
         mcs.invalidate_remote_ps(None)
@@ -52,7 +62,7 @@ class RemotePsTests(unittest.TestCase):
         _make_remote(self.root)
         rows = [mcs.compose_ps(self.root, "p") for _ in range(20)]
         self.assertEqual(len(self.calls), 1, "TTL 안에서는 박스에 한 번만 붙는다")
-        self.assertTrue(all(r == [{"Service": "web", "State": "running"}] for r in rows))
+        self.assertTrue(all(r == [_row()] for r in rows))
 
     def test_remote_refetches_after_ttl(self):
         _make_remote(self.root)
@@ -66,7 +76,7 @@ class RemotePsTests(unittest.TestCase):
 
         def slow():
             gate.wait(1)
-            return '[{"Service": "web", "State": "running"}]'
+            return _tsv()
         self.behaviour = slow
         results = []
         ts = [threading.Thread(target=lambda: results.append(mcs.compose_ps(self.root, "p"))) for _ in range(8)]
@@ -77,7 +87,7 @@ class RemotePsTests(unittest.TestCase):
         for t in ts: t.join(3)
         self.assertEqual(len(self.calls), 1, "이벤트·게이트웨이·대시보드가 동시에 불러도 접속은 하나")
         self.assertEqual(len(results), 8)
-        self.assertTrue(all(r == [{"Service": "web", "State": "running"}] for r in results), results)
+        self.assertTrue(all(r == [_row()] for r in results), results)
 
     def test_failure_backs_off_and_serves_stale(self):
         _make_remote(self.root)
@@ -105,7 +115,7 @@ class RemotePsTests(unittest.TestCase):
             raise subprocess.CalledProcessError(255, "docker")
         self.behaviour = boom
         mcs.compose_ps(self.root, "p")
-        self.behaviour = lambda: "[]"
+        self.behaviour = lambda: ""
         mcs.compose_ps(other, "q")
         self.assertEqual(self.calls, ["ssh://a", "ssh://b"], "a 가 죽어도 b 는 계속 본다")
         with mcs._remote_ps_lock:                      # 백오프 만료를 흉내 → 다시 실패하면 두 배
@@ -121,14 +131,14 @@ class RemotePsTests(unittest.TestCase):
 
         def slow_old():
             started.set(); release.wait(2)
-            return '[{"Service": "web", "State": "exited"}]'     # 조작 전 상태
+            return _tsv(state="exited", status="Exited (0) 1 second ago")     # 조작 전 상태
         self.behaviour = slow_old
         t = threading.Thread(target=lambda: mcs.compose_ps(self.root, "p")); t.start()
         started.wait(2)
         mcs.invalidate_remote_ps(self.root)                         # 그 사이 start 가 끝남
         release.set(); t.join(3)
-        self.behaviour = lambda: '[{"Service": "web", "State": "running"}]'
-        self.assertEqual(mcs.compose_ps(self.root, "p"), [{"Service": "web", "State": "running"}],
+        self.behaviour = lambda: _tsv()
+        self.assertEqual(mcs.compose_ps(self.root, "p"), [_row()],
                          "무효화 전에 출발한 조회가 옛 행을 캐시에 되살렸다")
         self.assertEqual(len(self.calls), 2)
 
@@ -141,7 +151,7 @@ class RemotePsTests(unittest.TestCase):
             raise FileNotFoundError("worktree gone")
         self.behaviour = missing_cwd
         self.assertEqual(mcs.compose_ps(self.root, "p"), [])
-        self.behaviour = lambda: "[]"
+        self.behaviour = lambda: ""
         mcs.compose_ps(other, "q")
         self.assertEqual(len(self.calls), 2, "로컬 원인 실패로 같은 박스의 다른 프로젝트까지 쉬면 안 된다")
         self.assertNotIn("ssh://box", mcs.remote_ps_health())
@@ -157,6 +167,22 @@ class RemotePsTests(unittest.TestCase):
         mcs.compose_ps(self.root, "p")
         mcs.compose_ps(other, "q")
         self.assertEqual(len(self.calls), 1, "멈춘 박스는 프로젝트가 달라도 같이 쉰다(고아는 박스 단위로 생긴다)")
+
+    def test_one_query_serves_every_project_on_the_box(self):
+        """박스에 워크트리가 몇 개든 조회는 한 번 — `docker ps` 하나를 프로젝트별로 나눠 준다.
+        (이전엔 워크트리마다 `compose ps` 를 따로 불러 워크트리 수만큼 접속했다.)"""
+        _make_remote(self.root)
+        other = Path(self.tmp.name, "wt5"); other.mkdir(); _make_remote(other)
+        self.behaviour = lambda: _tsv(project="p") + _tsv(project="q", service="api")
+        self.assertEqual(mcs.compose_ps(self.root, "p"), [_row(project="p")])
+        self.assertEqual(mcs.compose_ps(other, "q"), [_row(project="q", service="api")])
+        self.assertEqual(len(self.calls), 1, "워크트리가 몇 개든 박스에는 한 번만 묻는다")
+
+    def test_project_absent_from_box_is_empty_without_extra_call(self):
+        _make_remote(self.root)
+        self.behaviour = lambda: _tsv(project="other")
+        self.assertEqual(mcs.compose_ps(self.root, "p"), [], "그 박스에 없는 프로젝트는 빈 목록")
+        self.assertEqual(len(self.calls), 1, "없다고 다시 묻지 않는다")
 
     def test_invalidate_clears_cache_and_backoff(self):
         _make_remote(self.root)

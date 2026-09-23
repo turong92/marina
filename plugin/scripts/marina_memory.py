@@ -17,6 +17,7 @@ from typing import Any
 
 from marina_paths import session_id
 from marina_registry import project_for
+from marina_ssh_mux import ssh_options
 from marina_state import _bin, _env, _mc
 
 
@@ -50,16 +51,19 @@ def _run(args: list[str], timeout: float, env: dict | None = None) -> str:
 
 
 def _ssh_args(docker_host: str) -> list[str] | None:
-    """`ssh://user@host[:port]` → ssh 인자. ssh 가 아니면 None(읽을 방법이 없다)."""
+    """`ssh://user@host[:port]` → ssh 인자. ssh 가 아니면 None(읽을 방법이 없다).
+
+    폴링이라 **접속을 새로 열지 않는다** — docker 쪽 폴링이 쓰는 마스터에 얹힌다(marina_ssh_mux)."""
     if not docker_host.startswith("ssh://"):
         return None
     rest = docker_host[len("ssh://"):].strip("/")
     if not rest:
         return None
+    base = ["ssh", "-o", "BatchMode=yes", *ssh_options()]
     hostpart, sep, port = rest.rpartition(":")
     if sep and port.isdigit():
-        return ["ssh", "-o", "BatchMode=yes", "-p", port, hostpart]
-    return ["ssh", "-o", "BatchMode=yes", rest]
+        return [*base, "-p", port, hostpart]
+    return [*base, rest]
 
 
 def _target_env(target) -> dict | None:

@@ -816,6 +816,33 @@ def _read_transcript_title(path: Path, max_lines: int = 40) -> str:
     return "" if _looks_like_shell_noise(title) else title
 
 
+def _read_transcript_lineage(path: Path, max_lines: int = 200, max_bytes: int = 512 * 1024) -> str:
+    """이 트랜스크립트가 **어느 대화**인지 — 첫 사용자 메시지의 uuid.
+
+    resume·압축은 새 sid 파일을 만들면서 앞선 메시지를 uuid 째 **복사해 온다**. 그래서 이 값이 같으면
+    같은 대화의 다른 파일이다(실측 2026-09-23: 12b83bfb 와 557c0a93 이 uuid e25b11a5 를 공유).
+    제목·본문 비교와 달리 우연히 겹치지 않는다."""
+    # 40줄로는 모자랐다 — 압축된 대화는 선두 메타·요약이 길어 첫 사용자 줄이 41번째였다(실측).
+    # 대신 바이트 예산을 둔다: 요약 한 줄이 수십 KB 라 줄 수만으로는 상한이 안 선다.
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for i, line in enumerate(fh):
+                if i >= max_lines:
+                    break
+                max_bytes -= len(line)
+                if max_bytes < 0:
+                    break
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if isinstance(o, dict) and o.get("type") == "user" and isinstance(o.get("uuid"), str):
+                    return o["uuid"]
+    except OSError:
+        return ""
+    return ""
+
+
 def _claude_cli_sessions(now: float, cutoff: float) -> dict[str, list[dict[str, Any]]]:
     # ~/.claude/projects/<slug>/<sid>.jsonl 스캔 → cwd 로 worktree, 파일 stem 으로 진짜 sid.
     by_root: dict[str, list[dict[str, Any]]] = {}
@@ -836,6 +863,7 @@ def _claude_cli_sessions(now: float, cutoff: float) -> dict[str, list[dict[str, 
         title = _read_transcript_title(path) or repo_head_subject(Path(cwd)) or sid[:8]
         by_root.setdefault(cwd, []).append({
             "source": "claude", "title": title, "ts": mtime, "cliSessionId": sid,
+            "lineage": _read_transcript_lineage(path),
         })
     return by_root
 
@@ -849,6 +877,7 @@ def claude_agent_sessions(refresh: bool = False, include_all: bool = False) -> d
     if not refresh and now - cache[0] < SESSION_TITLES_TTL:
         return cache[1]
     by_root: dict[str, list[dict[str, Any]]] = {}
+    desktop_canon: dict[str, str] = {}      # 옛 sid·지금 sid → **지금** sid (데스크톱 앱 기록)
     cutoff = now - (AGENTS_MAX_AGE_ALL if include_all else AGENTS_MAX_AGE)
     if CLAUDE_SESSIONS_DIR.is_dir():
         for path in glob.iglob(str(CLAUDE_SESSIONS_DIR / "**" / "local_*.json"), recursive=True):
@@ -859,6 +888,17 @@ def claude_agent_sessions(refresh: bool = False, include_all: bool = False) -> d
                 data = json.loads(Path(path).read_text(encoding="utf-8"))
             except Exception:
                 continue
+            # **정본 혈통**: 앱은 한 대화가 CLI 세션 파일을 갈아탄 것을 스스로 안다(priorCliSessionIds).
+            # 실측 2026-09-23: 이 대화가 09-22 10:53 에 557c0a93 → 12b83bfb 로 갈렸고, 앱 기록 하나가
+            # 둘을 잇고 있었다(local_40eb2194). 첫 메시지 uuid 추정보다 이게 정확하고, **어느 쪽이
+            # 지금 것인지**까지 말해 준다. worktreePath 가 없는 기록에도 들어 있으므로 먼저 모은다.
+            cur = str(data.get("cliSessionId") or "")
+            priors = data.get("priorCliSessionIds")
+            if cur and isinstance(priors, list) and priors:
+                desktop_canon[cur] = cur
+                for prior in priors:
+                    if isinstance(prior, str) and prior:
+                        desktop_canon[prior] = cur
             wt = data.get("worktreePath")
             title = (data.get("title") or "").strip()
             if not wt or not title:
@@ -869,12 +909,41 @@ def claude_agent_sessions(refresh: bool = False, include_all: bool = False) -> d
             })
     # CLI 트랜스크립트 소스 병합 — Desktop local_*.json 이 없는 순수 CLI 세션도 잡는다.
     # 진짜 sid(파일 stem)를 cliSessionId 로 실어 agents_payload 가 상태/preview 를 진짜 sid 로 조회.
-    for cli_root, cli_entries in _claude_cli_sessions(now, cutoff).items():
+    _cli_by_root = _claude_cli_sessions(now, cutoff)
+    for cli_root, cli_entries in _cli_by_root.items():
         existing = by_root.setdefault(cli_root, [])
         seen = {str(e.get("cliSessionId") or "") for e in existing}
         for entry in cli_entries:
             if entry["cliSessionId"] not in seen:      # Desktop 이 같은 sid 를 이미 가지면 skip
                 existing.append(entry)
+    # 같은 대화가 두 줄로 보이던 것 — resume·압축은 **새 sid 파일**을 만들고 옛 파일은 그대로 남는다.
+    # 데스크톱 앱이 같은 대화를 열면 자기 기록으로 또 하나를 만든다(형: "데스크탑앱이랑 경쟁해서 동일
+    # 세션이 2개씩 열린다", 2026-09-23). 혈통이 같으면 **가장 최근 것 하나만** 남긴다 — 옛 줄을 누르면
+    # 이어지지 않는 과거가 열리고, 목록에선 제목이 같아 구별도 안 된다.
+    lineage_by_sid = {str(e.get("cliSessionId") or ""): str(e.get("lineage") or "")
+                      for entries in _cli_by_root.values() for e in entries}
+    for entries in by_root.values():
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for e in entries:
+            sid = str(e.get("cliSessionId") or "")
+            lin = (desktop_canon.get(sid)                      # ① 앱이 말해 준 정본(지금 sid)
+                   or str(e.get("lineage") or "")              # ② 첫 사용자 메시지 uuid
+                   or lineage_by_sid.get(sid, ""))
+            e["lineage"] = lin
+            if lin:
+                groups.setdefault(lin, []).append(e)
+        drop: set = set()
+        for lin, group in groups.items():
+            if len(group) < 2:
+                continue
+            # 앱이 준 묶음이면 **지금 sid** 를 남긴다(그게 살아 있는 쪽이다). uuid 로 묶인 것은
+            # 누가 현재인지 알 길이 없으니 가장 최근에 쓰인 것을 남긴다.
+            keep = next((e for e in group if str(e.get("cliSessionId") or "") == lin), None)
+            if keep is None:
+                keep = max(group, key=lambda e: e["ts"])
+            drop |= {id(e) for e in group if e is not keep}
+        if drop:
+            entries[:] = [e for e in entries if id(e) not in drop]
     if include_all:
         _claude_agents_all_cache = (now, by_root)
     else:
@@ -2237,11 +2306,12 @@ def _usage_token_count(usage: dict[str, Any], key: str) -> int:
 # (~/.claude.json additionalModelOptionsCache 는 사용자가 직접 만진 커스텀 모델만 담아 불완전).
 # 그래서 모바일 모델 드롭다운과 컨텍스트 윈도우 폴백을 이 큐레이트 목록에서 공급한다.
 # 기본값 + 정식 버전만(형 지시 — opus/sonnet/haiku alias '최신' 항목은 헷갈려 제거). 목록에 없는 건 "직접 입력"으로.
-# 지금 제공되는 모델 전부(2026-09-10 갱신). 순서는 **고르는 빈도**다 — 기본값·Opus 5 가 위,
+# 지금 제공되는 모델 전부(2026-09-23 갱신 — CLI 2.1.280 바이너리의 모델 id 목록과 대조). 순서는 **고르는 빈도**다 — 기본값·Opus 5 가 위,
 # 지난 세대는 아래. Mythos 는 Project Glasswing 전용이라 넣지 않는다(고를 수 없는 걸 보여주면
 # 눌러보고 나서야 안 된다는 걸 안다). id 에 날짜 접미사를 붙이지 않는다 — 표의 문자열 그대로다.
 CLAUDE_MODEL_CATALOG = [
     {"value": "default", "label": "기본값 (CLI 설정 모델)", "window": None},
+    {"value": "claude-opus-5-5", "label": "Opus 5.5", "window": 1_000_000},
     {"value": "claude-opus-5", "label": "Opus 5", "window": 1_000_000},
     {"value": "claude-fable-5-1", "label": "Fable 5.1", "window": 1_000_000},
     {"value": "claude-fable-5", "label": "Fable 5", "window": 1_000_000},

@@ -4043,9 +4043,7 @@ _MOBILE_HTML = r"""<!doctype html>
 
     function navEntries() {
       const 전부 = (state.sessions || []).filter(s => s.kind === "agent");
-      const 자리 = new Map(전부.map(s => [s.key, s]));
-      const 최근 = 방문순서.map(k => 자리.get(k)).filter(Boolean)
-        .concat(전부.filter(s => !방문순서.includes(s.key)));
+      const 최근 = navVisited(방문순서, 전부);
       const session = selectedSession();
       const room = session ? roomByRoot(String(session.root || "")) : null;
       return {
@@ -7091,6 +7089,20 @@ _MOBILE_HTML = r"""<!doctype html>
       insertSuggestion(item.getAttribute("data-insert") || "");
     };
     suggestionsEl.onmousedown = event => event.preventDefault();
+    // PC 에서 휠로도 프로젝트 줄을 넘긴다 — 가로 스크롤인데 일반 마우스 휠은 세로만 굴려서
+    // 손이 닿지 않는다(형 신고 2026-09-23. 트랙패드는 가로 제스처가 있지만 휠에는 없다).
+    // 끝에 닿으면 페이지 스크롤을 도로 내준다 — 안 그러면 줄 위에서 휠이 통째로 먹힌다.
+    (function 가로휠(el) {
+      el.addEventListener("wheel", event => {
+        if (event.deltaX) return;                 // 트랙패드 가로 제스처는 건드리지 않는다
+        const 여유 = el.scrollWidth - el.clientWidth;
+        if (여유 <= 0) return;
+        const 다음 = Math.max(0, Math.min(여유, el.scrollLeft + event.deltaY));
+        if (다음 === el.scrollLeft) return;
+        el.scrollLeft = 다음;
+        event.preventDefault();
+      }, {passive: false});
+    })(projectTabs);
     projectTabs.onclick = event => {
       const btn = event.target.closest("[data-project]");
       if (!btn || !projectTabs.contains(btn)) return;
@@ -7564,6 +7576,15 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!방) return 대화;
       if (!대화 || 방 === 대화) return 방;
       return `${방} · ${대화}`;
+    }
+
+    // 최근 목록의 재료 = **내가 연 것만**. 안 열어 본 대화는 최근이 아니다 — 남는 자리를 서버가
+    // 준 순서로 채우면 방을 가리지 않고 남의 대화가 "최근"에 섞여 올라온다(형: "최근 아닌 것도
+    // 올라오고 동일 위계 다른 대화도 올라온다", 2026-09-23). 자리가 남으면 **비워 둔다** —
+    // 빈 구역은 숨겨지고, 안 열어 본 대화는 '이 방의 대화'와 방 목록에 그대로 있다.
+    function navVisited(visited, sessions) {
+      const 자리 = new Map((sessions || []).map(s => [s.key, s]));
+      return (visited || []).map(k => 자리.get(k)).filter(Boolean);
     }
 
     // 최근 대화 = **내가 마지막으로 연 순서**(브라우저 탭·앱 전환기와 같다). 서버 활동순이
