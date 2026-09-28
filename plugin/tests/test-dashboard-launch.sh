@@ -42,6 +42,15 @@ JSON
     grep -A1 -q '<key>MARINA_GATEWAY_ADMIN</key>' "$P" || { echo "FAIL: gateway admin env missing"; exit 1; }
     grep -A1 '<key>PATH</key>' "$P" | grep -Fq "<string>$FAKE:" || { echo "FAIL: launchd PATH missing"; exit 1; }
     grep -A1 -q '<key>KeepAlive</key>' "$P" || { echo "FAIL: launchd plist should restart dashboard after exit"; exit 1; }
+    # 재부팅 후에도 뜨려면 launchd 가 로그인 때 읽는 곳에 사본이 있어야 한다.
+    local L="$HOME/Library/LaunchAgents/marina.dashboard.plist"
+    cmp -s "$P" "$L" || { echo "FAIL: login plist not installed in LaunchAgents"; exit 1; }
+    # 명시적 stop 은 로그인 항목도 뺀다. 포트는 실 데몬(3900)을 건드리지 않게 빈 포트로.
+    PATH="$FAKE:$PATH" MARINA_CONTROL_PORT=59998 bash "$DASH" stop >/dev/null 2>&1
+    [[ ! -e "$L" ]] || { echo "FAIL: stop left login plist behind"; exit 1; }
+    # MARINA_HOME 을 따로 세운 격리 실행은 로그인 항목을 건드리지 않는다.
+    PATH="$FAKE:$PATH" MARINA_HOME="$TMP/other" MARINA_DRY_RUN=1 bash "$DASH" start >/dev/null 2>&1
+    [[ ! -e "$L" ]] || { echo "FAIL: non-default MARINA_HOME installed login plist"; exit 1; }
   fi
   rm -rf "$TMP"
 }

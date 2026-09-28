@@ -18,6 +18,10 @@ PID_FILE="$DASHBOARD_DIR/dashboard.pid"
 LOG_FILE="$DASHBOARD_DIR/dashboard.log"
 LABEL="marina.dashboard"
 PLIST_FILE="$DASHBOARD_DIR/$LABEL.plist"
+# launchctl bootstrap 은 이번 로그인 세션에만 등록한다 — 재부팅하면 launchd 는 ~/Library/LaunchAgents 만
+# 다시 읽으므로 거기 사본이 없으면 대시보드가 안 뜬다(2026-09-28 재부팅 후 실측). 기본 MARINA_HOME 일 때만
+# 설치해서, MARINA_HOME 을 따로 세운 테스트·격리 프리뷰가 실제 로그인 항목을 덮지 않게 한다.
+LOGIN_PLIST_FILE="$HOME/Library/LaunchAgents/$LABEL.plist"
 LAUNCHER="$DASHBOARD_DIR/dashboard-launch.sh"
 SYSTEMD_UNIT_DIR="$HOME/.config/systemd/user"
 SYSTEMD_UNIT="$SYSTEMD_UNIT_DIR/marina-dashboard.service"
@@ -159,6 +163,12 @@ write_plist() {
 EOF
 }
 
+install_login_plist() {
+  [[ "$MARINA_HOME" == "$HOME/.marina" ]] || return 0
+  mkdir -p "$(dirname "$LOGIN_PLIST_FILE")"
+  cp "$PLIST_FILE" "$LOGIN_PLIST_FILE"
+}
+
 write_launcher() { marina_emit_launcher "$LAUNCHER" dashboard; }
 
 persist_bind() {
@@ -219,7 +229,7 @@ start() {
 
   if [[ "${MARINA_DRY_RUN:-}" == "1" ]]; then
     case "$sup" in
-      launchd) write_plist ;;
+      launchd) write_plist; install_login_plist ;;
       systemd) write_systemd_unit ;;
     esac
     echo "dry-run: wrote launcher + $sup config; not starting"
@@ -243,6 +253,7 @@ start() {
   case "$sup" in
     launchd)
       write_plist
+      install_login_plist
       launchctl bootout "$(launchctl_domain)" "$PLIST_FILE" >/dev/null 2>&1 || true
       if launchctl bootstrap "$(launchctl_domain)" "$PLIST_FILE"; then
         launchctl kickstart -k "$(launchctl_domain)/$LABEL" >/dev/null 2>&1 || true
@@ -286,6 +297,8 @@ stop() {
   fi
   if use_launchctl; then
     [[ -f "$PLIST_FILE" ]] && launchctl bootout "$(launchctl_domain)" "$PLIST_FILE" >/dev/null 2>&1 || true
+    # 명시적 stop 은 다음 로그인에도 안 뜨게 — systemd 의 disable --now 와 같은 뜻.
+    if [[ "$MARINA_HOME" == "$HOME/.marina" ]]; then rm -f "$LOGIN_PLIST_FILE"; fi
   fi
   if command -v systemctl >/dev/null 2>&1 && [[ -f "$SYSTEMD_UNIT" ]]; then
     systemctl --user disable --now marina-dashboard >/dev/null 2>&1 || true
