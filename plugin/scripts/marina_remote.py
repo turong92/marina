@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -100,13 +101,29 @@ class RemoteController:
         marina_home: Union[Path, str, None] = None,
         tailscale_bin: Union[Path, str, None] = None,
         clock: Callable[[], float] = time.time,
+        tailscale_socket: Union[Path, str, None] = None,
     ) -> None:
         self.marina_home = Path(marina_home or DEFAULT_MARINA_HOME)
         self.state_path = self.marina_home / "remote-state.json"
         self.lock_path = self.marina_home / "remote-state.lock"
+        bin_pinned = bool(tailscale_bin or os.environ.get("MARINA_TAILSCALE_BIN"))
         self.tailscale_bin = str(tailscale_bin or os.environ.get("MARINA_TAILSCALE_BIN", "tailscale"))
+        self.tailscale_socket = str(tailscale_socket or os.environ.get("MARINA_TAILSCALE_SOCKET") or "")
+        # 맥에 오픈소스 tailscaled(LaunchDaemon)와 Tailscale 앱이 같이 떠 있으면, --socket 없는 CLI 는
+        # **앱 쪽**에 붙는다. 형 funnel 은 tailscaled 에 걸려 있는데 status 가 앱 노드의 dnsName 을 돌려주면
+        # 펀넬 Host 가드가 진짜 공개 주소를 403 으로 막는다(2026-09-28 재부팅 후 앱 자동 실행으로 실측).
+        # tailscaled 소켓이 있으면 그쪽을 명시한다. 바이너리를 주입한 경우(테스트)는 건드리지 않는다.
+        if (not self.tailscale_socket and not bin_pinned and sys.platform == "darwin"
+                and os.path.exists(self._TAILSCALED_SOCKET)):
+            self.tailscale_socket = self._TAILSCALED_SOCKET
         self.clock = clock
         self._cache: dict[str, Any] = {}
+
+    _TAILSCALED_SOCKET = "/var/run/tailscaled.socket"   # 맥 오픈소스 tailscaled 기본 소켓
+
+    def _argv(self, executable: str, *args: str) -> list[str]:
+        socket = ["--socket", self.tailscale_socket] if self.tailscale_socket else []
+        return [executable, *socket, *args]
 
     # launchd/systemd 데몬은 최소 PATH(/usr/bin:/bin:/usr/sbin:/sbin)로 뜬다 — homebrew 등이 빠져
     # shutil.which("tailscale") 가 None 을 돌려주고, 그러면 원격 status=tailscale_not_found·dnsName=None 이
@@ -133,7 +150,7 @@ class RemoteController:
 
     def _run_json(self, executable: str, *args: str) -> Any:
         completed = subprocess.run(
-            [executable, *args],
+            self._argv(executable, *args),
             check=True,
             capture_output=True,
             text=True,
@@ -176,7 +193,7 @@ class RemoteController:
     def _mutate(self, executable: str, *args: str) -> subprocess.CompletedProcess[str]:
         try:
             return subprocess.run(
-                [executable, *args],
+                self._argv(executable, *args),
                 check=False,
                 capture_output=True,
                 text=True,

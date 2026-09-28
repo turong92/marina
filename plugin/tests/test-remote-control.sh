@@ -502,6 +502,27 @@ class RemoteControlTests(unittest.TestCase):
             ]))
             self.assertFalse(any("reset" in call for call in calls))
 
+    def test_tailscaled_socket_is_preferred_over_the_mac_app(self):
+        # 앱과 tailscaled 가 같이 뜬 맥에서 --socket 없는 CLI 는 앱 노드를 본다 → funnel Host 가드 403.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            sock = root / "tailscaled.socket"
+            sock.write_text("", encoding="utf-8")
+            original = RemoteController._TAILSCALED_SOCKET
+            RemoteController._TAILSCALED_SOCKET = str(sock)
+            try:
+                auto = RemoteController(root / "marina")
+                self.assertEqual(["tailscale", "--socket", str(sock), "status", "--json"],
+                                 auto._argv("tailscale", "status", "--json"))
+                pinned = RemoteController(root / "marina", root / "fake-tailscale")
+                self.assertEqual(["x", "status"], pinned._argv("x", "status"))
+                sock.unlink()
+                self.assertEqual(["x", "status"], RemoteController(root / "marina")._argv("x", "status"))
+            finally:
+                RemoteController._TAILSCALED_SOCKET = original
+            explicit = RemoteController(root / "marina", root / "fake-tailscale", tailscale_socket="/s")
+            self.assertEqual(["x", "--socket", "/s", "status"], explicit._argv("x", "status"))
+
     def test_canonical_fingerprint_ignores_json_key_order_only(self):
         left = {"Web": {"host:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3900"}}}}, "TCP": {"443": {"HTTPS": True}}}
         right = {"TCP": {"443": {"HTTPS": True}}, "Web": {"host:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3900"}}}}}
