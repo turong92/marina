@@ -6,6 +6,7 @@ import json
 import math
 import mmap
 import os
+import shlex
 import re
 import shutil
 import subprocess
@@ -1601,6 +1602,51 @@ def _activity_file_path(raw_input: Any, detail: str) -> str:
     return target
 
 
+# 셸로 쓴 파일 — `cat > 보고서.html << EOF`, `echo … >> x.md`, `… | tee y.csv`. 에이전트가 Write 대신 이렇게
+# 결과물을 만드는 일이 실제로 있고(2026-09-28 채팅방: 문서 3개 전부 Bash heredoc), 그러면 대화에 받기 칩이
+# 안 붙어 형이 "공유가 안 된다"가 됐다. **첫 줄만** 본다 — heredoc 본문(HTML 의 `>` 등)을 파싱하면 헛것을 잡는다.
+# 정규식이 아니라 셸 토큰으로 본다 — 따옴표 안 비교식(awk 'NR > 100', python -c "1 > 2")을 쓰기로 오인하지 않게.
+_SHELL_WRITE_OPS = (">", ">>", ">|", "&>", "&>>")
+_TEMP_ROOTS = tuple(sorted({os.path.realpath(p) + os.sep for p in ("/tmp", "/var/folders", tempfile.gettempdir())}))
+
+
+def _shell_write_target(command: str, workdir: str = "") -> str:
+    """셸 명령이 쓴 파일 하나(첫 줄의 마지막 쓰기 대상). 못 찾거나 믿을 수 없으면 ""."""
+    text = str(command or "").strip()
+    first = text.splitlines()[0] if text else ""
+    try:
+        lexer = shlex.shlex(first, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return ""                                  # 따옴표가 안 닫힌 줄 — 추측하지 않는다
+    found = ""
+    for i, token in enumerate(tokens[:-1]):
+        if token in _SHELL_WRITE_OPS:
+            target = tokens[i + 1]
+        elif token == "tee":
+            rest = [t for t in tokens[i + 1:] if not t.startswith("-")]
+            target = rest[0] if rest else ""
+        else:
+            continue
+        # 변수·치환은 펼쳐 봐야 안다 — 추측하지 않는다. /dev/null 등은 파일이 아니다.
+        if not target or target.startswith(("/dev/", "&")) or any(c in target for c in "$`*?(){}|;<>"):
+            continue
+        if not target.startswith(("/", "~")):
+            if workdir:
+                target = os.path.join(workdir, target)
+            elif "cd" in tokens[:i]:
+                continue                           # cd 로 옮긴 뒤의 상대 경로는 어디인지 모른다
+        # 절대 경로는 **지금 파일로 있는 것만** — 잘못 잡은 게 있어도 죽은 칩을 띄우지 않게.
+        if target.startswith(("/", "~")) and not os.path.isfile(os.path.expanduser(target)):
+            continue
+        # 임시 폴더(스크래치패드 등)는 중간 작업물이다 — 서버도 방 밖이라 안 주므로 칩을 띄우면 죽은 링크가 된다.
+        if os.path.realpath(os.path.expanduser(target)).startswith(_TEMP_ROOTS):
+            continue
+        found = target
+    return found
+
+
 def _activity_label(name: str, activity_type: str, raw_input: Any, detail: str) -> str:
     payload = _json_value(raw_input)
     if activity_type == "skill":
@@ -1746,6 +1792,12 @@ def _new_timeline_activity(source: str, offset: int, index: int, name: str,
     # 경로를 알아야 하는데, label 은 표시용이라(잘리고 바뀐다) 계약으로 쓸 수 없다.
     if activity_type in ("diff", "file"):
         target = _activity_file_path(raw_input, detail)
+        if target:
+            item["path"] = target
+    elif activity_type == "command":
+        payload = _json_value(raw_input)
+        target = _shell_write_target(str(payload.get("cmd") or payload.get("command") or ""),
+                                     str(payload.get("workdir") or ""))
         if target:
             item["path"] = target
     if model:
@@ -2755,6 +2807,11 @@ def _tool_file_targets(name: str, raw_input: Any) -> list[str]:
         if isinstance(묶음, str):
             묶음 = [묶음]
         return [str(item).strip() for item in (묶음 or []) if str(item).strip()]
+    if 키 in ("bash", "exec", "exec_command", "shell", "terminal"):
+        payload = _json_value(raw_input)
+        target = _shell_write_target(str(payload.get("cmd") or payload.get("command") or ""),
+                                     str(payload.get("workdir") or ""))
+        return [target] if target else []
     if 키 not in _WRITE_TOOLS:
         return []
     payload = _json_value(raw_input)

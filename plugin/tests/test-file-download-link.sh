@@ -23,6 +23,38 @@ assert _activity_type("SendUserFile", "") == "file", _activity_type("SendUserFil
 assert 경로 == "/tmp/보고서.html", 경로
 assert _activity_file_path({"file_path": "/wt/x.md"}, "") == "/wt/x.md"
 print("ok 건네준 파일도 경로가 실린다")
+
+# ⑤ 셸로 쓴 파일도 칩이 붙는다 — 에이전트가 Write 대신 `cat > x.html << EOF` 로 결과물을 만든 채팅방에서
+#    받기 칩이 하나도 안 떠 "공유가 안 된다"가 됐다(2026-09-28). 첫 줄만 본다(heredoc 본문의 > 는 무시).
+import os, tempfile
+from marina_sessions import _shell_write_target, _tool_file_targets
+import marina_sessions as _ms
+_임시규칙, _ms._TEMP_ROOTS = _ms._TEMP_ROOTS, ()   # 테스트 파일은 임시 폴더에 있다 — 양성 사례에선 그 규칙을 끈다
+with tempfile.TemporaryDirectory() as d:
+    결과물 = os.path.join(d, "검토.html")
+    open(결과물, "w").write("<p>a > b</p>")
+    명령 = f"cat > \"{결과물}\" << 'EOF'\n<p>a > b.html</p>\nEOF"
+    assert _shell_write_target(명령) == 결과물, _shell_write_target(명령)
+    assert _tool_file_targets("Bash", {"command": 명령}) == [결과물], "만든 파일 목록에도 올라야 한다"
+    from marina_sessions import _new_timeline_activity
+    활동 = _new_timeline_activity("claude", 0, 0, "Bash", "c1", {"command": 명령})
+    assert 활동.get("path") == 결과물, f"대화 활동에 경로가 없어 칩이 안 뜬다: {활동}"
+assert _shell_write_target("echo x >> notes.md") == "notes.md"
+assert _shell_write_target("npm test 2>&1 | tee build.log") == "build.log"
+_ms._TEMP_ROOTS = _임시규칙
+assert _shell_write_target("cmd &> run.log") == "run.log"
+# 임시 폴더(스크래치패드)에 쓴 중간 작업물은 칩을 안 띄운다 — 서버가 방 밖이라 막아 죽은 링크가 된다.
+with tempfile.NamedTemporaryFile(suffix=".md", delete=False) as 임시:
+    pass
+assert _shell_write_target(f"cat > {임시.name} << EOF") == "", "임시 폴더 파일에 칩이 붙었다"
+os.unlink(임시.name)
+# 리뷰 치명 지적: 따옴표 안 비교식은 쓰기가 아니다.
+for 아님 in ("ls | head", "cmd > /dev/null 2>&1", "echo x > $OUT", "git diff >&2",
+             "awk 'NR>=4700 && NR<=4780' f", "cat > /없는/경로.md << EOF",
+             "awk 'NR > 100 { print }' f", 'python3 -c "print(1 > 2)"', "echo 'if (a > b) return 1;'",
+             "jq '.a > .b' f.json", "cd sub && cat > x.md << EOF", "echo 'unterminated > x"):
+    assert _shell_write_target(아님) == "", (아님, _shell_write_target(아님))
+print("ok 셸로 쓴 파일도 칩 대상")
 PY
 
 python3 - "$SCR" <<'PY2' | node
