@@ -113,6 +113,28 @@ def _changed_paths(root: Path) -> list[str] | None:
     return 경로들 or None
 
 
+# 프록시(Cloudflare 터널 등) 뒤 공개 이름 — 한 줄에 하나, # 은 주석. env 가 아니라 파일인 이유: 재시작 헬퍼는
+# 깨끗한 env 로 돌아 env 로 준 값은 재시작에 사라진다(dashboard-bind.env 와 같은 이유).
+PUBLIC_HOSTS_FILE = MARINA_HOME / "public-hosts"
+_public_hosts_cache: tuple = (None, frozenset())   # (mtime, 이름들) — 요청마다 읽지 않게
+
+
+def extra_public_hosts() -> frozenset:
+    global _public_hosts_cache
+    try:
+        mtime = PUBLIC_HOSTS_FILE.stat().st_mtime
+    except OSError:
+        return frozenset()
+    if _public_hosts_cache[0] != mtime:
+        names = set()
+        for line in PUBLIC_HOSTS_FILE.read_text(encoding="utf-8").splitlines():
+            name = line.split("#", 1)[0].strip().rstrip(".").lower()
+            if name:
+                names.add(name)
+        _public_hosts_cache = (mtime, frozenset(names))
+    return _public_hosts_cache[1]
+
+
 # HTML 을 **보기**로 여는 경우(모바일 뷰어 iframe). 원칙(대시보드 오리진에서 HTML 실행 금지)은 그대로 두고
 # 이 응답만 CSP sandbox 로 **출처 없는 문서**로 만든다 — 스크립트는 돌지만 marina 쿠키·토큰·API 에 닿지 못한다
 # (쿠키는 SameSite=Lax 라 출처 없는 요청엔 안 딸려 간다). URL 을 직접 열어도 sandbox 는 헤더라 똑같이 걸린다.
@@ -167,6 +189,14 @@ class Handler(BaseHTTPRequestHandler):
             guard_check=self._auth_guard_self_check,
         )
 
+    def _public_hosts(self) -> set:
+        """프록시 뒤 공개 이름들 — 테일스케일(펀넬) 이름 + ~/.marina/public-hosts 에 적은 이름(Cloudflare 터널 등)."""
+        names = set(extra_public_hosts())
+        dns = str(self._remote_controller().status().get("dnsName") or "").rstrip(".").lower()
+        if dns:
+            names.add(dns)
+        return names
+
     def _host_allowed(self) -> bool:
         if host_allowed(self.headers.get("host")):
             return True
@@ -178,12 +208,12 @@ class Handler(BaseHTTPRequestHandler):
             return False
         try:
             supplied = urllib.parse.urlsplit("//" + str(self.headers.get("host") or "")).hostname
-            expected = self._remote_controller().status().get("dnsName")
+            expected = self._public_hosts()
         except Exception:
-            supplied, expected = None, None
+            supplied, expected = None, set()
         if expected:
-            # 이름을 알면 그 이름만 통과 — 펀넬 뒤에 다른 이름을 붙여 들어오는 건 막는다.
-            return bool(supplied and str(supplied).rstrip(".") == str(expected).rstrip("."))
+            # 이름을 알면 그 이름만 통과 — 펀넬·터널 뒤에 다른 이름을 붙여 들어오는 건 막는다.
+            return bool(supplied and str(supplied).rstrip(".").lower() in expected)
         # **이름을 못 얻는 경우가 실제로 있다.** 맥에서 GUI 앱과 CLI 가 서로 다른 tailscaled 를
         # 보면 status 가 NeedsLogin·DNSName 빈 값으로 나온다(실측 2026-08-24: 형은 그 주소로
         # 멀쩡히 접속 중인데 CLI 두 개 다 빈 값). 그때 예외를 죽여버리면 /api/auth/* 가 403 이라
@@ -200,12 +230,12 @@ class Handler(BaseHTTPRequestHandler):
         try:
             origin_parts = urllib.parse.urlsplit(str(origin))
             host_parts = urllib.parse.urlsplit("//" + str(self.headers.get("host") or ""))
-            expected = str(self._remote_controller().status().get("dnsName") or "").rstrip(".").lower()
+            expected = self._public_hosts()
             origin_host = str(origin_parts.hostname or "").rstrip(".").lower()
             request_host = str(host_parts.hostname or "").rstrip(".").lower()
             return bool(
-                expected and origin_parts.scheme == "https"
-                and origin_host == request_host == expected
+                origin_parts.scheme == "https"
+                and origin_host == request_host and origin_host in expected
                 and origin_parts.port in (None, 443)
                 and host_parts.port in (None, 443)
             )

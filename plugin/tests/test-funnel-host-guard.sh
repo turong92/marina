@@ -31,6 +31,8 @@ class 가짜:
         return type("C", (), {"status": lambda _self: 상태})()
 
     _host_allowed = mh.Handler._host_allowed
+    _public_hosts = mh.Handler._public_hosts
+    _origin_allowed = mh.Handler._origin_allowed
 
 
 # ① 로컬 이름은 그대로 통과.
@@ -52,6 +54,27 @@ assert 가짜("evil.example.com", "http", dns=None)._host_allowed() is False
 # ⑤ 원격 클라이언트가 직접 때리는 것도 막힌다(펀넬은 같은 기계에서 프록시한다).
 assert 가짜("my-mac.tailnet.ts.net", "https", client="203.0.113.9", dns=None)._host_allowed() is False
 print("ok 펀넬 호스트 가드: 이름 없어도 프록시 신호로 통과 · 리바인딩·원격직결은 차단")
+
+# ⑥ Cloudflare 터널 같은 다른 프록시 이름 — ~/.marina/public-hosts 에 적은 것만 더 통과한다(2026-09-28).
+#    펀넬 이름과 **같이** 허용돼야 하고(둘 다 켜 둔 채 옮긴다), 적지 않은 이름은 여전히 막힌다.
+import os, tempfile
+from pathlib import Path
+원래파일 = mh.PUBLIC_HOSTS_FILE
+with tempfile.TemporaryDirectory() as d:
+    mh.PUBLIC_HOSTS_FILE = Path(d) / "public-hosts"
+    mh.PUBLIC_HOSTS_FILE.write_text("# 개인 도메인\nMarina.Example.Dev.\n\n", encoding="utf-8")
+    터널 = "marina.example.dev"
+    assert 가짜(터널, "https", dns="my-mac.tailnet.ts.net")._host_allowed() is True, "적어 둔 터널 이름이 막힌다"
+    assert 가짜("my-mac.tailnet.ts.net", "https", dns="my-mac.tailnet.ts.net")._host_allowed() is True, "펀넬 이름이 같이 살아야 한다"
+    assert 가짜("evil.example.dev", "https", dns="my-mac.tailnet.ts.net")._host_allowed() is False, "안 적은 이름이 통과했다"
+    assert 가짜(터널, "", dns="my-mac.tailnet.ts.net")._host_allowed() is False, "프록시 신호 없이 통과했다"
+    # POST 출처 — 같은 공개 이름끼리만(https, 기본 포트).
+    요청 = 가짜(터널, "https", dns="my-mac.tailnet.ts.net"); 요청.headers["origin"] = "https://" + 터널
+    assert 요청._origin_allowed() is True, "터널 주소에서 보낸 POST 가 막힌다"
+    요청.headers["origin"] = "https://evil.example.com"
+    assert 요청._origin_allowed() is False
+mh.PUBLIC_HOSTS_FILE = 원래파일
+print("ok 추가 공개 이름(public-hosts): 적은 것만 통과")
 PY
 
 echo "PASS test-funnel-host-guard"
