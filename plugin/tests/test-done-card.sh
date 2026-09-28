@@ -96,13 +96,25 @@ mm._live_agent_cwds = lambda refresh=False: set()
 mm.mobile_pending_question = lambda source, sid: None
 mm.mobile_hidden = lambda: []
 mm.room_has_changes = lambda root_arg, **kw: True
-mm.change_summary = lambda root_arg, **kw: {"files": 2, "names": ["a.py", "b.py"]}
+import marina_rooms as mr
+import marina_sessions as ms
+# 폴더엔 3개가 바뀌어 있지만 이 대화가 손댄 건 2개 — 옛 백업 파일은 이 대화 몫이 아니다(2026-09-28 실측).
+mr.change_summary = lambda root_arg, **kw: {"files": 3, "names": ["a.py", "b.py", "x.bak"],
+                                             "paths": ["a.py", "b.py", "x.bak"], "commits": 0, "commitTimes": []}
+ms.session_touched_paths = lambda r, source, sid: (frozenset({"a.py", "b.py"}), 1.0)
 
 mm.agents_payload = lambda r, refresh=False, include_all=False, limit=None: [
     {"source": "claude", "sid": "s1", "title": "A", "status": "completed", "ts": 10}]
 방 = mm.mobile_state()["rooms"][0]
 assert 방["status"] == "완료", 방["status"]
 assert 방["done"]["files"] == 2, 방
+assert "x.bak" not in 방["done"]["names"], "대화가 안 건드린 파일을 셌다"
+
+# 이 대화가 아무것도 안 바꿨다(진단·질문만) — 폴더에 뭐가 있든 "끝났어요"가 아니다.
+ms.session_touched_paths = lambda r, source, sid: (frozenset(), 1.0)
+진단방 = mm.mobile_state()["rooms"][0]
+assert 진단방["status"] == "대기" and not 진단방.get("done"), (진단방["status"], 진단방.get("done"))
+ms.session_touched_paths = lambda r, source, sid: (frozenset({"a.py", "b.py"}), 1.0)
 
 mm.agents_payload = lambda r, refresh=False, include_all=False, limit=None: [
     {"source": "claude", "sid": "s1", "title": "A", "status": "working", "ts": 10}]

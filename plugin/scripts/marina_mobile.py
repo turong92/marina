@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots
-from marina_rooms import build_room, change_summary, finalize_room, room_has_changes
+from marina_rooms import build_room, finalize_room, room_has_changes, room_own_changes
 from marina_agent_events import latest_agent_event
 from marina_sessions import (
     _live_agent_cwds,
@@ -689,8 +689,10 @@ def current_room_mark(root: Path) -> str | None:
     방이 바로 튀어나오는 쪽보다, 부르는 방이 한 번 더 보이는 쪽으로 틀린다."""
     try:
         agents = canonical_room_agents(root)
-        changed = (any(str(a.get("status") or "") == "completed" for a in agents)
-                   and room_has_changes(root))
+        # 목록(mobile_state)과 **같은 잣대** — 갈라지면 접은 방이 다음 폴에 펴진다.
+        changed = (room_own_changes(root, agents)[0]
+                   if any(str(a.get("status") or "") == "completed" for a in agents)
+                   and room_has_changes(root) else False)
         return str(build_room(root, worktree_labels(root), agents, has_changes=changed,
                               questions=mobile_pending_question).get("mark") or "")
     except Exception:
@@ -1048,8 +1050,13 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                                 and f"{item.get('source')}:{item.get('sid')}" not in gone])
                 # git 은 completed 가 하나라도 있을 때만 부른다. 완료/대기를 가르는 데만
                 # 쓰이는 값이라, 나머지 워크트리에서 git 을 돌리는 건 순수한 낭비다.
-                changed = (any(str(a.get("status") or "") == "completed" for a in room_agents)
-                           and room_has_changes(root))
+                # 완료/대기는 **그 대화가 바꾼 것**으로 가른다(room_own_changes) — 폴더에 원래 있던
+                # 변경분으로 가르면 진단만 한 대화도 "끝났어요"가 된다.
+                changed = False
+                own_done = None
+                if (any(str(a.get("status") or "") == "completed" for a in room_agents)
+                        and room_has_changes(root)):
+                    changed, own_done = room_own_changes(root, room_agents)
                 room = build_room(root, info, room_agents, has_changes=changed,
                                   questions=pending_question)
                 # 손대야 낫는 사유(로그인 만료·한도)는 방까지 올린다 — 방 목록이 첫 화면이라
@@ -1067,8 +1074,8 @@ def mobile_state(refresh: bool = False, include_all: bool = False) -> dict[str, 
                 # 완료 카드 재료 — **끝난 방에만** 싣는다. 아직 도는 방에 "끝났어요"가 붙으면
                 # 카드 자체를 못 믿게 된다(스펙 §4 가 completed 오탐을 막으려던 것과 같은 이유).
                 # git 은 새로 안 부른다: 완료 판정이 방금 부른 출력에서 뽑아둔 요약을 쓴다.
-                if room.get("status") == "완료":
-                    room["done"] = change_summary(root)
+                if room.get("status") == "완료" and own_done is not None:
+                    room["done"] = own_done
                 if include_all:
                     # 전체보기에서는 나머지도 **보여만 준다**(꺼내서 정리하라고). hidden 표시가
                     # 붙으므로 finalize_room 이 상태·지문·시각 계산에서 알아서 뺀다.
@@ -7766,11 +7773,19 @@ _MOBILE_HTML = r"""<!doctype html>
       const d = (room && room.done) || {};
       return `${room ? room.root : ""}|${d.files || 0}|${d.commits || 0}|${(d.names || []).join(",")}`;
     }
-    let doneDismissed = "";
-    try { doneDismissed = localStorage.getItem("marinaMobileDoneDismissed") || ""; } catch (e) {}
+    // **방마다** 기억한다. 예전엔 한 칸이라 B방 카드를 닫으면 A방에서 닫은 카드가 되살아났다.
+    // 지금 목록에 없는 방은 저장할 때 버린다 — 끝없이 쌓이지 않게.
+    let doneDismissed = {};
+    try {
+      const raw = JSON.parse(localStorage.getItem("marinaMobileDoneDismissedV2") || "{}");
+      if (raw && typeof raw === "object") doneDismissed = raw;
+    } catch (e) {}
     function dismissDone(room) {
-      doneDismissed = doneKey(room);
-      try { localStorage.setItem("marinaMobileDoneDismissed", doneDismissed); } catch (e) {}
+      if (!room) return;
+      doneDismissed[String(room.root || "")] = doneKey(room);
+      const 있는방 = new Set((state.rooms || []).map(item => String(item.root || "")));
+      for (const key of Object.keys(doneDismissed)) if (!있는방.has(key)) delete doneDismissed[key];
+      try { localStorage.setItem("marinaMobileDoneDismissedV2", JSON.stringify(doneDismissed)); } catch (e) {}
       renderDoneSlot(selectedSession());
     }
     function renderDoneSlot(session) {
@@ -7784,7 +7799,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const 이름 = 같은방 ? String(servicesState.preview || "") : "";
       const 도는것 = 이름
         ? (servicesState.services || []).find(item => item.service === 이름 && item.openUrl) : null;
-      const html = room && doneKey(room) === doneDismissed
+      const html = room && doneKey(room) === doneDismissed[String(room.root || "")]
         ? ""                                    // 형이 닫은 결과다 — 새 결과가 나오면 키가 바뀌어 다시 뜬다
         : renderDoneCard(room, { service: 이름, url: 도는것 ? 도는것.openUrl : "" });
       if (doneSlot.innerHTML !== html) doneSlot.innerHTML = html;

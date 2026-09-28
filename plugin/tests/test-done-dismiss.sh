@@ -31,7 +31,11 @@ assert "data-done-dismiss" in 카드, f"닫을 길이 없다: {카드[:400]}"
 # ③ 닫힘은 **그 결과**에 붙는다 — 방 경로만으로 기억하면 다음 결과까지 영영 안 보인다.
 키 = html[html.find("function doneKey"):][:400]
 assert "files" in 키 and "commits" in 키 and "names" in 키, f"닫힘 키가 결과를 안 본다: {키[:200]}"
-assert "doneKey(room) === doneDismissed" in html, "닫힘을 렌더에서 안 본다"
+assert 'doneKey(room) === doneDismissed[String(room.root || "")]' in html, "닫힘을 렌더에서 방마다 안 본다"
+# ④ 방마다 기억한다 — 한 칸이면 B방을 닫는 순간 A방에서 닫은 카드가 되살아난다(2026-09-28).
+닫기 = html[html.find("function dismissDone"):][:700]
+assert 'doneDismissed[String(room.root || "")] = doneKey(room)' in 닫기, 닫기
+assert "delete doneDismissed[key]" in 닫기, "목록에 없는 방 기록을 안 버린다 — 끝없이 쌓인다"
 print("ok 완료 카드: 바탕 있고 · 닫히고 · 새 결과엔 다시 뜬다")
 PY
 

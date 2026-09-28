@@ -58,6 +58,7 @@ _changes_cache: dict[str, tuple[float, bool]] = {}
 _summary_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 _SUMMARY_NAMES_MAX = 4      # 카드 한 장에 들어갈 만큼만
 _SUMMARY_PATHS_MAX = 200    # "앱을 건드렸나" 판단용 — 목록이 아니라 표본이다
+_SUMMARY_MATCH_MAX = 5000   # room_own_changes 가 대화 몫을 가를 때 보는 끝
 # 데몬은 요청마다 스레드다. dict 갱신 자체는 GIL 덕에 깨지지 않지만, 청소 중에 크기가
 # 바뀌면 순회가 터진다 — 청소만 잠근다(읽기·쓰기는 잠그지 않는다. 최악이 git 한 번 더다).
 _changes_lock = threading.Lock()
@@ -180,15 +181,20 @@ def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = N
             # **경로는 따로 담는다.** 화면에 쓰는 게 아니라, 이 방이 앱을 건드렸는지 판단하는
             # 재료다(preview_service). 카드 이름과 달리 앞뒤 폴더가 있어야 판단이 된다.
             "paths": 경로들[:_SUMMARY_PATHS_MAX],
+            # "그 대화가 바꾼 것" 을 가를 때 쓰는 목록 — 표본(200)으로 가르면 201번째 뒤를 고친 대화가
+            # "파일 0개"가 된다(리뷰 지적). 그래도 끝은 둔다(벤더 폴더를 통째로 푼 방 같은 극단).
+            "matchPaths": 경로들[:_SUMMARY_MATCH_MAX],
         })
         dirty = bool(경로들)
-        # 미커밋이 이미 있으면 커밋 쪽은 볼 필요가 없다 — git 한 번을 아낀다.
-        # 커밋 수까지 센다(상한을 둔다 — 카드에 쓸 숫자지 목록이 아니다). 미커밋이 있으면
-        # 굳이 안 센다: 그때는 파일 개수로 말하고, git 한 번을 아낀다.
-        커밋들 = "" if dirty else run(["log", "--oneline", "-20", "HEAD", "--not", "--remotes"], root)
-        commits = len([line for line in 커밋들.splitlines() if line.strip()])
+        # 커밋은 **미커밋이 있어도 센다**(상한 20 — 카드에 쓸 숫자지 목록이 아니다). 예전엔 미커밋이
+        # 있으면 건너뛰었는데, 대화와 무관한 백업 파일 하나가 그 대화가 만든 커밋을 가렸다.
+        # 시각(%ct)을 같이 받는다 — "그 대화 중에 생긴 커밋"만 세려면 필요하다(room_own_changes).
+        커밋들 = run(["log", "--format=%ct", "-20", "HEAD", "--not", "--remotes"], root)
+        줄들 = [line.strip() for line in 커밋들.splitlines() if line.strip()]
+        commits = len(줄들)
         _summary_cache[key] = (current + _CHANGES_TTL_S,
-                               {**_summary_cache[key][1], "commits": commits})
+                               {**_summary_cache[key][1], "commits": commits,
+                                "commitTimes": [int(x) for x in 줄들 if x.isdigit()]})
         ahead = dirty or commits > 0
     except Exception:
         # 실패도 캐시한다(더 긴 수명으로). 안 하면 지속적 실패에서 폴마다 타임아웃을 다시 문다.
@@ -272,6 +278,52 @@ def change_summary(root: Path, *, runner: Callable[[list[str], Path], str] = Non
         if cached is not None and current >= cached[0]:
             return {"files": 0, "names": [], "commits": 0, "paths": []}
     return dict(cached[1]) if cached else {"files": 0, "names": [], "commits": 0, "paths": []}
+
+
+def _path_hit(changed: str, touched: frozenset) -> bool:
+    """git 이 말한 변경 경로가 이 대화가 손댄 것인가. 새 폴더는 `?? dir/` 한 줄로 오니 그 안을 만졌으면 맞다."""
+    if changed in touched:
+        return True
+    return changed.endswith("/") and any(t.startswith(changed) for t in touched)
+
+
+def room_own_changes(root: Path, agents: list[dict[str, Any]],
+                     touched: Callable[[Path, str, str], tuple] = None,
+                     summary: dict[str, Any] = None) -> tuple[Callable[[str, str], bool], dict[str, Any]]:
+    """(대화별 "뭘 바꿨나" 판정, 완료 카드 요약) — **그 대화가 한 일**만 센다.
+
+    예전엔 워크트리 전체의 git status 를 그대로 썼다. 그래서 진단만 한 대화에 옛 백업 파일
+    (settings.local.json.bak-…)로 "끝났어요 · 파일 4개"가 뜨고, 브랜치에 쌓인 커밋 20개가 이번 일처럼
+    보였다(2026-09-28 실측, 형: "똑바로 워킹 안 한다").
+    - 파일: 폴더의 변경분 ∩ 그 대화가 Write/Edit/셸 쓰기로 손댄 경로
+    - 커밋: 아직 안 올라간 커밋 중 그 대화가 시작된 뒤에 생긴 것
+    끝난(completed) 대화만 본다 — 도는 대화의 중간 결과로 카드를 띄우지 않는다."""
+    if touched is None:
+        from marina_sessions import session_touched_paths as touched
+    끝난 = [(str(a.get("source") or ""), str(a.get("sid") or "")) for a in agents
+           if str(a.get("status") or "") == "completed"]
+    빈것 = {"files": 0, "names": [], "commits": 0, "paths": []}
+    if not 끝난:
+        return (lambda source, sid: False), 빈것
+    요약 = change_summary(root) if summary is None else summary
+    바뀐 = list(요약.get("matchPaths") or 요약.get("paths") or [])
+    커밋시각 = [int(t) for t in 요약.get("commitTimes") or []]
+    if not 바뀐 and not 커밋시각:
+        return (lambda source, sid: False), 빈것
+    한일: dict[tuple[str, str], tuple[list[str], int]] = {}
+    for key in 끝난:
+        손댄, 시작 = touched(root, key[0], key[1])
+        경로들 = [p for p in 바뀐 if _path_hit(p, 손댄)]
+        커밋 = sum(1 for t in 커밋시각 if 시작 and t >= 시작)
+        한일[key] = (경로들, 커밋)
+    모든경로 = sorted({p for 경로들, _ in 한일.values() for p in 경로들}, key=바뀐.index)
+    done = {
+        "files": len(모든경로),
+        "names": [p.rstrip("/").split("/")[-1] for p in 모든경로[:_SUMMARY_NAMES_MAX]],
+        "commits": max((c for _, c in 한일.values()), default=0),
+        "paths": 모든경로,
+    }
+    return (lambda source, sid: bool(한일.get((source, sid), ([], 0))[0] or 한일.get((source, sid), ([], 0))[1])), done
 
 
 def branch_from_text(text: str, *, salt: str = "") -> str:
@@ -418,7 +470,8 @@ def finalize_room(room: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]], *,
-               has_changes: bool, questions: Callable[[str, str], Any]) -> dict[str, Any]:
+               has_changes: bool | Callable[[str, str], bool],
+               questions: Callable[[str, str], Any]) -> dict[str, Any]:
     """방 하나를 조립한다 — 워크트리 1개 + 그 안의 세션들(탭).
 
     이름은 **하나**다. 배경에 적힌 "이름이 세 번 반복된다"가 여기서 다시 나오지 않도록,
@@ -436,7 +489,9 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
             "source": source,
             "sid": sid,
             "title": str(agent.get("title") or sid or source),
-            "status": room_status(canon, has_changes),
+            # has_changes 가 함수면 **그 대화가** 뭘 바꿨는지로 가른다(room_own_changes) — 폴더에 원래
+            # 있던 백업 파일·며칠 전 작업분으로 "끝났어요"가 뜨지 않게(형: "똑바로 안 한다", 2026-09-28).
+            "status": room_status(canon, has_changes(source, sid) if callable(has_changes) else has_changes),
             # 탭의 마지막 활동 시각. 화면 정렬에도 쓰지만, 권한 필터가 탭을 걸러낸 뒤 방의
             # lastAt 을 다시 계산하려면 탭이 자기 시각을 들고 있어야 한다.
             "ts": float(agent.get("ts") or 0),

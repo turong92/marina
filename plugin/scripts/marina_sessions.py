@@ -1620,6 +1620,7 @@ def _activity_file_path(raw_input: Any, detail: str) -> str:
 # 안 붙어 형이 "공유가 안 된다"가 됐다. **첫 줄만** 본다 — heredoc 본문(HTML 의 `>` 등)을 파싱하면 헛것을 잡는다.
 # 정규식이 아니라 셸 토큰으로 본다 — 따옴표 안 비교식(awk 'NR > 100', python -c "1 > 2")을 쓰기로 오인하지 않게.
 _SHELL_WRITE_OPS = (">", ">>", ">|", "&>", "&>>")
+_SHELL_NOFILE_REDIRECT = re.compile(r"\d*>&\d+|&?\d*>+\s*/dev/null")
 _TEMP_ROOTS = tuple(sorted({os.path.realpath(p) + os.sep for p in ("/tmp", "/var/folders", tempfile.gettempdir())}))
 
 
@@ -1627,6 +1628,12 @@ def _shell_write_target(command: str, workdir: str = "") -> str:
     """셸 명령이 쓴 파일 하나(첫 줄의 마지막 쓰기 대상). 못 찾거나 믿을 수 없으면 ""."""
     text = str(command or "").strip()
     first = text.splitlines()[0] if text else ""
+    # 쓰기 연산자는 전부 `>` 를 품는다 — 둘 다 없으면 토큰으로 쪼갤 필요가 없다(쪼개기가 비싸다:
+    # 긴 세션 여럿을 처음 훑을 때 shlex 가 3초를 먹었다, 2026-09-28 실측).
+    # `2>&1`·`> /dev/null` 은 아래에서도 버리는 대상이라 미리 지우고 본다(대부분의 명령이 이것뿐이다).
+    거친 = _SHELL_NOFILE_REDIRECT.sub("", first)
+    if ">" not in 거친 and "tee" not in 거친:
+        return ""
     try:
         lexer = shlex.shlex(first, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
@@ -2855,6 +2862,117 @@ def session_file_in_root(root: Path, raw: str) -> Path | None:
     return None
 
 
+def _line_tool_calls(raw: bytes, source: str) -> list[tuple[str, Any]]:
+    """트랜스크립트 한 줄의 도구 호출들 — (이름, 입력). 값싼 사전 필터로 대부분의 줄은 파싱하지 않는다."""
+    if (b'"tool_use"' if source == "claude" else b'"function_call"') not in raw:
+        return []
+    try:
+        obj = json.loads(raw)
+    except Exception:
+        return []
+    if not isinstance(obj, dict):
+        return []
+    if source == "claude":
+        blocks = (obj.get("message") or {}).get("content")
+        return [(str(b.get("name") or ""), b.get("input")) for b in blocks
+                if isinstance(b, dict) and b.get("type") == "tool_use"] if isinstance(blocks, list) else []
+    payload = obj.get("payload") or {}
+    if obj.get("type") != "response_item" or payload.get("type") not in ("function_call", "custom_tool_call"):
+        return []
+    return [(str(payload.get("name") or ""),
+             payload.get("arguments") if payload.get("type") == "function_call" else payload.get("input"))]
+
+
+# 세션이 손댄 파일(워크트리 기준 상대경로)과 시작 시각 — "끝났어요" 카드가 **그 대화가 한 일**만 세게.
+# 폴마다 부르므로 기록 파일 크기·시각으로 캐시하고, 늘어난 부분만 이어 읽는다(긴 세션은 수십 MB).
+_touched_cache: dict[str, tuple[int, float, int, frozenset, float]] = {}   # 경로 → (크기, 시각, 읽은 끝, 경로들, 시작)
+_TOUCHED_CACHE_MAX = 4000
+
+
+def _transcript_start(path: Path) -> float:
+    """기록의 첫 timestamp. 없으면 파일이 생긴 시각."""
+    try:
+        with path.open("rb") as handle:
+            for _ in range(40):
+                raw = handle.readline()
+                if not raw:
+                    break
+                m = re.search(rb'"timestamp"\s*:\s*"([^"]+)"', raw)
+                if m:
+                    try:
+                        return datetime.fromisoformat(m.group(1).decode().replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        continue
+        stat = path.stat()
+        return float(getattr(stat, "st_birthtime", 0) or stat.st_mtime)
+    except OSError:
+        return 0.0
+
+
+def _file_touched_paths(path: Path, root: Path, source: str) -> frozenset:
+    """기록 파일 하나에서 손댄 워크트리 안 경로들 — 크기·시각으로 캐시, 늘어난 부분만 이어 읽는다."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return frozenset()
+    key = f"{path}|{root}"
+    cached = _touched_cache.get(key)
+    if cached and cached[0] == stat.st_size and cached[1] == stat.st_mtime:
+        return cached[3]
+    # 기록은 뒤에 덧붙기만 한다. 줄어들었으면(교체) 처음부터.
+    offset, found = (cached[2], set(cached[3])) if cached and stat.st_size >= cached[2] else (0, set())
+    base = root.resolve()
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            for raw in handle:
+                if not raw.endswith(b"\n"):
+                    break                                 # 쓰는 중인 줄 — 다음에 마저 읽는다
+                offset += len(raw)
+                for name, raw_input in _line_tool_calls(raw, source):
+                    if name.strip().lower() in _HANDOFF_TOOLS:
+                        continue                          # 건네준 건 만든 게 아니다
+                    for target in _tool_file_targets(name, raw_input):
+                        resolved = session_file_in_root(root, target)
+                        if resolved is not None:
+                            try:
+                                found.add(str(resolved.relative_to(base)))
+                            except ValueError:
+                                pass
+    except OSError:
+        return frozenset(found)
+    result = frozenset(found)
+    _touched_cache.pop(key, None)                 # 맨 뒤로 — 오래 안 쓴 것부터 버린다
+    _touched_cache[key] = (stat.st_size, stat.st_mtime, offset, result, 0.0)
+    # 끝을 둔다(리뷰 지적) — 세션·서브에이전트 기록은 계속 생기고 지워진 것도 남는다. 넘치면 오래된 절반을 버린다
+    # (버려진 건 다음에 처음부터 다시 읽을 뿐이다).
+    if len(_touched_cache) > _TOUCHED_CACHE_MAX:
+        for old in list(_touched_cache)[: len(_touched_cache) // 2]:
+            _touched_cache.pop(old, None)
+    return result
+
+
+def session_touched_paths(root: Path, source: str, sid: str) -> tuple[frozenset, float]:
+    """(이 세션이 Write/Edit/셸 쓰기로 손댄 워크트리 안 경로들, 세션 시작 시각). 모르면 (빈 것, 0).
+
+    **서브에이전트가 한 일도 이 세션 몫이다.** 계획을 서브에이전트에게 맡겨 돌리는 세션은 코드 수정이
+    전부 subagents/agent-*.jsonl 에 있다(실측 A2-1: 본 기록엔 계획 문서뿐, 서브에이전트 123개)."""
+    try:
+        path = agent_transcript_path(root, source, sid)
+    except (ValueError, OSError):
+        return frozenset(), 0.0
+    found = set(_file_touched_paths(path, root, source))
+    if source == "claude":
+        for child in sorted((path.parent / sid / "subagents").glob("agent-*.jsonl")):
+            found |= _file_touched_paths(child, root, source)
+    start_key = f"start|{path}"
+    start = _touched_cache.get(start_key, (0, 0, 0, frozenset(), 0.0))[4]
+    if not start:
+        start = _transcript_start(path)
+        _touched_cache[start_key] = (0, 0, 0, frozenset(), start)
+    return frozenset(found), start
+
+
 def agent_session_files(root: Path, source: str, sid: str,
                         limit: int = AGENT_SESSION_FILES_MAX) -> dict[str, Any]:
     """이 세션이 만든/바꾼 파일 목록 — 최근에 손댄 것이 앞. 내용은 안 싣는다(메타만)."""
@@ -2873,28 +2991,9 @@ def agent_session_files(root: Path, source: str, sid: str,
     seen: dict[str, dict[str, Any]] = {}
     # 전체 파일을 줄 단위로 흘려 읽는다 — _json_objects 는 끝 256KB 만 읽어서 긴 세션의 Write/Edit 를
     # 거의 다 놓친다(이 세션만 해도 46건 중 대부분이 그 밖에 있다). 값싼 사전 필터로 대부분의 줄은 건너뛴다.
-    marker = b'"tool_use"' if source == "claude" else b'"function_call"'
     with path.open("rb") as handle:
         for raw in handle:
-            if marker not in raw:
-                continue
-            try:
-                obj = json.loads(raw)
-            except Exception:
-                continue
-            if not isinstance(obj, dict):
-                continue
-            if source == "claude":
-                blocks = (obj.get("message") or {}).get("content")
-                calls = [(str(b.get("name") or ""), b.get("input")) for b in blocks
-                         if isinstance(b, dict) and b.get("type") == "tool_use"] if isinstance(blocks, list) else []
-            else:
-                payload = obj.get("payload") or {}
-                if obj.get("type") != "response_item" or payload.get("type") not in ("function_call", "custom_tool_call"):
-                    continue
-                calls = [(str(payload.get("name") or ""),
-                          payload.get("arguments") if payload.get("type") == "function_call" else payload.get("input"))]
-            for name, raw_input in calls:
+            for name, raw_input in _line_tool_calls(raw, source):
                 건넴 = name.strip().lower() in _HANDOFF_TOOLS
                 for target in _tool_file_targets(name, raw_input):
                     resolved = session_file_in_root(root, target)
