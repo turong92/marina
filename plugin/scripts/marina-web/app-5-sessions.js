@@ -29,7 +29,7 @@
           title="${openable ? `클릭=터미널로 이 세션에 붙기(resume) · ${meta.title}` : '세션 원본을 못 찾음 — 표시만'}">
           <span class="wt-dot ${meta.dot}" title="${meta.title}"></span>
           <span class="agent-src ${isCodex ? 'codex' : 'claude'}">${isCodex ? 'Codex' : 'Claude'}</span>
-          <span class="svc-name"><span title="${escapeHtml(agent.title)}">${escapeHtml(agent.title)}</span></span>
+          <span class="svc-name">${typeof webAgentUnread === 'function' && webAgentUnread(agent) ? '<span class="unreadDot" role="img" aria-label="새 메시지"></span>' : ''}<span title="${escapeHtml(agent.title)}">${escapeHtml(agent.title)}</span></span>
           <span class="svc-right">
             ${openable ? `<span class="hov-acts"><button data-agent-raw title="원본 터미널로 열기 — 권한 프롬프트·/명령·TUI 조작">&gt;_</button></span>` : ''}
             <span class="agent-state-label">${meta.label}</span>

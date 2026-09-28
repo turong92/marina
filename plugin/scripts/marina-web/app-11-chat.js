@@ -110,26 +110,53 @@
     // 탭 파비콘 점은 **모든 대화** 기준이다(열어 둔 탭만 보면 안 연 대화의 새 메시지를 놓친다 — 리뷰 지적).
     // 대화마다 이 기기에서 마지막으로 본 시각을 기억하고, 처음엔 전부 본 걸로 시작한다(모바일 방 목록과 같은 규칙).
     // 지금 화면에 떠 있는 대화 탭(창이 보일 때)만 본 걸로 친다.
-    const WEB_SEEN_STORE = 'marinaWebSeenAgents';
+    // 모바일 방 목록과 같은 규칙, **이 브라우저에만**(로컬). "여기까지 다 읽음" 시각(w) + 그 뒤 본 대화만(s).
+    // 대화의 마지막 활동이 max(w, s[대화]) 보다 새로우면 안 읽음. 다 읽으면 s 를 비우고 w 만 올린다 —
+    // 기록이 끝없이 쌓이지 않는다. 일하는 중(working)은 기록이 계속 바뀌어 새 메시지로 안 친다.
+    const WEB_SEEN_STORE = 'marinaWebSeenV2';
     let webSeen = null;
+    let webUnreadSids = new Set();
+    // 왼쪽 대화 줄은 구조가 바뀔 때만 다시 그려진다 — 점은 여기서 바로 맞춘다(안 그러면 한참 안 바뀐다, 리뷰 지적).
+    function syncAgentRowDots() {
+      document.querySelectorAll('[data-agent-row][data-agent-sid]').forEach(row => {
+        const name = row.querySelector('.svc-name');
+        if (!name) return;
+        const want = webUnreadSids.has(`${row.dataset.agentSource}:${row.dataset.agentSid}`);
+        const dot = name.querySelector('.unreadDot');
+        if (want && !dot) name.insertAdjacentHTML('afterbegin', '<span class="unreadDot" role="img" aria-label="새 메시지"></span>');
+        else if (!want && dot) dot.remove();
+      });
+    }
+    function webAgentUnread(agent) { return webUnreadSids.has(`${agent.source}:${agent.sid}`); }
     function anyAgentUnseen() {
       if (!webSeen) {
-        try { webSeen = JSON.parse(localStorage.getItem(WEB_SEEN_STORE) || 'null'); } catch (_) { webSeen = null; }
+        try { webSeen = JSON.parse(localStorage.getItem(WEB_SEEN_STORE) || 'null'); localStorage.removeItem('marinaWebSeenAgents'); } catch (_) { webSeen = null; }   // 옛 형식은 버린다
+        if (webSeen && (typeof webSeen.w !== 'number' || !webSeen.s || typeof webSeen.s !== 'object')) webSeen = null;
       }
-      const seed = !webSeen;
-      if (seed) webSeen = {};
-      let changed = seed, unseen = false;
-      const active = chatTabs[chatActive];
-      const viewing = active && !document.hidden && !chatPane().hidden ? `${active.root} ${active.source} ${active.sid}` : '';
+      const agents = [];
       worktreeData.forEach(wt => (wt.agents || []).forEach(a => {
-        if (!a.sid) return;
-        const key = `${wt.root} ${a.source} ${a.sid}`;
-        const ts = Number(a.statusTs || a.ts || 0);
-        if (seed || key === viewing) { if ((webSeen[key] || 0) < ts) { webSeen[key] = ts; changed = true; } return; }
-        if (!(key in webSeen) ? ts > 0 : ts > webSeen[key] + 1) unseen = true;
+        if (a.sid) agents.push({key: `${wt.root}|${a.source}:${a.sid}`, sid: `${a.source}:${a.sid}`,
+                                ts: Number(a.statusTs || a.ts || 0), working: a.status === 'working'});
       }));
+      // "다 읽음" 시각엔 일하는 중인 대화는 안 넣는다 — 넣으면 끝나는 순간의 점이 이미 흡수돼 안 뜬다(리뷰 지적).
+      const top = agents.reduce((m, a) => (a.working ? m : Math.max(m, a.ts)), 0);
+      let changed = false;
+      if (!webSeen) { webSeen = {w: top, s: {}}; changed = true; }   // 처음엔 전부 읽은 걸로
+      const active = chatTabs[chatActive];
+      const viewing = active && !document.hidden && !chatPane().hidden ? `${active.root}|${active.source}:${active.sid}` : '';
+      const unread = new Set();
+      agents.forEach(a => {
+        if (a.key === viewing) {
+          if (a.ts > webSeen.w && (webSeen.s[a.key] || 0) < a.ts) { webSeen.s[a.key] = a.ts; changed = true; }
+          return;
+        }
+        if (!a.working && a.ts > Math.max(webSeen.w, webSeen.s[a.key] || 0) + 1) unread.add(a.sid);
+      });
+      if (!unread.size && (top > webSeen.w || Object.keys(webSeen.s).length)) { webSeen = {w: Math.max(webSeen.w, top), s: {}}; changed = true; }
       if (changed) { try { localStorage.setItem(WEB_SEEN_STORE, JSON.stringify(webSeen)); } catch (_) {} }
-      return unseen || chatTabs.some(t => t.unread);
+      webUnreadSids = unread;
+      syncAgentRowDots();
+      return unread.size > 0 || chatTabs.some(t => t.unread);
     }
 
     // AGENTS 행 진입점 — 이미 열린 세션이면 새 탭이 아니라 그 탭으로 간다(브라우저와 같은 감각).

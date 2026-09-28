@@ -1388,6 +1388,8 @@
     .chat-turns .copyBtn:hover { background: var(--sys-bg-surface-hover); }
     .chat-turns .copyBtn.copied { color: var(--st-ok, #2f6b45); }
     .chat-turns .mdTableBlock { position: relative; }
+    /* 새 메시지 점 — 왼쪽 대화 줄(탭 파비콘 점과 같은 기준). */
+    .agent-row .unreadDot { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: #e5484d; vertical-align: 1px; flex: none; }
     .chat-turns .tableCopyBtn { position: absolute; top: -10px; right: -2px; z-index: 2; display: none; font-size: 10px; }
     .chat-turns .turnMeta { color: var(--sys-cont-neutral-lightest); font-size: 11px; }
     /* 질문 카드 — 웹엔 스킨이 아예 없어 공유 렌더러가 낸 마크업이 날것으로 나왔다.

@@ -3004,6 +3004,8 @@ _MOBILE_HTML = r"""<!doctype html>
     /* 새 메시지 — 이름 옆 빨간 점. */
     .roomNameLine { display: flex; align-items: center; gap: 6px; min-width: 0; }
     .roomNameLine .roomName { min-width: 0; }
+    #backBtn, #chatNavTitle { position: relative; }
+    #backBtn.hasUnread::after, #chatNavTitle.hasUnread::after { content: ""; position: absolute; top: 3px; right: 3px; width: 8px; height: 8px; border-radius: 50%; background: #e5484d; box-shadow: 0 0 0 2px var(--bg, #fff); }
     .unreadDot { flex: none; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #e5484d; }
     .roomTab .unreadDot { margin-right: 7px; vertical-align: 1px; }
     /* 아코디언 안 가름줄 — 위는 "새로 시작", 아래는 "이미 있는 대화". 실선을 쓰면 상자가
@@ -4914,45 +4916,67 @@ _MOBILE_HTML = r"""<!doctype html>
     // ROOM_LIST_START  (테스트가 이 블록을 vm 에 싣는다)
     // 방 목록 — 폰을 열면 이게 첫 화면이다.
     //
-    // 새 메시지 빨간 점(형: "슬랙처럼 레드닷"). 대화마다 **이 기기에서 마지막으로 본 시각**을 기억하고,
-    // 서버가 주는 그 대화의 마지막 활동 시각(tab.ts)이 더 새로우면 점을 찍는다. 처음 켤 땐 전부 본 걸로
-    // 시작한다 — 안 그러면 방마다 점이 뜬다. 그 뒤에 처음 보는 대화는 "새 대화"라 점을 찍는다.
-    const SEEN_STORE = "marinaSeenTabs";
-    let seenTabs = null;   // {"<root>|<source>:<sid>": ts}
+    // 새 메시지 빨간 점(형: "슬랙처럼 레드닷"). **이 브라우저에만** 기억한다(로컬).
+    // 기록은 두 가지뿐이다: "여기까지 다 읽음" 시각 하나(w) + 그 뒤에 본 대화만 대화별로(s).
+    // 대화의 마지막 활동(tab.ts)이 max(w, s[대화]) 보다 새로우면 점. 다 읽고 나면 s 를 비우고 w 만 올린다 —
+    // 그래서 기록은 "지금 안 읽은 대화 수"만큼만 생기고 끝없이 쌓이지 않는다(형: "다 읽으면 다 지워지면 되잖아").
+    const SEEN_STORE = "marinaSeenV2";
+    let seenState = null;   // {w: 초, s: {"<root>|<source>:<sid>": 초}}
     function seenMap() {
-      if (seenTabs) return seenTabs;
-      try { seenTabs = JSON.parse(localStorage.getItem(SEEN_STORE) || "null"); } catch (_) { seenTabs = null; }
-      return seenTabs;
+      if (seenState) return seenState;
+      try { seenState = JSON.parse(localStorage.getItem(SEEN_STORE) || "null"); localStorage.removeItem("marinaSeenTabs"); } catch (_) { seenState = null; }   // 옛 형식은 버린다
+      if (seenState && (typeof seenState.w !== "number" || typeof seenState.s !== "object" || !seenState.s)) seenState = null;
+      return seenState;
     }
     function saveSeen() {
-      try { localStorage.setItem(SEEN_STORE, JSON.stringify(seenTabs || {})); } catch (_) {}
+      try { localStorage.setItem(SEEN_STORE, JSON.stringify(seenState)); } catch (_) {}
     }
     function seenKeyOf(root, source, sid) { return `${root}|${source}:${sid}`; }
-    // 처음이면 지금 있는 대화를 전부 본 걸로 깔아 둔다.
+    // "다 읽음" 시각에 흡수할 최대 활동 시각. 일하는 중인 대화와 접어 둔 방은 뺀다 — 넣으면 일이 끝나는 순간이나
+    // 방을 다시 펼쳤을 때의 새 메시지가 이미 흡수돼 점이 안 뜬다(리뷰 지적).
+    function maxTabTs(rooms) {
+      let top = 0;
+      (rooms || []).forEach(room => {
+        if (room.archived) return;
+        (room.tabs || []).forEach(tab => { if (tab.status !== "작업중") top = Math.max(top, Number(tab.ts || 0)); });
+      });
+      return top;
+    }
+    // 처음이면 지금까지를 전부 읽은 걸로 시작한다 — 안 그러면 방마다 점이 뜬다.
     function seedSeen(rooms) {
       if (seenMap()) return;
-      seenTabs = {};
-      (rooms || []).forEach(room => (room.tabs || []).forEach(tab => {
-        seenTabs[seenKeyOf(room.root, tab.source, tab.sid)] = Number(tab.ts || 0);
-      }));
+      seenState = {w: maxTabTs(rooms), s: {}};
       saveSeen();
     }
     function markTabSeen(root, source, sid, ts) {
-      const map = seenMap();
-      if (!map || !root || !sid) return;
-      const key = seenKeyOf(root, source, sid);
+      const st = seenMap();
+      if (!st || !root || !sid) return;
       const at = Number(ts || 0);
-      if ((map[key] || 0) >= at && key in map) return;
-      map[key] = at;
+      if (at <= st.w) return;                     // 이미 "다 읽음" 안쪽이다 — 적을 게 없다
+      const key = seenKeyOf(root, source, sid);
+      if ((st.s[key] || 0) >= at) return;
+      st.s[key] = at;
       saveSeen();
     }
     function tabUnread(room, tab) {
-      const map = seenMap();
-      if (!map || tab.hidden || tab.deleted || tab.roleOf) return false;
-      const seen = map[seenKeyOf(room.root, tab.source, tab.sid)];
-      return seen === undefined ? Number(tab.ts || 0) > 0 : Number(tab.ts || 0) > seen + 1;   // 1초 여유(시계·반올림)
+      const st = seenMap();
+      if (!st || tab.hidden || tab.deleted || tab.roleOf) return false;
+      // 일하는 중엔 기록이 계속 바뀐다 — 그걸 새 메시지로 치면 봐도 금세 다시 켜진다(형: "확인했는데 안 지워진다").
+      // 일이 끝나거나(대기·완료) 답을 기다릴 때 새 메시지로 본다.
+      if (tab.status === "작업중") return false;
+      const seen = Math.max(st.w, st.s[seenKeyOf(room.root, tab.source, tab.sid)] || 0);
+      return Number(tab.ts || 0) > seen + 1;      // 1초 여유(시계·반올림)
     }
     function roomUnread(room) { return !room.archived && (room.tabs || []).some(tab => tabUnread(room, tab)); }
+    // 안 읽은 게 하나도 없으면 대화별 기록을 비우고 "다 읽음" 시각만 올린다.
+    function collapseSeen(rooms) {
+      const st = seenMap();
+      if (!st || (rooms || []).some(roomUnread)) return;
+      const top = Math.max(st.w, maxTabTs(rooms));
+      if (top === st.w && !Object.keys(st.s).length) return;
+      seenState = {w: top, s: {}};
+      saveSeen();
+    }
     //
     // 상태의 심각도 순서. **정렬에는 더 이상 쓰지 않는다**(목록은 최근 순 — renderRooms 참조).
     // 남겨두는 이유: 방 하나에 대화가 여럿일 때 어느 상태로 접을지 서버가 이 순서로 정하고,
@@ -7818,7 +7842,12 @@ _MOBILE_HTML = r"""<!doctype html>
                                        openRoomRoot, launchSources());
       listView.scrollTop = 스크롤;
       if (drawerOpen()) markCurrentRoom();   // 폴 재렌더가 '지금 방' 표시를 지우지 않게
-      window.MarinaChat.setFaviconDot("rooms", 방들.some(roomUnread));
+      const 새것 = 방들.some(roomUnread);
+      collapseSeen(방들);
+      window.MarinaChat.setFaviconDot("rooms", 새것);
+      // 대화 화면에선 방 목록이 가려져 점을 못 본다 — 목록 여는 ☰ 와 대화 제목에도 찍는다(형: "어디 떴는지 모르겠다").
+      document.getElementById("backBtn").classList.toggle("hasUnread", 새것);
+      chatNavTitle.classList.toggle("hasUnread", 새것);
       // 방이 하나도 없으면 예전 세션 목록을 되살린다. 서버가 rooms 를 못 만들었을 때
       // (옛 데몬·조립 실패) 빈 화면만 남으면 형은 앱이 고장난 줄 안다 — 목록이 안 뜨면
       // 아무것도 못 하므로, 방은 부가정보고 세션 목록이 생명줄이다.
