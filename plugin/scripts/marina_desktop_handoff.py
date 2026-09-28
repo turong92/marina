@@ -94,7 +94,154 @@ def _status(sid: str, root: str) -> str:
     return str(got.get("status") or "unknown")
 
 
-def tick(now: float | None = None, *, kill=None, status=None) -> list:
+# ── 반대 방향: marina 가 만든 대화를 데스크톱 목록에 올린다 ────────────────────────────────
+# 데스크톱 앱은 **자기가 만든 대화만** 목록에 보여준다. 다만 CLI 대화를 입양하는 장치가 이미 있다 —
+# `adoptedFromOtherSurface: true` 기록(9/9 에 앱이 25건을 한 번에 입양). 앱이 쓴 그 모양 그대로 써 주면
+# 앱이 받아들이고 자기 필드를 채워 정식 대화로 편입한다(실측 2026-09-24: 733B → 62KB, 클릭·인계까지 확인).
+# 제약: 앱은 **켜질 때만** 폴더를 읽는다 — 켜 있는 동안 쓴 건 다음 실행에 보인다(지우지는 않는다, 실측).
+_adopted: set = set()               # 이번 데몬 수명에서 이미 판단한 sid — 같은 걸 매 틱 다시 보지 않게
+
+
+_account_cache: tuple = (-1e18, None)   # (잰 시각, 폴더) — 없음(None)도 캐시한다
+
+
+def _account_dir(now: float):
+    """기록이 사는 폴더(계정/조직 두 단계). 가장 최근에 바뀐 기록의 폴더를 쓴다.
+    계정이 여럿이면 **데스크톱 앱에 지금 로그인한 쪽**이 그 폴더다 — 앱은 대화를 클릭만 해도 lastFocusedAt 을
+    찍으므로 가장 최근에 바뀐다. 입양 기록은 그 계정 목록에만 보이니 거기 써야 맞다(다른 계정은 어차피 안 보인다).
+    파일 수백 개를 훑으므로 5초 루프에서 매번 돌지 않게 30초 캐시한다(리뷰 지적)."""
+    global _account_cache
+    at, cached = _account_cache
+    if now - at < 30.0:
+        return cached
+    newest, best = 0.0, None
+    for p in glob.glob(str(_desktop_dir() / "*" / "*" / "local_*.json")):
+        try:
+            m = os.path.getmtime(p)
+        except OSError:
+            continue
+        if m > newest:
+            newest, best = m, Path(p).parent
+    _account_cache = (now, best)
+    return best
+
+
+def _desktop_lineages(cwd: str) -> set:
+    """같은 cwd 에 이미 있는 데스크톱 대화들의 혈통. resume 으로 sid 만 바뀐 같은 대화를 또 올리면
+    데스크톱 목록에 두 줄이 생긴다(marina 목록에서 혈통으로 접은 것과 같은 문제)."""
+    import marina_sessions as ms
+    out = set()
+    slug_dir = ms.CLAUDE_PROJECTS_DIR / ms._claude_project_slug(Path(cwd))
+    for sid, path in list(_index.items()):
+        rec = _read(path)
+        if rec.get("cwd") != cwd:
+            continue
+        lin = ms._read_transcript_lineage(slug_dir / f"{sid}.jsonl")
+        if lin:
+            out.add(lin)
+    return out
+
+
+def adoption_record(sid: str, transcript: Path, now_ms: int):
+    """데스크톱 앱이 CLI 대화를 입양할 때 쓰는 모양 그대로(필드·값 모두 앱이 쓴 기록에서 복사). 못 만들면 None."""
+    import datetime
+    import marina_sessions as ms
+    cwd = ms._read_transcript_cwd(transcript)
+    if not cwd:
+        return None
+    first, model = None, None
+    budget = 2 * 1024 * 1024                # 5초 루프 안에서 도는 함수 — 수십 MB 대화를 통째로 읽지 않는다(리뷰 지적)
+    try:
+        with transcript.open(encoding="utf-8") as fh:
+            for i, line in enumerate(fh):
+                budget -= len(line)
+                if i >= 400 or budget < 0:
+                    break
+                try:
+                    o = json.loads(line)
+                except Exception:
+                    continue
+                if not isinstance(o, dict):
+                    continue
+                if first is None and isinstance(o.get("timestamp"), str):
+                    first = o["timestamp"]
+                msg = o.get("message")
+                m = msg.get("model") if isinstance(msg, dict) else None
+                if isinstance(m, str) and m and not m.startswith("<"):
+                    model = m
+    except OSError:
+        return None
+    try:
+        created = int(datetime.datetime.fromisoformat(first.replace("Z", "+00:00")).timestamp() * 1000)
+    except Exception:
+        created = int(transcript.stat().st_mtime * 1000)
+    rec = {"sessionId": "local_" + sid, "cliSessionId": sid, "cwd": cwd, "originCwd": cwd,
+           "createdAt": created, "lastActivityAt": int(transcript.stat().st_mtime * 1000),
+           "isArchived": False, "title": ms._read_transcript_title(transcript) or sid[:8],
+           "titleSource": "auto", "permissionMode": "auto",
+           "chromePermissionMode": "skip_all_permission_checks", "indexedAt": now_ms,
+           "alwaysAllowedReasons": [], "sessionPermissionUpdates": [], "adoptedFromOtherSurface": True}
+    if model:
+        rec["model"] = model
+    return rec
+
+
+def adopt_missing(held, now: float, *, write=None) -> list:
+    """marina 가 쥔 대화 중 데스크톱 기록이 없는 것을 입양시킨다. 쓴 sid 목록."""
+    import tempfile
+    import marina_sessions as ms
+    written = []
+    # `_adopted` 에는 **다시 볼 필요가 없을 때만** 넣는다(썼다·이미 있다·같은 대화가 있다). 계정 폴더가 아직
+    # 없거나 쓰기가 실패한 건 다음 틱에 다시 — 먼저 넣어 두면 데스크톱 앱을 처음 켜기 전에 쥔 대화나
+    # 일시적 I/O 실패가 데몬 수명 내내 영영 입양되지 않는다(리뷰 지적).
+    pending = [t for t in held if t.agent["sid"] not in _adopted]
+    if not pending:
+        return written
+    folder = _account_dir(now)
+    if folder is None:
+        return written                     # 데스크톱 앱을 아직 안 쓴 맥 — 폴더가 생기면 그때
+    for term in pending:
+        sid = term.agent["sid"]
+        if _focus_path(sid, now):
+            _adopted.add(sid)              # 이미 데스크톱에 있다
+            continue
+        transcript = ms.CLAUDE_PROJECTS_DIR / ms._claude_project_slug(Path(term.root)) / f"{sid}.jsonl"
+        if not transcript.is_file():
+            continue                       # 아직 첫 말 전 — 기록이 생기면 다음 틱에
+        rec = adoption_record(sid, transcript, int(now * 1000))
+        if rec is None:
+            continue
+        lin = ms._read_transcript_lineage(transcript)
+        if lin and lin in _desktop_lineages(rec["cwd"]):
+            _adopted.add(sid)
+            _log(f"skip adopt {sid[:8]} — same conversation already on desktop (lineage {lin[:8]})")
+            continue
+        target = folder / f"local_{sid}.json"
+        if target.exists():
+            _adopted.add(sid)
+            continue
+        try:
+            if write is not None:
+                write(target, rec)
+            else:
+                fd, tmp = tempfile.mkstemp(dir=str(folder), prefix=".marina-")
+                try:
+                    with os.fdopen(fd, "w", encoding="utf-8") as f:
+                        json.dump(rec, f, ensure_ascii=False, indent=2)
+                    os.replace(tmp, str(target))   # 원자 교체 — 앱이 반쪽 파일을 읽지 않게
+                except BaseException:
+                    Path(tmp).unlink(missing_ok=True)
+                    raise
+        except Exception as exc:
+            _log(f"adopt write failed {sid[:8]}: {exc!r} — retry next tick")
+            continue
+        _adopted.add(sid)
+        written.append(sid)
+        _log(f"adopted {sid[:8]} → {folder.parent.name[:8]}/{folder.name[:8]} (visible after next app launch)")
+    return written
+
+
+def tick(now: float | None = None, *, kill=None, status=None, write=None) -> list:
     """한 번 훑는다. 놓아 준 (tid, sid) 목록을 돌려준다. kill·status 는 테스트용 주입점."""
     if not enabled():
         return []
@@ -105,6 +252,10 @@ def tick(now: float | None = None, *, kill=None, status=None) -> list:
     with mt._lock:
         held = [t for t in mt._by_tid.values()
                 if t.alive and (t.agent or {}).get("source") == "claude" and (t.agent or {}).get("sid")]
+    try:
+        adopt_missing(held, now, write=write)
+    except Exception as exc:
+        _log(f"adopt failed: {exc!r}")
     released = []
     for term in held:
         sid = term.agent["sid"]
