@@ -5,11 +5,13 @@ import http.client
 import json
 import os
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
@@ -115,24 +117,94 @@ def _changed_paths(root: Path) -> list[str] | None:
 
 # 프록시(Cloudflare 터널 등) 뒤 공개 이름 — 한 줄에 하나, # 은 주석. env 가 아니라 파일인 이유: 재시작 헬퍼는
 # 깨끗한 env 로 돌아 env 로 준 값은 재시작에 사라진다(dashboard-bind.env 와 같은 이유).
+# 줄 뒤에 `preview=<이름>` 을 붙이면 그 이름이 미리보기 문(PREVIEW_PORT)으로 가는 주소다 —
+# 터널은 포트를 가리지 않아서 `<이름>:8443` 이 대시보드로 떨어진다(2026-09-28 실측 404).
+#   marina.example.com  preview=marina-app.example.com
 PUBLIC_HOSTS_FILE = MARINA_HOME / "public-hosts"
-_public_hosts_cache: tuple = (None, frozenset())   # (mtime, 이름들) — 요청마다 읽지 않게
+_public_hosts_cache: tuple = (None, frozenset(), {})   # (mtime, 이름들, 이름→미리보기 이름) — 요청마다 읽지 않게
 
 
-def extra_public_hosts() -> frozenset:
+def _load_public_hosts() -> tuple:
     global _public_hosts_cache
     try:
         mtime = PUBLIC_HOSTS_FILE.stat().st_mtime
     except OSError:
-        return frozenset()
+        return (None, frozenset(), {})
     if _public_hosts_cache[0] != mtime:
-        names = set()
+        names, previews = set(), {}
         for line in PUBLIC_HOSTS_FILE.read_text(encoding="utf-8").splitlines():
-            name = line.split("#", 1)[0].strip().rstrip(".").lower()
-            if name:
-                names.add(name)
-        _public_hosts_cache = (mtime, frozenset(names))
-    return _public_hosts_cache[1]
+            words = line.split("#", 1)[0].split()
+            if not words:
+                continue
+            name = words[0].rstrip(".").lower()
+            names.add(name)
+            for word in words[1:]:
+                key, _, value = word.partition("=")
+                if key == "preview" and value.strip():
+                    previews[name] = value.strip().rstrip(".").lower()
+        _public_hosts_cache = (mtime, frozenset(names), previews)
+    return _public_hosts_cache
+
+
+def preview_host_for(host: str) -> str:
+    """이 공개 이름으로 들어왔을 때 미리보기를 열 이름. 없으면 빈 문자열(예전처럼 :8443)."""
+    return _load_public_hosts()[2].get(str(host or "").rstrip(".").lower(), "")
+
+
+# 미리보기 이름은 대시보드와 **다른 호스트**라 로그인 쿠키가 안 따라간다. 그래서 [화면 보기]를 누르면
+# 대시보드(로그인된 쪽)가 1회용 입장권을 주고, 미리보기 문이 그걸 받아 자기 호스트에 세션을 연다.
+# 쿠키 범위를 상위 도메인 전체로 넓히는 길은 안 간다 — 그 도메인의 다른 서비스까지 로그인이 샌다.
+_PREVIEW_TICKET_TTL_S = 120.0
+_preview_tickets: dict = {}          # 입장권 → (만료 시각, user_id, label)
+_preview_tickets_lock = threading.Lock()
+
+
+def issue_preview_ticket(user_id: int | None, label: str, now: float | None = None) -> str:
+    current = time.time() if now is None else now
+    ticket = secrets.token_urlsafe(24)
+    with _preview_tickets_lock:
+        for key in [k for k, v in _preview_tickets.items() if v[0] <= current]:
+            _preview_tickets.pop(key, None)
+        _preview_tickets[ticket] = (current + _PREVIEW_TICKET_TTL_S, user_id, label)
+    return ticket
+
+
+# 입장권으로 받는 건 **정식 로그인 세션이 아니라 미리보기 전용 통행증**이다(리뷰 지적). 그 호스트는 남의 앱이
+# 루트에서 도는 곳이라 대시보드를 여는 열쇠를 둘 이유가 없고, 누를 때마다 로그인 세션이 쌓이지도 않게.
+# 통행증은 그 방(label) 하나에만 맞는다. 메모리에만 둔다 — 재시작하면 [화면 보기]를 한 번 더 누르면 된다.
+PREVIEW_PASS_COOKIE = "marina_preview_pass"
+_PREVIEW_PASS_TTL_S = 12 * 3600.0
+_preview_passes: dict = {}           # 통행증 → (만료 시각, user_id, label)
+
+
+def issue_preview_pass(user_id: int | None, label: str, now: float | None = None) -> str:
+    current = time.time() if now is None else now
+    token = secrets.token_urlsafe(32)
+    with _preview_tickets_lock:
+        for key in [k for k, v in _preview_passes.items() if v[0] <= current]:
+            _preview_passes.pop(key, None)
+        _preview_passes[token] = (current + _PREVIEW_PASS_TTL_S, user_id, label)
+    return token
+
+
+def preview_pass_ok(token: str, label: str, now: float | None = None) -> bool:
+    current = time.time() if now is None else now
+    entry = _preview_passes.get(str(token or ""))
+    return bool(entry and entry[0] > current and entry[2] == label)
+
+
+def redeem_preview_ticket(ticket: str, label: str, now: float | None = None) -> tuple:
+    """(맞나, user_id). **한 번 쓰면 버린다** — 주소창·기록에 남은 입장권으로 다시 못 들어온다."""
+    current = time.time() if now is None else now
+    with _preview_tickets_lock:
+        entry = _preview_tickets.pop(str(ticket or ""), None)
+    if not entry or entry[0] <= current or entry[2] != label:
+        return False, None
+    return True, entry[1]
+
+
+def extra_public_hosts() -> frozenset:
+    return _load_public_hosts()[1]
 
 
 # HTML 을 **보기**로 여는 경우(모바일 뷰어 iframe). 원칙(대시보드 오리진에서 HTML 실행 금지)은 그대로 두고
@@ -392,35 +464,48 @@ class Handler(BaseHTTPRequestHandler):
 
         서비스 목록과 완료 카드의 [화면 보기]가 **같은 계산**을 쓰게 한다 — 두 벌로 갈라지면
         한쪽만 폰에서 안 열리는 주소를 준다."""
-        session = session_payload(root) if session is None else session
         open_urls: dict[str, str] = {}
+        remote_host = str(self.headers.get("host") or "").split(":")[0]
+        is_local = remote_host in ("localhost", "127.0.0.1", "::1", "")
+        preview_host = "" if is_local else preview_host_for(remote_host)
+        for name, domain in self._preview_routes(root, session).items():
+            if is_local:
+                open_urls[name] = f"http://{domain}/"
+                continue
+            label = self._route_label(domain)
+            if preview_host:
+                # 미리보기 이름이 따로 있다(터널) — 입장권을 받으러 같은 호스트를 한 번 거친다.
+                open_urls[name] = ("/mobile/api/preview-go?" + urllib.parse.urlencode(
+                    {"root": str(root), "label": label}))
+            else:
+                open_urls[name] = (f"https://{remote_host}:{_PREVIEW_PUBLIC_PORT}"
+                                   f"/__room?label={urllib.parse.quote(label)}")
+        return open_urls
+
+    @staticmethod
+    def _route_label(domain: str) -> str:
+        label = str(domain or "").split(":")[0]
+        return label[: -len(".localhost")] if label.endswith(".localhost") else label
+
+    def _preview_routes(self, root: Path, session: dict[str, Any] = None) -> dict[str, str]:
+        """서비스 → 게이트웨이 도메인(<wt>.<proj>.localhost:3902). 입장권 발급도 이 목록으로 대상을 검사한다."""
+        session = session_payload(root) if session is None else session
+        routes: dict[str, str] = {}
         if not _GATEWAY_ON:
-            return open_urls
+            return routes
         snapshot = next(
             (item for item in _gateway_snapshot()
              if item.get("id") == session.get("id") and item.get("projectId") == session.get("projectId")),
             None,
         )
         if not snapshot:
-            return open_urls
+            return routes
         # 게이트웨이 주소(<wt>.<proj>.localhost:3902)는 **이 맥에서만** 열린다.
         # 폰이나 다른 기기로 접속했으면 그 주소를 줘도 이름 해석이 안 돼 아무 일도
-        # 안 일어난다. 그때는 미리보기 문(전용 포트)을 거치는 주소를 준다 —
-        # 형이 접속에 쓴 호스트를 그대로 쓰므로 별도 설정이 필요 없다.
-        remote_host = str(self.headers.get("host") or "").split(":")[0]
-        is_local = remote_host in ("localhost", "127.0.0.1", "::1", "")
+        # 안 일어난다. 그때는 미리보기 문(전용 포트)을 거치는 주소를 준다(_service_open_urls).
         for route in _gw().summarize_gateway([snapshot], _GATEWAY_PORT):
-            name = str(route.get("service") or "")
-            domain = str(route.get("domain") or "")
-            if is_local:
-                open_urls[name] = f"http://{domain}/"
-            else:
-                label = domain.split(":")[0]
-                if label.endswith(".localhost"):
-                    label = label[: -len(".localhost")]
-                open_urls[name] = (f"https://{remote_host}:{_PREVIEW_PUBLIC_PORT}"
-                                   f"/__room?label={urllib.parse.quote(label)}")
-        return open_urls
+            routes[str(route.get("service") or "")] = str(route.get("domain") or "")
+        return routes
 
     def _require_root_access(self, root: Path) -> bool:
         if self._policy().can_root(getattr(self, "auth_principal", None), root):
@@ -508,6 +593,13 @@ class Handler(BaseHTTPRequestHandler):
     # 홉바이홉 헤더는 그대로 옮기면 안 된다(연결 수명은 이쪽 소켓의 것이다).
     _HOP_BY_HOP = frozenset({"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                              "te", "trailers", "transfer-encoding", "upgrade"})
+
+    def _request_cookie_value(self, name: str) -> str:
+        for chunk in str(self.headers.get("cookie") or "").split(";"):
+            key, _, value = chunk.strip().partition("=")
+            if key == name:
+                return value
+        return ""
 
     def _preview_cookie(self) -> str:
         for chunk in str(self.headers.get("cookie") or "").split(";"):
@@ -819,6 +911,39 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(mobile_catalog(root, query.get("source", [""])[0], query.get("q", [""])[0]))
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
+            return
+        if parsed.path == "/mobile/api/preview-go":
+            # [화면 보기] → 미리보기 이름으로 넘긴다. 로그인·방 권한을 여기(대시보드 호스트)서 확인하고
+            # 1회용 입장권을 실어 보낸다(issue_preview_ticket 설명). 대상은 이 방의 게이트웨이 경로뿐이다.
+            if not self._agent_api_ok(parsed, principal):
+                self.send_json({"error": "mobile disabled or invalid token"}, 403)
+                return
+            query = urllib.parse.parse_qs(parsed.query)
+            try:
+                root = safe_root(query.get("root", [""])[0])
+            except Exception as exc:
+                self.send_json({"error": str(exc)}, 400)
+                return
+            if not self._require_root_access(root):
+                return
+            label = str(query.get("label", [""])[0]).lower()
+            labels = {self._route_label(d) for d in self._preview_routes(root).values()}
+            preview_host = preview_host_for(str(self.headers.get("host") or "").split(":")[0])
+            if not label or label not in labels or not preview_host:
+                self.send_json({"error": "열 수 있는 화면이 아니에요"}, 404)
+                return
+            params = {"label": label}
+            if auth_controller().store.auth_enabled():
+                if principal is None:
+                    self.send_json({"error": "먼저 로그인해주세요"}, 401)
+                    return
+                params["ticket"] = issue_preview_ticket(principal.user.id, label)
+            self.send_response(302)
+            self.send_header("location", f"https://{preview_host}/__room?" + urllib.parse.urlencode(params))
+            self.send_header("cache-control", "no-store")
+            self.send_header("referrer-policy", "no-referrer")
+            self.send_header("content-length", "0")
+            self.end_headers()
             return
         if parsed.path == "/mobile/api/services":
             if not self._agent_api_ok(parsed, principal):
@@ -3073,8 +3198,12 @@ class PreviewHandler(BaseHTTPRequestHandler):
     def _handle(self, method: str) -> None:
         parsed = urllib.parse.urlparse(self.path)
         controller = auth_controller()
+        if parsed.path == self._ROOM_PATH and "ticket=" in parsed.query:
+            self._enter_with_ticket(parsed, controller)
+            return
         try:
-            if controller.store.auth_enabled() and controller._principal(self) is None:
+            통행 = preview_pass_ok(Handler._request_cookie_value(self, PREVIEW_PASS_COOKIE), Handler._preview_cookie(self))
+            if controller.store.auth_enabled() and not 통행 and controller._principal(self) is None:
                 # 미리보기 포트에는 로그인 폼을 두지 않는다 — 대시보드에서 로그인하고 오면 쿠키가 따라온다.
                 self._deny(401, "먼저 마리나 대시보드에서 로그인해주세요.")
                 return
@@ -3101,6 +3230,37 @@ class PreviewHandler(BaseHTTPRequestHandler):
         target = parsed.path + (f"?{parsed.query}" if parsed.query else "")
         Handler._proxy_to_gateway(self, label, target, method)
 
+    def _enter_with_ticket(self, parsed: urllib.parse.ParseResult, controller: Any) -> None:
+        """대시보드가 준 1회용 입장권으로 이 호스트에 세션을 연다(미리보기 이름이 따로 있을 때)."""
+        query = urllib.parse.parse_qs(parsed.query)
+        label = str(query.get("label", [""])[0]).lower()
+        if not Handler._PREVIEW_LABEL_RE.match(label):
+            self._deny(400, "invalid preview target")
+            return
+        # 남이 자기 입장권 링크를 보내 **내 브라우저에 자기 통행증**을 심는 걸 막는다(리뷰 지적: 로그인 CSRF).
+        # 정상 경로는 마리나 화면 → 같은 사이트의 preview-go → 여기라 same-site 다. 헤더가 없는 옛 브라우저는 통과.
+        출처 = str(self.headers.get("sec-fetch-site") or "").lower()
+        if 출처 and 출처 not in ("same-site", "same-origin"):
+            self._deny(403, "마리나 화면에서 [화면 보기]로 들어와 주세요.")
+            return
+        ok, user_id = redeem_preview_ticket(query.get("ticket", [""])[0], label)
+        if not ok:
+            self._deny(401, "입장권이 만료됐어요 — 마리나에서 [화면 보기]를 다시 눌러주세요.")
+            return
+        secure = "; Secure" if controller._is_https(self) else ""
+        cookies = [f"{PREVIEW_PASS_COOKIE}={issue_preview_pass(user_id, label)}; Path=/; SameSite=Lax; HttpOnly"
+                   f"; Max-Age={int(_PREVIEW_PASS_TTL_S)}{secure}"]
+        self.send_response(302)
+        self.send_header("location", "/")          # 입장권이 주소창에 남지 않게 바로 떼어낸다
+        for value in cookies:
+            self.send_header("set-cookie", value)
+        self.send_header("set-cookie",
+                         f"marina_preview={urllib.parse.quote(label)}; Path=/; SameSite=Lax; HttpOnly")
+        self.send_header("cache-control", "no-store")
+        self.send_header("referrer-policy", "no-referrer")
+        self.send_header("content-length", "0")
+        self.end_headers()
+
     def do_GET(self) -> None:      # noqa: N802
         self._handle("GET")
 
@@ -3117,7 +3277,8 @@ class PreviewHandler(BaseHTTPRequestHandler):
         self._handle("DELETE")
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print("[marina-preview]", fmt % args)
+        # 입장권은 1회용이지만 로그에 남기지 않는다 — 쓰이기 전에 로그를 읽는 쪽이 가로챌 수 있다(리뷰 지적).
+        print("[marina-preview]", re.sub(r"ticket=[^&\s]+", "ticket=…", fmt % args))
 
 
 def main() -> None:
