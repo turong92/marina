@@ -3208,6 +3208,15 @@ _MOBILE_HTML = r"""<!doctype html>
     .pendingActions { display: inline-flex; gap: 5px; }
     .pendingActionBtn { display: inline-flex; align-items: center; width: auto; min-height: 19px; padding: 1px 7px; border: 1px solid #c8d1dc; border-radius: 999px; background: #fff; color: #526176; font-size: 9px; font-weight: 800; line-height: 1.6; text-decoration: none; cursor: pointer; }
     .pendingActionBtn[data-pending-cancel] { border-color: #e3b8b8; color: #a22b2b; }
+    /* 복사 — 폰엔 호버가 없어 늘 보여야 한다. 대신 작고 흐리게, 손가락 닿는 높이(28px)는 지킨다. */
+    .turnTools { display: flex; justify-content: flex-end; margin-top: 4px; }
+    .copyBtn { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 28px; min-height: 28px; padding: 2px 8px; border: 0; border-radius: 999px; background: transparent; color: #7a8394; font-size: 11px; font-weight: 750; line-height: 1; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+    .copyBtn:active { background: rgba(120, 130, 150, .16); }
+    .copyBtn.copied { color: #2f6b45; }
+    .turn.output .copyBtn { color: #9ca3af; }
+    .mdTableBlock { margin: 6px 0; }
+    .mdTableBlock .mdTableWrap { margin: 0; }
+    .tableCopyBtn { display: flex; margin: 0 0 2px auto; min-height: 24px; font-size: 10px; }
     .queuedTag { display: inline-block; margin-bottom: 4px; padding: 1px 6px; border-radius: 6px; background: rgba(11, 99, 206, .12); color: #0b63ce; font-size: 9px; font-weight: 850; }
     .queuedTag.consumed { background: rgba(107, 114, 128, .14); color: #6b7280; }
     .queuedTag.steered { background: rgba(47, 107, 69, .14); color: #2f6b45; }
@@ -3570,6 +3579,8 @@ _MOBILE_HTML = r"""<!doctype html>
       .mdCode { background: #141a23; border-color: #303846; }
       .mdCodeLang { border-color: #262e3a; color: #8b96a8; }
       .mdTableWrap, .mdHr { border-color: #303846; }
+      .copyBtn { color: #8b96a8; }
+      .copyBtn.copied { color: #7fd6a2; }
       .mdTable th, .mdTable td { border-color: #262e3a; }
       .mdTable th { background: #1c2431; }
       .mdQuote { border-color: #3a4453; color: #a5adba; }

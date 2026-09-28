@@ -139,7 +139,8 @@
           };
           const head = `<tr>${header.map((text, index) => cell(text, "th", index)).join("")}</tr>`;
           const body = rows.map(row => `<tr>${header.map((_, index) => cell(row[index] ?? "", "td", index)).join("")}</tr>`).join("");
-          out.push(`<div class="mdTableWrap"><table class="mdTable"><thead>${head}</thead><tbody>${body}</tbody></table></div>`);
+          // 표는 따로 복사한다 — 탭 구분(TSV)이라 시트·노션에 붙이면 칸이 그대로 산다. 스크롤 박스 밖에 둬야 버튼이 안 밀린다.
+          out.push(`<div class="mdTableBlock"><button class="copyBtn tableCopyBtn" type="button" data-copy-table aria-label="표 복사" title="표 복사 (탭 구분)">⧉ 표</button><div class="mdTableWrap"><table class="mdTable"><thead>${head}</thead><tbody>${body}</tbody></table></div></div>`);
           continue;
         }
         // ③ 제목
@@ -420,7 +421,10 @@
         : item.queued
         ? `<span class="queuedTag${item.queuedCancelled ? " consumed" : ""}">⏱ ${item.queuedCancelled ? "대기열에서 취소됨" : "대기열 · 대기 중"}</span>`
         : "";
-      return `<div class="turn ${role}${item.pending ? " pending" : ""}${item.queued ? " queued" : ""}" data-timeline-message-id="${esc(item.id || "")}">${peerFrom}${queuedBadge}<div class="turnBody">${renderMarkdownBlocks(stripped)}</div>${renderTurnAttachments(attachments)}${renderTimelineImages(item)}${pendingState}</div>`;
+      // 복사는 원문(마크다운) 그대로 — 화면에 그린 HTML 이 아니라 에이전트가 쓴 글자를 준다. 아직 안 간 말은 뺀다.
+      const copyBtn = !item.pending && stripped.trim()
+        ? `<div class="turnTools"><button class="copyBtn" type="button" data-copy-text="${esc(stripped)}" aria-label="메시지 복사" title="메시지 복사">⧉</button></div>` : "";
+      return `<div class="turn ${role}${item.pending ? " pending" : ""}${item.queued ? " queued" : ""}" data-timeline-message-id="${esc(item.id || "")}">${peerFrom}${queuedBadge}<div class="turnBody">${renderMarkdownBlocks(stripped)}</div>${renderTurnAttachments(attachments)}${renderTimelineImages(item)}${copyBtn}${pendingState}</div>`;
     }
     function timelineDetailAttrs(id) {
       const value = String(id || "detail");
@@ -829,6 +833,72 @@
       ]);
     }
 
+  // ── 복사 ── 버튼은 렌더러가 그리니 동작도 여기 하나로(웹·모바일이 같은 걸 쓴다). 호스트 상태는 안 본다.
+  function tableTsv(table) {
+    return Array.from(table.rows).map(row => Array.from(row.cells)
+      .map(cell => cell.innerText.replace(/\s*\n\s*/g, " ").replace(/\t/g, " ").trim()).join("\t")).join("\n");
+  }
+  // navigator.clipboard 는 보안 컨텍스트(https·localhost)에서만 있다. tailnet IP 로 http 접속하면 없으니
+  // 옛 방식(선택 후 execCommand)으로 떨어진다 — iOS 는 readonly textarea + setSelectionRange 여야 복사된다.
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      return navigator.clipboard.writeText(text).then(() => true, () => legacyCopy(text));
+    }
+    return Promise.resolve(legacyCopy(text));
+  }
+  function legacyCopy(text) {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0;font-size:16px;";
+    document.body.appendChild(ta);
+    ta.focus({preventScroll: true});
+    ta.setSelectionRange(0, text.length);
+    let ok = false;
+    try { ok = document.execCommand("copy"); } catch (_) { ok = false; }
+    ta.remove();
+    return ok;
+  }
+  // 버튼 표시만으론 부족하다 — 웹은 폴링 때마다 대화를 통째로 다시 그려 버튼 노드가 바뀐다(리뷰 지적).
+  // 그래서 body 에 붙는 토스트로도 알린다. 스타일은 인라인(웹·모바일 CSS 두 벌을 안 만들려고).
+  function showCopyToast(ok) {
+    let el = document.getElementById("marinaCopyToast");
+    if (!el) {
+      el = document.createElement("div");
+      el.id = "marinaCopyToast";
+      el.setAttribute("role", "status");
+      el.style.cssText = "position:fixed;left:50%;bottom:calc(84px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:10000;padding:6px 12px;border-radius:999px;background:rgba(20,26,35,.88);color:#fff;font-size:12px;font-weight:700;pointer-events:none;transition:opacity .15s;opacity:0;";
+      document.body.appendChild(el);
+    }
+    el.textContent = ok ? "복사됨" : "복사하지 못했어요";
+    el.style.opacity = "1";
+    clearTimeout(el._timer);
+    el._timer = setTimeout(() => { el.style.opacity = "0"; }, 1300);
+  }
+  function flashCopied(btn, ok) {
+    showCopyToast(ok);
+    if (!btn.dataset.copyLabel) btn.dataset.copyLabel = btn.textContent;
+    btn.textContent = ok ? "✓" : "✕";
+    btn.classList.toggle("copied", ok);
+    clearTimeout(btn._copyTimer);
+    btn._copyTimer = setTimeout(() => { btn.textContent = btn.dataset.copyLabel; btn.classList.remove("copied"); }, 1500);
+  }
+  if (typeof document !== "undefined") {
+    document.addEventListener("click", event => {
+      const btn = event.target.closest && event.target.closest("[data-copy-text], [data-copy-table]");
+      if (!btn) return;
+      event.preventDefault();
+      event.stopPropagation();
+      let text = btn.getAttribute("data-copy-text");
+      if (text == null) {
+        const table = btn.closest(".mdTableBlock") && btn.closest(".mdTableBlock").querySelector("table");
+        text = table ? tableTsv(table) : "";
+      }
+      if (!text) return;
+      copyText(text).then(ok => flashCopied(btn, ok));
+    }, true);
+  }
+
   window.MarinaChat = {
     configure, setDetailScope, noteDetailToggle, IMAGE_EXT_RE, collectViewables,
     esc, renderInlineMarkdown, renderRichText, mdTableCells, mdIsTableRow, mdIsTableDivider,
@@ -840,6 +910,6 @@
     activityGroupSummary, progressLine, renderActivityItem, renderActivityGroup, reconcileActivityList,
     renderTimelineSequence, questionsFromActivity, pendingQuestionActivity,
     questionFallbackText, renderQuestionCard, renderAnsweredQuestion, renderConversationSequence, pendingKeyPart,
-    timelineItemKeyParts, exchangeRenderKey,
+    timelineItemKeyParts, exchangeRenderKey, tableTsv,
   };
 })();
