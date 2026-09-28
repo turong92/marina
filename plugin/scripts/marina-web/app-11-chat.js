@@ -812,6 +812,9 @@
     function chatStartPoll() {
       if (chatTimer) return;
       chatTimer = setInterval(() => {
+        // 탭이 뒤로 가 있으면 건너뛴다 — 다른 폴링(목록·모바일)과 같은 규칙. 안 그러면 대화 칸만 열어 두고
+        // 창을 내려도 3초마다 대화 기록 전체를 다시 받는다(2026-09-28 요청 로그로 확인).
+        if (document.hidden) return;
         const pane = chatPane();
         if (!pane || pane.hidden || chatSending || chatAnswering) return;
         // 입력 중이면 그 칸만 건너뛴다 — 옆 칸까지 멈출 이유가 없다.
