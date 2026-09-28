@@ -113,6 +113,27 @@ def _changed_paths(root: Path) -> list[str] | None:
     return 경로들 or None
 
 
+# HTML 을 **보기**로 여는 경우(모바일 뷰어 iframe). 원칙(대시보드 오리진에서 HTML 실행 금지)은 그대로 두고
+# 이 응답만 CSP sandbox 로 **출처 없는 문서**로 만든다 — 스크립트는 돌지만 marina 쿠키·토큰·API 에 닿지 못한다
+# (쿠키는 SameSite=Lax 라 출처 없는 요청엔 안 딸려 간다). URL 을 직접 열어도 sandbox 는 헤더라 똑같이 걸린다.
+# CDN 스크립트·외부 그림은 허용해야 에이전트가 만든 차트·리포트가 산다.
+HTML_VIEW_HEADERS = (
+    ("content-security-policy", "sandbox allow-scripts allow-popups; "
+                                "default-src * data: blob: 'unsafe-inline' 'unsafe-eval'; frame-ancestors 'self'"),
+    ("x-frame-options", "SAMEORIGIN"),
+    ("referrer-policy", "no-referrer"),
+)
+
+
+def session_file_as_html(raw_path: str, view: str, token_in_url: bool = False) -> bool:
+    """view=html 이고 확장자가 .html/.htm 일 때만 — 다른 파일은 여전히 text/plain.
+    **URL 에 모바일 토큰이 실린 요청은 안 된다**(리뷰 치명 지적): sandbox 는 쿠키·부모 접근은 막아도
+    문서가 자기 주소(location.search)를 읽는 건 못 막는다. 스크립트가 도는 문서에 장기 비밀을 넘기면
+    그대로 빼 가 marina 를 조종할 수 있다. 쿠키 로그인은 URL 에 비밀이 없어 괜찮다."""
+    return (view == "html" and not token_in_url
+            and Path(raw_path or "").suffix.lower() in (".html", ".htm"))
+
+
 class Handler(BaseHTTPRequestHandler):
     def _remote_controller(self) -> RemoteController:
         global _REMOTE_CONTROLLER
@@ -882,13 +903,19 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 self.send_json({"error": str(exc)}, 400)
                 return
+            as_html = session_file_as_html(query.get("path", [""])[0], query.get("view", [""])[0],
+                                           token_in_url=bool(query.get("token", [""])[0]))
             self.send_response(200)
-            self.send_header("content-type", content_type)
+            self.send_header("content-type", "text/html; charset=utf-8" if as_html else content_type)
             self.send_header("x-content-type-options", "nosniff")
             self.send_header("content-disposition", "inline")
             self.send_header("cache-control", "private, no-cache")   # 파일은 계속 바뀐다 — 캐시 금지
             self.send_header("content-length", str(len(data)))
-            auth_controller().add_security_headers(self)
+            if as_html:
+                for name, value in HTML_VIEW_HEADERS:
+                    self.send_header(name, value)
+            else:
+                auth_controller().add_security_headers(self)
             self.end_headers()
             self.wfile.write(data)
             return

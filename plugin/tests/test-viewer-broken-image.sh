@@ -49,12 +49,13 @@ function 요소(id) {
 }
 const els = {};
 for (const id of ["imageViewer", "imageViewerImg", "viewerText", "viewerName", "viewerCount",
-                  "viewerDead", "viewerPrev", "viewerNext"]) els[id] = 요소(id);
+                  "viewerDead", "viewerPrev", "viewerNext", "viewerDoc", "viewerFrame"]) els[id] = 요소(id);
 
 const context = {
   document: {getElementById: id => els[id] || 요소(id)},
   imageViewer: els.imageViewer, imageViewerImg: els.imageViewerImg,
   viewerText: els.viewerText, viewerName: els.viewerName,
+  viewerDoc: els.viewerDoc, viewerFrame: els.viewerFrame,
   headers: () => ({}), responseError: async () => "err",
   transcriptImageUrl: ref => `/ti?ref=${ref}`, sessionFileUrl: p => `/sf?path=${encodeURIComponent(p)}`,
   IMAGE_EXT_RE: /\.(png|jpe?g|gif|webp|bmp|heic|svg)$/i,

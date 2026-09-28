@@ -3349,6 +3349,10 @@ _MOBILE_HTML = r"""<!doctype html>
                        transform-origin: center center; }
     .imageViewer img.zoomed { cursor: grab; }
     .viewerText { flex: 1; min-height: 0; margin: 0; padding: 0 12px calc(12px + env(safe-area-inset-bottom)); overflow: auto; color: #e8edf4; font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre; }
+    /* 마크다운은 대화창과 같은 렌더러로, HTML 은 출처 없는 틀(sandbox) 안에서 실제 페이지로 본다. */
+    .viewerDoc { display: none; flex: 1; min-height: 0; margin: 0 8px calc(8px + env(safe-area-inset-bottom)); padding: 14px 14px 20px; overflow: auto; border-radius: 10px; background: #fff; color: #1c2330; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
+    .viewerDoc > :first-child { margin-top: 0; }
+    .viewerFrame { display: none; flex: 1; min-height: 0; width: calc(100% - 16px); margin: 0 8px calc(8px + env(safe-area-inset-bottom)); border: 0; border-radius: 10px; background: #fff; }
     .imageViewerClose { width: 34px; min-height: 34px; flex: none; padding: 0; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; border-color: transparent; font-size: 19px; }
     /* 세션 탭 — 가로 스크롤 한 줄. 목록 뷰에선 숨긴다(거기선 목록 자체가 탐색이다). */
     .navTrigger { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto;
@@ -3579,6 +3583,7 @@ _MOBILE_HTML = r"""<!doctype html>
       .mdCode { background: #141a23; border-color: #303846; }
       .mdCodeLang { border-color: #262e3a; color: #8b96a8; }
       .mdTableWrap, .mdHr { border-color: #303846; }
+      .viewerDoc { background: #11151c; color: #e8edf4; }
       .copyBtn { color: #8b96a8; }
       .copyBtn.copied { color: #7fd6a2; }
       .mdTable th, .mdTable td { border-color: #262e3a; }
@@ -3829,6 +3834,8 @@ _MOBILE_HTML = r"""<!doctype html>
       <div class="viewerBar" id="viewerBar"><span class="viewerName" id="viewerName"></span><span class="viewerCount" id="viewerCount"></span><button class="imageViewerClose" id="imageViewerClose" type="button" aria-label="닫기">&#215;</button></div>
       <img id="imageViewerImg" alt="" />
       <pre class="viewerText" id="viewerText"></pre>
+      <div class="viewerDoc" id="viewerDoc"></div>
+      <iframe class="viewerFrame" id="viewerFrame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" title="HTML 미리보기"></iframe>
       <div class="viewerDead" id="viewerDead"></div>
       <button class="viewerNav prev" id="viewerPrev" type="button" aria-label="이전">&#8249;</button>
       <button class="viewerNav next" id="viewerNext" type="button" aria-label="다음">&#8250;</button>
@@ -4259,6 +4266,8 @@ _MOBILE_HTML = r"""<!doctype html>
     const imageViewer = document.getElementById("imageViewer");
     const imageViewerImg = document.getElementById("imageViewerImg");
     const viewerText = document.getElementById("viewerText");
+    const viewerDoc = document.getElementById("viewerDoc");
+    const viewerFrame = document.getElementById("viewerFrame");
     const viewerName = document.getElementById("viewerName");
     const viewerBar = document.getElementById("viewerBar");
     const imageViewerClose = document.getElementById("imageViewerClose");
@@ -4554,6 +4563,10 @@ _MOBILE_HTML = r"""<!doctype html>
       imageViewerImg.style.display = "none";
       viewerText.style.display = "none";
       viewerText.textContent = "";
+      viewerDoc.style.display = "none";
+      viewerDoc.innerHTML = "";
+      viewerFrame.style.display = "none";
+      viewerFrame.removeAttribute("src");      // 페이지가 뒤에서 계속 돌지 않게
       viewerDead.style.display = "none";
       viewerName.textContent = "";
       viewerCount.textContent = "";
@@ -4571,6 +4584,13 @@ _MOBILE_HTML = r"""<!doctype html>
       if (!item) return "";
       if (item.type === "raw") return item.url || "";
       return item.type === "image" ? transcriptImageUrl(item.ref) : sessionFileUrl(item.path);
+    }
+    // 파일 종류 — 경로가 없는 항목(raw)은 이름으로 본다.
+    function viewerKind(item) {
+      const name = String((item && (item.path || item.name)) || "").toLowerCase();
+      if (/\.(md|markdown)$/.test(name)) return "markdown";
+      if (/\.html?$/.test(name)) return "html";
+      return "text";
     }
     function viewerIsImage(item) {
       return Boolean(item && (item.type === "image" || item.isImage
@@ -4594,6 +4614,10 @@ _MOBILE_HTML = r"""<!doctype html>
       imageViewerImg.style.display = "none";
       imageViewerImg.removeAttribute("src");
       viewerText.style.display = "none";
+      viewerDoc.style.display = "none";
+      viewerDoc.innerHTML = "";
+      viewerFrame.style.display = "none";
+      viewerFrame.removeAttribute("src");
       viewerDead.style.display = "none";
 
       const url = viewerUrlOf(item);
@@ -4608,6 +4632,15 @@ _MOBILE_HTML = r"""<!doctype html>
         imageViewerImg.src = url;
         return;
       }
+      const kind = viewerKind(item);
+      // 토큰 모드(쿠키 로그인 아님)는 파일 URL 에 토큰이 실린다 — 스크립트가 도는 페이지에 넘기면 빼 갈 수
+      // 있어서 서버도 HTML 로 안 준다. 그땐 소스를 텍스트로 보여 준다.
+      if (kind === "html" && cookieAuth) {
+        // 서버가 view=html 이면 CSP sandbox 를 건 text/html 로 준다 — iframe 의 sandbox 속성과 이중으로.
+        viewerFrame.style.display = "block";
+        viewerFrame.src = `${url}${url.includes("?") ? "&" : "?"}view=html`;
+        return;
+      }
       viewerText.style.display = "block";
       viewerText.textContent = "불러오는 중...";
       try {
@@ -4615,6 +4648,14 @@ _MOBILE_HTML = r"""<!doctype html>
         if (!r.ok) throw new Error(await responseError(r));
         const body = await r.text();
         if (seq !== viewerSeq) return;   // 그 사이 넘어갔다 — 남의 화면을 덮지 않는다
+        if (kind === "markdown" && body) {
+          // 대화창과 같은 렌더러 — 글자는 전부 이스케이프된다(원문 HTML 은 실행되지 않는다).
+          viewerText.style.display = "none";
+          viewerDoc.style.display = "block";
+          viewerDoc.innerHTML = renderMarkdownBlocks(body.length > VIEWER_TEXT_MAX ? body.slice(0, VIEWER_TEXT_MAX) : body);
+          viewerDoc.scrollTop = 0;
+          return;
+        }
         viewerText.textContent = body.length > VIEWER_TEXT_MAX
           ? `${body.slice(0, VIEWER_TEXT_MAX)}\n\n… 이하 생략 (${body.length.toLocaleString()}자 중 앞 ${VIEWER_TEXT_MAX.toLocaleString()}자)`
           : (body || "(빈 파일)");
