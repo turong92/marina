@@ -3233,6 +3233,8 @@ _MOBILE_HTML = r"""<!doctype html>
     .mdTableBlock { position: relative; margin: 6px 0; }
     .mdTableBlock .mdTableWrap { margin: 0; }
     .tableCopyBtn { position: absolute; top: -12px; right: -4px; z-index: 2; display: none; min-height: 24px; font-size: 10px; }
+    /* 파일 뷰어의 표(CSV)는 말풍선 밖이라 탭·호버 규칙이 안 닿는다 — 늘 보인다(리뷰 지적). */
+    .viewerDoc .tableCopyBtn { display: inline-flex; }
     .queuedTag { display: inline-block; margin-bottom: 4px; padding: 1px 6px; border-radius: 6px; background: rgba(11, 99, 206, .12); color: #0b63ce; font-size: 9px; font-weight: 850; }
     .queuedTag.consumed { background: rgba(107, 114, 128, .14); color: #6b7280; }
     .queuedTag.steered { background: rgba(47, 107, 69, .14); color: #2f6b45; }
@@ -3371,6 +3373,9 @@ _MOBILE_HTML = r"""<!doctype html>
     /* 마크다운은 대화창과 같은 렌더러로, HTML 은 출처 없는 틀(sandbox) 안에서 실제 페이지로 본다. */
     .viewerDoc { display: none; flex: 1; min-height: 0; margin: 0 8px calc(8px + env(safe-area-inset-bottom)); padding: 14px 14px 20px; overflow: auto; border-radius: 10px; background: #fff; color: #1c2330; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
     .viewerDoc > :first-child { margin-top: 0; }
+    /* 폰 브라우저가 직접 여는 게 나은 것(PDF)·미리볼 수 없는 것(엑셀·zip…)은 카드 하나 — 열기 또는 받기. */
+    .viewerCard { display: none; margin: auto 24px; padding: 18px; border-radius: 12px; background: rgb(255 255 255 / 8%); color: #e8edf4; font-size: 13px; line-height: 1.6; text-align: center; }
+    .viewerCard a { display: inline-block; margin-top: 12px; padding: 9px 22px; border-radius: 18px; background: #2f6fed; color: #fff; font-weight: 700; text-decoration: none; }
     .viewerFrame { display: none; flex: 1; min-height: 0; width: calc(100% - 16px); margin: 0 8px calc(8px + env(safe-area-inset-bottom)); border: 0; border-radius: 10px; background: #fff; }
     /* 확대 화면에서 바로 받기(형: "디테일 확대 화면에서 다운로드도"). 닫기 버튼과 같은 모양. */
     .viewerSave { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; flex: none; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; font-size: 16px; text-decoration: none; }
@@ -3861,6 +3866,7 @@ _MOBILE_HTML = r"""<!doctype html>
       <div class="viewerDoc" id="viewerDoc"></div>
       <iframe class="viewerFrame" id="viewerFrame" sandbox="allow-scripts allow-popups" referrerpolicy="no-referrer" title="HTML 미리보기"></iframe>
       <div class="viewerDead" id="viewerDead"></div>
+      <div class="viewerCard" id="viewerCard"></div>
       <button class="viewerNav prev" id="viewerPrev" type="button" aria-label="이전">&#8249;</button>
       <button class="viewerNav next" id="viewerNext" type="button" aria-label="다음">&#8250;</button>
     </div>
@@ -4561,6 +4567,7 @@ _MOBILE_HTML = r"""<!doctype html>
     // 없었다. 목록 출처는 둘: 모아보기(자기 배열) / 채팅(collectViewables — 그 대화 것만, A안).
     const viewerCount = document.getElementById("viewerCount");
     const viewerDead = document.getElementById("viewerDead");
+    const viewerCard = document.getElementById("viewerCard");
     const viewerPrev = document.getElementById("viewerPrev");
     const viewerNext = document.getElementById("viewerNext");
     let viewerList = [];
@@ -4593,6 +4600,8 @@ _MOBILE_HTML = r"""<!doctype html>
       viewerFrame.style.display = "none";
       viewerFrame.removeAttribute("src");      // 페이지가 뒤에서 계속 돌지 않게
       viewerDead.style.display = "none";
+      viewerCard.style.display = "none";
+      viewerCard.innerHTML = "";
       viewerName.textContent = "";
       viewerCount.textContent = "";
       viewerSave.hidden = true;
@@ -4617,7 +4626,50 @@ _MOBILE_HTML = r"""<!doctype html>
       const name = String((item && (item.path || item.name)) || "").toLowerCase();
       if (/\.(md|markdown)$/.test(name)) return "markdown";
       if (/\.html?$/.test(name)) return "html";
+      if (/\.pdf$/.test(name)) return "pdf";
+      if (/\.(csv|tsv)$/.test(name)) return "table";
+      if (VIEWER_BINARY_RE.test(name)) return "binary";
       return "text";
+    }
+    // 글자로 읽으면 깨진 기호만 나오는 것들 — 받아서 앱으로 연다.
+    const VIEWER_BINARY_RE = /\.(xlsx?|xlsm|docx?|pptx?|key|numbers|pages|hwpx?|zip|gz|tgz|tar|7z|rar|dmg|jar|mp4|mov|m4a|mp3|wav|webm|woff2?|ttf|otf|sqlite|db|psd|ai|sketch|fig)$/;
+    const VIEWER_TABLE_ROWS = 1000;   // 표는 이만큼만 그린다 — 나머지는 받아서 본다
+    function viewerShowCard(message, href, label, newTab) {
+      viewerCard.style.display = "block";
+      viewerCard.innerHTML = `<div>${esc(message)}</div>`
+        + (href ? `<a href="${esc(href)}"${newTab ? ' target="_blank" rel="noopener noreferrer"' : ` download="${esc(viewerSave.getAttribute("download") || "")}"`}>${esc(label)}</a>` : "");
+    }
+    // CSV·TSV → 대화창 표와 같은 모양(복사 버튼째로). 따옴표 안 쉼표·줄바꿈·"" 이스케이프까지.
+    function parseDelimited(text, sep) {
+      const rows = [];
+      let row = [], cell = "", quoted = false;
+      for (let i = 0; i < text.length; i++) {
+        const c = text[i];
+        if (quoted) {
+          if (c === '"' && text[i + 1] === '"') { cell += '"'; i++; }
+          else if (c === '"') quoted = false;
+          else cell += c;
+        } else if (c === '"' && cell === "") quoted = true;
+        else if (c === sep) { row.push(cell); cell = ""; }
+        else if (c === "\n" || c === "\r") {
+          if (c === "\r" && text[i + 1] === "\n") i++;
+          row.push(cell); rows.push(row); row = []; cell = "";
+          if (rows.length > VIEWER_TABLE_ROWS) return rows;
+        } else cell += c;
+      }
+      if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+      return rows;
+    }
+    function renderDelimitedTable(text, name) {
+      const rows = parseDelimited(text.replace(/^\ufeff/, ""), /\.tsv$/i.test(name) ? "\t" : ",");
+      if (!rows.length) return "";
+      const 잘림 = rows.length > VIEWER_TABLE_ROWS;
+      const [head, ...body] = rows.slice(0, VIEWER_TABLE_ROWS);
+      const cells = (r, tag) => r.map(v => `<${tag}>${esc(v)}</${tag}>`).join("");
+      return `<div class="mdTableBlock"><button class="copyBtn tableCopyBtn" type="button" data-copy-table aria-label="표 복사" title="표 복사 (탭 구분)">⧉ 표</button>`
+        + `<div class="mdTableWrap"><table class="mdTable"><thead><tr>${cells(head, "th")}</tr></thead><tbody>`
+        + body.map(r => `<tr>${cells(r, "td")}</tr>`).join("") + `</tbody></table></div></div>`
+        + (잘림 ? `<p>… 앞 ${VIEWER_TABLE_ROWS.toLocaleString()}줄만 보여요 — 전체는 ⬇ 받기로</p>` : "");
     }
     function viewerIsImage(item) {
       return Boolean(item && (item.type === "image" || item.isImage
@@ -4646,6 +4698,8 @@ _MOBILE_HTML = r"""<!doctype html>
       viewerFrame.style.display = "none";
       viewerFrame.removeAttribute("src");
       viewerDead.style.display = "none";
+      viewerCard.style.display = "none";
+      viewerCard.innerHTML = "";
 
       const url = viewerUrlOf(item);
       // 받기 — 지금 보는 것을 그대로(대화 이미지·만든 파일 모두). 이름이 없는 대화 이미지는 번호를 붙인다.
@@ -4668,6 +4722,17 @@ _MOBILE_HTML = r"""<!doctype html>
         return;
       }
       const kind = viewerKind(item);
+      // PDF 는 폰 브라우저 내장 뷰어가 제일 낫다(여러 쪽·확대·검색). iframe 안에선 iOS 가 첫 쪽만 그린다.
+      // 토큰 모드는 URL 에 토큰이 실린다 — 새 탭으로 열면 주소창·방문 기록에 남으니 받기만 준다(리뷰 지적).
+      if (kind === "pdf") {
+        if (cookieAuth) viewerShowCard("PDF 문서예요", url, "열기", true);
+        else viewerShowCard("PDF 문서예요 — 받아서 여세요", url, "⬇ 받기", false);
+        return;
+      }
+      if (kind === "binary") {
+        viewerShowCard("여기선 미리 볼 수 없는 형식이에요 — 받아서 앱으로 여세요", url, "⬇ 받기", false);
+        return;
+      }
       // 토큰 모드(쿠키 로그인 아님)는 파일 URL 에 토큰이 실린다 — 스크립트가 도는 페이지에 넘기면 빼 갈 수
       // 있어서 서버도 HTML 로 안 준다. 그땐 소스를 텍스트로 보여 준다.
       if (kind === "html" && cookieAuth) {
@@ -4683,6 +4748,19 @@ _MOBILE_HTML = r"""<!doctype html>
         if (!r.ok) throw new Error(await responseError(r));
         const body = await r.text();
         if (seq !== viewerSeq) return;   // 그 사이 넘어갔다 — 남의 화면을 덮지 않는다
+        // 확장자로 못 거른 이진 파일 — 깨진 기호를 쏟지 않는다(앞 8000자만 보는 어림이다).
+        if (body.slice(0, 8000).includes("\u0000")) {
+          viewerText.style.display = "none";
+          viewerShowCard("여기선 미리 볼 수 없는 형식이에요 — 받아서 앱으로 여세요", url, "⬇ 받기", false);
+          return;
+        }
+        if (kind === "table" && body) {
+          viewerText.style.display = "none";
+          viewerDoc.style.display = "block";
+          viewerDoc.innerHTML = renderDelimitedTable(body, item.path || item.name || "");
+          viewerDoc.scrollTop = 0;
+          return;
+        }
         if (kind === "markdown" && body) {
           // 대화창과 같은 렌더러 — 글자는 전부 이스케이프된다(원문 HTML 은 실행되지 않는다).
           viewerText.style.display = "none";

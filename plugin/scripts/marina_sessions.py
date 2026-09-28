@@ -3018,7 +3018,7 @@ def _handed_over_file(root: Path, source: str, sid: str, raw: str) -> Path | Non
 
 def agent_session_file_bytes(root: Path, raw_path: str,
                              source: str = "", sid: str = "") -> tuple[bytes, str]:
-    """워크트리 안 파일 원본. 이미지 화이트리스트 외에는 전부 text/plain 으로 준다 —
+    """워크트리 안 파일 원본. 이미지 화이트리스트·PDF 외에는 전부 text/plain 으로 준다 —
     대시보드 오리진에서 HTML/JS 를 그대로 서빙하면 저장형 XSS 가 되기 때문.
 
     **그 세션이 건네준(SendUserFile) 파일은 방 밖이라도 준다.** 에이전트가 임시 폴더에 만들어
@@ -3038,6 +3038,10 @@ def agent_session_file_bytes(root: Path, raw_path: str,
         raise ValueError("파일이 너무 커요 (8MB 상한)")
     data = resolved.read_bytes()
     media = _SESSION_FILE_IMAGE_TYPES.get(resolved.suffix.lower())
+    if resolved.suffix.lower() == ".pdf":
+        # PDF 는 브라우저 내장 뷰어가 연다 — 스크립트가 대시보드 오리진에서 돌지 않는다
+        # (기존 보안 헤더 그대로 두고 Chromium 에서 여러 쪽 렌더 실측, 2026-09-28).
+        media = "application/pdf"
     return data, media if media else "text/plain; charset=utf-8"
 
 
