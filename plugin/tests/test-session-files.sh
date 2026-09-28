@@ -160,6 +160,8 @@ assert "function galleryData(" in html and "GALLERY_FRESH_MS" in html, "모아�
 # 캐시는 먼저 그리는 용도일 뿐 — 새로 받아 갈아 끼워야 방금 만든 파일이 보인다(리뷰 지적).
 assert "stale.then(data =>" in html and "fresh = true" in html, "받아 둔 목록만 보여주고 새로 안 받는다"
 assert 'galleryData(galleryTab === "files" ? "images" : "files", value)' in html, "옆 탭을 미리 안 받는다"
+# 확대 화면(뷰어)에서도 받을 수 있어야 한다(형: "디테일 확대 화면에서 다운로드도 가능해야지") — 대화 이미지 포함.
+assert 'id="viewerSave"' in html and "viewerSave.href = url" in html, "확대 화면에 받기가 없다"
 print("PASS part B: 탭 2개 + 앱 안 뷰어(텍스트/이미지·배경만 닫힘·Esc 우선) + ＋CC 줄바꿈 방지 + 빈 상태 안내")
 PY
 

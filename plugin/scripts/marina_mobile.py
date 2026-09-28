@@ -2984,17 +2984,28 @@ _MOBILE_HTML = r"""<!doctype html>
     /* 방 안 — **누른 카드 바로 밑**에서 펼쳐진다(목록 위에 얹던 상자를 없앴다).
        카드와 한 몸으로 읽혀야 하므로 테두리를 두르지 않는다: 왼쪽 레일 하나와 배경만으로
        "이 카드에 딸린 것"을 말한다. 상자를 또 그리면 목록 안에 상자가 겹친다. */
-    .roomAcc { background: var(--panel); border-bottom: 1px solid var(--line);
-               padding: 2px 0 8px 0; }
+    .roomAcc { background: var(--open-bg); border-bottom: 1px solid var(--open-edge);
+               padding: 2px 0 8px 0; margin-bottom: 6px; box-shadow: inset 3px 0 0 var(--open-rail); }
     .roomAcc > * { margin-left: 22px; }         /* 레일만큼 들여쓴다 — 부모-자식이 눈에 보이게 */
     .roomAcc { position: relative; }
     .roomAcc::before { content: ""; position: absolute; left: 12px; top: 2px; bottom: 10px;
-                       width: 1px; background: var(--line); }
+                       width: 1px; background: var(--open-edge); }
     .roomRow.open { border-bottom-color: transparent; }
     /* 펼친 카드는 이름을 풀어 준다 — 목록에서만 줄인다는 규칙은 그대로고, 열어 본 방에서는
        원래 이름이 보여야 한다(예전엔 패널 머리가 그 몫이었다). */
     .roomRow.open .roomName { white-space: normal; overflow: visible; }
-    .roomRow.open .roomCard { background: var(--panel); }
+    /* 펼친 카드 + 그 아래 목록을 **한 덩어리**로 — 같은 배경 + 왼쪽 색띠, 끝에 선과 여백(형: "경계가 분간 안 돼").
+       예전엔 배경이 목록과 거의 같은 색(--panel)이고 레일이 1px 흐린 선이라 어디까지가 펼친 것인지 안 보였다. */
+    .roomRow.open { background: var(--open-bg); box-shadow: inset 3px 0 0 var(--open-rail); }
+    .roomRow.open .roomCard { background: transparent; }
+    /* "지금 방"(.here)이면서 펼친 방 — 띠는 "지금 방" 색을 따른다. 라이트·다크가 같은 규칙을 쓰게 명시한다
+       (같은 세기의 두 규칙이 소스 순서로만 갈리면 다크 블록이 뒤에 있어 모드마다 이기는 쪽이 달라진다). */
+    .roomRow.here.open { background: var(--open-bg); box-shadow: inset 3px 0 0 var(--here-rail); }
+    /* 새 메시지 — 이름 옆 빨간 점. */
+    .roomNameLine { display: flex; align-items: center; gap: 6px; min-width: 0; }
+    .roomNameLine .roomName { min-width: 0; }
+    .unreadDot { flex: none; display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #e5484d; }
+    .roomTab .unreadDot { margin-right: 7px; vertical-align: 1px; }
     /* 아코디언 안 가름줄 — 위는 "새로 시작", 아래는 "이미 있는 대화". 실선을 쓰면 상자가
        하나 더 생긴 것처럼 읽혀서 점선으로 얕게만 나눈다. */
     .roomAccSplit { border-top: 1px dashed #d6dde6; margin: 0 8px 8px; }
@@ -3123,7 +3134,8 @@ _MOBILE_HTML = r"""<!doctype html>
             /* 방 화면이 쓰는 토큰. **정의가 없으면 그 선언 전체가 무효**가 되어 테두리·배경이
                통째로 사라진다(형: "카드 아름답게 깨진다") — 실측으로 방 패널의 탭·버튼·상자
                테두리가 전부 0px none 이었다. 색은 이미 쓰던 값과 같다. */
-            --line: #e3e7ed; --panel: #f4f7fb; }
+            --line: #e3e7ed; --panel: #f4f7fb;
+            --open-bg: #eaf0f9; --open-edge: #c3d2e6; --open-rail: #5b8fd6; --here-rail: #0b63ce; }
     .session-status { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 4px; }
     .session-status-label { font-size: 10px; font-weight: 850; color: #747d8b; white-space: nowrap; }
     .wt-dot { flex: none; width: 13px; height: 13px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-size: 8px; line-height: 1; box-sizing: border-box; }
@@ -3358,6 +3370,9 @@ _MOBILE_HTML = r"""<!doctype html>
     .viewerDoc { display: none; flex: 1; min-height: 0; margin: 0 8px calc(8px + env(safe-area-inset-bottom)); padding: 14px 14px 20px; overflow: auto; border-radius: 10px; background: #fff; color: #1c2330; font-size: 14px; line-height: 1.6; overflow-wrap: anywhere; }
     .viewerDoc > :first-child { margin-top: 0; }
     .viewerFrame { display: none; flex: 1; min-height: 0; width: calc(100% - 16px); margin: 0 8px calc(8px + env(safe-area-inset-bottom)); border: 0; border-radius: 10px; background: #fff; }
+    /* 확대 화면에서 바로 받기(형: "디테일 확대 화면에서 다운로드도"). 닫기 버튼과 같은 모양. */
+    .viewerSave { display: inline-flex; align-items: center; justify-content: center; width: 34px; height: 34px; flex: none; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; font-size: 16px; text-decoration: none; }
+    .viewerSave[hidden] { display: none; }
     .imageViewerClose { width: 34px; min-height: 34px; flex: none; padding: 0; border-radius: 17px; background: rgb(255 255 255 / 14%); color: #fff; border-color: transparent; font-size: 19px; }
     /* 세션 탭 — 가로 스크롤 한 줄. 목록 뷰에선 숨긴다(거기선 목록 자체가 탐색이다). */
     .navTrigger { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1 1 auto;
@@ -3550,7 +3565,8 @@ _MOBILE_HTML = r"""<!doctype html>
                  font-size: 12px; font-weight: 800; cursor: pointer; }
     @media (prefers-color-scheme: dark) {
       :root { --st-run: #34c98e; --st-boot: #f0a132; --st-err: #e5484d; --st-stop: #5a5f6a;
-              --line: #303846; --panel: #171d27; }
+              --line: #303846; --panel: #171d27;
+              --open-bg: #172133; --open-edge: #34465f; --open-rail: #4b8fe0; --here-rail: #4b8fe0; }
       body { background: #11151c; color: #f4f6f9; }
       header, select, textarea, input, button { background: #171d27; color: #f4f6f9; border-color: #303846; }
       label, p, .status { color: #a5adba; }
@@ -3837,7 +3853,7 @@ _MOBILE_HTML = r"""<!doctype html>
       </section>
     </div>
     <div class="imageViewer" id="imageViewer" aria-hidden="true">
-      <div class="viewerBar" id="viewerBar"><span class="viewerName" id="viewerName"></span><span class="viewerCount" id="viewerCount"></span><button class="imageViewerClose" id="imageViewerClose" type="button" aria-label="닫기">&#215;</button></div>
+      <div class="viewerBar" id="viewerBar"><span class="viewerName" id="viewerName"></span><span class="viewerCount" id="viewerCount"></span><a class="viewerSave" id="viewerSave" hidden aria-label="받기" title="받기">&#11015;</a><button class="imageViewerClose" id="imageViewerClose" type="button" aria-label="닫기">&#215;</button></div>
       <img id="imageViewerImg" alt="" />
       <pre class="viewerText" id="viewerText"></pre>
       <div class="viewerDoc" id="viewerDoc"></div>
@@ -4273,6 +4289,7 @@ _MOBILE_HTML = r"""<!doctype html>
     const imageViewerImg = document.getElementById("imageViewerImg");
     const viewerText = document.getElementById("viewerText");
     const viewerDoc = document.getElementById("viewerDoc");
+    const viewerSave = document.getElementById("viewerSave");
     const viewerFrame = document.getElementById("viewerFrame");
     const viewerName = document.getElementById("viewerName");
     const viewerBar = document.getElementById("viewerBar");
@@ -4576,6 +4593,8 @@ _MOBILE_HTML = r"""<!doctype html>
       viewerDead.style.display = "none";
       viewerName.textContent = "";
       viewerCount.textContent = "";
+      viewerSave.hidden = true;
+      viewerSave.removeAttribute("href");
       viewerList = [];
       viewerSeq += 1;
     }
@@ -4627,6 +4646,14 @@ _MOBILE_HTML = r"""<!doctype html>
       viewerDead.style.display = "none";
 
       const url = viewerUrlOf(item);
+      // 받기 — 지금 보는 것을 그대로(대화 이미지·만든 파일 모두). 이름이 없는 대화 이미지는 번호를 붙인다.
+      viewerSave.hidden = !(url && item.servable !== false);
+      if (!viewerSave.hidden) {
+        viewerSave.href = url;
+        const 이름 = String((item.path || "").split("/").pop() || item.name || "");
+        viewerSave.setAttribute("download", item.type === "image" || !/\.[a-z0-9]{1,5}$/i.test(이름)
+          ? `marina-image-${String(item.ref || viewerIdx + 1).replace(/[^\w-]/g, "")}.png` : 이름);
+      }
       if (item.servable === false || !url) {
         // 목록에서 빼지 않는다 — 조용히 건너뛰면 n/N 개수가 어긋나 형이 헷갈린다.
         viewerDead.style.display = "block";
@@ -4887,6 +4914,46 @@ _MOBILE_HTML = r"""<!doctype html>
     // ROOM_LIST_START  (테스트가 이 블록을 vm 에 싣는다)
     // 방 목록 — 폰을 열면 이게 첫 화면이다.
     //
+    // 새 메시지 빨간 점(형: "슬랙처럼 레드닷"). 대화마다 **이 기기에서 마지막으로 본 시각**을 기억하고,
+    // 서버가 주는 그 대화의 마지막 활동 시각(tab.ts)이 더 새로우면 점을 찍는다. 처음 켤 땐 전부 본 걸로
+    // 시작한다 — 안 그러면 방마다 점이 뜬다. 그 뒤에 처음 보는 대화는 "새 대화"라 점을 찍는다.
+    const SEEN_STORE = "marinaSeenTabs";
+    let seenTabs = null;   // {"<root>|<source>:<sid>": ts}
+    function seenMap() {
+      if (seenTabs) return seenTabs;
+      try { seenTabs = JSON.parse(localStorage.getItem(SEEN_STORE) || "null"); } catch (_) { seenTabs = null; }
+      return seenTabs;
+    }
+    function saveSeen() {
+      try { localStorage.setItem(SEEN_STORE, JSON.stringify(seenTabs || {})); } catch (_) {}
+    }
+    function seenKeyOf(root, source, sid) { return `${root}|${source}:${sid}`; }
+    // 처음이면 지금 있는 대화를 전부 본 걸로 깔아 둔다.
+    function seedSeen(rooms) {
+      if (seenMap()) return;
+      seenTabs = {};
+      (rooms || []).forEach(room => (room.tabs || []).forEach(tab => {
+        seenTabs[seenKeyOf(room.root, tab.source, tab.sid)] = Number(tab.ts || 0);
+      }));
+      saveSeen();
+    }
+    function markTabSeen(root, source, sid, ts) {
+      const map = seenMap();
+      if (!map || !root || !sid) return;
+      const key = seenKeyOf(root, source, sid);
+      const at = Number(ts || 0);
+      if ((map[key] || 0) >= at && key in map) return;
+      map[key] = at;
+      saveSeen();
+    }
+    function tabUnread(room, tab) {
+      const map = seenMap();
+      if (!map || tab.hidden || tab.deleted || tab.roleOf) return false;
+      const seen = map[seenKeyOf(room.root, tab.source, tab.sid)];
+      return seen === undefined ? Number(tab.ts || 0) > 0 : Number(tab.ts || 0) > seen + 1;   // 1초 여유(시계·반올림)
+    }
+    function roomUnread(room) { return !room.archived && (room.tabs || []).some(tab => tabUnread(room, tab)); }
+    //
     // 상태의 심각도 순서. **정렬에는 더 이상 쓰지 않는다**(목록은 최근 순 — renderRooms 참조).
     // 남겨두는 이유: 방 하나에 대화가 여럿일 때 어느 상태로 접을지 서버가 이 순서로 정하고,
     // 화면도 같은 어휘를 써야 하기 때문이다(marina_rooms.ROOM_STATUS_ORDER 와 짝).
@@ -5001,8 +5068,8 @@ _MOBILE_HTML = r"""<!doctype html>
           <div class="roomCard" data-room="${esc(room.root)}">
             <span class="roomIcon">${esc(ROOM_ICON[status] || ROOM_ICON["대기"])}</span>
             <span class="roomBody">
-              <button class="roomName" type="button">${esc(펼침 ? (room.name || room.shortName || "")
-                                                  : (room.shortName || room.name || ""))}</button>
+              <span class="roomNameLine"><button class="roomName" type="button">${esc(펼침 ? (room.name || room.shortName || "")
+                                                  : (room.shortName || room.name || ""))}</button>${roomUnread(room) ? '<span class="unreadDot" role="img" aria-label="새 메시지"></span>' : ""}</span>
               <span class="metaRow">
                 <span class="roomMeta">${esc(막힘 ? 막힘 : roomStatusLabel(status) + where)}</span>
                 ${배지}${묶음}
@@ -5072,7 +5139,8 @@ _MOBILE_HTML = r"""<!doctype html>
           ? `<button class="roomTabUnhide" type="button" data-unhide="${esc(key)}">숨김 해제</button>`
           : (tab.stale ? '<span class="roomTabNote">오래됨</span>' : "")
             + `<button class="roomMore roomTabMore" type="button" data-chat-menu="${esc(key)}" aria-label="대화 메뉴">⋯</button>`;
-        return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${esc(tab.title || key)}</button>${꼬리}</div>`;
+        const 점 = tabUnread(room, tab) ? '<span class="unreadDot" role="img" aria-label="새 메시지"></span>' : "";
+        return `<div class="roomTabRow"><button class="${cls}" type="button" data-tab="${esc(key)}">${점}${esc(tab.title || key)}</button>${꼬리}</div>`;
       }).join("");
       const 딸린 = 역할들.map(tab => `<div class="roleRow"><span>↳ 🔍</span><span class="grow">${esc(tab.roleOf.role === "reviewer" ? "리뷰어" : tab.roleOf.role)} <span class="st">· 읽기 전용</span></span><span class="st">진행 중</span></div>`).join("");
       return 시작줄 + 가름줄 + `<div class="roomTabs">${strip}${딸린}</div>`;
@@ -6706,6 +6774,7 @@ _MOBILE_HTML = r"""<!doctype html>
     function renderInbox() {
       const items = inboxSessions();
       const unread = items.filter(item => !inboxRead.has(item.eventId)).length;
+      window.MarinaChat.setFaviconDot("inbox", unread > 0);
       inboxCount.textContent = unread > 99 ? "99+" : String(unread);
       inboxMenuBtn.title = unread ? `새 작업 ${unread}개` : "확인할 새 작업 없음";
       if (!inboxSheet.classList.contains("open")) return;
@@ -7741,12 +7810,15 @@ _MOBILE_HTML = r"""<!doctype html>
       // 사라진 방은 접는다. **여기서 closeRoom 을 부르지 않는다** — closeRoom 이 다시
       // renderRoomList 를 불러 한 바퀴 더 돈다. 상태만 정리하고 아래에서 한 번에 그린다.
       if (openRoomRoot && !roomByRoot(openRoomRoot)) { openRoomRoot = ""; closeRoomMenu(); }
+      seedSeen(방들);
+      markViewingSeen(방들);
       const 스크롤 = listView.scrollTop;     // 폴 재렌더가 보던 자리를 잃지 않게
       roomList.innerHTML = renderRooms(방들, Date.now() / 1000, showArchivedRooms,
                                        sessionSearch.value, selectedProjectId,
                                        openRoomRoot, launchSources());
       listView.scrollTop = 스크롤;
       if (drawerOpen()) markCurrentRoom();   // 폴 재렌더가 '지금 방' 표시를 지우지 않게
+      window.MarinaChat.setFaviconDot("rooms", 방들.some(roomUnread));
       // 방이 하나도 없으면 예전 세션 목록을 되살린다. 서버가 rooms 를 못 만들었을 때
       // (옛 데몬·조립 실패) 빈 화면만 남으면 형은 앱이 고장난 줄 안다 — 목록이 안 뜨면
       // 아무것도 못 하므로, 방은 부가정보고 세션 목록이 생명줄이다.
@@ -7756,6 +7828,18 @@ _MOBILE_HTML = r"""<!doctype html>
       // 종류 탭(claude/codex/터미널)은 **세션** 개념이라 방 목록에는 안 먹는다. 보이기만 하고
       // 아무 일도 안 하면 UI 가 거짓말을 하는 것이라, 방 목록일 때는 아예 숨긴다.
       sourceTabs.hidden = !방없음;
+    }
+    // 지금 화면에 떠 있는 대화는 본 것이다 — 화면이 꺼져 있거나(백그라운드) 목록만 보고 있으면 아니다.
+    function markViewingSeen(방들) {
+      if (document.visibilityState === "hidden") return;
+      if ((document.getElementById("mobileApp") || {dataset: {}}).dataset.view !== "chat") return;
+      const value = currentTargetValue();
+      if (!String(value || "").startsWith("agent:")) return;
+      const [, source, sid] = value.split(":");
+      const root = sessionRoot();
+      const room = (방들 || []).find(r => r.root === root);
+      const tab = room && (room.tabs || []).find(t => t.source === source && t.sid === sid);
+      markTabSeen(root, source, sid, tab ? tab.ts : Date.now() / 1000);
     }
     function launchSources() {
       const opts = state.agentOptions || {};

@@ -909,6 +909,38 @@
     }, true);
   }
 
+  // ── 탭 파비콘 빨간 점 ── 형: "슬랙처럼 새 메시지 오면 탭에 레드닷". 웹·모바일이 같은 걸 쓴다.
+  // 원래 아이콘(라이트·다크 두 벌 <link rel=icon>)을 각각 캔버스에 그리고 오른쪽 위에 점을 얹어 바꿔 끼운다.
+  // 신호가 둘 이상(대화·Inbox)이라 이름별로 모아 하나라도 켜져 있으면 점을 찍는다.
+  const faviconSignals = {};
+  let faviconShown = null;
+  function setFaviconDot(name, on) {
+    if (typeof document === "undefined" || typeof document.querySelectorAll !== "function") return;   // 브라우저 밖(테스트 vm)
+    faviconSignals[name] = Boolean(on);
+    const want = Object.values(faviconSignals).some(Boolean);
+    if (want === faviconShown) return;
+    faviconShown = want;
+    document.querySelectorAll('link[rel="icon"]').forEach(link => {
+      if (!link.dataset.baseHref) link.dataset.baseHref = link.getAttribute("href") || "";
+      const base = link.dataset.baseHref;
+      if (!want) { link.setAttribute("href", base); return; }
+      const img = new Image();
+      img.onload = () => {
+        if (!faviconShown) return;                 // 그리는 사이 꺼졌다
+        const c = document.createElement("canvas");
+        c.width = c.height = 64;
+        const g = c.getContext("2d");
+        g.drawImage(img, 0, 0, 64, 64);
+        g.beginPath(); g.arc(50, 14, 12, 0, Math.PI * 2);
+        g.fillStyle = "#e5484d"; g.fill();
+        g.lineWidth = 3; g.strokeStyle = "#ffffff"; g.stroke();
+        link.setAttribute("href", c.toDataURL("image/png"));
+      };
+      img.onerror = () => link.setAttribute("href", base);   // 못 그리면 원래 아이콘이라도
+      img.src = base;
+    });
+  }
+
   window.MarinaChat = {
     configure, setDetailScope, noteDetailToggle, IMAGE_EXT_RE, collectViewables,
     esc, renderInlineMarkdown, renderRichText, mdTableCells, mdIsTableRow, mdIsTableDivider,
@@ -920,6 +952,6 @@
     activityGroupSummary, progressLine, renderActivityItem, renderActivityGroup, reconcileActivityList,
     renderTimelineSequence, questionsFromActivity, pendingQuestionActivity,
     questionFallbackText, renderQuestionCard, renderAnsweredQuestion, renderConversationSequence, pendingKeyPart,
-    timelineItemKeyParts, exchangeRenderKey, tableTsv,
+    timelineItemKeyParts, exchangeRenderKey, tableTsv, setFaviconDot,
   };
 })();

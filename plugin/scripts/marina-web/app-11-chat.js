@@ -104,7 +104,32 @@
         if (i === chatActive) { t.seenTs = ts; if (t.unread) { t.unread = false; changed = true; } return; }
         if (ts > (t.seenTs || 0) && !t.unread) { t.unread = true; changed = true; }
       });
+      window.MarinaChat.setFaviconDot('chat', anyAgentUnseen());
       if (changed && !chatPane().hidden) renderChatPane();
+    }
+    // 탭 파비콘 점은 **모든 대화** 기준이다(열어 둔 탭만 보면 안 연 대화의 새 메시지를 놓친다 — 리뷰 지적).
+    // 대화마다 이 기기에서 마지막으로 본 시각을 기억하고, 처음엔 전부 본 걸로 시작한다(모바일 방 목록과 같은 규칙).
+    // 지금 화면에 떠 있는 대화 탭(창이 보일 때)만 본 걸로 친다.
+    const WEB_SEEN_STORE = 'marinaWebSeenAgents';
+    let webSeen = null;
+    function anyAgentUnseen() {
+      if (!webSeen) {
+        try { webSeen = JSON.parse(localStorage.getItem(WEB_SEEN_STORE) || 'null'); } catch (_) { webSeen = null; }
+      }
+      const seed = !webSeen;
+      if (seed) webSeen = {};
+      let changed = seed, unseen = false;
+      const active = chatTabs[chatActive];
+      const viewing = active && !document.hidden && !chatPane().hidden ? `${active.root} ${active.source} ${active.sid}` : '';
+      worktreeData.forEach(wt => (wt.agents || []).forEach(a => {
+        if (!a.sid) return;
+        const key = `${wt.root} ${a.source} ${a.sid}`;
+        const ts = Number(a.statusTs || a.ts || 0);
+        if (seed || key === viewing) { if ((webSeen[key] || 0) < ts) { webSeen[key] = ts; changed = true; } return; }
+        if (!(key in webSeen) ? ts > 0 : ts > webSeen[key] + 1) unseen = true;
+      }));
+      if (changed) { try { localStorage.setItem(WEB_SEEN_STORE, JSON.stringify(webSeen)); } catch (_) {} }
+      return unseen || chatTabs.some(t => t.unread);
     }
 
     // AGENTS 행 진입점 — 이미 열린 세션이면 새 탭이 아니라 그 탭으로 간다(브라우저와 같은 감각).

@@ -103,6 +103,7 @@
       if (!button || !count || !panel) return;
       const entries = agentInboxEntries();
       const unread = entries.filter(item => !agentInboxRead.has(item.eventId)).length;
+      if (window.MarinaChat) window.MarinaChat.setFaviconDot('inbox', unread > 0);   // 이 파일이 렌더러보다 먼저 로드된다
       count.hidden = unread === 0;
       count.textContent = unread > 99 ? '99+' : String(unread);
       button.classList.toggle('has-unread', unread > 0);
