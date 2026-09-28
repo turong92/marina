@@ -136,7 +136,7 @@
       const agents = [];
       worktreeData.forEach(wt => (wt.agents || []).forEach(a => {
         if (a.sid) agents.push({key: `${wt.root}|${a.source}:${a.sid}`, sid: `${a.source}:${a.sid}`,
-                                ts: Number(a.statusTs || a.ts || 0), working: a.status === 'working'});
+                                ts: Number(a.msgTs || a.ts || 0), working: a.status === 'working'});   // 마지막 Claude 말 시각 우선 — 파일 시각은 재시작에도 바뀐다
       }));
       // "다 읽음" 시각엔 일하는 중인 대화는 안 넣는다 — 넣으면 끝나는 순간의 점이 이미 흡수돼 안 뜬다(리뷰 지적).
       const top = agents.reduce((m, a) => (a.working ? m : Math.max(m, a.ts)), 0);

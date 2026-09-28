@@ -482,6 +482,12 @@ def _claude_project_slug(root: Path) -> str:
     return re.sub(r"[/.]", "-", str(root))
 
 def _jsonl_last_assistant_preview(path: Path) -> str:
+    return _jsonl_last_assistant(path)[0]
+
+
+def _jsonl_last_assistant(path: Path) -> tuple[str, float]:
+    """(마지막 assistant 텍스트 미리보기, 그 메시지 시각). 시각은 **새 메시지 점**의 기준이다 — 파일 수정 시각은
+    marina 재시작으로 대화 프로세스가 끝날 때도 바뀌어(종료 기록이 덧붙는다) 아무 말 없이 점이 켜졌다(2026-09-28 실측)."""
     # 파일 끝 16KB 만 읽어 마지막 유효 assistant 텍스트를 역방향으로 찾는다. 경계에서 잘린 첫 줄은
     # json.loads 가 실패해 자연히 건너뛴다(부분 파싱 크래시 없음).
     try:
@@ -491,7 +497,7 @@ def _jsonl_last_assistant_preview(path: Path) -> str:
                 fh.seek(size - AGENT_PREVIEW_TAIL_BYTES)
             raw = fh.read()
     except Exception:
-        return ""
+        return "", 0.0
     text = raw.decode("utf-8", errors="ignore")
     for line in reversed(text.splitlines()):
         line = line.strip()
@@ -510,8 +516,13 @@ def _jsonl_last_assistant_preview(path: Path) -> str:
             if isinstance(item, dict) and item.get("type") == "text" and item.get("text"):
                 snippet = " ".join(str(item["text"]).split())
                 if snippet:
-                    return snippet[:AGENT_PREVIEW_LEN]
-    return ""
+                    at = 0.0
+                    try:
+                        at = datetime.fromisoformat(str(obj.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
+                    except ValueError:
+                        pass
+                    return snippet[:AGENT_PREVIEW_LEN], at
+    return "", 0.0
 
 
 def _agent_event_ts(obj: dict[str, Any], fallback: float) -> float:
@@ -1239,7 +1250,9 @@ def agents_payload(root: Path, refresh: bool = False, include_all: bool = False,
             if resolved.get("reason"):
                 item["statusReason"] = resolved["reason"]
             if e["source"] == "claude":
-                preview = _jsonl_last_assistant_preview(jpath)
+                preview, msg_ts = _jsonl_last_assistant(jpath)
+                if msg_ts:
+                    item["msgTs"] = int(msg_ts)
                 if preview:
                     from marina_logtext import redact_text   # 카드 payload 도 로그와 같은 마스킹(codex P2)
                     item["preview"] = redact_text(preview)

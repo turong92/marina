@@ -4934,11 +4934,13 @@ _MOBILE_HTML = r"""<!doctype html>
     function seenKeyOf(root, source, sid) { return `${root}|${source}:${sid}`; }
     // "다 읽음" 시각에 흡수할 최대 활동 시각. 일하는 중인 대화와 접어 둔 방은 뺀다 — 넣으면 일이 끝나는 순간이나
     // 방을 다시 펼쳤을 때의 새 메시지가 이미 흡수돼 점이 안 뜬다(리뷰 지적).
+    // 새 메시지 기준 시각 — 마지막 Claude 말(msgTs)이 있으면 그것, 없으면(codex 등) 파일 시각.
+    function tabMsgTs(tab) { return Number(tab.msgTs || tab.ts || 0); }
     function maxTabTs(rooms) {
       let top = 0;
       (rooms || []).forEach(room => {
         if (room.archived) return;
-        (room.tabs || []).forEach(tab => { if (tab.status !== "작업중") top = Math.max(top, Number(tab.ts || 0)); });
+        (room.tabs || []).forEach(tab => { if (tab.status !== "작업중") top = Math.max(top, tabMsgTs(tab)); });
       });
       return top;
     }
@@ -4965,7 +4967,7 @@ _MOBILE_HTML = r"""<!doctype html>
       // 일이 끝나거나(대기·완료) 답을 기다릴 때 새 메시지로 본다.
       if (tab.status === "작업중") return false;
       const seen = Math.max(st.w, st.s[seenKeyOf(room.root, tab.source, tab.sid)] || 0);
-      return Number(tab.ts || 0) > seen + 1;      // 1초 여유(시계·반올림)
+      return tabMsgTs(tab) > seen + 1;            // 1초 여유(시계·반올림)
     }
     function roomUnread(room) { return !room.archived && (room.tabs || []).some(tab => tabUnread(room, tab)); }
     // 안 읽은 게 하나도 없으면 대화별 기록을 비우고 "다 읽음" 시각만 올린다.
@@ -7867,7 +7869,7 @@ _MOBILE_HTML = r"""<!doctype html>
       const root = sessionRoot();
       const room = (방들 || []).find(r => r.root === root);
       const tab = room && (room.tabs || []).find(t => t.source === source && t.sid === sid);
-      markTabSeen(root, source, sid, tab ? tab.ts : Date.now() / 1000);
+      markTabSeen(root, source, sid, tab ? tabMsgTs(tab) : Date.now() / 1000);
     }
     function launchSources() {
       const opts = state.agentOptions || {};

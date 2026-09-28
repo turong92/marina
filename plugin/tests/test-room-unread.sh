@@ -72,6 +72,9 @@ collapseSeen([room, 일방]);
 assert.ok(JSON.parse(store.marinaSeenV2).w < 500, "일하는 중인 대화 시각이 다 읽음에 흡수됐다");
 일방.tabs[0] = {...일방.tabs[0], ts: 510, status: "대기"};
 assert.equal(roomUnread(일방), true, "일이 끝났는데 점이 안 뜬다");
+// 새 메시지 기준은 마지막 Claude 말 시각(msgTs)이다 — 재시작으로 파일 시각(ts)만 바뀌면 점이 없어야 한다.
+const 재시작방 = {root: "/r/z", name: "z", shortName: "z", tabs: [{source: "claude", sid: "z1", title: "z", ts: 999999, msgTs: 1, status: "완료"}]};
+assert.equal(roomUnread(재시작방), false, "재시작으로 파일 시각만 바뀌었는데 점이 떴다");
 console.log("PASS test-room-unread");
 ''')
 PY

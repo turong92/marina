@@ -440,6 +440,8 @@ def build_room(root: Path, labels: dict[str, Any], agents: list[dict[str, Any]],
             # 탭의 마지막 활동 시각. 화면 정렬에도 쓰지만, 권한 필터가 탭을 걸러낸 뒤 방의
             # lastAt 을 다시 계산하려면 탭이 자기 시각을 들고 있어야 한다.
             "ts": float(agent.get("ts") or 0),
+            # 마지막 assistant 메시지 시각 — 새 메시지 점의 기준(파일 시각은 재시작에도 바뀐다). 모르면 0.
+            "msgTs": float(agent.get("msgTs") or 0),
             # 왜 막혔는지 — 로그인이 풀린 대화가 어느 것인지 화면이 알아야 한다.
             # 없으면 "가장 최근 클로드 대화"에 /login 을 쳐서, 작업 중인 대화에 그 글자가
             # 프롬프트로 제출된다.
