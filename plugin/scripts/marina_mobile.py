@@ -6798,7 +6798,6 @@ _MOBILE_HTML = r"""<!doctype html>
     function renderInbox() {
       const items = inboxSessions();
       const unread = items.filter(item => !inboxRead.has(item.eventId)).length;
-      window.MarinaChat.setFaviconDot("inbox", unread > 0);
       inboxCount.textContent = unread > 99 ? "99+" : String(unread);
       inboxMenuBtn.title = unread ? `새 작업 ${unread}개` : "확인할 새 작업 없음";
       if (!inboxSheet.classList.contains("open")) return;
