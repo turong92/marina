@@ -26,3 +26,25 @@ with tempfile.TemporaryDirectory() as d:
     assert ms._jsonl_last_assistant(empty) == ("", 0.0)
 print("PASS test-last-message-ts")
 PY
+
+# 웹의 열어 둔 대화 탭 점(markChatUnread)도 같은 기준이어야 한다 — 리뷰 지적: 여기만 파일 시각을 봐서
+# 재시작하면 뒤 탭에 가짜 점이 떴다.
+node - "$HERE/../scripts/marina-web/app-11-chat.js" <<'NODE'
+const fs = require("node:fs"), vm = require("node:vm"), assert = require("node:assert/strict");
+const src = fs.readFileSync(process.argv[2], "utf8");
+const at = src.indexOf("function markChatUnread()");
+let depth = 0, end = src.indexOf("{", at);
+for (let i = end; i < src.length; i++) { if (src[i] === "{") depth++; else if (src[i] === "}" && --depth === 0) { end = i + 1; break; } }
+const ctx = {chatTabs: [], worktreeData: [], chatActive: 0, chatPane: () => ({hidden: true}), renderChatPane() {},
+  anyAgentUnseen: () => false, window: {MarinaChat: {setFaviconDot() {}}}};
+vm.createContext(ctx);
+vm.runInContext(src.slice(at, end) + "; this.markChatUnread = markChatUnread;", ctx);
+ctx.chatTabs = [{root: "/r", source: "claude", sid: "a", title: "보는 탭"}, {root: "/r", source: "claude", sid: "b", title: "뒤 탭", seenTs: 100}];
+ctx.worktreeData = [{root: "/r", agents: [{source: "claude", sid: "a", ts: 1}, {source: "claude", sid: "b", msgTs: 100, statusTs: 999, ts: 999}]}];
+ctx.markChatUnread();
+assert.equal(ctx.chatTabs[1].unread, undefined, "재시작으로 파일 시각만 바뀌었는데 뒤 탭에 점이 떴다");
+ctx.worktreeData[0].agents[1].msgTs = 150;
+ctx.markChatUnread();
+assert.equal(ctx.chatTabs[1].unread, true, "새 말이 왔는데 뒤 탭에 점이 없다");
+console.log("PASS test-last-message-ts (web tab)");
+NODE

@@ -100,7 +100,8 @@
         const a = ((wt && wt.agents) || []).find(x => x.sid === t.sid && x.source === t.source);
         if (!a) return;
         if (a.title && a.title !== t.title) { t.title = a.title; changed = true; }
-        const ts = a.statusTs || a.ts || 0;
+        // 마지막 Claude 말 시각 기준 — 재시작이 기록 파일에 종료 줄만 덧붙여도 점이 켜지면 안 된다.
+        const ts = a.msgTs || a.statusTs || a.ts || 0;
         if (i === chatActive) { t.seenTs = ts; if (t.unread) { t.unread = false; changed = true; } return; }
         if (ts > (t.seenTs || 0) && !t.unread) { t.unread = true; changed = true; }
       });
@@ -168,7 +169,7 @@
         chatTabs.push({root, source: agent.source, sid: agent.sid,
                        title: agent.title || String(agent.sid).slice(0, 8),
                        view: 'chat', cursor: null, items: [], hasMore: false, paged: false, draft: '',
-                       attachments: [], scrollTop: 0, seenTs: agent.statusTs || agent.ts || 0,
+                       attachments: [], scrollTop: 0, seenTs: agent.msgTs || agent.statusTs || agent.ts || 0,
                        unread: false});
         chatActive = chatTabs.length - 1;
       }
