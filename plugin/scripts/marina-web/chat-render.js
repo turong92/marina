@@ -886,7 +886,17 @@
   if (typeof document !== "undefined") {
     document.addEventListener("click", event => {
       const btn = event.target.closest && event.target.closest("[data-copy-text], [data-copy-table]");
-      if (!btn) return;
+      if (!btn) {
+        // 폰엔 호버가 없다 — 말풍선을 탭하면 그 말풍선의 복사 버튼을 띄운다(다른 건 접는다).
+        // 링크·버튼·접기 같은 원래 누를 것을 누른 거나, 글자를 선택하던 중이면 건드리지 않는다.
+        const turn = event.target.closest && event.target.closest(".turn");
+        const own = turn && event.target.closest("a, button, summary, input, textarea, select, img, label, .turnState");
+        const selecting = window.getSelection && String(window.getSelection() || "");
+        if (own || selecting) return;
+        document.querySelectorAll(".turn.showTools").forEach(el => { if (el !== turn) el.classList.remove("showTools"); });
+        if (turn && turn.querySelector("[data-copy-text], [data-copy-table]")) turn.classList.toggle("showTools");
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       let text = btn.getAttribute("data-copy-text");

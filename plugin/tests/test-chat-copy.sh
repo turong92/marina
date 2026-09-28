@@ -26,9 +26,10 @@ function load({secure}) {
     addEventListener(type, fn, capture) { if (type === "click") { listener = fn; assert.strictEqual(capture, true, "캡처 단계여야 말풍선 클릭 핸들러보다 먼저 받는다"); } },
     createElement() { const el = {style: {}, setAttribute() {}, focus() {}, setSelectionRange() {}, remove() {}, value: ""}; return el; },
     getElementById(id) { return toasts[id] || null; },
+    querySelectorAll() { return []; },
     execCommand(cmd) { execCalls += 1; return cmd === "copy"; },
   };
-  const window = {isSecureContext: secure};
+  const window = {isSecureContext: secure, getSelection: () => ""};
   const navigator = secure ? {clipboard: {writeText: t => { written.push(t); return Promise.resolve(); }}} : {};
   vm.runInNewContext(src, {window, document, navigator, setTimeout: () => 0, clearTimeout() {}, Promise});
   return {chat: window.MarinaChat, click: e => listener(e), written, execCalls: () => execCalls, toast: () => toasts.marinaCopyToast};
@@ -81,6 +82,19 @@ function ev(target) { return {target, preventDefault() {}, stopPropagation() {}}
   assert.strictEqual(b.textContent, "✓", "복사 후 표시가 안 바뀐다");
   // 웹은 폴링마다 대화를 통째로 다시 그려 버튼이 바뀐다 — 버튼과 무관한 토스트로도 알려야 한다.
   assert.ok(http.toast() && http.toast().textContent === "복사됨", "복사 토스트가 안 뜬다");
+
+  // ④ 폰엔 호버가 없다 — 말풍선 본문을 탭하면 복사 버튼이 뜬다(자리를 차지하지 않게 평소엔 숨김).
+  const cls = new Set();
+  const turn = {classList: {toggle(c) { cls.has(c) ? cls.delete(c) : cls.add(c); }, remove(c) { cls.delete(c); }},
+                querySelector: () => ({})};
+  const body = {closest: sel => (sel === ".turn" ? turn : null)};
+  http.click(ev(body));
+  assert.ok(cls.has("showTools"), "말풍선을 탭해도 복사 버튼이 안 뜬다");
+  http.click(ev(body));
+  assert.ok(!cls.has("showTools"), "다시 탭하면 접혀야 한다");
+  const link = {closest: sel => (sel === ".turn" ? turn : sel.startsWith("a,") ? {} : null)};
+  http.click(ev(link));
+  assert.ok(!cls.has("showTools"), "링크를 누른 건데 복사 버튼이 떴다");
 
   console.log("PASS test-chat-copy");
 })().catch(e => { console.error("FAIL:", e.message); process.exit(1); });

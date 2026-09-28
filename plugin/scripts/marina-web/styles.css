@@ -1379,14 +1379,16 @@
     .chat-turns .turnImageBtn img { display: block; max-width: 320px; max-height: 240px; }
     .chat-turns .activityGroup { margin: 6px 0; font-size: 12px; color: var(--sys-cont-neutral-light); }
     .chat-turns .mdTableWrap { overflow-x: auto; }
-    /* 복사 버튼 — 웹은 호버로 드러내되, 터치 기기(호버 없음)에선 늘 보이게. */
-    .chat-turns .turnTools { display: flex; justify-content: flex-end; margin-top: 2px; }
-    .chat-turns .copyBtn { padding: 2px 8px; border: 0; border-radius: 999px; background: transparent; color: var(--sys-cont-neutral-lightest); font-size: 11px; cursor: pointer; opacity: 0; transition: opacity .12s; }
-    .chat-turns .turn:hover .copyBtn, .chat-turns .mdTableBlock:hover .copyBtn, .chat-turns .copyBtn:focus-visible, .chat-turns .copyBtn.copied { opacity: 1; }
+    /* 복사 버튼 — 자리를 차지하지 않게 말풍선 모서리에 떠 있다. 올리면 보이고, 터치 기기는 탭하면(.showTools). */
+    .chat-turns .turn { position: relative; }
+    .chat-turns .turnTools { position: absolute; top: -8px; right: 0; z-index: 2; display: none; }
+    .chat-turns .turn:hover .turnTools, .chat-turns .turn.showTools .turnTools,
+    .chat-turns .turn:hover .tableCopyBtn, .chat-turns .turn.showTools .tableCopyBtn { display: inline-flex; }
+    .chat-turns .copyBtn { padding: 2px 8px; border: 1px solid var(--sys-style-neutral-default); border-radius: 999px; background: var(--sys-bg-surface); color: var(--sys-cont-neutral-light); font-size: 11px; cursor: pointer; }
     .chat-turns .copyBtn:hover { background: var(--sys-bg-surface-hover); }
     .chat-turns .copyBtn.copied { color: var(--st-ok, #2f6b45); }
-    .chat-turns .tableCopyBtn { display: flex; margin: 0 0 2px auto; font-size: 10px; }
-    @media (hover: none) { .chat-turns .copyBtn { opacity: 1; } }
+    .chat-turns .mdTableBlock { position: relative; }
+    .chat-turns .tableCopyBtn { position: absolute; top: -10px; right: -2px; z-index: 2; display: none; font-size: 10px; }
     .chat-turns .turnMeta { color: var(--sys-cont-neutral-lightest); font-size: 11px; }
     /* 질문 카드 — 웹엔 스킨이 아예 없어 공유 렌더러가 낸 마크업이 날것으로 나왔다.
        클래스는 chat-render.js 가 정한 그대로(모바일과 동일), 색만 시스템 토큰으로. */

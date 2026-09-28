@@ -3208,15 +3208,17 @@ _MOBILE_HTML = r"""<!doctype html>
     .pendingActions { display: inline-flex; gap: 5px; }
     .pendingActionBtn { display: inline-flex; align-items: center; width: auto; min-height: 19px; padding: 1px 7px; border: 1px solid #c8d1dc; border-radius: 999px; background: #fff; color: #526176; font-size: 9px; font-weight: 800; line-height: 1.6; text-decoration: none; cursor: pointer; }
     .pendingActionBtn[data-pending-cancel] { border-color: #e3b8b8; color: #a22b2b; }
-    /* 복사 — 폰엔 호버가 없어 늘 보여야 한다. 대신 작고 흐리게, 손가락 닿는 높이(28px)는 지킨다. */
-    .turnTools { display: flex; justify-content: flex-end; margin-top: 4px; }
-    .copyBtn { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 28px; min-height: 28px; padding: 2px 8px; border: 0; border-radius: 999px; background: transparent; color: #7a8394; font-size: 11px; font-weight: 750; line-height: 1; cursor: pointer; -webkit-tap-highlight-color: transparent; }
-    .copyBtn:active { background: rgba(120, 130, 150, .16); }
+    /* 복사 — 자리를 차지하지 않게 말풍선 모서리에 **떠 있다**(형: "공간 너무 차지"). 폰엔 호버가 없어
+       말풍선을 한 번 탭하면(.showTools) 나타나고, 마우스가 있으면 올렸을 때 나타난다. */
+    .turn { position: relative; }
+    .turnTools { position: absolute; top: -10px; right: -4px; z-index: 2; display: none; }
+    .turn.showTools .turnTools, .turn.showTools .tableCopyBtn { display: inline-flex; }
+    @media (hover: hover) { .turn:hover .turnTools, .turn:hover .tableCopyBtn { display: inline-flex; } }
+    .copyBtn { display: inline-flex; align-items: center; justify-content: center; width: auto; min-width: 28px; min-height: 28px; padding: 2px 8px; border: 1px solid #d5dbe4; border-radius: 999px; background: #fff; color: #56607a; font-size: 12px; font-weight: 750; line-height: 1; cursor: pointer; box-shadow: 0 1px 4px rgb(0 0 0 / 12%); -webkit-tap-highlight-color: transparent; }
     .copyBtn.copied { color: #2f6b45; }
-    .turn.output .copyBtn { color: #9ca3af; }
-    .mdTableBlock { margin: 6px 0; }
+    .mdTableBlock { position: relative; margin: 6px 0; }
     .mdTableBlock .mdTableWrap { margin: 0; }
-    .tableCopyBtn { display: flex; margin: 0 0 2px auto; min-height: 24px; font-size: 10px; }
+    .tableCopyBtn { position: absolute; top: -12px; right: -4px; z-index: 2; display: none; min-height: 24px; font-size: 10px; }
     .queuedTag { display: inline-block; margin-bottom: 4px; padding: 1px 6px; border-radius: 6px; background: rgba(11, 99, 206, .12); color: #0b63ce; font-size: 9px; font-weight: 850; }
     .queuedTag.consumed { background: rgba(107, 114, 128, .14); color: #6b7280; }
     .queuedTag.steered { background: rgba(47, 107, 69, .14); color: #2f6b45; }
@@ -3324,6 +3326,9 @@ _MOBILE_HTML = r"""<!doctype html>
     .fileList { display: flex; flex-direction: column; gap: 5px; }
     .fileRow { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 42px; padding: 7px 9px; border: 1px solid #d5dbe4; border-radius: 7px; background: #fff; text-align: left; }
     .fileRow:disabled { opacity: .55; }
+    .fileRowWrap { display: flex; align-items: stretch; gap: 6px; }
+    .fileRowWrap .fileRow { flex: 1; min-width: 0; }
+    .fileSave { flex: none; display: flex; align-items: center; justify-content: center; width: 42px; border: 1px solid #d5dbe4; border-radius: 7px; background: #fff; color: #3b4658; font-size: 16px; text-decoration: none; }
     .fileThumb { flex: none; width: 30px; height: 30px; border-radius: 5px; object-fit: cover; background: #f0f2f6; }
     .fileIcon { flex: none; width: 30px; height: 30px; border-radius: 5px; background: #f0f2f6; color: #63708a; font-size: 9px; font-weight: 800; display: flex; align-items: center; justify-content: center; }
     .fileMeta { min-width: 0; display: flex; flex-direction: column; gap: 1px; }
@@ -3584,8 +3589,9 @@ _MOBILE_HTML = r"""<!doctype html>
       .mdCodeLang { border-color: #262e3a; color: #8b96a8; }
       .mdTableWrap, .mdHr { border-color: #303846; }
       .viewerDoc { background: #11151c; color: #e8edf4; }
-      .copyBtn { color: #8b96a8; }
+      .copyBtn { background: #1c2431; border-color: #303846; color: #a5adba; }
       .copyBtn.copied { color: #7fd6a2; }
+      .fileSave { background: #171d27; border-color: #303846; color: #e8edf4; }
       .mdTable th, .mdTable td { border-color: #262e3a; }
       .mdTable th { background: #1c2431; }
       .mdQuote { border-color: #3a4453; color: #a5adba; }
@@ -4687,6 +4693,31 @@ _MOBILE_HTML = r"""<!doctype html>
     let galleryTab = "images";
     let galleryImageList = [];   // 뷰어가 좌우로 넘길 목록 — 모아보기에서 열면 세션 전체다
     let galleryFileList = [];
+    // 모아보기 응답 캐시 — 서버는 20ms 인데 공개 주소(funnel) 중계가 0.4~4초로 들쭉날쭉하다(실측 2026-09-28).
+    // 왕복을 줄인다: 열 때 두 탭을 **같이** 받아 두고(옆 탭은 누르는 순간 뜬다), 다시 열면 받아 둔 걸 **먼저**
+    // 그린 뒤 새로 받아 갈아 끼운다 — 방금 만든 파일이 캐시 때문에 안 보이는 일은 없다(리뷰 지적).
+    const galleryCache = new Map();   // `${kind}|${value}` → {at, promise}
+    const GALLERY_FRESH_MS = 5000;    // 이만큼 안이면 새로 받지 않는다(방금 미리 받은 옆 탭)
+    function galleryCached(kind, value) {
+      const hit = galleryCache.get(`${kind}|${value}`);
+      return hit ? hit.promise : null;
+    }
+    function galleryData(kind, value) {
+      const key = `${kind}|${value}`;
+      const hit = galleryCache.get(key);
+      if (hit && Date.now() - hit.at < GALLERY_FRESH_MS) return hit.promise;
+      const [, source, sid] = value.split(":");
+      const params = new URLSearchParams({root: sessionRoot(), source, sid});
+      const url = kind === "files" ? `/mobile/api/session-files?${params}` : `/mobile/api/images?${params}`;
+      const promise = fetch(url, {headers: headers()}).then(async r => {
+        if (!r.ok) throw new Error(await responseError(r));
+        return r.json();
+      });
+      // 실패는 캐시하지 않는다 — 단 그 사이 새로 채운 항목은 지우지 않게 자기 것일 때만.
+      promise.catch(() => { if ((galleryCache.get(key) || {}).promise === promise) galleryCache.delete(key); });
+      galleryCache.set(key, {at: Date.now(), promise});
+      return promise;
+    }
     function fileSizeLabel(bytes) {
       const n = Number(bytes) || 0;
       if (n < 1024) return `${n}B`;
@@ -4714,18 +4745,30 @@ _MOBILE_HTML = r"""<!doctype html>
       galleryGrid.innerHTML = "";
       galleryFiles.innerHTML = "";
       galleryStatus.textContent = "불러오는 중...";
+      galleryData(galleryTab === "files" ? "images" : "files", value).catch(() => {});   // 옆 탭도 미리
       return galleryTab === "files" ? loadGalleryFiles(value) : loadGalleryImages(value);
     }
-    async function loadGalleryImages(value) {
-      const [, source, sid] = value.split(":");
+    // 받아 둔 게 있으면 그걸 먼저 그리고(느린 중계를 기다리지 않게), 새 응답이 오면 갈아 끼운다.
+    async function loadGalleryKind(kind, value, render) {
+      const still = () => galleryTab === kind && currentTargetValue() === value;   // 그 사이 탭·세션이 바뀌었나
+      let fresh = false;
+      const stale = galleryCached(kind, value);
+      if (stale) stale.then(data => { if (!fresh && still()) render(data, value); }).catch(() => {});
       try {
-        const params = new URLSearchParams({root: sessionRoot(), source, sid});
-        const r = await fetch(`/mobile/api/images?${params}`, {headers: headers()});
-        if (!r.ok) throw new Error(await responseError(r));
-        const data = await r.json();
+        const data = await galleryData(kind, value);
+        fresh = true;
+        if (still()) render(data, value);
+      } catch (error) {
+        if (still() && !galleryGrid.innerHTML && !galleryFiles.innerHTML) galleryStatus.textContent = `불러오기 실패 · ${String(error)}`;
+      }
+    }
+    function loadGalleryImages(value) { return loadGalleryKind("images", value, renderGalleryImages); }
+    function loadGalleryFiles(value) { return loadGalleryKind("files", value, renderGalleryFiles); }
+    function renderGalleryImages(data, value) {
         const images = Array.isArray(data.images) ? data.images : [];
         galleryImageList = images.map(img => ({type: "image", ref: img.ref, name: img.name || "대화 이미지"}));
         if (!images.length) {
+          galleryGrid.innerHTML = "";
           galleryStatus.textContent = "이 대화엔 이미지가 없어요. 내가 만든 파일은 '만든 파일' 탭에 있어요.";
           return;
         }
@@ -4735,21 +4778,12 @@ _MOBILE_HTML = r"""<!doctype html>
           const url = transcriptImageUrl(img.ref, value);
           return url ? `<button class="galleryCell" type="button" data-image-ref="${esc(img.ref)}"><img src="${esc(url)}" alt="" loading="lazy" /></button>` : "";
         }).join("");
-      } catch (error) {
-        galleryStatus.textContent = `불러오기 실패 · ${String(error)}`;
-      }
     }
-    async function loadGalleryFiles(value) {
-      const [, source, sid] = value.split(":");
-      try {
-        const params = new URLSearchParams({root: sessionRoot(), source, sid});
-        const r = await fetch(`/mobile/api/session-files?${params}`, {headers: headers()});
-        if (!r.ok) throw new Error(await responseError(r));
-        const data = await r.json();
+    function renderGalleryFiles(data) {
         const files = Array.isArray(data.files) ? data.files : [];
         galleryFileList = files.map(f => ({type: "file", path: f.path, name: f.relPath,
                                            isImage: Boolean(f.isImage), servable: f.servable !== false}));
-        if (!files.length) { galleryStatus.textContent = "이 세션이 만든/바꾼 파일이 없어요."; return; }
+        if (!files.length) { galleryFiles.innerHTML = ""; galleryStatus.textContent = "이 세션이 만든/바꾼 파일이 없어요."; return; }
         galleryStatus.textContent = `파일 ${files.length}개 · 최근에 손댄 것부터`;
         galleryFiles.innerHTML = files.map(file => {
           const badge = file.action === "created" ? "새로 만듦" : "수정";
@@ -4760,11 +4794,13 @@ _MOBILE_HTML = r"""<!doctype html>
             ? `${fileSizeLabel(file.size)} · ${file.touches}번 손댐`
             : "지금은 없는 파일 (지워졌거나 옮겨졌어요)";
           const attrs = file.servable ? `data-file-path="${esc(file.path)}" data-file-name="${esc(file.relPath)}" data-file-image="${file.isImage ? "1" : ""}"` : "disabled";
-          return `<button class="fileRow" type="button" ${attrs}>${thumb}<span class="fileMeta"><span class="fileName">${esc(file.relPath)}</span><span class="fileSub">${esc(sub)}</span></span><span class="fileBadge${file.action === "created" ? "" : " edited"}">${badge}</span></button>`;
+          // 받기 — 줄을 누르면 앱 안 뷰어, ⬇ 는 기기로 저장. 링크를 줄(button) 밖에 둬야 눌림이 안 섞인다.
+          // 저장 이름은 경로 없이 파일 이름만(슬래시가 섞이면 브라우저마다 다르게 저장한다).
+          const 이름 = String(file.name || file.path || "").split("/").pop();
+          const save = file.servable
+            ? `<a class="fileSave" href="${esc(sessionFileUrl(file.path))}" download="${esc(이름)}" aria-label="${esc(이름)} 받기" title="받기">⬇</a>` : "";
+          return `<div class="fileRowWrap"><button class="fileRow" type="button" ${attrs}>${thumb}<span class="fileMeta"><span class="fileName">${esc(file.relPath)}</span><span class="fileSub">${esc(sub)}</span></span><span class="fileBadge${file.action === "created" ? "" : " edited"}">${badge}</span></button>${save}</div>`;
         }).join("");
-      } catch (error) {
-        galleryStatus.textContent = `불러오기 실패 · ${String(error)}`;
-      }
     }
     function showToast(message) {
       clearTimeout(toastTimer);

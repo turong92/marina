@@ -153,6 +153,13 @@ launch = re.search(r"\.wtLaunchBtn \{([^}]*)\}", html).group(1)
 for prop in ("width: auto", "white-space: nowrap", "flex: none"):
     assert prop in launch, f"＋CC 버튼에 {prop} 가 없어 좁은 폭에서 접힌다: {launch.strip()}"
 
+# 모아보기 파일은 받을 수 있어야 한다(형: "다운로드 가능하게") — 줄마다 저장 링크.
+assert 'class="fileSave"' in html and 'download="${esc(이름)}"' in html, "모아보기 파일에 받기 링크가 없다"
+# 불러오기 — 공개 주소 중계가 느려 왕복을 줄인다: 두 탭을 같이 받고 잠깐 캐시한다.
+assert "function galleryData(" in html and "GALLERY_FRESH_MS" in html, "모아보기 응답 캐시가 없다"
+# 캐시는 먼저 그리는 용도일 뿐 — 새로 받아 갈아 끼워야 방금 만든 파일이 보인다(리뷰 지적).
+assert "stale.then(data =>" in html and "fresh = true" in html, "받아 둔 목록만 보여주고 새로 안 받는다"
+assert 'galleryData(galleryTab === "files" ? "images" : "files", value)' in html, "옆 탭을 미리 안 받는다"
 print("PASS part B: 탭 2개 + 앱 안 뷰어(텍스트/이미지·배경만 닫힘·Esc 우선) + ＋CC 줄바꿈 방지 + 빈 상태 안내")
 PY
 
