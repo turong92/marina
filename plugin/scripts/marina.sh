@@ -99,6 +99,7 @@ usage (marina.sh = 내부 launcher; 평소엔 `marina <명령>` 래퍼로 — �
     marina.sh logs [service]                   # docker 로그 follow
   worktree (작업 시작 — 브랜치명 지정 워크트리 생성; Claude 자동 claude/<id> 대신 feature/{task} 등):
     marina.sh worktree create <branch> [base] [--project <id>]  # git worktree(-b) + 서브레포 같은 브랜치 미러. --project=아무데서나(cwd 무관)
+    marina.sh session new <project> <task> [--base B] [--no-start] | ls | attach | start | stop | rm   # Discord 채널 = 워크트리 세션(tmux + claude --channels)
     marina.sh worktree gc [--dry-run] [--days K] [--json]      # 유휴(세션·프로세스 0 + 커밋·파일 K일↑) 워크트리 판정 + 삭제 전 백업 가드. 삭제는 대시보드에서
   project (~/.marina/projects.json, 위치 무관):
     marina.sh project add <path> --compose <file> [--env-var NAME --env-default VAL]   # compose 등록(파일을 marina 로 복사. 또는 대시보드 위저드)
@@ -443,6 +444,10 @@ print(f"런타임: 원격 ({t.host})" if t.is_remote else "런타임: 로컬")
     gateway)
       # 호스트 브라우저 게이트웨이 caddy 제어 — 설치 사용자도 PATH 의 marina 로 도달(코덱스 P2). marina gateway {start|stop|status|install|uninstall}
       exec bash "$SCRIPT_DIR/marina-gateway-control.sh" "$@" ;;
+    session)
+      # 워크트리 하나 = Discord 채널 하나 = tmux 안의 claude --channels 하나.
+      # 설계: docs/superpowers/specs/2026-10-01-discord-sessions-design.md
+      PYTHONPATH="$SCRIPT_DIR" MARINA_HOME="$MARINA_HOME" exec python3 "$SCRIPT_DIR/marina_session.py" "$@" ;;
     worktree)
       # 브랜치명 지정 워크트리 생성(= 작업 시작) — git worktree + 서브레포 attach(브랜치 전체 미러).
       # Claude 자동 워크트리는 claude/<id> 라, feature/{task} 등 원하는 이름으로 만들 때 사용.
