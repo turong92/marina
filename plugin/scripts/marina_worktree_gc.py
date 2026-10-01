@@ -196,6 +196,12 @@ def idle_verdict(root: Path, info: dict[str, Any], agents: list[dict[str, Any]] 
     now = time.time() if now is None else now
     attached = attached_agents(agents)
     live_proc = _root_has_live_agent(root, live_cwds or set())
+    if not live_proc:
+        try:   # 마리나 PTY 밖(tmux)에서 도는 Discord 세션도 활동 신호다
+            from marina_session import has_live_session
+            live_proc = has_live_session(root)
+        except Exception:
+            pass
     out: dict[str, Any] = {"gcDays": days, "gcIdle": False, "gcIdleDays": None,
                            "gcAgents": len(attached), "gcLiveProcess": bool(live_proc)}
     last_ts = int(info.get("lastCommitTs") if info.get("lastCommitTs") is not None else (info.get("lastTs") or 0))

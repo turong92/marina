@@ -447,6 +447,12 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, 
 
     sid = session_id(root)
     stop_all(root)
+    # Discord 세션(tmux claude · 채널 · 상태 폴더) 정리 — 채널 수명 = 워크트리 수명. 실패해도 삭제는 진행.
+    try:
+        from marina_session import teardown_for_root
+        discord_warnings = teardown_for_root(root)
+    except Exception as exc:
+        discord_warnings = [f"세션 정리 실패: {exc}"]
     cleanup_session(root)
     bootout_session_dashboard(sid)
 
@@ -460,6 +466,7 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, 
     except Exception:
         root_branch = ""
     results: dict[str, Any] = {"subrepos": {}, "branches": {}, "root": None}
+    results["discordSessions"] = discord_warnings
     if not keep_images:
         # 워크트리 폴더가 사라지기 **전에** — compose images 조회가 --project-directory(=root)를 쓴다.
         try:
