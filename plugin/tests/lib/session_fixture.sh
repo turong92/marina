@@ -9,6 +9,8 @@ TMPROOT="$(mktemp -d "${TMPDIR:-/tmp}/marina-session.XXXXXX")"; TMPROOT="$(cd "$
 export MARINA_TMUX_SOCKET="marina-test-$$"          # 형의 tmux 와 절대 섞이지 않게
 export MARINA_CHANNELS_DIR="$MARINA_HOME/channels"  # 형의 ~/.claude/channels 대신
 export MARINA_SESSION_BOOT_WAIT=0.5
+export MARINA_CLAUDE_JSON="$TMPROOT/claude.json"       # 형의 ~/.claude.json(폴더 신뢰) 대신
+export MARINA_CLAUDE_PROJECTS="$TMPROOT/claude-projects"  # 형의 ~/.claude/projects(대화 기록) 대신
 FD="$TMPROOT/fakediscord"; mkdir -p "$FD"
 FAKE_OUT="$TMPROOT/claude-calls"; mkdir -p "$FAKE_OUT"
 FD_PID=""
