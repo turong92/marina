@@ -56,6 +56,9 @@ usage (marina = 전역 CLI):
     marina project ls | rm <id> | default <id> a,b,c | infer <path>
   워크트리 (작업 시작 — 브랜치명 지정 생성 + 서브레포 미러):
     marina worktree create <branch> [base] [--project <id>]
+  Discord 세션 (워크트리 = 채널 = tmux claude · 채팅방·로비):
+    marina session new <프로젝트> <작업> | new chat <이름> [--title] [--from <대화ID>] | lobby
+    marina session ls | attach | start [--all] | stop | rm <세션>
   게이트웨이 (호스트 브라우저 → <wt>.<proj>.localhost, 보통 start 시 자동 기동):
     marina gateway start|stop|status|config|install|uninstall
   링크 (main checkout 의 deps·빌드산출물·설정을 워크트리로):
@@ -221,7 +224,7 @@ case "$command" in
   auth|user)
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$AUTH_CLI" "$command" "$@"
     ;;
-  project|worktree|gateway|link|reap)
+  project|worktree|gateway|link|reap|session)
     # 그룹 → marina.sh dispatch 로 위임 (project {add|rm|ls|...} · worktree create · gateway {start|...} · link)
     # worktree/gateway 누락이 "설치 shim 은 이 명령 없음" 증상의 원인이었음(도그푸드에서 발견)
     "$SESSION" "$command" "$@"

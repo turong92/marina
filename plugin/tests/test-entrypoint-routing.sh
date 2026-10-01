@@ -11,6 +11,11 @@ out=$(bash "$EP" worktree 2>&1 || true)
 echo "$out" | grep -q "worktree create" || { echo "FAIL: worktree 미라우팅 — $out"; exit 1; }
 echo "$out" | grep -q "전역 CLI" && { echo "FAIL: worktree 가 전역 usage 로 떨어짐"; exit 1; }
 
+# session: Discord 세션 명령 — 빠져 있어 설치본에서 'unknown command: session' 이었다(2026-10-01)
+out=$(bash "$EP" session --help 2>&1 || true)
+echo "$out" | grep -q "Discord" || { echo "FAIL: session 미라우팅 — $out"; exit 1; }
+echo "$out" | grep -q "unknown command" && { echo "FAIL: session 이 전역 usage 로 떨어짐"; exit 1; }
+
 # gateway: status 는 running/stopped 중 하나
 out=$(MARINA_HOME="$(mktemp -d)" bash "$EP" gateway status 2>&1 || true)
 echo "$out" | grep -qE "running|stopped" || { echo "FAIL: gateway 미라우팅 — $out"; exit 1; }
