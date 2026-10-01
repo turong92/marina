@@ -661,18 +661,38 @@ def session_env(sdir: Path) -> dict[str, str]:
     return env
 
 
-def last_inbound_message(transcript: Path, channel_id: str) -> str | None:
-    """세션 기록 끝 2MB 에서 이 채널에서 받은 마지막 메시지 ID(JSON 이스케이프 \" 도 허용)."""
+def inbound_messages(transcript: Path, channel_id: str) -> list[str]:
+    """세션 기록 끝 2MB 에서 Claude 가 **실제로 읽은** 이 채널 메시지 ID 들(순서대로, 중복 제거).
+    읽은 것 = user 기록(턴을 연 메시지) · attachment queued_command(처리 중 끼어든 메시지).
+    queue-operation(도착만 함, 아직 안 읽음)은 세지 않는다 — 안 읽은 메시지에 ✅ 가 붙지 않게(실측 2026-10-01)."""
     try:
         data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
     except OSError:
-        return None
-    last = None
-    for m in _CHANNEL_TAG.finditer(data):
-        if m.group(1) == channel_id:
-            last = m.group(2)
-    return last
-
+        return []
+    out: list[str] = []
+    for raw in data.splitlines():
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue                                     # 2MB 경계에서 잘린 첫 줄 등
+        if not isinstance(row, dict):
+            continue
+        texts: list[str] = []
+        if row.get("type") == "user":
+            content = (row.get("message") or {}).get("content")
+            if isinstance(content, str):
+                texts.append(content)
+            elif isinstance(content, list):
+                texts += [str(b.get("text") or "") for b in content if isinstance(b, dict)]
+        elif row.get("type") == "attachment":
+            att = row.get("attachment") or {}
+            if isinstance(att, dict) and att.get("type") == "queued_command":
+                texts.append(str(att.get("prompt") or ""))
+        for text in texts:
+            for m in _CHANNEL_TAG.finditer(text):
+                if m.group(1) == channel_id and m.group(2) not in out:
+                    out.append(m.group(2))
+    return out
 
 def _hook_target(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any] | None:
     """상태 폴더로 찾고, 없으면 cwd 로 짐작 — 채팅 세션은 모두 같은 폴더라 짐작하지 않는다."""
@@ -687,16 +707,25 @@ def hook_stop(payload: dict[str, Any]) -> None:
     s = _hook_target(payload, items)
     if not s or not s.get("channelId"):
         return
-    mid = last_inbound_message(Path(str(payload.get("transcript_path") or "/nonexistent")), str(s["channelId"]))
-    if not mid:
+    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), str(s["channelId"]))
+    if not ids:
+        return
+    # 연달아 온 메시지는 한 턴에 처리된다 → 지난번 ✅ 이후 받은 것 전부(최대 20). 기록이 없으면 마지막 것만.
+    mark = Path(str(s.get("stateDir") or "")) / "acked" if s.get("stateDir") else None
+    last = mark.read_text().strip() if mark and mark.is_file() else ""
+    todo = ids[ids.index(last) + 1:] if last in ids else ids[-1:]
+    if not todo:
         return
     cfg = load_config()
     dc = Discord(read_token(cfg))
-    dc.add_reaction(str(s["channelId"]), mid, "✅")
-    try:
-        dc.remove_reaction(str(s["channelId"]), mid, "👀")
-    except DiscordError:
-        pass
+    for mid in todo[-20:]:
+        dc.add_reaction(str(s["channelId"]), mid, "✅")
+        try:
+            dc.remove_reaction(str(s["channelId"]), mid, "👀")
+        except DiscordError:
+            pass
+    if mark and mark.parent.is_dir():
+        mark.write_text(todo[-1] + "\n")
 
 
 def notify_exit(ref: str, code: str) -> None:

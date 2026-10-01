@@ -41,6 +41,35 @@ printf '{"cwd":"%s","transcript_path":"%s"}' "$SRC" "$TMPROOT/t.jsonl" | hook "$
 grep -q "\"PUT\", \"p\": \"/channels/$CH/messages/M2/reactions/%E2%9C%85/@me\"" "$FD/log.jsonl" || fail "마지막 메시지(M2)에 ✅ 추가 요청 없음"
 grep -q "\"DELETE\", \"p\": \"/channels/$CH/messages/M2/reactions/%F0%9F%91%80/@me\"" "$FD/log.jsonl" || fail "👀 제거 요청 없음"
 grep -q "/messages/MX/" "$FD/log.jsonl" && fail "다른 채널 메시지에 반응함"
+grep -q "/messages/M1/reactions/%E2%9C%85" "$FD/log.jsonl" && fail "처음엔 마지막 것만(옛 메시지에 몰아서 ✅ 하지 않는다)"
+
+# 연달아 온 메시지(M3·M4)를 한 턴에 처리 → 둘 다 ✅, 이미 ✅ 한 M2 는 다시 안 건드림(2026-10-01 실사용)
+python3 - "$TMPROOT/t.jsonl" "$CH" <<'PY2'
+import json, sys
+def line(cid, mid):
+    text = f'<channel source="plugin:discord:discord" chat_id="{cid}" message_id="{mid}" user="u" ts="t">\nhi\n</channel>'
+    return json.dumps({"type": "user", "message": {"role": "user", "content": text}})
+def tag(cid, mid):
+    return f'<channel source="plugin:discord:discord" chat_id="{cid}" message_id="{mid}" user="u" ts="t">\nhi\n</channel>'
+ch = sys.argv[2]
+rows = [
+    # 처리 중 끼어든 메시지는 attachment(queued_command) 로 남는다(실측)
+    {"type": "queue-operation", "operation": "enqueue", "content": tag(ch, "M3")},
+    {"type": "attachment", "attachment": {"type": "queued_command", "prompt": tag(ch, "M3")}},
+    json.loads(line(ch, "M4")),
+    # 도착만 하고 아직 안 읽은 메시지 — ✅ 하면 안 된다
+    {"type": "queue-operation", "operation": "enqueue", "content": tag(ch, "M5")},
+]
+open(sys.argv[1], "a").write("".join(json.dumps(r) + "\n" for r in rows))
+PY2
+before="$(grep -c "/messages/M2/reactions/%E2%9C%85" "$FD/log.jsonl")"
+printf '{"cwd":"%s","transcript_path":"%s"}' "$SRC" "$TMPROOT/t.jsonl" | hook "$SD" || fail "두 번째 훅 실패"
+for m in M3 M4; do
+  grep -q "\"PUT\", \"p\": \"/channels/$CH/messages/$m/reactions/%E2%9C%85/@me\"" "$FD/log.jsonl" || fail "$m 에 ✅ 없음(연달아 온 메시지)"
+  grep -q "\"DELETE\", \"p\": \"/channels/$CH/messages/$m/reactions/%F0%9F%91%80/@me\"" "$FD/log.jsonl" || fail "$m 👀 제거 없음"
+done
+[ "$(grep -c "/messages/M2/reactions/%E2%9C%85" "$FD/log.jsonl")" = "$before" ] || fail "이미 ✅ 한 M2 를 다시 건드림"
+grep -q "/messages/M5/reactions/%E2%9C%85" "$FD/log.jsonl" && fail "아직 안 읽은 M5(대기열만)에 ✅"
 
 n="$(wc -l < "$FD/log.jsonl")"
 printf '{"cwd":"/nowhere","transcript_path":"%s"}' "$TMPROOT/t.jsonl" | hook "/no/such/state" || fail "모르는 세션에서 실패 코드"
