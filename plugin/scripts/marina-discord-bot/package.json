@@ -1,0 +1,8 @@
+{
+  "name": "marina-discord-bot",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "discord.js": "^14.14.0"
+  }
+}

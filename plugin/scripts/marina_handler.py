@@ -3384,6 +3384,22 @@ def main() -> None:
 
     _threading.Thread(target=_handoff_loop, daemon=True, name="desktop-handoff").start()
 
+    # Discord 봇(선택 기능) — ~/.marina/discord.json 이 있을 때만 일한다: 🛑 정지 봇 프로세스,
+    # #상태 대시보드, 주간 숫자판, 작업 중 '입력 중…'. 없으면 30초마다 설정만 다시 본다.
+    def _discord_loop() -> None:
+        _time.sleep(10)
+        try:
+            from marina_discord_bot import run_forever
+            run_forever()
+        except Exception as exc:            # 삼키되 남긴다(리뷰 M3)
+            try:
+                from marina_discord_bot import _log
+                _log(f"loop died: {exc!r}")
+            except Exception:
+                pass
+
+    _threading.Thread(target=_discord_loop, daemon=True, name="discord-bot").start()
+
     # 변화 감지 — 화면에 밀어주고(SSE), 사람을 불러야 하면 폰을 깨운다(푸시).
     # 이 루프가 없으면 폰은 계속 3초마다 물어봐야 하고, "방금 바뀌었다"를 아는 곳이 없어
     # 알림을 보낼 근거 자체가 생기지 않는다.
