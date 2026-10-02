@@ -38,8 +38,10 @@ CHANNEL_RULES = (
     "- 채널 reply 는 일이 끝났을 때(최종 결과·완료·실패) 또는 상대의 답이 필요할 때만 새로 보낸다(알림이 울리도록). 짧은 답은 progress 없이 reply 만.\n"
     "- Discord 로 '/<이름> …' 이 오면 그 이름의 스킬을 Skill 도구로 실행한다. 단 정확히 '/compact'·'/model <이름>'·'/effort <단계>' 는 "
     "마리나가 입력창에 직접 친다 — '[마리나] … 직접 실행한다' 안내가 같이 오면 그대로 두고, 안내 없이 왔으면(작업 중에 끼어든 경우) 쉬는 중에 다시 보내 달라고 답한다.\n"
+    "- '[Discord 추천 버튼]' · '[Discord 슬래시]' 로 시작하는 입력은 Discord 사용자가 버튼·슬래시 명령을 쓴 것이다 — "
+    "'/이름 …' 이면 그 스킬을 Skill 도구로 실행하고, 답은 Discord reply 로 한다.\n"
     "- 지시에 대한 끝 보고·답은 reply_to = 그 지시 메시지 ID 로 단다(✅ 대신 '이 지시가 끝났다'는 표시). 여러 메시지를 한 번에 처리했으면 마지막 것에.\n"
-    "- 질문은 번호 선택지 텍스트로 묻는다.\n"
+    "- 선택지가 있는 질문은 AskUserQuestion 도구로 묻는다 — Discord 에 버튼으로 뜨고 상대가 누르면 답이 들어온다.\n"
     "- 이미지는 첨부한다. HTML 은 스크린샷과 열어볼 주소를 보낸다. 10MB 를 넘는 파일은 링크로 보낸다.\n"
     "- 스크린샷·HTML 같은 결과물은 share_file 도구에 넘기고 돌려받은 파일을 reply 로 첨부한다(프로젝트 #자료실 에도 모인다).\n"
     "- 터미널에서 직접 받은 지시의 답은 터미널에 둬도 된다."
@@ -462,9 +464,8 @@ def claude_argv(project: str, task: str, resume: bool = False, session_id: str =
              "--remote-control", rc_name(project, task),
              "--append-system-prompt", CHANNEL_RULES,
              "--mcp-config", str(state_dir(project, task) / "mcp.json"),   # share_file(결과물 → #자료실)
-             "--settings", str(state_dir(project, task) / "settings.json"),
-             # 가변 인자라 뒤따르는 값을 삼킨다 — 맨 끝에 둔다(marina_term 실측 2026-09-10)
-             "--disallowedTools", "AskUserQuestion"]
+             # AskUserQuestion 은 켠다 — 질문이 채널에 버튼으로 뜬다(봇 3단계, marina_discord_ask)
+             "--settings", str(state_dir(project, task) / "settings.json")]
     return argv
 
 
@@ -676,6 +677,183 @@ def hook_reply_to(payload: dict[str, Any]) -> "dict[str, Any] | None":
                                    "updatedInput": dict(inp, reply_to=ids[-1])}}
 
 
+def clear_suggest(sd: Path, ch: str, dc: "Discord") -> None:
+    """[▶ 추천] 버튼 떼기 — 다음 지시가 오면 바로(늦게 바뀌는 표시 금지)."""
+    try:
+        (sd / "suggest-cleared-at").write_text(f"{time.time()}\n")   # 늦게 끝나는 추천 대기자가 보고 물러난다(리뷰 I4)
+    except OSError:
+        pass
+    f = sd / "suggest.json"
+    try:
+        sug = json.loads(f.read_text(encoding="utf-8"))
+        f.unlink()
+    except (OSError, ValueError):
+        return
+    try:
+        dc._req("PATCH", f"/channels/{ch}/messages/{sug.get('msg')}", {"components": []})
+    except SessionError:
+        pass
+
+
+_SENT_IDS = re.compile(r"sent (?:\d+ parts )?\(ids?: ([\d, ]+)\)")
+
+
+def last_reply_id(transcript: Path) -> str:
+    """이번 턴(마지막 지시 이후)에 답장 도구가 보낸 마지막 메시지 ID. 여러 조각이면 마지막 조각(리뷰 I6)."""
+    try:
+        lines = transcript.read_bytes()[-1_000_000:].decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    reply_uses: set[str] = set()
+    last = ""
+    for raw in lines:
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        content = (row.get("message") or {}).get("content") if isinstance(row, dict) else None
+        if row.get("type") == "user" and (isinstance(content, str) or (isinstance(content, list) and any(
+                isinstance(b, dict) and b.get("type") == "text" for b in content))):
+            last = ""                                   # 새 지시 = 새 턴
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use" and b.get("name") == _REPLY_TOOL:
+                reply_uses.add(str(b.get("id")))
+            elif b.get("type") == "tool_result" and str(b.get("tool_use_id")) in reply_uses:
+                for t in ([b["content"]] if isinstance(b.get("content"), str) else
+                          [str(x.get("text") or "") for x in b.get("content") or [] if isinstance(x, dict)]):
+                    m = _SENT_IDS.search(t)
+                    if m:
+                        last = [x.strip() for x in m.group(1).split(",") if x.strip()][-1]
+    return last
+
+
+def _spawn_suggest(tmux: str, ch: str, msg: str) -> None:
+    bot = Path(__file__).resolve().with_name("marina_discord_bot.py")
+    subprocess.Popen([sys.executable, str(bot), "suggest", tmux, ch, msg, str(time.time())],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+PERM_WAIT = 300.0
+
+
+def _turn_from_terminal(transcript: Path, ch: str) -> bool:
+    """이번 턴을 연 입력이 터미널에서 직접 친 말인가(Discord 메시지·백그라운드 알림이 아님) — 그땐 터미널 권한 창이 맞다."""
+    try:
+        lines = transcript.read_bytes()[-1_000_000:].decode("utf-8", "replace").splitlines()
+    except OSError:
+        return False
+    for raw in reversed(lines):
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("type") != "user":
+            continue
+        c = (row.get("message") or {}).get("content")
+        texts = [c] if isinstance(c, str) else [str(b.get("text") or "") for b in c or []
+                                                if isinstance(b, dict) and b.get("type") == "text"]
+        if not texts:
+            continue                     # 도구 결과 — 더 위로
+        t = "\n".join(texts)
+        return not any(m.group(1) == ch for m in _CHANNEL_TAG.finditer(t)) and "<task-notification>" not in t
+    return False
+
+
+def hook_permission(payload: dict[str, Any], wait: float = PERM_WAIT, poll: float = 1.0) -> "dict[str, Any] | None":
+    """권한 창 대신 채널에 [허용][거부]. 누를 때까지 기다린다(그동안 터미널 창은 숨겨짐 — 하네스 문서). 시간이 지나면 결정 없이
+    돌려줘 원래 권한 창으로. 명령 원문은 안 보낸다(도구 이름·설명만). AskUserQuestion 은 질문 버튼이,
+    ExitPlanMode 는 계획을 봐야 하니 터미널이 맡는다. 터미널에서 직접 친 지시도 터미널 창으로(리뷰 I7)."""
+    start = time.time()
+    s = _session_from_env()
+    tool = str(payload.get("tool_name") or "")
+    if not s or s.get("kind") in CHAT_KINDS or tool in ("AskUserQuestion", "ExitPlanMode", ""):
+        return None
+    sd, ch = Path(str(s["stateDir"])), str(s["channelId"])
+    if _turn_from_terminal(Path(str(payload.get("transcript_path") or "/nonexistent")), ch):
+        return None
+    _, label, what = tool_activity(tool, payload.get("tool_input") or {})
+    token = uuid.uuid4().hex[:12]
+    f, ans = sd / f"perm-{token}.json", sd / f"perm-{token}.answer"
+    text = (f"🔐 **권한 요청** — `{tool}` {label}" + (f": {what}" if what else "")
+            + f"\n-# {int(wait // 60) or 1}분 안에 안 누르면 터미널 권한 창으로 넘어가")
+    dc = Discord(read_token(load_config()))
+    _write_json(f, {"token": token, "msg": ""})      # 버튼보다 먼저 — 빨리 눌러도 '없는 요청'이 안 되게(리뷰 I3)
+    msg, answer = "", ""
+    import signal
+    def _bye(*_: Any) -> None:
+        raise SystemExit(0)
+    try:
+        signal.signal(signal.SIGTERM, _bye)          # 하네스가 훅을 끊어도 버튼·기록은 정리(리뷰 I2)
+    except ValueError:
+        pass                                          # 메인 스레드가 아니면(테스트) 생략
+    try:
+        try:
+            msg = str(dc._req("POST", f"/channels/{ch}/messages", {
+                "content": text, "allowed_mentions": {"parse": []},
+                "components": [{"type": 1, "components": [
+                    {"type": 2, "style": 3, "label": "허용", "custom_id": f"mperm:a:{ch}:{token}"},
+                    {"type": 2, "style": 4, "label": "거부", "custom_id": f"mperm:d:{ch}:{token}"}]}]}).get("id") or "")
+        except SessionError:
+            return None
+        _write_json(f, {"token": token, "msg": msg})
+        end = start + wait                            # 훅 시작부터 — 느린 Discord 때문에 훅 제한을 넘지 않게(리뷰 I4)
+        while time.time() < end:
+            try:
+                answer = ans.read_text().strip()
+            except OSError:
+                answer = ""
+            if answer:
+                break
+            time.sleep(poll)
+    finally:
+        for x in (f, ans):
+            try:
+                x.unlink()
+            except OSError:
+                pass
+        if msg:
+            note = {"allow": "✅ 허용함", "deny": "⛔ 거부함"}.get(answer, "⌛ 넘어감 — 터미널에서 결정")
+            try:
+                dc._req("PATCH", f"/channels/{ch}/messages/{msg}", {"content": text.split("\n")[0] + f"\n-# {note}", "components": []})
+            except SessionError:
+                pass
+    if answer == "allow":
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": {"behavior": "allow"}}}
+    if answer == "deny":
+        return {"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+                                       "decision": {"behavior": "deny", "message": "Discord 에서 거부함"}}}
+    return None
+
+
+def hook_question(payload: dict[str, Any]) -> None:
+    """AskUserQuestion 이 뜨는 순간: 채널에 질문 메시지(떼어 낸 프로세스가 올린다 — 질문 창을 막지 않게)."""
+    s = _session_from_env()
+    if not s or s.get("kind") in CHAT_KINDS or payload.get("tool_name") != "AskUserQuestion":
+        return
+    ask = Path(__file__).resolve().with_name("marina_discord_ask.py")
+    p = subprocess.Popen([sys.executable, str(ask), "post", str(s["stateDir"]), str(s["channelId"]), str(time.time())],
+                         stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    p.stdin.write(json.dumps(payload.get("tool_input") or {}).encode())
+    p.stdin.close()
+
+
+def hook_question_done(payload: dict[str, Any]) -> None:
+    s = _session_from_env()
+    if not s or payload.get("tool_name") != "AskUserQuestion":
+        return
+    _spawn_question_done(str(s["stateDir"]), str(s["channelId"]))     # 떼어 낸다 — Discord 왕복에 Claude 를 붙잡지 않게(리뷰 I7)
+
+
+def _spawn_question_done(sdir: str, ch: str) -> None:
+    ask = Path(__file__).resolve().with_name("marina_discord_ask.py")
+    subprocess.Popen([sys.executable, str(ask), "done", sdir, ch],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def _spawn_slash(tmux: str, cmd: str, mid: str) -> None:
     s = _session_from_env() or {}
     bot = Path(__file__).resolve().with_name("marina_discord_bot.py")
@@ -739,6 +917,18 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
     prompt_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-prompt"]) + " || true"
     settings["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command": typing, "timeout": 10},
                                                         {"type": "command", "command": prompt_hook, "timeout": 10}]}]
+    if chat_root is None:
+        # 질문 버튼(봇 3단계): 질문이 뜨면 채널에 올리고, 어디서든 답하면 정리한다. 떼어 내서 질문 창을 막지 않는다
+        q_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-question"]) + " || true"
+        qd_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-question-done"]) + " || true"
+        settings["hooks"]["PreToolUse"].append({"matcher": "AskUserQuestion",
+                                                "hooks": [{"type": "command", "command": q_hook, "timeout": 10}]})
+        settings["hooks"]["PostToolUse"] = [{"matcher": "AskUserQuestion",
+                                             "hooks": [{"type": "command", "command": qd_hook, "timeout": 15}]}]
+        # 권한 승인 버튼(봇 4): 채널에서 누를 때까지 기다린다 — 훅 제한은 기다림보다 넉넉히
+        p_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-permission"]) + " || true"
+        settings["hooks"]["PermissionRequest"] = [{"hooks": [{"type": "command", "command": p_hook,
+                                                              "timeout": int(PERM_WAIT) + 30}]}]
     # 답장 = 끝 표시: reply_to 가 빠지면 훅이 채운다(규칙만으론 잊는다, 실사용)
     reply_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-reply-to"]) + " || true"
     settings["hooks"]["PreToolUse"].append({"matcher": _REPLY_TOOL,
@@ -915,6 +1105,11 @@ def hook_stop(payload: dict[str, Any]) -> None:
             lockf.close()
     if ids:
         _archive_threads(s, dc, ids)
+    # 다음 입력 추천 → 마지막 답장에 버튼(개발 세션만). 추천은 턴이 끝난 뒤 뜨니 떼어 낸 대기자가 읽는다
+    if s.get("kind") not in CHAT_KINDS and s.get("tmux"):
+        sent = last_reply_id(Path(str(payload.get("transcript_path") or "/nonexistent")))
+        if sent:
+            _spawn_suggest(str(s["tmux"]), str(s["channelId"]), sent)
 
 
 def _wait_lock(path: Path, timeout: float = 3.0) -> Any:
@@ -1096,6 +1291,11 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
     if _stopped_after(sd, at):      # 턴이 끝나기 전에 떠난 훅이 늦게 도착했다 — 끝난 지시에 다시 달지 않는다(실사용)
         return
     prompt = payload.get("hook_event_name") == "UserPromptSubmit"
+    if prompt:
+        clear_suggest(sd, ch, Discord(read_token(load_config())))    # 새 지시 — 지난 추천 버튼은 바로 뗀다
+        if (sd / "question.json").exists():                          # 취소돼 PostToolUse 가 안 온 질문도 정리(리뷰 C2)
+            import marina_discord_ask
+            marina_discord_ask.done(sd, ch, "지나간 질문")
     ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), ch)
     if prompt:      # 막 받은 메시지는 아직 기록에 없을 수 있다 — 넘겨받은 글에서 직접 읽는다
         tagged = [m.group(2) for m in _CHANNEL_TAG.finditer(str(payload.get("prompt") or "")) if m.group(1) == ch]
@@ -1804,6 +2004,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("hook-typing")
     sub.add_parser("hook-reply-to")
     sub.add_parser("hook-prompt")
+    sub.add_parser("hook-question")
+    sub.add_parser("hook-permission")
+    sub.add_parser("hook-question-done")
     sub.add_parser("hook-activity-run")
     p = sub.add_parser("hook-chat-guard")
     p.add_argument("root")
@@ -1823,6 +2026,20 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "mcp-chat":
         mcp_chat()
+        return 0
+    if a.cmd in ("hook-question", "hook-question-done"):
+        try:
+            (hook_question if a.cmd == "hook-question" else hook_question_done)(json.loads(sys.stdin.read() or "{}"))
+        except Exception:
+            pass
+        return 0
+    if a.cmd == "hook-permission":
+        try:
+            out = hook_permission(json.loads(sys.stdin.read() or "{}"))
+            if out:
+                print(json.dumps(out, ensure_ascii=False))
+        except Exception:
+            pass
         return 0
     if a.cmd in ("hook-reply-to", "hook-prompt"):
         # 실패해도 도구 호출·입력은 그대로 지나가게 — 출력이 없으면 하네스는 아무것도 바꾸지 않는다

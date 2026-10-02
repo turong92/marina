@@ -126,6 +126,133 @@ def _ctx_percent(rec: dict[str, Any]) -> float | None:
         return None
 
 
+_BG_SHELL = re.compile(r"Command running in background with ID: (\w+)")
+_BG_AGENT = re.compile(r"agentId: (\w+)")
+_TASK_DONE = re.compile(r"<task-id>(\w+)</task-id>.*?<status>(\w+)</status>", re.S)
+
+
+def _texts(content: Any) -> list[str]:
+    if isinstance(content, str):
+        return [content]
+    if isinstance(content, list):
+        return [str(b.get("text") or "") for b in content if isinstance(b, dict)]
+    return []
+
+
+def background_tasks(transcript: Path) -> list[dict[str, Any]]:
+    """지금 뒤에서 도는 일(백그라운드 셸·서브에이전트) = 기록에서 시작됨 − 끝남 알림. 기록 끝 2MB 만 본다."""
+    try:
+        data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
+    except OSError:
+        return []
+    descs: dict[str, str] = {}
+    bg_use: dict[str, str] = {}          # tool_use_id → 'shell'|'agent' (백그라운드로 띄운 것만, 리뷰 I1)
+    started: dict[str, dict[str, Any]] = {}
+    done: set[str] = set()
+    for raw in data.splitlines():
+        if "<task-id>" in raw:
+            for m in _TASK_DONE.finditer(raw.replace("\\n", "\n")):
+                if m.group(2) != "running":
+                    done.add(m.group(1))
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        content = ((row.get("message") or {}) if isinstance(row, dict) else {}).get("content")
+        if not isinstance(content, list):
+            continue
+        for b in content:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use" and isinstance(b.get("input"), dict):
+                descs[str(b.get("id"))] = str(b["input"].get("description") or b.get("name") or "")
+                if b["input"].get("run_in_background") and b.get("name") in ("Bash", "Agent", "Task"):
+                    bg_use[str(b.get("id"))] = "shell" if b.get("name") == "Bash" else "agent"
+                if b.get("name") in ("TaskStop", "KillShell", "KillBash"):    # 손으로 끈 건 알림이 없다(실측)
+                    done.add(str(b["input"].get("task_id") or b["input"].get("shell_id") or b["input"].get("bash_id") or ""))
+            elif b.get("type") == "tool_result":
+                # 백그라운드로 띄운 도구의 결과만 — 동기 에이전트 결과·파일 내용 속 같은 글자는 무시(리뷰 I1)
+                kind = bg_use.get(str(b.get("tool_use_id")))
+                if not kind:
+                    continue
+                for t in _texts(b.get("content")):
+                    for m in (_BG_SHELL if kind == "shell" else _BG_AGENT).finditer(t):
+                        started[m.group(1)] = {"id": m.group(1), "kind": kind,
+                                               "desc": descs.get(str(b.get("tool_use_id")), "")}
+    return [t for i, t in started.items() if i not in done]
+
+
+def _task_output(transcript: Path, task_id: str) -> Path | None:
+    base = Path(os.environ.get("MARINA_CLAUDE_TMP") or "/private/tmp")
+    hits = list(base.glob(f"claude-*/{transcript.parent.name}/{transcript.stem}/tasks/{task_id}.output"))
+    return hits[0] if hits else None
+
+
+def _agent_last_words(transcript: Path, task_id: str) -> str:
+    p = transcript.parent / transcript.stem / "subagents" / f"agent-{task_id}.jsonl"
+    try:
+        lines = p.read_bytes()[-300_000:].decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    for raw in reversed(lines):
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if row.get("type") == "assistant":
+            t = " ".join(x for x in _texts((row.get("message") or {}).get("content")) if x).strip()
+            if t:
+                return t
+    return ""
+
+
+_SHELLS = re.compile(r"(?:· |\b)(\d+) shells?\b")
+
+
+def _pane_shells(name: str) -> int:
+    """화면 아래쪽(입력창 근처)에 하네스가 띄우는 'N shell(s)' — 지금 실제로 도는 백그라운드 셸 수."""
+    if not ms.tmux_alive(name):
+        return 0
+    lines = (ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()
+    box = max((i for i, l in enumerate(lines) if l.startswith("❯")), default=-1)
+    if box < 0:
+        return 0
+    # 입력창 바로 위(턴 끝 줄 '… · 1 shell still running')부터 아래 상태 줄까지만 — 대화 본문의 같은 글자는 무시
+    near = lines[max(0, box - 4):]
+    return max([int(m.group(1)) for ln in near for m in _SHELLS.finditer(ln)] + [0])
+
+
+def _session_born(name: str) -> float:
+    r = ms._tmux("display-message", "-p", "-t", name, "#{session_created}") if name else None
+    try:
+        return float((r.stdout or "").strip()) if r else 0.0
+    except ValueError:
+        return 0.0
+
+
+def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
+    """기록만 믿으면 틀린다 — 재시작으로 죽은 셸은 끝남 알림이 없다(실측). 셸은 화면의 'N shell' 수만큼(최근 것),
+    에이전트는 지금 세션이 뜬 뒤 기록이 움직인 것만."""
+    tr = _session_transcript(rec)
+    if not tr:
+        return []
+    tasks = background_tasks(tr)
+    n = _pane_shells(str(rec.get("tmux") or ""))
+    shells = [t for t in tasks if t["kind"] == "shell"]
+    keep = {t["id"] for t in (shells[-n:] if n else [])}
+    born = _session_born(str(rec.get("tmux") or ""))
+    for t in tasks:
+        if t["kind"] == "agent":
+            # 지금 세션(tmux)이 뜬 뒤에 움직인 에이전트만 — 그 전 것은 재시작으로 죽었다(알림이 안 와 있을 뿐)
+            p = tr.parent / tr.stem / "subagents" / f"agent-{t['id']}.jsonl"
+            try:
+                if p.stat().st_mtime >= born:
+                    keep.add(t["id"])
+            except OSError:
+                pass
+    return [t for t in tasks if t["id"] in keep]
+
+
 def snapshot(full: bool = True) -> dict[str, Any]:
     """full=False: 4초마다 도는 가벼운 판정(작업 중 여부만). ctx·사용량·서버는 그릴 때만."""
     rows = []
@@ -136,7 +263,9 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         act = ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent")))
         rows.append({"ref": f"{rec.get('project')}/{rec.get('task')}", "channelId": str(rec["channelId"]),
                      "alive": alive, "busy": busy, "emoji": str(act.get("emoji") or "") if busy else "",
-                     "ctx": _ctx_percent(rec) if alive and full else None})
+                     "ctx": _ctx_percent(rec) if alive and full else None,
+                     "tasks": live_tasks(rec) if alive and full else [],
+                     "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists()})
     if not full:
         return {"sessions": rows, "anyBusy": any(r["busy"] for r in rows)}
     try:
@@ -173,6 +302,23 @@ def _row(r: dict[str, Any], proj_w: int) -> str:
     return f"`{ctx:>4}  {proj:<{proj_w}}` <#{r['channelId']}>{warn}"
 
 
+VIEW_PREFIX = "marina-view:"
+
+
+def _count(cs: list[dict[str, Any]]) -> int:
+    return sum(1 + _count(c.get("components") or []) + (1 if c.get("accessory") else 0) for c in cs)
+
+
+def _tasks_tag(r: dict[str, Any]) -> str:
+    t = r.get("tasks") or []
+    sh, ag = sum(x["kind"] == "shell" for x in t), sum(x["kind"] == "agent" for x in t)
+    return "  " + " ".join(([f"⏳{sh}"] if sh else []) + ([f"🤖{ag}"] if ag else [])) if t else ""
+
+
+def _view_button(r: dict[str, Any]) -> dict[str, Any]:
+    return {"type": 2, "style": 2, "label": "보기", "custom_id": VIEW_PREFIX + r["channelId"]}
+
+
 def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     """#상태 메시지(Components V2). 섹션: 작업 중(줄마다 정지 버튼) · 대기 · 꺼짐. 같으면 고쳐 쓰지 않는다.
     디스크·부하·시각은 꼬리말로 따로 — 매번 바뀌는 값이 비교를 흔들지 않게."""
@@ -181,14 +327,33 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = [_text("### 사용량\n" + ("  ·  ".join(use) or "알 수 없음"))]
     rows = sorted(snap["sessions"], key=lambda r: (r["ref"].split("/", 1)[0], r["ref"]))
     proj_w = max([len(r["ref"].split("/", 1)[0]) for r in rows] + [4])
+    rows = [dict(r, busy=True, emoji="❓") if r.get("asking") and not r["busy"] else r for r in rows]   # 답 기다리는 질문
     busy = [r for r in rows if r["busy"]]
-    idle = [r for r in rows if r["alive"] and not r["busy"]]
+    bg = [r for r in rows if r["alive"] and not r["busy"] and r.get("tasks")]
+    idle = [r for r in rows if r["alive"] and not r["busy"] and not r.get("tasks")]
     off = [r for r in rows if not r["alive"]]
+    # 메시지당 구성요소 40개(중첩 포함) — 아래 대기·꺼짐·꼬리말 몫(6)을 남기고 넘치면 '외 N개'(리뷰 I2)
+    room = [40 - 6 - _count(out) - 4]
+    def add(block: list[dict[str, Any]]) -> bool:
+        if _count(block) > room[0]:
+            return False
+        out.extend(block); room[0] -= _count(block)
+        return True
     out.append({"type": 14})
     out.append(_text(f"### 🔧 작업 중 {len(busy)}" + ("" if busy else "\n-# 없음")))
-    for r in busy[:10]:        # 메시지당 구성요소 40개 제한 — 작업 중이 10개를 넘을 일은 없다
-        out.append({"type": 9, "components": [_text(f"{r['emoji'] or '🔧'} {_row(r, proj_w)}")],
-                    "accessory": {"type": 2, "style": 4, "label": "정지", "custom_id": STOP_PREFIX + r["channelId"]}})
+    left = [r for r in busy if not add(
+        [{"type": 9, "components": [_text(f"{r['emoji'] or '🔧'} {_row(r, proj_w)}{_tasks_tag(r)}")],
+          "accessory": {"type": 2, "style": 4, "label": "정지", "custom_id": STOP_PREFIX + r["channelId"]}}]
+        + ([{"type": 1, "components": [_view_button(r)]}] if r.get("tasks") else []))]
+    if left:
+        out.append(_text("-# 외 " + " ".join(f"<#{r['channelId']}>" for r in left)))
+    if bg:
+        out.append({"type": 14})
+        out.append(_text(f"### ⏳ 백그라운드 {len(bg)}\n-# 턴은 끝났고 뒤에서 셸·에이전트가 도는 중 — 세션 재시작하면 같이 죽는다"))
+        left = [r for r in bg if not add([{"type": 9, "components": [_text(f"{_row(r, proj_w)}{_tasks_tag(r)}")],
+                                            "accessory": _view_button(r)}])]
+        if left:
+            out.append(_text("-# 외 " + " ".join(f"<#{r['channelId']}>" for r in left)))
     out.append({"type": 14})
     out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) for r in idle)))
     if off:
@@ -328,6 +493,51 @@ def _session_transcript(rec: dict[str, Any]) -> Path | None:
     return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
 
 
+def _allowed(rec: dict[str, Any], channel: str, user: str, dc: ms.Discord) -> bool:
+    """허용 목록이 빈 채팅방은 역할로 보이는 사람이 곧 쓸 수 있는 사람이다. 봇 자신(미리 단 🛑)은 제외(리뷰 M8)."""
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    try:
+        allow = json.loads((sd / "access.json").read_text(encoding="utf-8"))["groups"][str(channel)].get("allowFrom") or []
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return False
+    return not (allow and str(user) not in [str(a) for a in allow]) and str(user) != dc.me()
+
+
+def view(channel: str, user: str) -> str:
+    """[보기]: 뒤에서 도는 셸의 출력 끝·에이전트의 마지막 말(누른 사람에게만). 명령 원문은 안 보낸다(설명만)."""
+    rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
+    if not rec:
+        return "모르는 채널이야"
+    if not _allowed(rec, channel, user, _dc(ms.load_config())):
+        return "볼 권한이 없어"
+    tr = _session_transcript(rec)
+    tasks = live_tasks(rec) if tr else []
+    if not tasks or not tr:
+        return "지금 뒤에서 도는 일은 없어"
+    parts = []
+    budget = max(120, 1800 // len(tasks))
+    for t in tasks[:12]:
+        head = f"{'⏳' if t['kind'] == 'shell' else '🤖'} **{_clean(t['desc'] or t['id'])[:80]}**"
+        room = max(40, budget - len(head) - 12)
+        if t["kind"] == "shell":
+            p = _task_output(tr, t["id"])
+            try:
+                tail = _clean(p.read_bytes()[-4000:].decode("utf-8", "replace")) if p else ""
+            except OSError:
+                tail = ""
+            body = "\n".join(tail.rstrip().splitlines()[-8:])[-room:].replace("```", "ʼʼʼ")
+            parts.append(head + ("\n```\n" + body + "\n```" if body else "\n-# 출력 없음"))
+        else:
+            words = _clean(_agent_last_words(tr, t["id"]))[-room:]
+            parts.append(head + ("\n" + words if words else "\n-# 아직 말 없음"))
+    out = ""
+    for part in parts:                 # 조각 단위로 자른다 — 코드 펜스가 중간에 끊기지 않게(리뷰 M2)
+        if len(out) + len(part) + 1 > 1900:
+            break
+        out += ("\n" if out else "") + part
+    return out or parts[0][:1900]
+
+
 def interrupt(channel: str, user: str, message: str) -> str:
     """🛑 → 그 세션에 Esc. 대상 지시 = 기록의 마지막 메시지(누른 메시지가 스레드 상태 줄·옛 메시지여도, 리뷰 I3).
     진행 훅과 같은 잠금 안에서 한다 — 떼자마자 진행 훅이 다시 달거나, 두 번 눌려 Esc 가 두 번 가지 않게(리뷰 I2·I4)."""
@@ -335,13 +545,8 @@ def interrupt(channel: str, user: str, message: str) -> str:
     if not rec:
         return "모르는 채널이야"
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))
-    try:
-        allow = json.loads((sd / "access.json").read_text(encoding="utf-8"))["groups"][str(channel)].get("allowFrom") or []
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        allow = None
-    # 허용 목록이 빈 채팅방은 역할로 보이는 사람이 곧 쓸 수 있는 사람이다. 봇 자신(미리 단 🛑)은 제외(리뷰 M8)
     dc = _dc(ms.load_config())
-    if allow is None or (allow and str(user) not in [str(a) for a in allow]) or str(user) == dc.me():
+    if not _allowed(rec, channel, user, dc):
         return "멈출 권한이 없어"
     lockf = ms._wait_lock(sd / "activity.lock", timeout=3.0)
     try:
@@ -363,6 +568,10 @@ def interrupt(channel: str, user: str, message: str) -> str:
             mark.write_text(f"{mid} {time.time()}\n")
         # Esc 로 끝난 턴엔 Stop 훅이 안 돈다 — 턴 끝과 같은 정리(달아 둔 표시 전부 떼기·끝 표시 전진)를 여기서(리뷰 B-I2)
         ms._clear_locked(rec, sd, dc, ids)
+        clear_perms(sd, str(channel))                 # 기다리던 권한 요청 버튼도
+        if (sd / "question.json").exists():          # 질문 중에 멈췄으면 그 질문 메시지도 정리
+            import marina_discord_ask
+            marina_discord_ask.done(sd, str(channel), "멈춤")
         if mid:
             try:
                 dc.add_reaction(str(channel), mid, "⏹️")
@@ -376,6 +585,14 @@ def interrupt(channel: str, user: str, message: str) -> str:
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_CTRL = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]")
+_SECRET = re.compile(r"(?i)(bearer\s+|authorization:\s*\S+\s+|(?:token|secret|password|passwd|api[_-]?key|key)\s*[=:]\s*)\S+"
+                     r"|AKIA[0-9A-Z]{12,}|-----BEGIN [A-Z ]+-----[\s\S]*?(?:-----END [A-Z ]+-----|$)|(?:sk|ghp|xox[bp])-?[A-Za-z0-9_-]{16,}")
+
+
+def _clean(text: str) -> str:
+    """Discord 로 내보내는 셸 출력: 제어문자 제거 + 흔한 비밀 모양 가리기(리뷰 I7)."""
+    return _SECRET.sub(lambda m: (m.group(1) or "") + "•••", _CTRL.sub("", text))
 _DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[(?:22|0)?m|$)")
 
 
@@ -392,6 +609,220 @@ def _input_empty(tmux: str) -> bool:
     return bool(box) and _input_empty_text(box[-1])
 
 
+_GHOST = re.compile(r"❯[\s\xa0]*\x1b\[2m(.*?)(?:\x1b\[(?:22|0)?m|$)")
+SAY_PREFIX = "marina-say:"
+SUGGEST_MARK = "[Discord 추천 버튼] "
+
+
+def ghost_text(line: str) -> str:
+    """입력창의 흐린 글씨(ESC[2m) = Claude Code 의 다음 입력 추천(실측). 흐리지 않은 글은 쓰던 초안이라 아니다."""
+    m = _GHOST.search(line)
+    return _ANSI.sub("", m.group(1)).strip() if m else ""
+
+
+def run_suggest(tmux: str, channel: str, msg: str, settle: float = 6.0, started: float | None = None) -> None:
+    """턴 끝: 추천이 뜰 틈을 두고 입력창을 읽어, 있으면 마지막 답장에 [▶ 추천] 버튼을 단다.
+    그 사이 새 지시가 와서 지웠으면(suggest-cleared-at) 단 것을 되돌린다(리뷰 I4)."""
+    started = time.time() if started is None else started
+    time.sleep(settle)
+    if not ms.tmux_alive(tmux):
+        return
+    lines = (ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or "").rstrip().splitlines()
+    box = [ln for ln in lines if "❯" in _ANSI.sub("", ln)]
+    text = ghost_text(box[-1]) if box else ""
+    rec = next((x for x in ms.load_sessions() if str(x.get("channelId")) == str(channel)), None)
+    if not text or not rec or not rec.get("stateDir"):
+        return
+    sd = Path(str(rec["stateDir"]))
+    def cleared() -> bool:
+        try:
+            return float((sd / "suggest-cleared-at").read_text()) > started
+        except (OSError, ValueError):
+            return False
+    if cleared() or _pane_busy(tmux)[1]:
+        return
+    dc = _dc(ms.load_config())
+    try:
+        dc._req("PATCH", f"/channels/{channel}/messages/{msg}", {"components": [{"type": 1, "components": [
+            {"type": 2, "style": 1, "label": ("▶ " + text)[:80], "custom_id": SAY_PREFIX + str(channel)}]}]})
+    except ms.SessionError:
+        return
+    ms._write_json(sd / "suggest.json", {"text": text, "msg": str(msg)})
+    if cleared():
+        ms.clear_suggest(sd, str(channel), dc)
+
+
+def _spawn_type(tmux: str, text: str, channel: str, mid: str) -> None:
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "type", tmux, text, channel, mid],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def say(channel: str, user: str, message: str = "") -> str:
+    """[▶ 추천] 누름: 한 번만. 허용 명령은 그대로, 글은 '[Discord 추천 버튼]' 을 붙여 입력창에(답은 Discord 로 — 규칙).
+    누른 버튼이 지금 추천의 메시지가 아니면(남은 옛 버튼) 치지 않고 그 버튼을 뗀다(리뷰 I3)."""
+    rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
+    if not rec:
+        return "모르는 채널이야"
+    dc = _dc(ms.load_config())
+    if not _allowed(rec, channel, user, dc):
+        return "누를 권한이 없어"
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    try:
+        sug = json.loads((sd / "suggest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        sug = {}
+    if message and str(sug.get("msg") or "") != str(message):
+        try:
+            dc._req("PATCH", f"/channels/{channel}/messages/{message}", {"components": []})
+        except ms.SessionError:
+            pass
+        return "지난 추천이라 뗐어" if sug else "지금 누를 추천이 없어"
+    claim = sd / f"suggest.json.{os.getpid()}.{time.time_ns()}"
+    try:
+        os.rename(sd / "suggest.json", claim)      # 먼저 가져간 쪽만 친다 — 두 번 눌러도 한 번(리뷰 I5)
+    except OSError:
+        return "지금 누를 추천이 없어"
+    try:
+        sug = json.loads(claim.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        sug = {}
+    finally:
+        claim.unlink(missing_ok=True)
+    try:
+        dc._req("PATCH", f"/channels/{channel}/messages/{sug.get('msg')}", {"components": []})
+    except ms.SessionError:
+        pass
+    text = str(sug.get("text") or "")
+    if not text:
+        return "지금 누를 추천이 없어"
+    # 봇 답장엔 진행 반응을 달지 않는다(✅ 없음 결정과 맞춤, 리뷰 M5)
+    _spawn_type(str(rec.get("tmux") or ""), text if ms.slash_allowed(text) else SUGGEST_MARK + text, str(channel), "")
+    return "입력할게"
+
+
+SLASH_MARK = "[Discord 슬래시] "
+SLASH_COMMANDS = [   # 길드 명령(봇이 켜질 때 등록). 스킬 이름은 자동완성으로
+    {"name": "compact", "description": "이 채널 세션 대화 압축(쉬는 순간 입력)", "type": 1},
+    {"name": "model", "description": "모델 바꾸기", "type": 1, "options": [
+        {"type": 3, "name": "name", "description": "opus · sonnet · haiku · fable …", "required": True, "autocomplete": True}]},
+    {"name": "effort", "description": "생각 깊이 바꾸기", "type": 1, "options": [
+        {"type": 3, "name": "level", "description": "단계", "required": True,
+         "choices": [{"name": x, "value": x} for x in ("low", "medium", "high", "xhigh", "max")]}]},
+    {"name": "stop", "description": "이 채널 세션 작업 멈춤(Esc)", "type": 1},
+    {"name": "skill", "description": "스킬·명령 실행", "type": 1, "options": [
+        {"type": 3, "name": "name", "description": "스킬 이름", "required": True, "autocomplete": True},
+        {"type": 3, "name": "args", "description": "덧붙일 말", "required": False}]},
+]
+MODELS = ("opus", "sonnet", "haiku", "fable", "opusplan", "default")
+
+
+def _claude_home() -> Path:
+    return Path(os.environ.get("MARINA_CLAUDE_HOME") or Path.home() / ".claude")
+
+
+def list_skills(rec: dict[str, Any], query: str = "") -> list[str]:
+    """그 세션에서 쓸 수 있는 스킬·명령 이름(사용자 · 설치된 플러그인 · 프로젝트). 자동완성 최대 25개."""
+    home = _claude_home()
+    names: set[str] = set()
+    def scan(base: Path, prefix: str = "") -> None:
+        for d in (base / "skills").glob("*/SKILL.md"):
+            names.add(prefix + d.parent.name)
+        for f in (base / "commands").glob("*.md"):
+            names.add(prefix + f.stem)
+    scan(home)
+    try:
+        installed = json.loads((home / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins") or {}
+    except (OSError, ValueError, AttributeError):
+        installed = {}
+    for key, entries in installed.items():
+        for e in entries if isinstance(entries, list) else []:
+            if isinstance(e, dict) and e.get("installPath"):
+                scan(Path(str(e["installPath"])), str(key).split("@", 1)[0] + ":")
+    root = Path(str(rec.get("root") or "/nonexistent"))
+    scan(root / ".claude")
+    q = query.strip().lower()
+    hits = sorted(n for n in names if q in n.lower())
+    return sorted(hits, key=lambda n: (not n.lower().startswith(q), n))[:25]
+
+
+def slash(channel: str, user: str, name: str, value: str = "", args: str = "") -> str:
+    """Discord 슬래시 명령. 기본 명령은 쉬는 순간 입력창에 그대로, 스킬은 '[Discord 슬래시]' 를 붙여(Claude 가 Skill 도구로)."""
+    rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
+    if not rec or rec.get("kind") in ms.CHAT_KINDS:
+        return "이 채널은 세션 명령을 안 받아"
+    if not _allowed(rec, channel, user, _dc(ms.load_config())):
+        return "쓸 권한이 없어"
+    if name == "stop":
+        return interrupt(channel, user, "")
+    if name == "skill":
+        if value not in list_skills(rec, value):
+            return f"없는 스킬이야: {value}"
+        text = (SLASH_MARK + f"/{value} " + " ".join(args.split())[:1500]).strip()
+    else:
+        text = f"/{name}" + (f" {value.strip()}" if value.strip() else "")
+        if not ms.slash_allowed(text):
+            return "그 값은 못 넣어"
+    _spawn_type(str(rec.get("tmux") or ""), text, str(channel), "")
+    return "쉬는 순간 입력할게"
+
+
+def perm(channel: str, user: str, token: str, allow: bool) -> str:
+    """권한 요청 [허용]/[거부] — 기다리는 훅이 읽어 결정한다. 먼저 누른 것만(O_EXCL, 리뷰 I1).
+    허용 목록이 빈 채널(역할로 보이는 누구나)은 승인 못 한다 — 메시지와 달리 실행 권한이다(리뷰 I6)."""
+    rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
+    if not rec or not re.fullmatch(r"[0-9a-f]{12}", token or ""):
+        return "모르는 요청이야"
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    try:
+        allow_from = json.loads((sd / "access.json").read_text(encoding="utf-8"))["groups"][str(channel)].get("allowFrom") or []
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        allow_from = []
+    if not allow_from or not _allowed(rec, channel, user, _dc(ms.load_config())):
+        return "누를 권한이 없어"
+    if not (sd / f"perm-{token}.json").exists():
+        return "이미 끝났거나 없는 요청이야"
+    try:
+        fd = os.open(str(sd / f"perm-{token}.answer"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return "이미 결정됐어"
+    except OSError:
+        return "이미 끝났거나 없는 요청이야"
+    with os.fdopen(fd, "w") as fh:
+        fh.write("allow" if allow else "deny")
+    return "허용했어" if allow else "거부했어"
+
+
+def clear_perms(sd: Path, channel: str) -> None:
+    """멈춤(🛑) 등으로 기다리던 권한 요청이 끝났다 — 버튼과 기록을 정리(리뷰 I2)."""
+    dc = None
+    for f in sd.glob("perm-*.json"):
+        try:
+            msg = str(json.loads(f.read_text(encoding="utf-8")).get("msg") or "")
+        except (OSError, ValueError):
+            msg = ""
+        for x in (f, f.with_suffix(".answer")):
+            try:
+                x.unlink()
+            except OSError:
+                pass
+        if msg:
+            dc = dc or _dc(ms.load_config())
+            try:
+                dc._req("PATCH", f"/channels/{channel}/messages/{msg}", {"components": []})
+            except ms.SessionError:
+                pass
+
+
+def typeable(text: str) -> bool:
+    """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글과 허용 명령만."""
+    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK))
+
+
+def type_timeout(text: str) -> float:
+    """추천은 금방 안 쉬면 포기(옛 추천을 나중에 치지 않게), 슬래시·명령은 끝날 때까지 기다린다(리뷰 I5)."""
+    return 120.0 if text.startswith(SUGGEST_MARK) else 1800.0
+
+
 def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, settle: float = 3.0,
               timeout: float = 1800.0) -> None:
     """Discord 로 온 /compact·/model X·/effort X: 세션이 쉬고 입력창이 정말 비었을 때만 직접 친다(허용 목록은 훅이 거른다).
@@ -401,11 +832,12 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
     emoji, ok, lockf = ms.slash_emoji(cmd), False, None
     dc = None
     try:
-        dc = _dc(ms.load_config())
-        try:
-            dc.add_reaction(channel, mid, emoji)
-        except ms.SessionError:
-            pass
+        dc = _dc(ms.load_config()) if mid else None
+        if dc is not None:
+            try:
+                dc.add_reaction(channel, mid, emoji)
+            except ms.SessionError:
+                pass
         end = time.time() + timeout
         rec = next((x for x in ms.load_sessions() if str(x.get("channelId")) == str(channel)), {})
         sd = Path(str(rec.get("stateDir") or ms.marina_home()))
@@ -599,12 +1031,68 @@ def main(argv: list[str]) -> int:
     it.add_argument("--channel", required=True)
     it.add_argument("--user", required=True)
     it.add_argument("--message", required=True)
+    pm = sub.add_parser("perm")
+    pm.add_argument("--channel", required=True); pm.add_argument("--user", required=True)
+    pm.add_argument("--token", required=True); pm.add_argument("--allow", action="store_true")
+    sc = sub.add_parser("slash-cmd")
+    sc.add_argument("--channel", required=True); sc.add_argument("--user", required=True); sc.add_argument("--name", required=True)
+    sc.add_argument("--value", default=""); sc.add_argument("--args", default="")
+    sk = sub.add_parser("skills")
+    sk.add_argument("--channel", required=True); sk.add_argument("--query", default="")
+    sub.add_parser("commands")
+    sy = sub.add_parser("say")
+    sy.add_argument("--channel", required=True); sy.add_argument("--user", required=True); sy.add_argument("--message", default="")
+    sg = sub.add_parser("suggest")
+    sg.add_argument("tmux"); sg.add_argument("channel"); sg.add_argument("msg"); sg.add_argument("started", type=float)
+    ty = sub.add_parser("type")
+    ty.add_argument("tmux"); ty.add_argument("text"); ty.add_argument("channel"); ty.add_argument("mid")
+    vw = sub.add_parser("view")
+    vw.add_argument("--channel", required=True)
+    vw.add_argument("--user", required=True)
     sl = sub.add_parser("slash")
     sl.add_argument("tmux")
     sl.add_argument("command")
     sl.add_argument("channel")
     sl.add_argument("message")
     a = p.parse_args(argv)
+    if a.cmd == "perm":
+        try:
+            print(perm(a.channel, a.user, a.token, a.allow))
+        except ms.SessionError as exc:
+            print(str(exc))
+        return 0
+    if a.cmd == "slash-cmd":
+        try:
+            print(slash(a.channel, a.user, a.name, a.value, a.args))
+        except ms.SessionError as exc:
+            print(str(exc))
+        return 0
+    if a.cmd == "skills":
+        rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(a.channel)), None)
+        print(json.dumps(list_skills(rec, a.query) if rec and rec.get("kind") not in ms.CHAT_KINDS else [], ensure_ascii=False))
+        return 0
+    if a.cmd == "commands":
+        print(json.dumps(SLASH_COMMANDS, ensure_ascii=False))
+        return 0
+    if a.cmd == "say":
+        try:
+            print(say(a.channel, a.user, a.message))
+        except ms.SessionError as exc:
+            print(str(exc))
+        return 0
+    if a.cmd == "suggest":
+        run_suggest(a.tmux, a.channel, a.msg, started=a.started)
+        return 0
+    if a.cmd == "type":
+        if typeable(a.text):
+            run_slash(a.tmux, a.text, a.channel, a.mid, timeout=type_timeout(a.text))
+        return 0
+    if a.cmd == "view":
+        try:
+            print(view(a.channel, a.user))
+        except ms.SessionError as exc:
+            print(str(exc))
+        return 0
     if a.cmd == "slash":
         if ms.slash_allowed(a.command):
             run_slash(a.tmux, a.command, a.channel, a.message)

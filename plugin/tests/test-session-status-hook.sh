@@ -23,7 +23,7 @@ assert "hook-stop" in s["hooks"]["Stop"][0]["hooks"][0]["command"], s
 assert s["enabledPlugins"] == {"discord@claude-plugins-official": True}, s
 argv = ms.claude_argv("proj", "st")
 i = argv.index("--settings")
-assert argv[i + 1] == str(sd / "settings.json") and argv[-2:] == ["--disallowedTools", "AskUserQuestion"], argv
+assert argv[i + 1] == str(sd / "settings.json") and "AskUserQuestion" not in argv, argv   # 질문은 Discord 버튼으로(봇 3)
 env = ms.session_env(sd)
 assert env["DISCORD_STATE_DIR"] == str(sd) and env["MARINA_HOME"] == str(ms.marina_home()), env
 ms.save_sessions([{"project": "proj", "task": "st", "root": str(src), "channelId": ch, "tmux": "proj-st",
