@@ -3293,15 +3293,8 @@ def main() -> None:
         else:
             _pt.Thread(target=preview.serve_forever, daemon=True, name="marina-preview").start()
             print(f"marina preview: http://{HOST}:{_PREVIEW_PORT} (funnel 8443 로 연결)")
-    if _GATEWAY_ON:                                            # 동적반영: 백그라운드 폴링(빠짐없음, diff-reload) + 이벤트 훅(즉각)
-        import threading
-        import time
-        def _gw_loop():
-            while True:
-                refresh_gateway()
-                time.sleep(max(2, int(_env("GATEWAY_POLL", "5") or "5")))   # MARINA_GATEWAY_POLL (빈 문자열 방어)
-        threading.Thread(target=_gw_loop, daemon=True).start()
-        print(f"marina gateway: caddy {'있음' if _gw().caddy_bin() else '미설치(안내)'} · :{_GATEWAY_PORT} · 폴링+이벤트 동적반영")
+    if _GATEWAY_ON:   # 동적반영: 폴링은 청소 상주 프로그램(marina-runtimed)이, 이벤트 훅(즉각)은 그대로 여기서
+        print(f"marina gateway: caddy {'있음' if _gw().caddy_bin() else '미설치(안내)'} · :{_GATEWAY_PORT} · 폴링은 runtimed")
     # 모바일 보류함 드레이너 — 작업 중이라 미뤄둔 메시지를 세션이 유휴가 되는 순간 전달한다.
     # (진행 중인 턴을 끊지 않기 위한 장치이므로 폴링 주기는 짧게. 할 일이 없으면 즉시 반환한다.)
     import threading as _threading
@@ -3332,39 +3325,29 @@ def main() -> None:
 
     _threading.Thread(target=_warm_loop, daemon=True, name="worktree-warm").start()
 
-    # 고아 백그라운드 프로세스 리퍼 — Claude 세션이 남긴 ppid=1 고아(태스크 출력·사라진 cwd)를 N시간 뒤 정리.
-    # 판정·로그는 marina_reaper 에(`marina reap --dry-run` 과 같은 코드). MARINA_REAPER=0 으로 끈다.
+    # 청소(게이트웨이 폴링·도커 GC·워크트리 자동 정리·고아 리퍼)는 runtime 의 상주 프로그램 marina-runtimed 가 한다(분리 A).
+    # 기록된 데몬(정식 설치)만 띄워 준다 — 업데이트만 받으면 생기게. 격리 프리뷰는 안 띄운다(실 도커를 지운 사고).
     try:
-        import marina_reaper
-        if marina_reaper.enabled():
-            _threading.Thread(target=marina_reaper.run_forever, daemon=True, name="marina-reaper").start()
-            print(f"marina reaper: {marina_reaper.min_age_s() / 3600:g}h 넘은 고아 정리 · 로그 {marina_reaper.log_path()}")
-    except Exception as exc:                  # noqa: BLE001 — 청소 기능이 데몬 기동을 막으면 본말전도
-        print(f"[marina] reaper 기동 실패(무시): {exc!r}")
+        from marina_docker_gc import recorded_daemon_port
+        if recorded_daemon_port() == int(PORT):
+            import subprocess as _sp
+            _sp.Popen(["bash", str(Path(__file__).with_name("marina-runtimed.sh")), "ensure"],
+                      stdout=_sp.DEVNULL, stderr=_sp.DEVNULL, start_new_session=True)
+    except Exception as exc:                  # noqa: BLE001 — 청소 기동 실패가 대시보드를 막으면 본말전도
+        print(f"[marina] runtimed 기동 실패(무시): {exc!r}")
 
-    # 도커 GC — 정책 주기(기본 24h)로 워크트리에 안 묶인 산출물을 회수한다. 틱 함수가 예외를 전부 삼키므로
-    # GC 가 어떻게 실패해도 데몬은 영향이 없다. 기록된 데몬(dashboard-bind.env 의 포트)만 돈다 — 기록 없는 프리뷰·격리 인스턴스는 건너뜀(도커는 호스트 공유).
-    def _gc_loop() -> None:
-        _time.sleep(60)                         # 부팅 직후엔 도커·화면 채우기가 우선
+    # 강제 자동 업데이트(기본 1시간, MARINA_AUTO_UPDATE=0 으로 끔) — 대시보드 재시작·터미널 판정에 묶여 있어 여기 둔다.
+    def _update_loop() -> None:
+        _time.sleep(60)
         while True:
             try:
-                from marina_docker_gc import daemon_tick
-                daemon_tick(PORT)
-            except Exception:
-                pass
-            try:                                # 유휴 워크트리 자동 정리(worktree_auto_days, 기본 7) — 같은 정책·같은 '기록된 데몬만'
-                from marina_worktree_gc import auto_tick
-                auto_tick(PORT)
-            except Exception:
-                pass
-            try:                                # 강제 자동 업데이트(기본 1시간, MARINA_AUTO_UPDATE=0 으로 끔) — 설치 전 사전 검증
                 from marina_autoupdate import auto_update_tick
                 auto_update_tick(PORT)
             except Exception:
                 pass
             _time.sleep(600)
 
-    _threading.Thread(target=_gc_loop, daemon=True, name="docker-gc").start()
+    _threading.Thread(target=_update_loop, daemon=True, name="auto-update").start()
 
     # 데스크톱 앱이 연 대화를 놓아 준다(한 대화 = 한 주인). 폴링에 얹지 않는다 — 형이 데스크톱만 보고
     # 있으면 marina 로 폴링이 안 와서 영영 안 놓는다. 5초면 "열었더니 곧 쓸 수 있게 됨" 으로 느껴진다.

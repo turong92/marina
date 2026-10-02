@@ -48,6 +48,7 @@ assert gc.daemon_tick(3901, now=NOW + 100 * 3600, run=fake) == "skipped:not-prim
 assert gc.daemon_tick(3900, now=NOW + 100 * 3600, run=fake) == "ran"
 print("ok")
 PY
-grep -q '_gc_loop' "$HERE/../scripts/marina_handler.py" || { echo "FAIL: 데몬 main 에 _gc_loop 스레드가 없다"; exit 1; }
-grep -q 'daemon_tick' "$HERE/../scripts/marina_handler.py" || { echo "FAIL: 데몬이 daemon_tick 을 안 부른다"; exit 1; }
+# 분리 A: 청소 루프는 대시보드가 아니라 runtime 의 상주 프로그램(marina-runtimed)이 돈다
+grep -q 'daemon_tick' "$HERE/../scripts/marina_runtimed.py" || { echo "FAIL: runtimed 가 daemon_tick 을 안 부른다"; exit 1; }
+grep -q 'auto_tick' "$HERE/../scripts/marina_runtimed.py" || { echo "FAIL: runtimed 가 워크트리 auto_tick 을 안 부른다"; exit 1; }
 echo "PASS test-docker-gc-daemon-loop"

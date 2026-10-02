@@ -36,7 +36,8 @@ STATE_FILE = MARINA_HOME / "auto-update-state.json"
 LOG_FILE = MARINA_HOME / "auto-update.log"
 # 데몬이 부팅 때 import 하는 모듈 — 하나라도 실패하면 새 데몬이 안 뜬다
 PREFLIGHT_MODULES = ("marina_state", "marina_handler", "marina_compose_svc", "marina_lifecycle", "marina_sessions",
-                     "marina_docker_gc", "marina_worktree_gc", "marina_update", "marina_autoupdate")
+                     "marina_docker_gc", "marina_worktree_gc", "marina_update", "marina_autoupdate",
+                     "marina_worktrees", "marina_liveness", "marina_runtimed")
 PREFLIGHT_FILES = ("marina-compose.py", "marina-control.py")   # 하이픈 이름 — 파일로 로드(실행은 안 함)
 MAX_RESTART_TRIES = 3            # 재시작해도 serving 이 installed 로 안 바뀌면 여기서 멈춘다(매시간 재시작 루프 방지)
 MAX_CLIENT_DEFER_S = 6 * 3600    # 대시보드·폰이 붙어 있으면 재시작을 미루되 이만큼까지만

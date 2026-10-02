@@ -51,6 +51,7 @@ marina_emit_launcher() {
   case "$kind" in
     entrypoint) exec_line='exec "$ip/scripts/marina-entrypoint.sh" "$@"' ;;
     dashboard)  exec_line='exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$ip/scripts/marina-control.py"' ;;
+    runtimed)   exec_line='exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$ip/scripts/marina_runtimed.py"' ;;
     *) echo "marina_emit_launcher: bad kind: $kind" >&2; return 2 ;;
   esac
   mkdir -p "$(dirname "$target")"
