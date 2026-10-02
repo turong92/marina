@@ -30,6 +30,16 @@ try:
 except ValueError as exc:
     check("잠김" in str(exc) and "marina-session" in str(exc), f"이유를 보여 준다: {exc}")
 check(W("wl").exists(), "잠긴 워크트리는 남는다")
+# 실측(2026-10-03): force 삭제가 중간(stop_all)에 실패하면 잠금만 풀린 채 남았다 — 잠금은 실제로 지우기 직전에 푼다
+_stop = lc.stop_all
+lc.stop_all = lambda root: (_ for _ in ()).throw(ValueError("stop-all failed"))
+try:
+    lc.remove_worktree(W("wl"), force=True, keep_images=True)
+except ValueError:
+    pass
+import marina_liveness as lv
+check((lv.worktree_lock(W("wl")) or {}).get("owner") == "marina-session", "삭제가 실패하면 잠금은 그대로")
+lc.stop_all = _stop
 lc.remove_worktree(W("wl"), force=True, keep_images=True)
 check(not W("wl").exists(), "force 면 잠금을 풀고 지운다")
 lc.remove_worktree(W("wd"), keep_images=True)

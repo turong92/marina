@@ -451,8 +451,6 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, 
     held = lock_holds(root)
     if held and not force:
         raise ValueError(f"잠김: {held['reason']} — 쓰는 중인 워크트리입니다(force 로 지울 수 있음)")
-    if worktree_lock(root):   # force 거나 낡은 잠금 — git 은 잠긴 워크트리를 안 지우므로 먼저 푼다
-        subprocess.run(["git", "-C", str(root), "worktree", "unlock", str(root)], capture_output=True, timeout=10)
 
     sid = session_id(root)
     stop_all(root)
@@ -487,6 +485,10 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, 
         elif target.exists():
             results["subrepos"][repo] = {"error": f"source repo not found: {source_repo}", "path": str(target)}
 
+    # force 거나 낡은 잠금 — git 은 잠긴 워크트리를 안 지우므로 **지우기 직전에** 푼다
+    # (앞 단계가 실패하면 잠금이 그대로 남아야 한다 — 실측: stop_all 실패로 잠금만 풀린 채 남았음)
+    if worktree_lock(root):
+        subprocess.run(["git", "-C", str(root), "worktree", "unlock", str(root)], capture_output=True, timeout=10)
     results["root"] = remove_git_worktree(main_checkout, root, force=force)
     # 루트 레포 브랜치 정리: claude worktree 는 claude/<id> 를 물고 있음. codex 루트는 보통
     # detached HEAD 라 root_branch 가 비어 스킵되지만, 브랜치 체크아웃이면 동일하게 -d 시도.
