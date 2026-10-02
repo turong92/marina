@@ -18,7 +18,6 @@ from typing import Any
 
 import marina_session as ms
 
-_CONNECT = 1 << 20
 _MANAGE = 1 << 4
 _SEND = 1 << 11
 _HISTORY = 1 << 16
@@ -406,22 +405,19 @@ def _dc(cfg: dict[str, Any]) -> ms.Discord:
     return ms.Discord(ms.read_token(cfg))
 
 
-def _owner_channel(dc: ms.Discord, cfg: dict[str, Any], name: str, kind: int) -> str:
+def _owner_channel(dc: ms.Discord, cfg: dict[str, Any], name: str, kind: int, position: int = 0) -> str:
     """@everyone 은 막고 형·봇만 연다(만들 때 덮어쓰기 — 봇에 역할 관리 권한이 없어도 된다)."""
     guild = str(cfg["guildId"])
-    if kind == 2:   # 음성 = 숫자판: 보이기만, 들어가지 못함
-        owner = {"allow": str(ms._VIEW), "deny": str(_CONNECT)}
-        everyone_deny = ms._VIEW | _CONNECT
+    if kind == 4:   # 빈 카테고리 = 숫자판: 보이기만(눌러도 접히기만 — 음성 채널은 서버 주인이 들어가졌다)
+        owner = {"allow": str(ms._VIEW), "deny": "0"}
     else:           # #상태: 읽기만
         owner = {"allow": str(ms._VIEW | _HISTORY), "deny": str(_SEND)}
-        everyone_deny = ms._VIEW
-    # 음성 채널은 연결 권한이 없으면 봇도 못 만진다(실측 403 Missing Access) — 봇엔 연결·관리를 연다
-    bot = ms._TALK | (_CONNECT | _MANAGE if kind == 2 else 0)
-    ow = [{"id": guild, "type": 0, "allow": "0", "deny": str(everyone_deny)},
+    bot = ms._TALK | (_MANAGE if kind == 4 else 0)
+    ow = [{"id": guild, "type": 0, "allow": "0", "deny": str(ms._VIEW)},
           {"id": dc.me(), "type": 1, "allow": str(bot), "deny": "0"}]
     ow += [dict(owner, id=u, type=1) for u in owner_ids(cfg)]
     r = dc._req("POST", f"/guilds/{guild}/channels",
-                {"name": name, "type": kind, "position": 0, "permission_overwrites": ow})
+                {"name": name, "type": kind, "position": position, "permission_overwrites": ow})
     return str(r["id"])
 
 
@@ -472,33 +468,48 @@ def dashboard_tick(st: dict[str, Any], snap: dict[str, Any] | None = None) -> No
     _save_section("dashboard", dict(st))
 
 
-def weekly_tick(st: dict[str, Any]) -> None:
+METERS = (("fiveHour", "5시간"), ("weekly", "주간"))
+
+
+def meter_tick(meters: dict[str, dict[str, Any]]) -> None:
+    """사용량 숫자판 — 형만 보이는 빈 카테고리 이름에 5시간·주간 %."""
     cfg = ms.load_config()
     dc = _dc(cfg)
-    if not st:
-        st.update(_load_state().get("weekly") or {})
-    w = next((x for x in claude_usage() if x.get("key") == "weekly"), None)
-    if w is None:
-        return
-    name = f"📊 주간 {round(float(w.get('usedPercent') or 0))}%"
-    if st.get("channelId") and st.get("name") == name:
-        return
-    # 이름 변경은 10분 2회 제한 — 데몬을 연달아 재시작해도 넘지 않게 마지막 변경 시각을 저장해 둔다(리뷰 M5)
-    if st.get("channelId") and time.time() - float(st.get("renamedAt") or 0) < WEEKLY_EVERY:
-        return
-    if st.get("channelId"):
-        try:
-            dc._req("PATCH", f"/channels/{st['channelId']}", {"name": name})
-        except ms.DiscordError as exc:
-            if exc.code not in (403, 404):     # 지워졌거나 봇이 못 만지게 됐다 → 새로 만든다
-                raise
-            _log(f"weekly channel {st.get('channelId')} gone/forbidden ({exc.code}), recreating")
+    usage = {x.get("key"): x for x in claude_usage()}
+    saved = _load_state()
+    for pos, (key, label) in enumerate(METERS):
+        st = meters.setdefault(key, {})
+        if not st:
+            st.update(saved.get(key) or {})
+        if st.get("channelId") and st.get("kind") != 4:
+            # 예전 음성 숫자판(서버 주인은 눌러서 들어가졌다) — 지우고 카테고리로 다시 만든다
+            try:
+                dc._req("DELETE", f"/channels/{st['channelId']}")
+            except ms.SessionError:
+                pass
             st.clear()
-    if not st.get("channelId"):
-        st["channelId"] = _owner_channel(dc, cfg, name, 2)
-        _save_section("weekly", dict(st, name=name, renamedAt=time.time()))   # 다음 단계가 실패해도 또 만들지 않게
-    st.update(name=name, renamedAt=time.time())
-    _save_section("weekly", dict(st))
+        w = usage.get(key)
+        if w is None:
+            continue
+        name = f"📊 {label} {round(float(w.get('usedPercent') or 0))}%"
+        if st.get("channelId") and st.get("name") == name:
+            continue
+        # 이름 변경은 10분 2회 제한 — 데몬을 연달아 재시작해도 넘지 않게 마지막 변경 시각을 저장해 둔다(리뷰 M5)
+        if st.get("channelId") and time.time() - float(st.get("renamedAt") or 0) < WEEKLY_EVERY:
+            continue
+        if st.get("channelId"):
+            try:
+                dc._req("PATCH", f"/channels/{st['channelId']}", {"name": name})
+            except ms.DiscordError as exc:
+                if exc.code not in (403, 404):     # 지워졌거나 봇이 못 만지게 됐다 → 새로 만든다
+                    raise
+                _log(f"{key} meter {st.get('channelId')} gone/forbidden ({exc.code}), recreating")
+                st.clear()
+        if not st.get("channelId"):
+            st.update(channelId=_owner_channel(dc, cfg, name, 4, pos), kind=4)
+            _save_section(key, dict(st, name=name, renamedAt=time.time()))   # 다음 단계가 실패해도 또 만들지 않게
+        st.update(name=name, renamedAt=time.time())
+        _save_section(key, dict(st))
 
 
 def typing_tick(snap: dict[str, Any], ty: dict[str, float], now: float) -> None:
@@ -1067,7 +1078,7 @@ class Loop:
 
     def __init__(self) -> None:
         self.dash: dict[str, Any] = {}
-        self.week: dict[str, Any] = {}
+        self.meters: dict[str, dict[str, Any]] = {}
         self.ty: dict[str, float] = {}
         self.last_render = -1.0          # 데몬이 막 떴으면 한 번은 그린다
         self.last_weekly = -WEEKLY_EVERY
@@ -1153,7 +1164,7 @@ class Loop:
             dashboard_tick(self.dash)
         if now - self.last_weekly >= WEEKLY_EVERY:
             self.last_weekly = now
-            weekly_tick(self.week)
+            meter_tick(self.meters)
 
 
 def run_forever() -> None:

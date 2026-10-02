@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 마리나 Discord 봇 1단계 — 🛑 정지 · #상태 대시보드 · 주간 숫자판(형만 보임).
+# 마리나 Discord 봇 1단계 — 🛑 정지 · #상태 대시보드 · 사용량 숫자판(형만 보임).
 #  - 로직은 파이썬(marina_discord_bot.py), 봇(bun)은 🛑 반응 이벤트만 받아 interrupt 를 부른다
 #  - #상태·주간 채널은 만들 때부터 @everyone 을 막고 형(개발 프로젝트 allow)과 봇만 연다
 #  - 대시보드는 메시지 하나를 고쳐 쓴다 — 내용이 같으면 안 건드린다
@@ -107,33 +107,39 @@ before = mb.dirty_mtime(); time.sleep(0.05)
 mb.mark_dirty()
 check(mb.dirty_mtime() > before, "신호 파일")
 
-# ── 주간 숫자판(형만 보이는 잠긴 음성 채널) ──
-wk = {}
-mb.weekly_tick(wk)
-vc = [x for x in log() if x["m"] == "POST" and x["p"] == "/guilds/G1/channels" and x["b"].get("type") == 2]
-check(len(vc) == 1 and "주간 6%" in vc[0]["b"]["name"], f"숫자판 생성: {vc}")
+# ── 사용량 숫자판(형만 보이는 빈 카테고리 — 음성 채널은 서버 주인이 눌러서 들어가져 바꿈, 형 2026-10-02) ──
+#  - 5시간·주간 각각 한 줄. 카테고리는 눌러도 접히기만 한다
+mh_state = json.loads((mh / "discord-bot.json").read_text()) if (mh / "discord-bot.json").exists() else {}
+mh_state["weekly"] = {"channelId": "OLDVOICE", "name": "📊 주간 5%", "renamedAt": 0}   # 예전 음성 숫자판
+(mh / "discord-bot.json").write_text(json.dumps(mh_state))
+meters = {}
+n0 = len(log()); mb.meter_tick(meters)
+check(any(x["m"] == "DELETE" and x["p"] == "/channels/OLDVOICE" for x in log()[n0:]), "예전 음성 숫자판은 지운다")
+vc = [x for x in log()[n0:] if x["m"] == "POST" and x["p"] == "/guilds/G1/channels"]
+names = [x["b"]["name"] for x in vc]
+check(len(vc) == 2 and all(x["b"].get("type") == 4 for x in vc) and names == ["📊 5시간 20%", "📊 주간 6%"], f"숫자판 둘(카테고리): {names} {vc}")
 vow = {o["id"]: o for o in vc[0]["b"]["permission_overwrites"]} if vc else {}
 check(int(vow.get("G1", {}).get("deny", 0)) & ms._VIEW, "숫자판: @everyone 못 봄")
-check(int(vow.get("U1", {}).get("allow", 0)) & ms._VIEW and int(vow.get("U1", {}).get("deny", 0)) & mb._CONNECT,
-      "숫자판: 형은 보되 들어가지는 못함(잠금)")
-check(int(vow.get("BOT1", {}).get("allow", 0)) & mb._CONNECT and int(vow.get("BOT1", {}).get("allow", 0)) & mb._MANAGE,
-      "숫자판: 봇은 들어갈 수 있고 관리 가능(음성은 연결 권한이 없으면 봇도 못 만진다, 실측 50001)")
-n = len(log()); mb.weekly_tick(wk)
-check(not any(x["m"] in ("POST", "PATCH") for x in log()[n:]), "같은 숫자면 이름 안 바꿈(이름 변경은 10분 2회 제한)")
-mb.claude_usage = lambda: [{"key": "weekly", "label": "주간", "usedPercent": 7.4}]
-n = len(log()); mb.weekly_tick(wk)
+check(int(vow.get("U1", {}).get("allow", 0)) & ms._VIEW, "숫자판: 형은 봄")
+check(int(vow.get("BOT1", {}).get("allow", 0)) & mb._MANAGE, "숫자판: 봇은 이름을 바꿀 수 있다")
+wk = meters["weekly"]
+n = len(log()); mb.meter_tick(meters)
+check(not any(x["m"] in ("POST", "PATCH", "DELETE") for x in log()[n:]), "같은 숫자면 이름 안 바꿈(이름 변경은 10분 2회 제한)")
+mb.claude_usage = lambda: [{"key": "fiveHour", "label": "5시간", "usedPercent": 20.0}, {"key": "weekly", "label": "주간", "usedPercent": 7.4}]
+n = len(log()); mb.meter_tick(meters)
 check(not any(x["m"] == "PATCH" for x in log()[n:]), "이름은 10분에 한 번만(재시작해도 기억, 리뷰 M5)")
-wk["renamedAt"] = time.time() - 601; n = len(log()); mb.weekly_tick(wk)
-ren = [x for x in log()[n:] if x["m"] == "PATCH" and x["p"] == f"/channels/{wk['channelId']}"]
-check(ren and "주간 7%" in ren[0]["b"]["name"], f"숫자 바뀌면 이름 변경: {ren}")
+wk["renamedAt"] = time.time() - 601; n = len(log()); mb.meter_tick(meters)
+ren = [x for x in log()[n:] if x["m"] == "PATCH"]
+check(len(ren) == 1 and ren[0]["p"] == f"/channels/{wk['channelId']}" and "주간 7%" in ren[0]["b"]["name"], f"바뀐 것만 이름 변경: {ren}")
 # 봇이 못 만지는 채널(403 Missing Access)이 되면 새로 만든다
 (fd / "forbid").write_text(wk["channelId"])
-mb.claude_usage = lambda: [{"key": "weekly", "label": "주간", "usedPercent": 9.0}]
-old_id = wk["channelId"]; wk["renamedAt"] = 0; n = len(log()); mb.weekly_tick(wk)
-check(wk["channelId"] != old_id and any(x["m"] == "POST" and x["b"].get("type") == 2 for x in log()[n:]), f"접근 불가면 다시 만듦: {wk}")
+mb.claude_usage = lambda: [{"key": "fiveHour", "label": "5시간", "usedPercent": 20.0}, {"key": "weekly", "label": "주간", "usedPercent": 9.0}]
+old_id = wk["channelId"]; wk["renamedAt"] = 0; n = len(log()); mb.meter_tick(meters)
+check(wk["channelId"] != old_id and any(x["m"] == "POST" and x["b"].get("type") == 4 for x in log()[n:]), f"접근 불가면 다시 만듦: {wk}")
 (fd / "forbid").unlink()
 s2 = json.loads((mh / "discord-bot.json").read_text())
-check(s2.get("dashboard", {}).get("channelId") == st["channelId"] and s2.get("weekly", {}).get("channelId") == wk["channelId"],
+check(s2.get("dashboard", {}).get("channelId") == st["channelId"] and s2.get("weekly", {}).get("channelId") == wk["channelId"]
+      and s2.get("fiveHour", {}).get("channelId") == meters["fiveHour"]["channelId"],
       f"채널 기억(재시작해도 새로 안 만든다): {s2}")
 
 # ── 🛑 정지 ──
@@ -225,7 +231,7 @@ mb._spawn = P
 mb.BOT_DIR = mh / "botdir"
 mb.bot_command = lambda cfg: {"argv": ["bun", "bot.ts"], "cwd": str(mb.BOT_DIR), "env": {}, "bun": "bun"}
 (mb.BOT_DIR / "node_modules").mkdir(parents=True)
-mb.dashboard_tick = lambda st: calls.append("dash"); mb.weekly_tick = lambda st: calls.append("week")
+mb.dashboard_tick = lambda st: calls.append("dash"); mb.meter_tick = lambda st: calls.append("week")
 lp = mb.Loop(); t0 = time.time() + 5
 check(lp.step(t0) is True and calls == [["bun", "bot.ts"], "dash", "week"], f"첫 바퀴: {calls}")
 calls.clear(); lp.step(t0 + 4)
