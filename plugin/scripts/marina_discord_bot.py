@@ -151,20 +151,45 @@ def snapshot(full: bool = True) -> dict[str, Any]:
             "anyBusy": any(r["busy"] for r in rows)}
 
 
+def _bar(pct: float, width: int = 10) -> str:
+    full = max(0, min(width, round(pct / 100 * width)))
+    return "█" * full + "░" * (width - full)
+
+
+def _ctx(r: dict[str, Any]) -> str:
+    c = r.get("ctx")
+    if not isinstance(c, (int, float)):
+        return ""
+    return f"{round(c)}%" + ("⚠" if c >= 70 else "")
+
+
 def render(snap: dict[str, Any]) -> str:
-    """시각 줄을 뺀 본문 — 같으면 메시지를 안 고친다."""
-    use = " · ".join(f"{w.get('label')} {round(float(w.get('usedPercent') or 0))}%"
-                     for w in snap["usage"] if w.get("key") in ("fiveHour", "weekly"))
-    lines = [f"**구독** {use or '알 수 없음'}",
-             f"**서버** 디스크 여유 {snap['diskFree'] // (1 << 30)}GB · 부하 {snap['load']:.1f}"]
-    rows = sorted(snap["sessions"], key=lambda r: (not r["busy"], not r["alive"], r["ref"]))
-    lines.append(f"**작업 중 {sum(r['busy'] for r in rows)} / 세션 {len(rows)}**")
-    for r in rows:
-        head = f"{r['emoji'] or '🔧'} 작업 중" if r["busy"] else ("💤 대기" if r["alive"] else "⚫ 꺼짐")
-        ctx = f" · ctx {round(r['ctx'])}%" if isinstance(r.get("ctx"), (int, float)) else ""
-        lines.append(f"{head} · {r['ref']}{ctx} · <#{r['channelId']}>")
+    """본문(바뀔 때만 고쳐 쓴다). 디스크·부하·시각은 아래 꼬리말로 — 매번 바뀌는 값이 본문 비교를 흔들지 않게."""
+    lines = ["### 사용량"]
+    use = [f"{w.get('label')} `{_bar(float(w.get('usedPercent') or 0))}` {round(float(w.get('usedPercent') or 0))}%"
+           for w in snap["usage"] if w.get("key") in ("fiveHour", "weekly")]
+    lines.append("  ·  ".join(use) or "알 수 없음")
+    rows = sorted(snap["sessions"], key=lambda r: r["ref"])
+    busy = [r for r in rows if r["busy"]]
+    idle = [r for r in rows if r["alive"] and not r["busy"]]
+    off = [r for r in rows if not r["alive"]]
+    lines.append(f"### 작업 중 {len(busy)}")
+    lines += [f"{r['emoji'] or '🔧'} <#{r['channelId']}>" + (f"  ctx {_ctx(r)}" if _ctx(r) else "") for r in busy] or ["-# 없음"]
+    lines.append(f"### 대기 {len(idle)}")
+    groups: dict[str, list[str]] = {}
+    for r in idle:
+        groups.setdefault(r["ref"].split("/", 1)[0], []).append(f"<#{r['channelId']}> {_ctx(r)}".strip())
+    lines += [f"**{p}**  " + " · ".join(items) for p, items in groups.items()]
+    if off:
+        lines.append(f"### 꺼짐 {len(off)}")
+        lines.append(" · ".join(f"<#{r['channelId']}>" for r in off))
     body = "\n".join(lines)
-    return body if len(body) <= 1900 else body[:1900] + "\n…"
+    return body if len(body) <= 1800 else body[:1800] + "\n…"
+
+
+def footer(snap: dict[str, Any]) -> str:
+    return (f"-# 디스크 {snap.get('diskFree', 0) // (1 << 30)}GB 남음 · 부하 {snap.get('load', 0.0):.1f}"
+            f" · <t:{int(time.time())}:R> 갱신")
 
 
 # ── Discord ─────────────────────────────────────────────────────────────────
@@ -201,7 +226,7 @@ def dashboard_tick(st: dict[str, Any], snap: dict[str, Any] | None = None) -> No
     body = render(snap)
     if body == st.get("body") and st.get("messageId"):
         return
-    content = f"{body}\n-# <t:{int(time.time())}:R> 갱신"
+    content = f"{body}\n{footer(snap)}"
     msg = {"content": content, "allowed_mentions": {"parse": []}}
     for _ in range(2):
         if not st.get("channelId"):
