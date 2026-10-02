@@ -453,10 +453,30 @@ print(f"런타임: 원격 ({t.host})" if t.is_remote else "런타임: 로컬")
       # Claude 자동 워크트리는 claude/<id> 라, feature/{task} 등 원하는 이름으로 만들 때 사용.
       case "${1:-}" in
         create|new|add) shift; worktree_create "$@" ;;
+        rm|remove)
+          # 워크트리 지우기(runtime 단독에도 있어야 — 예전엔 대시보드 버튼뿐). 잠김·미커밋은 --force 없이 거절.
+          shift
+          local _wt="" _force=0
+          for _a in "$@"; do case "$_a" in --force|-f) _force=1 ;; *) _wt="$_a" ;; esac; done
+          [[ -n "$_wt" ]] || die "usage: marina worktree rm <이름|경로> [--force]"
+          if [[ ! -d "$_wt" ]]; then _wt="${SOURCE_ROOT:-$ROOT}/.claude/worktrees/$(printf '%s' "$_wt" | tr '/:' '--')"; fi
+          [[ -d "$_wt" ]] || die "워크트리 없음: $_wt"
+          PYTHONPATH="$SCRIPT_DIR" MARINA_HOME="$MARINA_HOME" python3 - "$(cd "$_wt" && pwd -P)" "$_force" <<'PY' ;;
+import sys
+from pathlib import Path
+from marina_lifecycle import remove_worktree
+try:
+    res = remove_worktree(Path(sys.argv[1]), force=sys.argv[2] == "1")
+except ValueError as exc:
+    print(f"marina: {exc}", file=sys.stderr); sys.exit(1)
+root = res.get("root") or {}
+print(f"✓ 지움: {sys.argv[1]}" if ("removed" in root or "missing" in root) else f"⚠ {root}")
+sys.exit(0 if ("removed" in root or "missing" in root) else 1)
+PY
         gc)
           # 유휴 워크트리 판정 + 삭제 전 가드(백업 브랜치). 삭제는 안 한다 — 대시보드 '유휴 정리'에서 골라서.
           shift; PYTHONPATH="$SCRIPT_DIR" MARINA_HOME="$MARINA_HOME" exec python3 "$SCRIPT_DIR/marina_worktree_gc.py" "$@" ;;
-        ""|-h|--help) echo "usage: marina worktree create <branch> [base] | gc [--dry-run] [--days K] [--json]" >&2; exit 2 ;;
+        ""|-h|--help) echo "usage: marina worktree create <branch> [base] | rm <이름|경로> [--force] | gc [--dry-run] [--days K] [--json]" >&2; exit 2 ;;
         *) die "worktree: 미지원 하위명령 '${1}' — create <branch> [base] | gc [--dry-run] [--days K]" ;;
       esac ;;
     -h|--help|help)

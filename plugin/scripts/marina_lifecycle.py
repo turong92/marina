@@ -184,8 +184,17 @@ def start_all(root: Path, force: bool = False) -> dict[str, Any]:
         reservation_token=reservation,
     )
 
+def _stop_all_if_any(root: Path) -> None:
+    """compose 를 등록 안 한 프로젝트(예: marina 자신)는 띄운 서비스가 없다 — 그것 때문에 삭제가 막히면 안 된다(실측)."""
+    try:
+        stop_all(root)
+    except ValueError as exc:
+        if "compose 파일 없음" not in str(exc):
+            raise
+
+
 def cleanup_session(root: Path) -> dict[str, Any]:
-    stop_all(root)
+    _stop_all_if_any(root)
     path = session_dir(root)
     if path.exists():
         shutil.rmtree(path)
@@ -453,7 +462,7 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, 
         raise ValueError(f"잠김: {held['reason']} — 쓰는 중인 워크트리입니다(force 로 지울 수 있음)")
 
     sid = session_id(root)
-    stop_all(root)
+    _stop_all_if_any(root)
     cleanup_session(root)
     bootout_session_dashboard(sid)
 

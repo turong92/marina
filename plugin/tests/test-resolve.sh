@@ -53,4 +53,12 @@ real_plugin="$(cd "$HERE/.." && pwd -P)"
 ip="$(sed 's|^exec .*|echo "$ip"|' "$TMP/marina" | CLAUDE_CONFIG_DIR=/nope CODEX_HOME=/nope bash)"
 [[ "$ip" == "$real_plugin" ]] || { echo "FAIL: baked fallback: '$ip' != '$real_plugin'"; exit 1; }
 
+# runtimed 런처: 설치 기록이 가리키는 곳에 marina_runtimed.py 가 없으면(옛 버전) 건너뛰고 런처를 만든 경로로(분리 A 실측)
+write_manifest "$TMP/old"                                   # 옛 설치본: marina_runtimed.py 없음
+mkdir -p "$TMP/newp/scripts"; : > "$TMP/newp/scripts/marina-entrypoint.sh"; : > "$TMP/newp/scripts/marina_runtimed.py"
+cp "$HERE/../scripts/marina-resolve.sh" "$TMP/newp/scripts/"
+( source "$TMP/newp/scripts/marina-resolve.sh"; marina_emit_launcher "$TMP/rtd" runtimed )
+ip="$(sed 's|^exec .*|echo "$ip"|' "$TMP/rtd" | CODEX_HOME=/nope bash)"
+[[ "$ip" == "$(cd "$TMP/newp" && pwd -P)" ]] || { echo "FAIL: runtimed 런처가 marina_runtimed.py 없는 옛 설치본을 골랐다: '$ip'"; exit 1; }
+
 echo "PASS test-resolve"
