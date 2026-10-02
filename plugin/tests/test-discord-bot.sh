@@ -87,6 +87,8 @@ vow = {o["id"]: o for o in vc[0]["b"]["permission_overwrites"]} if vc else {}
 check(int(vow.get("G1", {}).get("deny", 0)) & ms._VIEW, "숫자판: @everyone 못 봄")
 check(int(vow.get("U1", {}).get("allow", 0)) & ms._VIEW and int(vow.get("U1", {}).get("deny", 0)) & mb._CONNECT,
       "숫자판: 형은 보되 들어가지는 못함(잠금)")
+check(int(vow.get("BOT1", {}).get("allow", 0)) & mb._CONNECT and int(vow.get("BOT1", {}).get("allow", 0)) & mb._MANAGE,
+      "숫자판: 봇은 들어갈 수 있고 관리 가능(음성은 연결 권한이 없으면 봇도 못 만진다, 실측 50001)")
 n = len(log()); mb.weekly_tick(wk)
 check(not any(x["m"] in ("POST", "PATCH") for x in log()[n:]), "같은 숫자면 이름 안 바꿈(이름 변경은 10분 2회 제한)")
 mb.claude_usage = lambda: [{"key": "weekly", "label": "주간", "usedPercent": 7.4}]
@@ -95,6 +97,12 @@ check(not any(x["m"] == "PATCH" for x in log()[n:]), "이름은 10분에 한 번
 wk["renamedAt"] = time.time() - 601; n = len(log()); mb.weekly_tick(wk)
 ren = [x for x in log()[n:] if x["m"] == "PATCH" and x["p"] == f"/channels/{wk['channelId']}"]
 check(ren and "주간 7%" in ren[0]["b"]["name"], f"숫자 바뀌면 이름 변경: {ren}")
+# 봇이 못 만지는 채널(403 Missing Access)이 되면 새로 만든다
+(fd / "forbid").write_text(wk["channelId"])
+mb.claude_usage = lambda: [{"key": "weekly", "label": "주간", "usedPercent": 9.0}]
+old_id = wk["channelId"]; wk["renamedAt"] = 0; n = len(log()); mb.weekly_tick(wk)
+check(wk["channelId"] != old_id and any(x["m"] == "POST" and x["b"].get("type") == 2 for x in log()[n:]), f"접근 불가면 다시 만듦: {wk}")
+(fd / "forbid").unlink()
 s2 = json.loads((mh / "discord-bot.json").read_text())
 check(s2.get("dashboard", {}).get("channelId") == st["channelId"] and s2.get("weekly", {}).get("channelId") == wk["channelId"],
       f"채널 기억(재시작해도 새로 안 만든다): {s2}")

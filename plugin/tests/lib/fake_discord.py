@@ -137,6 +137,9 @@ class H(BaseHTTPRequestHandler):
         log({"m": "PATCH", "p": self.path, "b": body})
         if not self._auth():
             return
+        fb = (state / "forbid").read_text().split() if (state / "forbid").exists() else []
+        if self._parts()[:2] in (["channels", f] for f in fb):
+            self._send(403, {"message": "Missing Access", "code": 50001}); return
         self._send(200, {"id": self._parts()[-1], "thread_metadata": {"archived": bool(body.get("archived"))}})
 
     def do_PUT(self):

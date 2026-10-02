@@ -19,6 +19,7 @@ from typing import Any
 import marina_session as ms
 
 _CONNECT = 1 << 20
+_MANAGE = 1 << 4
 _SEND = 1 << 11
 _HISTORY = 1 << 16
 TYPING_EVERY = 8.0       # Discord '입력 중…' 은 10초면 꺼진다
@@ -181,8 +182,10 @@ def _owner_channel(dc: ms.Discord, cfg: dict[str, Any], name: str, kind: int) ->
     else:           # #상태: 읽기만
         owner = {"allow": str(ms._VIEW | _HISTORY), "deny": str(_SEND)}
         everyone_deny = ms._VIEW
+    # 음성 채널은 연결 권한이 없으면 봇도 못 만진다(실측 403 Missing Access) — 봇엔 연결·관리를 연다
+    bot = ms._TALK | (_CONNECT | _MANAGE if kind == 2 else 0)
     ow = [{"id": guild, "type": 0, "allow": "0", "deny": str(everyone_deny)},
-          {"id": dc.me(), "type": 1, "allow": str(ms._TALK), "deny": "0"}]
+          {"id": dc.me(), "type": 1, "allow": str(bot), "deny": "0"}]
     ow += [dict(owner, id=u, type=1) for u in owner_ids(cfg)]
     r = dc._req("POST", f"/guilds/{guild}/channels",
                 {"name": name, "type": kind, "position": 0, "permission_overwrites": ow})
@@ -247,11 +250,13 @@ def weekly_tick(st: dict[str, Any]) -> None:
         try:
             dc._req("PATCH", f"/channels/{st['channelId']}", {"name": name})
         except ms.DiscordError as exc:
-            if exc.code != 404:
+            if exc.code not in (403, 404):     # 지워졌거나 봇이 못 만지게 됐다 → 새로 만든다
                 raise
+            _log(f"weekly channel {st.get('channelId')} gone/forbidden ({exc.code}), recreating")
             st.clear()
     if not st.get("channelId"):
         st["channelId"] = _owner_channel(dc, cfg, name, 2)
+        _save_section("weekly", dict(st, name=name, renamedAt=time.time()))   # 다음 단계가 실패해도 또 만들지 않게
     st.update(name=name, renamedAt=time.time())
     _save_section("weekly", dict(st))
 
