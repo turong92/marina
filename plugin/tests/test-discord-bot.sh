@@ -42,7 +42,7 @@ posts = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{st.get(
 check(len(posts) == 1, f"대시보드 메시지 하나: {posts}")
 body = posts[0]["b"]["content"] if posts else ""
 check("5시간 `██░░░░░░░░` 20%" in body and "주간 `█░░░░░░░░░` 6%" in body, f"구독 사용량 막대: {body}")
-check(f"### 대기 1\n**proj**  <#{ch}>" in body and "### 작업 중 0" in body, f"상태별 묶음 + 채널 링크: {body}")
+check("작업 중 0 · 대기 1 · 꺼짐 0" in body and "💤    -  feat/a  proj" in body, f"표: 상태·ctx·이름·프로젝트 순: {body}")
 check("디스크" in body and "갱신" in body.splitlines()[-1], "디스크·시각은 꼬리말")
 check(posts and posts[0]["b"].get("allowed_mentions") == {"parse": []}, "멘션 알림 없음")
 n = len(log()); mb.dashboard_tick(st)
@@ -59,12 +59,12 @@ check(me["busy"] is True, f"작업 중 판정: {me}")
 check(snap["anyBusy"] is True, "작업 중 세션 있음")
 n = len(log()); mb.dashboard_tick(st)
 patches = [x for x in log()[n:] if x["m"] == "PATCH" and x["p"] == f"/channels/{st['channelId']}/messages/{st['messageId']}"]
-check(patches and f"### 작업 중 1\n🔧 <#{ch}>" in patches[0]["b"]["content"], f"고쳐 쓰기: {patches}")
+check(patches and "🔧    -  feat/a  proj" in patches[0]["b"]["content"], f"고쳐 쓰기: {patches}")
 r2 = mb.render({"usage": [], "sessions": [
     {"ref": "a/x", "channelId": "1", "alive": True, "busy": False, "emoji": "", "ctx": 71.0},
     {"ref": "a/y", "channelId": "2", "alive": True, "busy": False, "emoji": "", "ctx": 10.0},
     {"ref": "b/z", "channelId": "3", "alive": True, "busy": True, "emoji": "🧪", "ctx": 30.0}]})
-check("**a**  <#1> 71%⚠ · <#2> 10%" in r2 and "🧪 <#3>  ctx 30%" in r2, f"대기는 프로젝트별 한 줄, 70%↑ ⚠: {r2}")
+check(r2.index("🧪  30%  z     b") < r2.index("💤  71%  x     a ⚠") < r2.index("💤  10%  y     a"), f"작업 중 먼저, 한 줄에 한 세션, 70%↑ ⚠: {r2}")
 # '입력 중…' 은 10초면 꺼진다 — 작업 중인 세션 채널에 8초마다 다시 보낸다(쉬는 세션엔 안 보냄)
 ty = {}
 n = len(log()); mb.typing_tick(snap, ty, now=1000)

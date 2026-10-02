@@ -156,33 +156,28 @@ def _bar(pct: float, width: int = 10) -> str:
     return "█" * full + "░" * (width - full)
 
 
-def _ctx(r: dict[str, Any]) -> str:
-    c = r.get("ctx")
-    if not isinstance(c, (int, float)):
-        return ""
-    return f"{round(c)}%" + ("⚠" if c >= 70 else "")
-
-
 def render(snap: dict[str, Any]) -> str:
-    """본문(바뀔 때만 고쳐 쓴다). 디스크·부하·시각은 아래 꼬리말로 — 매번 바뀌는 값이 본문 비교를 흔들지 않게."""
+    """본문(바뀔 때만 고쳐 쓴다). 세션은 고정폭 표 — 한 줄에 한 세션, 이름 먼저·프로젝트 뒤(형 요청).
+    디스크·부하·시각은 꼬리말로 — 매번 바뀌는 값이 본문 비교를 흔들지 않게."""
     lines = ["### 사용량"]
     use = [f"{w.get('label')} `{_bar(float(w.get('usedPercent') or 0))}` {round(float(w.get('usedPercent') or 0))}%"
            for w in snap["usage"] if w.get("key") in ("fiveHour", "weekly")]
     lines.append("  ·  ".join(use) or "알 수 없음")
-    rows = sorted(snap["sessions"], key=lambda r: r["ref"])
-    busy = [r for r in rows if r["busy"]]
-    idle = [r for r in rows if r["alive"] and not r["busy"]]
-    off = [r for r in rows if not r["alive"]]
-    lines.append(f"### 작업 중 {len(busy)}")
-    lines += [f"{r['emoji'] or '🔧'} <#{r['channelId']}>" + (f"  ctx {_ctx(r)}" if _ctx(r) else "") for r in busy] or ["-# 없음"]
-    lines.append(f"### 대기 {len(idle)}")
-    groups: dict[str, list[str]] = {}
-    for r in idle:
-        groups.setdefault(r["ref"].split("/", 1)[0], []).append(f"<#{r['channelId']}> {_ctx(r)}".strip())
-    lines += [f"**{p}**  " + " · ".join(items) for p, items in groups.items()]
-    if off:
-        lines.append(f"### 꺼짐 {len(off)}")
-        lines.append(" · ".join(f"<#{r['channelId']}>" for r in off))
+    order = lambda r: (0 if r["busy"] else 1 if r["alive"] else 2, r["ref"].split("/", 1)[-1])
+    rows = sorted(snap["sessions"], key=order)
+    n_busy = sum(r["busy"] for r in rows)
+    n_idle = sum(r["alive"] and not r["busy"] for r in rows)
+    lines.append(f"### 세션 — 작업 중 {n_busy} · 대기 {n_idle} · 꺼짐 {len(rows) - n_busy - n_idle}")
+    name_w = max([len(r["ref"].split("/", 1)[-1]) for r in rows] + [4])
+    table = []
+    for r in rows:
+        state = (r["emoji"] or "🔧") if r["busy"] else ("💤" if r["alive"] else "⚫")
+        c = r.get("ctx")
+        ctx = f"{round(c):>3}%" if isinstance(c, (int, float)) else "   -"
+        proj, _, name = r["ref"].partition("/")
+        warn = " ⚠" if isinstance(c, (int, float)) and c >= 70 else ""
+        table.append(f"{state} {ctx}  {name:<{name_w}}  {proj}{warn}")
+    lines.append("```\n" + ("\n".join(table) or "세션 없음") + "\n```")
     body = "\n".join(lines)
     return body if len(body) <= 1800 else body[:1800] + "\n…"
 
