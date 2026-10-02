@@ -23,6 +23,7 @@ check(os.path.basename(ms._tmux_base()[0]) == "tmux" and ms._tmux_base()[1:] == 
 argv = ms.claude_argv("proj", "feat/one")
 check(argv[:5] == ["claude", "--channels", ms.PLUGIN, "--remote-control", "proj/feat/one"], f"인자 앞부분: {argv[:5]}")
 check(argv[5] == "--append-system-prompt" and "reply" in argv[6], "채널 규칙")
+check("reply_to" in argv[6], "끝 보고는 지시 메시지에 답장으로 단다(✅ 대신 끝 표시, 형 요청)")
 check(argv[-2:] == ["--disallowedTools", "AskUserQuestion"], "가변 인자 --disallowedTools 는 맨 끝")
 check(ms.claude_argv("proj", "feat/one", resume=True)[:2] == ["claude", "--continue"], "resume → --continue")
 
