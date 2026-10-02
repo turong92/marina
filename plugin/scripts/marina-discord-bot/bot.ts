@@ -32,6 +32,19 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
     });
 });
 
+// #상태 대시보드의 [정지] 버튼 — 🛑 반응과 같은 처리. 결과는 누른 사람에게만 보인다
+client.on(Events.InteractionCreate, async (it) => {
+  if (!it.isButton() || !it.customId.startsWith("marina-stop:")) return;
+  const channelId = it.customId.slice("marina-stop:".length);
+  await it.deferReply({ ephemeral: true }).catch(() => {});
+  execFile(py, [script, "interrupt", "--channel", channelId, "--user", it.user.id, "--message", ""],
+    { timeout: 20000, env: childEnv }, (err, out, errOut) => {
+      const msg = (out || errOut || String(err ?? "")).trim() || "처리 못 했어";
+      console.log(new Date().toISOString(), "stop-button", channelId, msg);
+      it.editReply(`<#${channelId}> ${msg}`).catch(() => {});
+    });
+});
+
 client.once(Events.ClientReady, (c) => console.log(new Date().toISOString(), "ready", c.user.tag));
 if (parent > 0) {
   setInterval(() => {

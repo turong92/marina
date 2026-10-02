@@ -156,30 +156,45 @@ def _bar(pct: float, width: int = 10) -> str:
     return "█" * full + "░" * (width - full)
 
 
-def render(snap: dict[str, Any]) -> str:
-    """본문(바뀔 때만 고쳐 쓴다). 세션은 고정폭 표 — 한 줄에 한 세션, 이름 먼저·프로젝트 뒤(형 요청).
-    디스크·부하·시각은 꼬리말로 — 매번 바뀌는 값이 본문 비교를 흔들지 않게."""
-    lines = ["### 사용량"]
+COMPONENTS_V2 = 1 << 15
+STOP_PREFIX = "marina-stop:"
+
+
+def _text(content: str) -> dict[str, Any]:
+    return {"type": 10, "content": content}
+
+
+def _row(r: dict[str, Any], proj_w: int) -> str:
+    """앞 칸(ctx·프로젝트)은 같은 너비의 고정폭으로 채우고, 길이가 제각각인 채널 링크는 맨 끝 — 세로 줄이 맞는다(형 요청)."""
+    c = r.get("ctx")
+    ctx = f"{round(c)}%" if isinstance(c, (int, float)) else "-"
+    proj = r["ref"].split("/", 1)[0]
+    warn = " ⚠" if isinstance(c, (int, float)) and c >= 70 else ""
+    return f"`{ctx:>4}  {proj:<{proj_w}}` <#{r['channelId']}>{warn}"
+
+
+def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    """#상태 메시지(Components V2). 섹션: 작업 중(줄마다 정지 버튼) · 대기 · 꺼짐. 같으면 고쳐 쓰지 않는다.
+    디스크·부하·시각은 꼬리말로 따로 — 매번 바뀌는 값이 비교를 흔들지 않게."""
     use = [f"{w.get('label')} `{_bar(float(w.get('usedPercent') or 0))}` {round(float(w.get('usedPercent') or 0))}%"
            for w in snap["usage"] if w.get("key") in ("fiveHour", "weekly")]
-    lines.append("  ·  ".join(use) or "알 수 없음")
-    order = lambda r: (0 if r["busy"] else 1 if r["alive"] else 2, r["ref"].split("/", 1)[-1])
-    rows = sorted(snap["sessions"], key=order)
-    n_busy = sum(r["busy"] for r in rows)
-    n_idle = sum(r["alive"] and not r["busy"] for r in rows)
-    lines.append(f"### 세션 — 작업 중 {n_busy} · 대기 {n_idle} · 꺼짐 {len(rows) - n_busy - n_idle}")
-    name_w = max([len(r["ref"].split("/", 1)[-1]) for r in rows] + [4])
-    table = []
-    for r in rows:
-        state = (r["emoji"] or "🔧") if r["busy"] else ("💤" if r["alive"] else "⚫")
-        c = r.get("ctx")
-        ctx = f"{round(c):>3}%" if isinstance(c, (int, float)) else "   -"
-        proj, _, name = r["ref"].partition("/")
-        warn = " ⚠" if isinstance(c, (int, float)) and c >= 70 else ""
-        table.append(f"{state} {ctx}  {name:<{name_w}}  {proj}{warn}")
-    lines.append("```\n" + ("\n".join(table) or "세션 없음") + "\n```")
-    body = "\n".join(lines)
-    return body if len(body) <= 1800 else body[:1800] + "\n…"
+    out: list[dict[str, Any]] = [_text("### 사용량\n" + ("  ·  ".join(use) or "알 수 없음"))]
+    rows = sorted(snap["sessions"], key=lambda r: (r["ref"].split("/", 1)[0], r["ref"]))
+    proj_w = max([len(r["ref"].split("/", 1)[0]) for r in rows] + [4])
+    busy = [r for r in rows if r["busy"]]
+    idle = [r for r in rows if r["alive"] and not r["busy"]]
+    off = [r for r in rows if not r["alive"]]
+    out.append({"type": 14})
+    out.append(_text(f"### 🔧 작업 중 {len(busy)}" + ("" if busy else "\n-# 없음")))
+    for r in busy[:10]:        # 메시지당 구성요소 40개 제한 — 작업 중이 10개를 넘을 일은 없다
+        out.append({"type": 9, "components": [_text(f"{r['emoji'] or '🔧'} {_row(r, proj_w)}")],
+                    "accessory": {"type": 2, "style": 4, "label": "정지", "custom_id": STOP_PREFIX + r["channelId"]}})
+    out.append({"type": 14})
+    out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) for r in idle)))
+    if off:
+        out.append({"type": 14})
+        out.append(_text(f"### ⚫ 꺼짐 {len(off)}" + "".join("\n" + _row(r, proj_w) for r in off)))
+    return out
 
 
 def footer(snap: dict[str, Any]) -> str:
@@ -218,11 +233,18 @@ def dashboard_tick(st: dict[str, Any], snap: dict[str, Any] | None = None) -> No
     if not st:
         st.update(_load_state().get("dashboard") or {})
     snap = snap or snapshot()
-    body = render(snap)
+    comps = render(snap)
+    body = json.dumps(comps, ensure_ascii=False, sort_keys=True)
     if body == st.get("body") and st.get("messageId"):
         return
-    content = f"{body}\n{footer(snap)}"
-    msg = {"content": content, "allowed_mentions": {"parse": []}}
+    msg = {"flags": COMPONENTS_V2, "components": comps + [_text(footer(snap))], "allowed_mentions": {"parse": []}}
+    if st.get("messageId") and st.get("v") != 2:
+        # 예전 글자 형식 메시지는 새 형식으로 고칠 수 없다 — 지우고 새로 올린다
+        try:
+            dc._req("DELETE", f"/channels/{st['channelId']}/messages/{st['messageId']}")
+        except ms.SessionError:
+            pass
+        st.pop("messageId", None)
     for _ in range(2):
         if not st.get("channelId"):
             st.clear()
@@ -233,7 +255,7 @@ def dashboard_tick(st: dict[str, Any], snap: dict[str, Any] | None = None) -> No
                 dc._req("PATCH", f"/channels/{st['channelId']}/messages/{st['messageId']}", msg)
             else:
                 st["messageId"] = str(dc._req("POST", f"/channels/{st['channelId']}/messages", msg).get("id") or "")
-            st["body"] = body
+            st.update(body=body, v=2)
             break
         except ms.DiscordError as exc:
             if exc.code != 404:

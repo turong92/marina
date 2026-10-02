@@ -40,13 +40,24 @@ check(int(ow.get("U1", {}).get("allow", 0)) & ms._VIEW, "형은 본다")
 check(int(ow.get("BOT1", {}).get("allow", 0)) & ms._VIEW, "봇도 본다(못 보면 고쳐 쓰지 못한다)")
 posts = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{st.get('channelId')}/messages"]
 check(len(posts) == 1, f"대시보드 메시지 하나: {posts}")
-body = posts[0]["b"]["content"] if posts else ""
+def txt(comps):
+    out = []
+    for c in comps or []:
+        if c.get("content"): out.append(c["content"])
+        out.append(txt(c.get("components")))
+    return "\n".join(x for x in out if x)
+body = txt(posts[0]["b"].get("components")) if posts else ""
+check(posts and posts[0]["b"].get("flags") == 1 << 15, "Components V2 메시지")
 check("5시간 `██░░░░░░░░` 20%" in body and "주간 `█░░░░░░░░░` 6%" in body, f"구독 사용량 막대: {body}")
-check("작업 중 0 · 대기 1 · 꺼짐 0" in body and "💤    -  feat/a  proj" in body, f"표: 상태·ctx·이름·프로젝트 순: {body}")
+check("### 🔧 작업 중 0" in body and f"### 💤 대기 1\n`   -  proj` <#{ch}>" in body, f"섹션 + 고정폭 칸 + 끝에 채널 링크: {body}")
 check("디스크" in body and "갱신" in body.splitlines()[-1], "디스크·시각은 꼬리말")
 check(posts and posts[0]["b"].get("allowed_mentions") == {"parse": []}, "멘션 알림 없음")
 n = len(log()); mb.dashboard_tick(st)
 check(not any(x["m"] in ("POST", "PATCH") for x in log()[n:]), "내용이 같으면 안 건드린다")
+old = {"channelId": st["channelId"], "messageId": "old-text", "body": "x"}
+n = len(log()); mb.dashboard_tick(old)
+check(any(x["m"] == "DELETE" and x["p"].endswith("/messages/old-text") for x in log()[n:])
+      and any(x["m"] == "POST" and x["b"].get("flags") == 1 << 15 for x in log()[n:]), "예전 글자 형식 메시지는 지우고 새로 올린다")
 
 # 작업 중 세션: 입력창(❯) 위에 도는 표시 줄 → 🔧 표시, 다음 갱신은 메시지를 고쳐 쓴다
 base = ms._tmux_base()
@@ -59,12 +70,18 @@ check(me["busy"] is True, f"작업 중 판정: {me}")
 check(snap["anyBusy"] is True, "작업 중 세션 있음")
 n = len(log()); mb.dashboard_tick(st)
 patches = [x for x in log()[n:] if x["m"] == "PATCH" and x["p"] == f"/channels/{st['channelId']}/messages/{st['messageId']}"]
-check(patches and "🔧    -  feat/a  proj" in patches[0]["b"]["content"], f"고쳐 쓰기: {patches}")
+pc = patches[0]["b"]["components"] if patches else []
+busy_sec = [c for c in pc if c.get("type") == 9]
+check(busy_sec and f"🔧 `   -  proj` <#{ch}>" in busy_sec[0]["components"][0]["content"]
+      and busy_sec[0]["accessory"]["custom_id"] == f"marina-stop:{ch}", f"작업 중 줄 + 정지 버튼: {pc}")
 r2 = mb.render({"usage": [], "sessions": [
     {"ref": "a/x", "channelId": "1", "alive": True, "busy": False, "emoji": "", "ctx": 71.0},
     {"ref": "a/y", "channelId": "2", "alive": True, "busy": False, "emoji": "", "ctx": 10.0},
     {"ref": "b/z", "channelId": "3", "alive": True, "busy": True, "emoji": "🧪", "ctx": 30.0}]})
-check(r2.index("🧪  30%  z     b") < r2.index("💤  71%  x     a ⚠") < r2.index("💤  10%  y     a"), f"작업 중 먼저, 한 줄에 한 세션, 70%↑ ⚠: {r2}")
+t2 = txt(r2)
+check("🧪 ` 30%  b   ` <#3>" in t2 and "` 71%  a   ` <#1> ⚠\n` 10%  a   ` <#2>" in t2,
+      f"프로젝트 너비 맞춤·프로젝트 순 정렬·70%↑ ⚠: {t2}")
+check(sum(1 for c in r2 if c.get("type") == 9) == 1, "정지 버튼은 작업 중에만")
 # '입력 중…' 은 10초면 꺼진다 — 작업 중인 세션 채널에 8초마다 다시 보낸다(쉬는 세션엔 안 보냄)
 ty = {}
 n = len(log()); mb.typing_tick(snap, ty, now=1000)
