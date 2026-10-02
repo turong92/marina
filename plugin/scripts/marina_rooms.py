@@ -16,6 +16,8 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from marina_worktrees import _MARINA_OWN, _is_nested_repo, own_changed_paths  # 분리 A: runtime 으로 옮김
+
 # 심각한 것부터. 방 안 탭들의 상태를 하나로 접을 때, 사람 조치가 필요한 것이 위로 올라와야
 # 방 목록에서 놓치지 않는다(스펙 §2).
 ROOM_STATUS_ORDER = ("문제", "응답필요", "작업중", "완료", "대기")
@@ -91,37 +93,6 @@ def _git(args: list[str], cwd: Path) -> str:
     return out.stdout
 
 
-# 마리나가 워크트리 안에 자기 것을 쓰는 자리(별칭·메모 — marina_paths 의 .workspace/marina).
-# 이걸 형 작업물로 세면, 마리나가 파일 하나 건드린 것만으로 방이 "완료"가 된다(실측).
-_MARINA_OWN = (".workspace/", ".workspace")
-
-
-def own_changed_paths(status_text: str, root: Path) -> list[str]:
-    """`git status --porcelain -z` 에서 **이 워크트리의** 변경 경로만 골라낸다.
-
-    중첩 레포는 뺀다 — 완료 판정(_has_own_changes)과 **같은 규칙**을 써야 한다. 규칙이
-    갈라지면 "완료라는데 바뀐 파일이 없다"가 나온다."""
-    out: list[str] = []
-    records = [item for item in str(status_text or "").split("\0") if item.strip()]
-    index = 0
-    while index < len(records):
-        record = records[index]
-        index += 1
-        # 리네임/복사는 레코드가 **둘**이다: `R  <새경로>\0<옛경로>\0`. 옛 경로에는 XY 접두사가
-        # 없는데도 앞 3글자를 자르면 이름이 뭉개지고(ab.py → "py") 개수도 하나 부푼다.
-        if record[:1] in ("R", "C"):
-            index += 1          # 옛 경로는 건너뛴다 — 한 번의 변경이다
-        path = record[3:] if len(record) > 3 else ""
-        if path in _MARINA_OWN or path.startswith(".workspace/"):
-            continue        # 마리나가 쓴 것 — 형이 한 일이 아니다
-        if record.startswith("?? "):
-            if path.endswith("/") and _is_nested_repo(root / path):
-                continue
-        if path:
-            out.append(path)
-    return out
-
-
 def _has_own_changes(status_text: str, root: Path) -> bool:
     """`git status --porcelain` 결과에 **이 워크트리의** 변경이 있나.
 
@@ -134,15 +105,6 @@ def _has_own_changes(status_text: str, root: Path) -> bool:
     # own_changed_paths 와 **같은 규칙**을 쓴다(중첩 레포·마리나 자기 폴더 제외).
     # 규칙이 갈라지면 "완료라는데 바뀐 파일이 없다"가 나온다 — 실제로 그렇게 어긋났다.
     return bool(own_changed_paths(status_text, root))
-
-
-def _is_nested_repo(path: Path) -> bool:
-    """이 디렉터리가 자기 git 레포인가. 권한이 막혀 있으면 판단을 포기한다 —
-    py3.9 의 Path.exists() 는 EACCES 를 삼키지 않고 던진다(그대로 두면 방 전체가 실패 캐시로 떨어진다)."""
-    try:
-        return (path / ".git").exists()
-    except OSError:
-        return False
 
 
 def room_has_changes(root: Path, *, runner: Callable[[list[str], Path], str] = None,

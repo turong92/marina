@@ -1,0 +1,12 @@
+# runtime 모듈 목록(스펙 R1). 이 목록 안 모듈은 목록 안 모듈만 import 한다 — test-runtime-boundary
+marina_state
+marina_paths
+marina_registry
+marina_compose_svc
+marina_dockerfile
+marina_memory
+marina_cache
+marina_logtext
+marina_runtime_target
+marina_ssh_mux
+marina_worktrees

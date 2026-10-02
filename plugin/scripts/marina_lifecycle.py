@@ -24,7 +24,7 @@ from marina_registry import discover_roots, has_attached_subrepos, is_source_che
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
 from marina_logtext import redact_text
-from marina_sessions import git_output, session_payload, worktree_status
+from marina_worktrees import git_output, session_payload, worktree_status
 from marina_memory import acquire_memory_reservation, release_memory_reservation
 from marina_compose_svc import _compose_services, compose_start_targets, invalidate_remote_ps
 
@@ -283,7 +283,7 @@ def _stash_one(repo: Path, room_name: str, label: str = "") -> str:
     # 중첩 레포(`?? sub/`)와 마리나 자기 폴더(.workspace)는 이 레포의 작업이 아니다.
     # 그냥 status 를 보면 중첩 레포가 있는 워크트리는 **영원히 "지울 게 있음"** 이라,
     # 아무것도 안 바꿨는데 gitlink 한 줄짜리 빈 보관 브랜치가 쌓인다.
-    from marina_rooms import own_changed_paths
+    from marina_worktrees import own_changed_paths
 
     변경 = own_changed_paths(git("status", "--porcelain", "-z"), repo)
     if not 변경:

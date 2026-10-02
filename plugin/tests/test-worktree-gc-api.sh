@@ -50,7 +50,7 @@ import marina_lifecycle
 import marina_sessions
 
 # du·docker·정지는 가짜 — 이 테스트는 API 표면과 git 결과만 본다
-marina_sessions._du_info = lambda root, is_main, refresh: (100, {}, 300, {})
+marina_sessions._du_info = __import__("marina_worktrees")._du_info = lambda root, is_main, refresh: (100, {}, 300, {})
 _real = subprocess.check_output
 def fake_check_output(args, **kw):
     text = " ".join(str(a) for a in args)

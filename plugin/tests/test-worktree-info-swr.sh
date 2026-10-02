@@ -24,7 +24,7 @@ def slow_status(r):
     calls["n"] += 1
     time.sleep(0.4)                      # 느린 git 흉내
     return real_status(r)
-ms.worktree_status = slow_status
+ms.worktree_status = __import__("marina_worktrees").worktree_status = slow_status
 
 # 1) 콜드 캐시 — 계산한다(느려도 어쩔 수 없다)
 _worktree_info_cache.pop(key, None)
@@ -76,7 +76,7 @@ def slow_status(r):
     calls["n"] += 1
     time.sleep(0.3)
     return real_status(r)
-ms.worktree_status = slow_status
+ms.worktree_status = __import__("marina_worktrees").worktree_status = slow_status
 
 ms.worktree_info(root)                       # 캐시 채우기(계산 1회)
 stamp, payload = _worktree_info_cache[key]

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from marina_registry import discover_all_roots, is_source_checkout, source_root_for, subrepos_of
-from marina_sessions import repo_branch, worktree_info, worktree_status
+from marina_worktrees import repo_branch, worktree_info, worktree_status
 
 _GRAPH_TTL = 15.0
 _graph_cache: dict[str, tuple[float, dict[str, Any]]] = {}

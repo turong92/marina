@@ -16,7 +16,7 @@ repo = Path(sys.argv[1])
 tmp = Path(sys.argv[2])
 sys.path.insert(0, str(repo / "plugin" / "scripts"))
 
-import marina_sessions as s
+import marina_worktrees as s  # 분리 A: 워크트리 상태는 runtime 모듈로 옮김
 
 root = tmp / "project"
 for path in (root, root / "used", root / "unused"):

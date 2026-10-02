@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# runtime 경계(스펙 R1): runtime 모듈은 runtime 모듈만 import 한다 — 대시보드·discord 를 지워도 runtime 이 돈다
+set -euo pipefail
+. "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"
+SCRIPTS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts" && pwd -P)"
+python3 - "$SCRIPTS" <<'PY'
+import ast, sys
+from pathlib import Path
+S = Path(sys.argv[1])
+RUNTIME = {l.strip() for l in (S / "RUNTIME_MODULES").read_text().splitlines() if l.strip() and not l.startswith("#")}
+names = {n[:-3] if n.endswith(".py") else n for n in RUNTIME}
+bad = []
+for name in sorted(RUNTIME):
+    f = S / (name if name.endswith(".py") else name + ".py")
+    tree = ast.parse(f.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        mods = []
+        if isinstance(node, ast.Import):
+            mods = [a.name for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module:
+            mods = [node.module]
+        for m in mods:
+            if m.startswith("marina_") and m not in names:
+                bad.append(f"{f.name}:{node.lineno} → {m}")
+if bad:
+    print("FAIL: runtime 이 runtime 밖 모듈을 import:\n  " + "\n  ".join(bad)); sys.exit(1)
+PY
+echo "PASS test-runtime-boundary"

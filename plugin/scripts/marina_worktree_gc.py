@@ -251,7 +251,7 @@ def _unpushed_count(repo: Path) -> int | None:
 
 def _own_changes(repo: Path) -> tuple[list[str], list[str]]:
     """(미커밋 수정, untracked) — 중첩 레포·마리나 자기 폴더는 뺀다(방 상태 판정과 같은 규칙)."""
-    from marina_rooms import own_changed_paths
+    from marina_worktrees import own_changed_paths
     try:   # _git 은 strip 을 한다 — porcelain 의 첫 레코드(" M a") 앞 공백이 날아가면 경로가 뭉개진다
         out = subprocess.run(["git", "-C", str(repo), "status", "--porcelain", "-z"], capture_output=True, text=True, timeout=120)
     except Exception:

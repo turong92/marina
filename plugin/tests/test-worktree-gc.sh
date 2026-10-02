@@ -59,7 +59,7 @@ import marina_sessions as ms
 import marina_worktree_gc as gc
 from marina_registry import discover_all_roots
 
-ms._du_info = lambda root, is_main, refresh: (10, {}, 20, {})     # du·docker 는 여기 관심사가 아니다
+ms._du_info = __import__("marina_worktrees")._du_info = lambda root, is_main, refresh: (10, {}, 20, {})     # du·docker 는 여기 관심사가 아니다
 discover_all_roots(refresh=True)
 W = lambda n: src / ".claude/worktrees" / n
 def git(repo, *a):

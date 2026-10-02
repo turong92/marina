@@ -30,7 +30,7 @@ grep -q "svc-opt" "$WEB/app-5b-actions.js" || { echo "FAIL: 옵션 서비스 행
 grep -q '\.svc\.svc-opt' "$WEB/styles.css" || { echo "FAIL: .svc-opt CSS 없음"; exit 1; }
 grep -q "시작 그룹 시작" "$WEB/app-5-sessions.js" || { echo "FAIL: startGroup 프로젝트 ▶ 문구 없음"; exit 1; }
 # --all busy 가 그룹 밖 서비스에 스핀을 돌리지 않게(전부 띄우는 것처럼 오인, 형 실사용 사례) — 조건부 머지 계약
-grep -q 'all_busy if s.get("inStartGroup") is not False else None' "$HERE/../scripts/marina_sessions.py" \
+grep -q 'all_busy if s.get("inStartGroup") is not False else None' "$HERE/../scripts/marina_worktrees.py" \
   || { echo "FAIL: --all busy 가 startGroup 밖 서비스에도 합쳐짐(전부 기동중으로 오표시)"; exit 1; }
 
 # ── ③ 폼 왕복: startGroup 리스트 파싱→직렬화 보존 (node vm, DOM 스텁) ──────────
