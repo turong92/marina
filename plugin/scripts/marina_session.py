@@ -1916,8 +1916,16 @@ def lock_root(s: dict[str, Any]) -> str:
     if not _dev(s):
         return ""
     try:
-        from marina_liveness import lock_worktree
-        lock_worktree(Path(str(s["root"])), LOCK_OWNER, f"{s.get('project')}/{s.get('task')}")
+        from marina_liveness import lock_worktree, worktree_lock
+        root = Path(str(s["root"]))
+        cur = worktree_lock(root)
+        if cur and cur["owner"] == LOCK_OWNER:
+            return ""
+        if cur and cur["owner"] == "claude":
+            # 데스크톱 claude --worktree 대화를 adopt — Claude 자기 잠금은 /exit 때 스스로 무시하고 지우므로(실측) 지켜 주지
+            # 못한다. marina-session 잠금으로 바꿔 건다(리뷰 I4).
+            subprocess.run(["git", "-C", str(root), "worktree", "unlock", str(root)], capture_output=True, timeout=10)
+        lock_worktree(root, LOCK_OWNER, f"{s.get('project')}/{s.get('task')}")
         return ""
     except Exception as exc:
         return str(exc)
@@ -1949,6 +1957,7 @@ def reconcile_gone(now: float | None = None) -> list[str]:
         if Path(str(s["root"])).is_dir():
             if s.pop("goneSince", None) is not None:
                 changed = True
+            lock_root(s)      # 배포 전부터 돌던 세션도 알아서 잠근다(멱등, 리뷰 I5)
             continue
         since = s.get("goneSince")
         if since is None:

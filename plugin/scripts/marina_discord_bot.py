@@ -1159,6 +1159,15 @@ class Loop:
         return True
 
     def view(self, now: float) -> None:
+        # 사라진 워크트리 정리·세션 잠금은 그리기보다 먼저 — #상태가 계속 실패해도 돌아야 한다(리뷰 M6)
+        if now - self.last_reconcile >= RECONCILE_EVERY:
+            self.last_reconcile = now
+            try:
+                gone = ms.reconcile_gone(now)      # 밖에서 지워진 워크트리의 채널 정리(runtime 은 Discord 를 모른다)
+                if gone:
+                    _log(f"reconcile: 워크트리가 사라진 세션 정리 {gone}")
+            except Exception as exc:
+                _log(f"reconcile 실패: {exc!r}")
         light = snapshot(full=False)
         typing_tick(light, self.ty, now)
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
@@ -1167,11 +1176,6 @@ class Loop:
         if now - self.last_weekly >= WEEKLY_EVERY:
             self.last_weekly = now
             meter_tick(self.meters)
-        if now - self.last_reconcile >= RECONCILE_EVERY:
-            self.last_reconcile = now
-            gone = ms.reconcile_gone(now)      # 밖에서 지워진 워크트리의 채널 정리(runtime 은 Discord 를 모른다)
-            if gone:
-                _log(f"reconcile: 워크트리가 사라진 세션 정리 {gone}")
 
 
 def run_forever() -> None:

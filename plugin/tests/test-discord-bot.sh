@@ -232,8 +232,19 @@ mb.BOT_DIR = mh / "botdir"
 mb.bot_command = lambda cfg: {"argv": ["bun", "bot.ts"], "cwd": str(mb.BOT_DIR), "env": {}, "bun": "bun"}
 (mb.BOT_DIR / "node_modules").mkdir(parents=True)
 mb.dashboard_tick = lambda st: calls.append("dash"); mb.meter_tick = lambda st: calls.append("week"); ms.reconcile_gone = lambda now: calls.append("gone") or []
+# 리뷰 M6: #상태 그리기가 계속 실패해도 사라진 워크트리 정리·잠금은 돈다
+_dt = mb.dashboard_tick
+mb.dashboard_tick = lambda st: (_ for _ in ()).throw(RuntimeError("render boom"))
+bad = mb.Loop(); bad.started = 0
+try:
+    bad.view(time.time())
+except Exception:
+    pass
+check("gone" in calls, f"그리기가 터져도 reconcile 은 먼저 돈다: {calls}")
+calls.clear(); mb.dashboard_tick = _dt
+mb.dashboard_tick = lambda st: calls.append("dash")
 lp = mb.Loop(); t0 = time.time() + 5
-check(lp.step(t0) is True and calls == [["bun", "bot.ts"], "dash", "week", "gone"], f"첫 바퀴(+사라진 워크트리 정리): {calls}")
+check(lp.step(t0) is True and calls == [["bun", "bot.ts"], "gone", "dash", "week"], f"첫 바퀴(+사라진 워크트리 정리): {calls}")
 calls.clear(); lp.step(t0 + 4)
 check(calls == [], f"다음 바퀴(신호·작업 없음)엔 아무것도: {calls}")
 lp.proc.returncode = 1; lp.step(t0 + 10)

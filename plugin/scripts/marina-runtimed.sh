@@ -75,7 +75,7 @@ XML
 
 write_unit() {
   mkdir -p "$SYSTEMD_UNIT_DIR"
-  { echo "[Unit]"; echo "Description=marina runtimed"; echo; echo "[Service]"; echo "ExecStart=$LAUNCHER"; echo "Restart=on-failure"
+  { echo "[Unit]"; echo "Description=marina runtimed"; echo; echo "[Service]"; echo "ExecStart=$LAUNCHER"; echo "Restart=always"; echo "RestartSec=10"
     echo "Environment=PATH=$DAEMON_PATH"; echo "Environment=MARINA_HOME=$MARINA_HOME"; echo "Environment=PYTHONUNBUFFERED=1"
     echo "Environment=MARINA_RUNTIMED_PRIMARY=$PRIMARY"
     for k in "${ENV_KEYS[@]}"; do if [[ -n "${!k:-}" ]]; then echo "Environment=$k=${!k}"; fi; done

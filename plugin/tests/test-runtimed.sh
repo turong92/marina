@@ -56,4 +56,19 @@ bash "$SCRIPTS/marina-runtimed.sh" stop >/dev/null
 bash "$SCRIPTS/marina-runtimed.sh" status | grep -q stopped || fail "stop → stopped"
 LA="$HOME/Library/LaunchAgents/marina.runtimed.plist"
 if [ -f "$LA" ] && grep -q "$MARINA_HOME" "$LA"; then fail "테스트가 실제 로그인 항목을 건드렸다"; fi
+# 리뷰 I3: 업데이트 감지로 0 종료 → systemd 도 다시 띄워야(on-failure 는 0 이면 안 띄움)
+grep -q "Restart=always" "$SCRIPTS/marina-runtimed.sh" || fail "I3: systemd 유닛이 Restart=always 가 아니다"
+# 리뷰 M8: 다른 인스턴스가 잠금을 쥐면 끝내지 말고 기다린다(끝내면 launchd 가 10초마다 다시 띄워 로그가 쌓인다)
+PYTHONPATH="$SCRIPTS" python3 - <<'PY2'
+import threading, time
+import marina_runtimed as rd
+a = rd.Loop(gateway=lambda: None, docker_gc=lambda p: None, worktree_gc=lambda p: None, primary=False, gateway_on=False)
+assert a.own()
+b = rd.Loop(gateway=lambda: None, docker_gc=lambda p: None, worktree_gc=lambda p: None, primary=False, gateway_on=False)
+got = []
+t = threading.Thread(target=lambda: got.append(b.own(wait=True)), daemon=True); t.start()
+time.sleep(0.5); assert not got, "쥔 동안엔 기다린다"
+a.lockf.close(); a.lockf = None
+t.join(5); assert got == [True], "풀리면 이어받는다"
+PY2
 echo "PASS test-runtimed"

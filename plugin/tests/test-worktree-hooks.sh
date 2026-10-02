@@ -53,4 +53,33 @@ remove "$out2" 2>/dev/null && [ ! -d "$out2" ] || fail "잠금 없으면 지운�
 remove "$out3" 2>/dev/null && [ ! -d "$out3" ] || fail "마리나 워크트리도 지운다"
 # 6) stdout 은 경로 한 줄뿐(다른 출력이 섞이면 Claude 가 그걸 경로로 쓴다)
 [ "$(create t6 "$MP" | wc -l | tr -d ' ')" = 1 ] || fail "stdout 한 줄"
+# ── 리뷰 지적 ──
+# I1: 마리나 경로도 기준 = 띄운 자리의 HEAD(부모 에이전트가 커밋한 게 서브에이전트에 보여야). origin/HEAD 로 fetch 하지 않는다
+FW="$(create feat-base "$MP" 2>/dev/null)"
+echo b > "$FW/b"; git -C "$FW" add b; git -C "$FW" commit -qm b
+SUB="$(create agent-1 "$FW" 2>/dev/null)"
+[ -f "$SUB/b" ] || fail "I1: 서브에이전트 워크트리가 부모 워크트리 HEAD 에서 시작해야"
+# I2: 지우면 훅이 만든 브랜치도(머지된 것만 -d) — 아무 레포나 서브에이전트마다 브랜치가 쌓이면 안 된다
+o7="$(create t7 "$OTHER" 2>/dev/null)"; remove "$o7" 2>/dev/null
+git -C "$OTHER" show-ref --verify --quiet refs/heads/worktree-t7 && fail "I2: 기본 경로 브랜치 worktree-t7 이 남았다"
+remove "$SUB" 2>/dev/null
+git -C "$MP" show-ref --verify --quiet refs/heads/agent-1 || fail "I2: 머지 안 된 커밋이 있는 브랜치는 남긴다(-d)"
+S2="$(create agent-2 "$MP" 2>/dev/null)"; remove "$S2" 2>/dev/null
+git -C "$MP" show-ref --verify --quiet refs/heads/agent-2 && fail "I2: 마리나 경로 브랜치 agent-2 가 남았다"
+# M1: worktree_path 가 없으면 아무것도 안 지운다(cwd 로 대신하면 돌던 워크트리를 지운다)
+set +e; printf '{"cwd":"%s","hook_event_name":"WorktreeRemove"}' "$FW" | bash "$HOOK" remove 2>/dev/null; rc=$?; set -e
+[ "$rc" -ne 0 ] && [ -d "$FW" ] || fail "M1: worktree_path 없으면 거절하고 남긴다(rc=$rc)"
+# C1: 서브레포에 미커밋 변경이 있으면 거절 — Claude 는 루트만 보고 '변경 없음'으로 묻지 않고 지운다
+PYTHONPATH="$SCRIPTS" python3 - "$FW" <<'PY2'
+import sys
+from pathlib import Path
+import marina_worktree_hooks as h, marina_worktrees
+marina_worktrees.worktree_status = lambda root: {"clean": False, "repos": [
+    {"name": "mproj", "dirty": False}, {"name": "backend", "dirty": True, "changeCount": 2}]}
+code, msg = h.remove({"worktree_path": sys.argv[1]})
+assert code != 0 and "backend" in msg and Path(sys.argv[1]).exists(), (code, msg)
+marina_worktrees.worktree_status = lambda root: {"clean": False, "repos": [{"name": "mproj", "dirty": True}]}
+code, msg = h.remove({"worktree_path": sys.argv[1]})
+assert code == 0 and not Path(sys.argv[1]).exists(), "루트만 더러우면 Claude 가 이미 물어본 것 — 지운다"
+PY2
 echo "PASS test-worktree-hooks"

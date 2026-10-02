@@ -90,14 +90,20 @@ class Loop:
         self.last_gc = float("-inf")
         self.lockf: Any = None
 
-    def own(self) -> bool:
+    def own(self, wait: bool = False) -> bool:
+        """한 홈에 하나. wait=True 면 쥔 쪽이 끝날 때까지 기다린다 — 끝내 버리면 launchd KeepAlive 가 10초마다
+        다시 띄워 로그만 쌓인다(리뷰 M8)."""
         if self.lockf is not None:
             return True
         try:
             MARINA_HOME.mkdir(parents=True, exist_ok=True)
             fh = open(MARINA_HOME / "runtimed.lock", "w")
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
+            return False
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.close()
             return False
         self.lockf = fh
         return True
@@ -130,8 +136,8 @@ def run_forever() -> int:
             time.sleep(3600)
     loop = Loop()
     if not loop.own():
-        _log("이미 다른 runtimed 가 돈다 — 끝냄")
-        return 0
+        _log("다른 runtimed 가 돈다 — 그쪽이 끝날 때까지 기다린다")
+        loop.own(wait=True)
     _log(f"runtimed 시작 home={MARINA_HOME} primary={loop.primary} gateway={loop.gateway_on}")
     if loop.primary:
         try:

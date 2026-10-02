@@ -77,6 +77,21 @@ ms.save_sessions(items)
 check(ms.main(["lock-all"]) == 0, "lock-all 성공(메인 체크아웃은 잠글 수 없어도 실패 아님)")
 check((lv.worktree_lock(rb) or {}).get("owner") == "marina-session", "기존 세션 잠금")
 
+# 8) 리뷰 I5: 배포 전부터 돌던 세션(잠금 없음)은 reconcile 이 알아서 잠근다(lock-all 을 안 쳐도)
+subprocess.run(["git", "-C", str(src), "worktree", "unlock", str(rb)], capture_output=True)
+ms.reconcile_gone(time.time())
+check((lv.worktree_lock(rb) or {}).get("owner") == "marina-session", "잠금 없는 기존 세션을 reconcile 이 잠근다")
+# 9) 리뷰 I4: 데스크톱 claude --worktree 대화를 adopt — Claude 자기 잠금(살아 있어도)은 marina-session 으로 바꿔 건다
+subprocess.run(["git", "-C", str(src), "worktree", "unlock", str(rb)], capture_output=True)
+import os
+subprocess.run(["git", "-C", str(src), "worktree", "lock", "--reason", f"claude session feat-b (pid {os.getpid()} start x)", str(rb)], check=True)
+why = ms.lock_root({"project": "proj", "task": "old", "root": str(rb)})
+check(why == "" and (lv.worktree_lock(rb) or {}).get("owner") == "marina-session", f"Claude 잠금은 넘겨받는다: {why} {lv.worktree_lock(rb)}")
+subprocess.run(["git", "-C", str(src), "worktree", "unlock", str(rb)], capture_output=True)
+subprocess.run(["git", "-C", str(src), "worktree", "lock", "--reason", "someone-else x", str(rb)], check=True)
+check(ms.lock_root({"project": "proj", "task": "old", "root": str(rb)}) != "", "다른 주인 잠금은 안 뺏는다(이유를 돌려줌)")
+subprocess.run(["git", "-C", str(src), "worktree", "unlock", str(rb)], capture_output=True)
+
 # 7) sessions.json 이 깨져도 예외 없음
 ms.sessions_path().write_text("{broken")
 check(ms.reconcile_gone(time.time()) == [], "깨진 기록 → 정리할 것 없음")
