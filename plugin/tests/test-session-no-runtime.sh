@@ -32,4 +32,11 @@ PY
 # 기준 브랜치 지정
 out="$(msess new proj feat/nr2 --base dev-base 2>&1)" || fail "base: $out"
 [ ! -f "$SRC/.claude/worktrees/feat-nr2/b" ] || fail "base=dev-base 에서 시작해야(b 없음)"
+# 리뷰 I4: base 를 안 주면 runtime 과 같은 규칙(origin/HEAD) — 메인 체크아웃이 다른 브랜치에 있어도 그 커밋을 안고 태어나지 않는다
+git init -q --bare "$TMPROOT/origin.git"; git -C "$SRC" remote add origin "$TMPROOT/origin.git"; git -C "$SRC" push -q origin main
+git -C "$SRC" remote set-head origin main
+git -C "$SRC" checkout -q -b feature/x; echo fx > "$SRC/fx"; git -C "$SRC" add fx; git -C "$SRC" commit -qm fx
+out="$(msess new proj fix/y 2>&1)" || fail "fix/y: $out"
+[ ! -f "$SRC/.claude/worktrees/fix-y/fx" ] || fail "I4: 메인 체크아웃의 feature/x 커밋을 안고 태어났다"
+git -C "$SRC" checkout -q main
 echo "PASS test-session-no-runtime"

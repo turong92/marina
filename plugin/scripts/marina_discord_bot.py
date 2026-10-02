@@ -1187,8 +1187,7 @@ def run_forever(stop: "Callable[[], bool] | None" = None) -> None:
         if stop and time.time() - last_check >= 60:
             last_check = time.time()
             if stop():
-                if loop.proc and loop.proc.poll() is None:
-                    loop.proc.terminate()
+                loop.stop_bot()      # bun 봇도 기다려 끝낸다 — 새 데몬의 봇과 겹치지 않게(리뷰 M2)
                 return
 
 

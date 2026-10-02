@@ -918,6 +918,7 @@ def resume_unanswered(rec: dict[str, Any]) -> None:
 
 def hook_prompt(payload: dict[str, Any]) -> "dict[str, Any] | None":
     """받은 순간: Discord 로 온 '/compact' 는 마리나가 세션이 쉬는 순간 입력창에 직접 친다. Claude 에겐 짧게 답만 하라고."""
+    _ensure_daemon_quiet()          # 지시를 받는 순간 봇이 있어야 🛑·typing 이 된다(리뷰 I3)
     s = _session_from_env()
     if s and s.get("stateDir"):                   # 턴 시작 — 안전 재시작은 턴 끝(stopped-at)까지 기다린다
         try:
@@ -1198,49 +1199,97 @@ def daemon_pid_path() -> Path:
     return marina_home() / "discord-daemon.pid"
 
 
+_DAEMON_ENV_KEEP = ("HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "SHELL", "SSH_AUTH_SOCK")
+
+
+def _daemon_env() -> dict[str, str]:
+    """데몬 환경 — 처음 깨운 세션의 것을 물려받지 않는다(DISCORD_STATE_DIR·CLAUDECODE·세션 PATH, 리뷰 I2)."""
+    env = {k: v for k, v in os.environ.items() if k in _DAEMON_ENV_KEEP or k.startswith(("LC_", "MARINA_"))}
+    env["PATH"] = ":".join([str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin",
+                            "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+    env["MARINA_HOME"] = str(marina_home())
+    env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
 def _spawn_daemon() -> int:
-    log = open(marina_home() / "discord-daemon.log", "a")
+    log_path = marina_home() / "discord-daemon.log"
+    try:
+        if log_path.stat().st_size > 1 << 20:        # 1MB 넘으면 새로(리뷰 M7)
+            log_path.unlink()
+    except OSError:
+        pass
+    log = open(log_path, "a")
+    # cwd 를 홈으로 — 세션 워크트리를 cwd 로 물면 그 워크트리가 지워진 뒤 고아 리퍼가 데몬을 죽인다(리뷰 I2)
     proc = subprocess.Popen([*_hook_entry(), "daemon"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                            start_new_session=True)
+                            start_new_session=True, cwd=str(marina_home()), env=_daemon_env())
     return proc.pid
+
+
+def _is_daemon_cmd(cmd: str) -> bool:
+    """`… marina_session.py daemon` 또는 `… marina-session-hook daemon` 으로 끝나는 프로세스만(리뷰 M1)."""
+    parts = cmd.split()
+    return bool(parts) and parts[-1] == "daemon" and any(
+        p.endswith("marina_session.py") or p.endswith("marina-session-hook") for p in parts[:-1])
+
+
+def _daemon_alive() -> bool:
+    try:
+        pid = int(daemon_pid_path().read_text().strip())
+        os.kill(pid, 0)
+    except (OSError, ValueError):
+        return False
+    try:
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=2).stdout
+    except subprocess.SubprocessError:
+        return True                               # 확인 못 하면 띄우지 않는다(중복보다 낫다)
+    return _is_daemon_cmd(cmd.strip())
 
 
 def ensure_daemon() -> str:
     """discord 봇(#상태·🛑·숫자판·typing·bun 봇)을 discord 가 스스로 띄운다(분리 B — 대시보드가 안 띄운다).
-    떠 있으면 그대로, 없을 때만 하나. 훅마다 불리므로 싸야 한다(파일 하나 + kill 0). 봇 안의 flock 이 하나만 일하게 한다."""
+    떠 있으면 그대로, 없을 때만 하나. 훅마다 불리므로 싸야 한다. 동시에 여러 훅이 불러도 하나만(잠금, 리뷰 I1)."""
     if os.environ.get("MARINA_DISCORD_DAEMON") == "off":
         return "off"
-    pf = daemon_pid_path()
+    if _daemon_alive():
+        return "running"
+    import fcntl
     try:
-        pid = int(pf.read_text().strip())
-        os.kill(pid, 0)
-        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=2).stdout
-        if "daemon" in cmd and "marina_session" in cmd or "marina-session-hook" in cmd:
-            return "running"
-    except (OSError, ValueError, subprocess.SubprocessError):
-        pass
-    pid = _spawn_daemon()
-    try:
-        pf.parent.mkdir(parents=True, exist_ok=True)
-        pf.write_text(f"{pid}\n")
+        marina_home().mkdir(parents=True, exist_ok=True)
+        lk = open(marina_home() / "discord-daemon.spawn.lock", "w")
+        fcntl.flock(lk, fcntl.LOCK_EX)
     except OSError:
-        pass
-    return "started"
-
-
-def _code_updated() -> bool:
-    """설치 목록의 최신 marina 가 지금 도는 이 파일이 아니면 참(업데이트됨). 설치본이 아니면(작업 트리) 거짓."""
-    me = Path(__file__).resolve()
-    if _hook_entry() == [sys.executable, str(me)]:
-        return False
+        return "running"
     try:
-        home = Path(os.environ.get("MARINA_CLAUDE_HOME") or Path.home() / ".claude")
+        if _daemon_alive():
+            return "running"
+        pid = _spawn_daemon()
+        daemon_pid_path().write_text(f"{pid}\n")
+        return "started"
+    finally:
+        lk.close()
+
+
+def _code_updated(me: "Path | None" = None, home: "Path | None" = None) -> bool:
+    """설치본으로 도는데 설치 목록의 최신이 이 파일이 아니면 참(업데이트됨) — 데몬이 스스로 끝나고 다음 훅이 새 코드로.
+    업데이트하면 installPath 가 새 해시로 바뀌고 옛 캐시는 남으므로 '설치본인가'는 캐시 폴더 아래인지로 본다(리뷰 C1).
+    최신 고르기는 셸 입구(shim)와 같은 규칙: user 범위·lastUpdated 최신."""
+    me = (me or Path(__file__)).resolve()
+    home = home or Path(os.environ.get("MARINA_CLAUDE_HOME") or Path.home() / ".claude")
+    try:
+        me.relative_to((home / "plugins" / "cache").resolve())
+    except ValueError:
+        return False                              # 작업 트리·테스트
+    try:
         data = json.loads((home / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins") or {}
-        latest = [Path(str(e.get("installPath"))) / "scripts" / "marina_session.py"
-                  for k, es in data.items() if str(k).startswith("marina@") for e in (es or []) if isinstance(e, dict)]
-        return bool(latest) and all(p.resolve() != me for p in latest if p.exists()) and any(p.exists() for p in latest)
     except (OSError, ValueError, AttributeError):
         return False
+    es = [e for k, v in data.items() if str(k).startswith("marina@") for e in (v or []) if isinstance(e, dict)]
+    es.sort(key=lambda e: (e.get("scope") == "user", str(e.get("lastUpdated") or "")), reverse=True)
+    if not es:
+        return False
+    latest = Path(str(es[0].get("installPath") or "")) / "scripts" / "marina_session.py"
+    return latest.exists() and latest.resolve() != me
 
 
 def _ensure_daemon_quiet() -> None:
@@ -1574,6 +1623,17 @@ def _git_worktree_add(project: str, task: str, base: str = "") -> Path:
         raise SessionError(f"이미 있어: {wt}")
     wt.parent.mkdir(parents=True, exist_ok=True)
     has = subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet", f"refs/heads/{task}"]).returncode == 0
+    if not has and not base:
+        # runtime 과 같은 규칙 — 원격 기본 브랜치 최신(origin/HEAD), 원격 없거나 실패하면 로컬 HEAD(리뷰 I4: 메인 체크아웃이
+        # 다른 브랜치에 있어도 그 커밋을 안고 태어나지 않게)
+        rmt = "origin" if subprocess.run(["git", "-C", str(root), "remote", "get-url", "origin"], capture_output=True).returncode == 0 else ""
+        if rmt:
+            subprocess.run(["git", "-C", str(root), "fetch", "-q", rmt], capture_output=True, timeout=120)
+            subprocess.run(["git", "-C", str(root), "remote", "set-head", rmt, "-a"], capture_output=True, timeout=60)
+            head = subprocess.run(["git", "-C", str(root), "symbolic-ref", "-q", "--short", f"refs/remotes/{rmt}/HEAD"],
+                                  capture_output=True, text=True).stdout.strip()
+            if head:
+                base = head
     args = ["worktree", "add", str(wt), task] if has else ["worktree", "add", "-b", task, str(wt)] + ([base] if base else [])
     r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=300)
     if r.returncode != 0:
