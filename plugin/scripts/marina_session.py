@@ -33,8 +33,8 @@ _KEEP_ENV = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPD
 CHANNEL_RULES = (
     "이 세션은 Discord 채널에 연결돼 있다. 상대는 Discord 만 보고 이 터미널은 보지 않는다.\n"
     "- 결과·질문·실패/막힘·완료는 반드시 discord reply 도구로 보낸다.\n"
-    "- 긴 작업은 시작할 때 진행 메시지 하나를 reply 로 보내고 edit_message 로 갱신한다. "
-    "끝나면 새 reply 를 보낸다(알림이 울리도록).\n"
+    "- 여러 단계 작업은 단계마다 progress 도구(message_id = 지시 메시지 ID)로 스레드에 진행 한 줄을 남긴다(알림 없음). "
+    "최종 결과는 채널에 새 reply 로 보낸다(알림이 울리도록). 짧은 답은 progress 없이 reply 만.\n"
     "- 질문은 번호 선택지 텍스트로 묻는다.\n"
     "- 이미지는 첨부한다. HTML 은 스크린샷과 열어볼 주소를 보낸다. 10MB 를 넘는 파일은 링크로 보낸다.\n"
     "- 스크린샷·HTML 같은 결과물은 share_file 도구에 넘기고 돌려받은 파일을 reply 로 첨부한다(프로젝트 #자료실 에도 모인다).\n"
@@ -48,6 +48,7 @@ CHAT_RULES = (
     "이 세션은 Discord 채널에 연결된 일상 도우미다. 상대는 개발자가 아니고 Discord 만 본다.\n"
     "- 할 수 있는 일: 웹 검색·웹 페이지 읽기, 이 폴더 안에서 파일 만들기·고치기.\n"
     "- 답·질문·결과는 반드시 discord reply 도구로, 쉬운 말로 보낸다. 질문은 번호 선택지 텍스트로 묻는다.\n"
+    "- 오래 걸리는 부탁은 단계마다 progress 도구(message_id = 부탁 메시지 ID)로 진행 상황을 남기고, 결과는 reply 로 보낸다.\n"
     "- 글 위주 결과(리서치·후보 비교·목록)는 파일 대신 Discord 서식 메시지로 바로 답한다: 제목은 **굵게**, "
     "목록·인용 사용. Discord 는 표를 못 그리니 표 대신 항목별 카드(이름 줄 + 들여쓴 세부 줄)로 쓴다. "
     "길면 메시지를 나눠 보낸다.\n"
@@ -642,14 +643,14 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
             "allow": ["Read", "Glob", "Grep", "Write", "Edit", "WebSearch", "WebFetch"]
                      + [f"mcp__plugin_discord_discord__{t}" for t in
                         ("reply", "react", "edit_message", "fetch_messages", "download_attachment")]
-                     + (["mcp__marina__open_chat", "mcp__marina__list_chats"] if lobby else ["mcp__marina__share_file"]),
+                     + (["mcp__marina__open_chat", "mcp__marina__list_chats"] if lobby else ["mcp__marina__share_file", "mcp__marina__progress"]),
             # 다음 기동 때 실행될 수 있는 폴더 안 설정 파일은 못 쓰게(리뷰 I2). '//' = 절대 경로
             "deny": [f"Edit(/{real}/{f})" for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md")]}
         settings["hooks"]["PreToolUse"] = [{"matcher": f"{_REPLY_TOOL}|WebFetch|Write|Edit",
                                             "hooks": [{"type": "command", "command": guard, "timeout": 15}]}]
     if chat_root is None:
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
-        settings["permissions"] = {"allow": ["mcp__marina__share_file"]}
+        settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress"]}
         mcp = {"mcpServers": {"marina": {"command": sys.executable,
                                          "args": [str(Path(__file__).resolve()), "mcp-chat"]}}}
         (sdir / "mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1103,11 +1104,56 @@ _CHAT_TOOLS_MCP = [
      "inputSchema": {"type": "object",
                      "properties": {"path": {"type": "string", "description": "이 폴더 안 파일 경로(상대·절대)"},
                                     "title": {"type": "string", "description": "결과물 제목(자료실 표시용)"}},
-                     "required": ["path"]}}]
+                     "required": ["path"]}},
+    {"name": "progress",
+     "description": "긴 작업의 진행 기록을 지시 메시지의 스레드에 남긴다(알림 없이). 같은 message_id 면 같은 스레드에 이어 쓴다. "
+                    "최종 결과는 스레드가 아니라 채널에 reply 로 보낸다.",
+     "inputSchema": {"type": "object",
+                     "properties": {"message_id": {"type": "string", "description": "지시한 Discord 메시지 ID(<channel> 태그의 message_id)"},
+                                    "text": {"type": "string", "description": "진행 한 줄"}},
+                     "required": ["message_id", "text"]}}]
+
+
+def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
+    """지시 메시지에 스레드를 열고(처음 한 번) 진행 한 줄을 알림 없이 남긴다."""
+    mid, text = str(args.get("message_id") or ""), str(args.get("text") or "").strip()
+    if not re.fullmatch(r"\d{1,25}|M\d+", mid):
+        raise SessionError("message_id 는 지시 메시지의 숫자 ID 여야 해")
+    if not text:
+        raise SessionError("text 가 비었어")
+    cfg = load_config()
+    dc = Discord(read_token(cfg))
+    tf = Path(str(rec["stateDir"])) / "threads.json"
+    try:
+        threads = json.loads(tf.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        threads = {}
+    tid = str(threads.get(mid) or "")
+    if not tid:
+        name = ("진행 · " + re.sub(r"\s+", " ", text))[:90]
+        try:
+            tid = str(dc._req("POST", f"/channels/{rec['channelId']}/messages/{mid}/threads",
+                              {"name": name, "auto_archive_duration": 1440})["id"])
+        except DiscordError as exc:
+            if exc.code == 403:
+                return ("스레드를 만들 권한이 없어(봇 역할에 '공개 스레드 만들기' 필요) — "
+                        "이번엔 채널에 진행 메시지 하나를 reply 로 보내고 edit_message 로 갱신해")
+            raise
+        threads[mid] = tid
+        tf.write_text(json.dumps(dict(list(threads.items())[-50:]), ensure_ascii=False) + "\n", encoding="utf-8")
+    dc._req("POST", f"/channels/{tid}/messages",
+            {"content": text[:1900], "flags": 4096, "allowed_mentions": {"parse": []}})   # 4096 = 알림 없이
+    return f"스레드에 남겼어(thread {tid}). 끝나면 결과는 채널에 reply 로."
 
 
 def chat_tool(name: str, args: dict[str, Any]) -> str:
-    """채팅 세션 MCP 도구. 실패는 SessionError."""
+    """채팅·개발 세션 MCP 도구. 실패는 SessionError."""
+    if name == "progress":
+        sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+        rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
+        if not rec or not rec.get("channelId"):
+            raise SessionError("이 세션의 기록을 찾지 못했어")
+        return _progress(rec, args)
     if name != "share_file":
         raise SessionError(f"없는 도구: {name}")
     import marina_share

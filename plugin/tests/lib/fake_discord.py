@@ -88,6 +88,14 @@ class H(BaseHTTPRequestHandler):
         if mode == "429once":
             fp.unlink(); self._send(429, {"message": "rate limited", "retry_after": 0.05}); return
         p = self._parts()
+        if len(p) == 5 and p[0] == "channels" and p[2] == "messages" and p[4] == "threads":
+            if (state / "no_threads").exists():
+                self._send(403, {"message": "Missing Permissions"}); return
+            with lock:
+                next_id[0] += 1
+                ch = {"id": str(next_id[0]), "name": body.get("name"), "type": 11, "parent_id": p[1]}
+                channels[ch["id"]] = ch
+            self._send(201, ch); return
         if len(p) == 3 and p[0] == "channels" and p[2] == "messages":
             self._send(200, {"id": "m-sent", "content": body.get("content")}); return
         if len(p) == 3 and p[0] == "guilds" and p[2] == "channels":

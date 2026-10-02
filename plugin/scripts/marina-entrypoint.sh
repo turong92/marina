@@ -56,8 +56,8 @@ usage (marina = 전역 CLI):
     marina project ls | rm <id> | default <id> a,b,c | infer <path>
   워크트리 (작업 시작 — 브랜치명 지정 생성 + 서브레포 미러):
     marina worktree create <branch> [base] [--project <id>]
-  Discord 세션 (워크트리 = 채널 = tmux claude · 채팅방·로비):
-    marina session new <프로젝트> <작업> | new chat <이름> [--title] [--from <대화ID>] | lobby
+  Discord 세션 — 선택 기능, ~/.marina/discord.json 설정 시 (워크트리 = 채널 = tmux claude · 채팅방·로비):
+    marina session new <프로젝트> <작업> [--from <대화ID>] | new chat <이름> [--title] [--from <대화ID>] | lobby [<프로젝트>]
     marina session ls | attach | start [--all] | stop | rm <세션>
   게이트웨이 (호스트 브라우저 → <wt>.<proj>.localhost, 보통 start 시 자동 기동):
     marina gateway start|stop|status|config|install|uninstall
