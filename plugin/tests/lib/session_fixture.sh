@@ -36,6 +36,7 @@ chmod +x "$TMPROOT/bin/claude"
 # runtime(marina CLI) — discord 는 이 명령으로만 runtime 을 부른다(분리 B). 없는 경우는 MARINA_RUNTIME_BIN=none 으로 테스트
 printf '#!/usr/bin/env bash\nexec bash "%s" "$@"\n' "$MARINA_SH" > "$TMPROOT/bin/marina"; chmod +x "$TMPROOT/bin/marina"
 export MARINA_RUNTIME_BIN="$TMPROOT/bin/marina"
+export MARINA_DISCORD_DAEMON=off      # 테스트가 실제 봇 데몬을 띄우지 않게(test-discord-daemon 만 켠다)
 export PATH="$TMPROOT/bin:$PATH"
 
 gi() { mkdir -p "$1"; git -C "$1" init -q -b main; git -C "$1" config user.email t@t.invalid; git -C "$1" config user.name T; echo ok > "$1/r"; git -C "$1" add r; git -C "$1" commit -qm init; }

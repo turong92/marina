@@ -1178,10 +1178,18 @@ class Loop:
             meter_tick(self.meters)
 
 
-def run_forever() -> None:
+def run_forever(stop: "Callable[[], bool] | None" = None) -> None:
+    """stop() 이 참이면 끝낸다 — discord 데몬은 플러그인이 업데이트되면 스스로 끝나고 다음 훅이 새 코드로 다시 띄운다(분리 B)."""
     loop = Loop()
+    last_check = time.time()
     while True:
         time.sleep(4 if loop.step(time.time()) else 30)
+        if stop and time.time() - last_check >= 60:
+            last_check = time.time()
+            if stop():
+                if loop.proc and loop.proc.poll() is None:
+                    loop.proc.terminate()
+                return
 
 
 def main(argv: list[str]) -> int:

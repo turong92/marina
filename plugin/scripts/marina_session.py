@@ -1194,9 +1194,67 @@ def _hook_target(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[s
         or next((x for x in items if x.get("kind") not in CHAT_KINDS and _same_root(x, root)), None)
 
 
+def daemon_pid_path() -> Path:
+    return marina_home() / "discord-daemon.pid"
+
+
+def _spawn_daemon() -> int:
+    log = open(marina_home() / "discord-daemon.log", "a")
+    proc = subprocess.Popen([*_hook_entry(), "daemon"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+                            start_new_session=True)
+    return proc.pid
+
+
+def ensure_daemon() -> str:
+    """discord 봇(#상태·🛑·숫자판·typing·bun 봇)을 discord 가 스스로 띄운다(분리 B — 대시보드가 안 띄운다).
+    떠 있으면 그대로, 없을 때만 하나. 훅마다 불리므로 싸야 한다(파일 하나 + kill 0). 봇 안의 flock 이 하나만 일하게 한다."""
+    if os.environ.get("MARINA_DISCORD_DAEMON") == "off":
+        return "off"
+    pf = daemon_pid_path()
+    try:
+        pid = int(pf.read_text().strip())
+        os.kill(pid, 0)
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=2).stdout
+        if "daemon" in cmd and "marina_session" in cmd or "marina-session-hook" in cmd:
+            return "running"
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    pid = _spawn_daemon()
+    try:
+        pf.parent.mkdir(parents=True, exist_ok=True)
+        pf.write_text(f"{pid}\n")
+    except OSError:
+        pass
+    return "started"
+
+
+def _code_updated() -> bool:
+    """설치 목록의 최신 marina 가 지금 도는 이 파일이 아니면 참(업데이트됨). 설치본이 아니면(작업 트리) 거짓."""
+    me = Path(__file__).resolve()
+    if _hook_entry() == [sys.executable, str(me)]:
+        return False
+    try:
+        home = Path(os.environ.get("MARINA_CLAUDE_HOME") or Path.home() / ".claude")
+        data = json.loads((home / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins") or {}
+        latest = [Path(str(e.get("installPath"))) / "scripts" / "marina_session.py"
+                  for k, es in data.items() if str(k).startswith("marina@") for e in (es or []) if isinstance(e, dict)]
+        return bool(latest) and all(p.resolve() != me for p in latest if p.exists()) and any(p.exists() for p in latest)
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _ensure_daemon_quiet() -> None:
+    try:
+        if config_path().exists():
+            ensure_daemon()
+    except Exception:
+        pass
+
+
 def hook_stop(payload: dict[str, Any]) -> None:
     """턴 끝: 이번 턴에 읽은 지시들의 진행 표시(👀·도구 이모지·🛑)를 전부 뗀다. 끝났다는 표시는 답장이 한다(✅ 없음, 형 결정 B).
     백그라운드 알림으로 이어서 일한 턴(새 메시지 없음)이 단 이모지도 여기서 뗀다."""
+    _ensure_daemon_quiet()
     items = load_sessions()
     s = _hook_target(payload, items)
     if not s or not s.get("channelId"):
@@ -2256,6 +2314,8 @@ def main(argv: list[str] | None = None) -> int:
     for name in ("attach", "stop", "rm"):
         sub.add_parser(name).add_argument("ref")
     sub.add_parser("lock-all")
+    sub.add_parser("daemon")
+    sub.add_parser("daemon-ensure")
     p = sub.add_parser("start")
     p.add_argument("ref", nargs="?", default="")
     p.add_argument("--all", action="store_true")
@@ -2419,6 +2479,12 @@ def main(argv: list[str] | None = None) -> int:
             s = find_session(a.ref)
             tmux_stop(str(s["tmux"]))
             print(f"✓ 정지: {s['project']}/{s['task']}")
+        elif a.cmd == "daemon":
+            daemon_pid_path().write_text(f"{os.getpid()}\n")
+            import marina_discord_bot
+            marina_discord_bot.run_forever(stop=_code_updated)
+        elif a.cmd == "daemon-ensure":
+            print(ensure_daemon())
         elif a.cmd == "lock-all":
             for x in load_sessions():
                 why = lock_root(x)
@@ -2434,6 +2500,8 @@ def main(argv: list[str] | None = None) -> int:
     except SessionError as exc:
         print(f"marina session: {exc}", file=sys.stderr)
         return 1
+    if a.cmd in ("new", "start", "restart", "lobby"):
+        _ensure_daemon_quiet()          # 세션을 띄우면 봇도(대시보드가 안 띄운다, 분리 B)
     return 0
 
 
