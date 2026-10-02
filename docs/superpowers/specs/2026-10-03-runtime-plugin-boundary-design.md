@@ -49,7 +49,10 @@
 | 5 | 훅이 거절하면 | `WorktreeRemove` 훅이 0 이 아닌 값으로 끝나면 워크트리는 **남는다**. 지울지 말지는 훅이 정한다 |
 | 6 | Claude Code 자체 잠금 | 훅이 없으면 Claude Code 가 직접 `git worktree lock` 을 건다(이유 `claude session <이름> (pid N start …)`). 프로세스를 죽여도 잠금은 남는다(낡은 잠금). 다시 열어도 새로 안 걸고, `/exit` 때 **잠금을 무시하고** 지운다 |
 
+| 7 | 훅을 어디에 두나 | **플러그인 hooks.json 의 WorktreeCreate 는 서브에이전트 `isolation: worktree` 때만 불린다.** 시작 인자 `claude --worktree` 는 플러그인이 로드되기 전에 워크트리를 만들어 플러그인 훅을 안 부른다. 설정 파일 훅(프로젝트 `.claude/settings.json`·`--settings <파일>`)은 둘 다 불린다(실측 2026-10-03) |
+
 이 결과로 정한 것:
+- runtime 플러그인 훅 = 서브에이전트 격리용. discord 는 세션을 띄울 때 자기 `--settings` 에 runtime 훅 경로를 넣어 `--worktree` 도 마리나로 만든다(B). 사람이 손으로 친 `claude --worktree` 까지 마리나로 만들려면 사용자 설정에 훅을 넣어야 한다 — 형 설정을 바꾸는 일이라 하지 않는다(필요하면 형이 결정).
 - **runtime 의 `WorktreeRemove` 훅은 남의 잠금을 존중한다.** 다른 주인(discord 등)이 잠갔으면 거절하고(exit 2) 이유를 stderr 로 낸다. 4번 때문에 이게 없으면 Discord 개발 세션에서 누가 `/exit` 한 번 치는 순간 깨끗한 워크트리가 사라진다.
 - **잠금 이유 형식(표준 git 잠금 위의 약속):** `<주인> <설명> (pid N …)`. 판정 규칙은 이렇다.
   - pid 가 적혀 있고 그 프로세스가 죽었으면 낡은 잠금으로 보고 무시한다. Claude Code 자기 잠금이 이 경우다.
