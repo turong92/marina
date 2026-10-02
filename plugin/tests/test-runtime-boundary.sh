@@ -13,7 +13,18 @@ RUNTIME = {l.lstrip("?") for l in RAW}
 names = {n[:-3] if n.endswith(".py") else n for n in RUNTIME}
 bad = []
 warn = []
-for name in sorted(RUNTIME):
+import re
+for name in sorted(n for n in RUNTIME if n.endswith(".sh")):
+    # 셸: runtime 밖 python 모듈·대시보드 진입점(marina-control.py·marina-dashboard.sh)을 부르면 위반
+    for i, line in enumerate((S / name).read_text(encoding="utf-8").splitlines(), 1):
+        if line.lstrip().startswith("#"):
+            continue
+        for m in re.findall(r"\b(marina_[a-z0-9_]+)\.py\b|\b(marina-control\.py|marina-dashboard\.sh)\b", line):
+            mod = m[0] or m[1]
+            if mod.startswith("marina_") and mod in names:
+                continue
+            (warn if name in PENDING else bad).append(f"{name}:{i} → {mod}")
+for name in sorted(n for n in RUNTIME if not n.endswith(".sh")):
     f = S / (name if name.endswith(".py") else name + ".py")
     tree = ast.parse(f.read_text(encoding="utf-8"))
     for node in ast.walk(tree):

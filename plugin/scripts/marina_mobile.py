@@ -2317,7 +2317,9 @@ def _harness_hooks() -> list[dict[str, Any]]:
                     "event": str(event),
                     "matcher": str((group or {}).get("matcher") or ""),
                     # 경로 전체를 보여줄 이유가 없다 — 폰 화면에서 스크립트 이름이면 충분하다.
-                    "script": 명령.rstrip('"').rsplit("/", 1)[-1],
+                    # 인자가 붙은 명령("…/marina-worktree-hook.sh" create)도 스크립트 이름만
+                    "script": next((t.rsplit("/", 1)[-1] for t in re.split(r'[\s"]+', 명령) if t.endswith((".sh", ".py"))),
+                                   명령.rstrip('"').rsplit("/", 1)[-1]),
                 })
     return 나온것
 

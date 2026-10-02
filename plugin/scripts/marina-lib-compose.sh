@@ -379,5 +379,6 @@ PY
     *) die "compose: 미지원 명령 $command" ;;
   esac
   # start/restart 성공 직후(여기 도달=up 성공): 게이트웨이 자동 기동 + 라우트 반영(CLI 경로도 대시보드와 동일 UX)
-  case "$command" in start|restart|rebuild|clean-rebuild) python3 "$SCRIPT_DIR/marina-control.py" gateway-ensure >/dev/null 2>&1 || true ;; esac
+  # (runtime 모듈을 직접 — 대시보드 진입점 marina-control.py 를 거치지 않는다, 분리 A)
+  case "$command" in start|restart|rebuild|clean-rebuild) PYTHONPATH="$SCRIPT_DIR" python3 -c 'import marina_lifecycle; marina_lifecycle.ensure_gateway()' >/dev/null 2>&1 || true ;; esac
 }

@@ -1,4 +1,5 @@
-# runtime 모듈 목록(스펙 R1). 이 목록 안 모듈은 목록 안 모듈만 import 한다 — test-runtime-boundary
+# runtime 모듈 목록(스펙 R1) — 이 목록 안 모듈은 목록 안 모듈만 import 한다(test-runtime-boundary).
+# 대시보드(dashboard)·discord 모듈을 부르면 실패. 앞에 ? 를 붙이면 '푸는 중'(경고만) — 남기지 말 것.
 marina_state
 marina_paths
 marina_registry
@@ -22,6 +23,26 @@ marina_build_inputs
 marina_prebuild
 marina_pretooluse
 marina_protected_write
-# 아래 ? 는 아직 푸는 중(경고만) — Task 9 에서 비운다
 marina_worktree_hooks
 marina_runtimed
+marina-compose.py
+marina-gateway.py
+marina-lib-compose.sh
+marina-lib-context.sh
+marina-lib-links.sh
+marina-lib-process.sh
+marina-lib-registry.sh
+marina-lib-services.sh
+marina-lib-session.sh
+marina-gateway-control.sh
+marina-runtimed.sh
+marina-worktree-hook.sh
+marina-session-start-hook.sh
+marina-pretooluse-hook.sh
+marina-protected-write-hook.sh
+marina-appdata-guard-hook.sh
+attach-detached-subrepos.sh
+# 라우터·런처 생성기 — 아직 session·dashboard·auth 로 넘겨 준다(B·C 에서 각 플러그인 명령으로 옮김)
+?marina.sh
+?marina-entrypoint.sh
+?marina-resolve.sh
