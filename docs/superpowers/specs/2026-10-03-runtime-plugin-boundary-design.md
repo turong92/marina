@@ -38,11 +38,24 @@
 | 실행 정의 | Compose 규격 + `x-marina` 확장 필드(이미 그렇게 함) | 다른 compose 도구와 그대로 호환 |
 | 기계가 읽는 출력 | `--json`(맨 위 `"v"`) | §R4 |
 
-> 실측 필요(④ 첫 단계): ① tmux 대화형 `claude --worktree <이름>` 에서 `WorktreeCreate` 가 불리는지, 이름 말고 기준 브랜치·프로젝트를 어떻게 넘기는지 ② `WorktreeRemove` 가 언제 불리는지. 대화형 세션 종료 때는 '남길까?' 질문이 있다 — discord 의 `marina-session rm` 은 이 경로를 못 타므로 직접 훅과 같은 정리 함수를 부른다 ③ `WorktreeCreate` 는 경로 하나를 돌려줘야 해서 **runtime 만** 정의한다(둘이 정의하면 충돌).
+### 실측 결과 (2026-10-03, Claude Code 2.1.287)
 
-`WorktreeRemove` 는 Claude Code 를 거쳐 지울 때만 분다. `marina worktree rm`·대시보드·`git worktree remove` 로 지우면 안 분다. 그래서 두 가지를 같이 둔다.
-- **잠금 존중:** runtime 은 잠긴 워크트리를 지우려 하면 잠금 이유(예: "discord 세션 #채널")를 보여 주고 `--force` 일 때만 지운다. git 의 `remove` 도 원래 잠긴 것을 거부한다.
-- **discord 정리는 사후 확인으로도:** discord 데몬이 주기적으로 '세션의 워크트리 폴더가 사라졌나'를 보고, 사라졌으면 채널·세션을 정리한다. 훅을 놓쳐도 결국 정리된다.
+| # | 확인한 것 | 결과 |
+|---|---|---|
+| 1 | `WorktreeCreate` 가 불리나 | `claude -p --worktree X`·tmux 대화형 `claude --worktree X` 둘 다 불린다. 입력 = `session_id·transcript_path·cwd(원본 체크아웃)·name`. 훅이 stdout 으로 경로를 내면 거기서 세션이 뜬다 |
+| 2 | 기준 브랜치·프로젝트 전달 | 입력엔 없다. 대신 **claude 를 띄울 때 준 환경변수가 훅에 그대로 간다**(실측: 띄울 때 준 변수를 훅이 그대로 읽음). 프로젝트는 입력의 `cwd` 로 안다 |
+| 3 | 대화형은 저장소 신뢰가 먼저 | 신뢰 안 한 폴더면 "Workspace trust not yet accepted" 로 바로 끝난다. 마리나 프로젝트는 이미 신뢰돼 있다 |
+| 4 | `WorktreeRemove` 는 언제 | **변경 없는 워크트리에서 `/exit` 하면 묻지도 않고 불린다**(`--resume` 으로 다시 연 세션도 같음). 변경이 있으면 Keep/Remove 를 묻는다. tmux 를 죽이면(재시작·정지) 안 불린다. 입력에 `worktree_path` |
+| 5 | 훅이 거절하면 | `WorktreeRemove` 훅이 0 이 아닌 값으로 끝나면 워크트리는 **남는다**. 지울지 말지는 훅이 정한다 |
+| 6 | Claude Code 자체 잠금 | 훅이 없으면 Claude Code 가 직접 `git worktree lock` 을 건다(이유 `claude session <이름> (pid N start …)`). 프로세스를 죽여도 잠금은 남는다(낡은 잠금). 다시 열어도 새로 안 걸고, `/exit` 때 **잠금을 무시하고** 지운다 |
+
+이 결과로 정한 것:
+- **runtime 의 `WorktreeRemove` 훅은 남의 잠금을 존중한다.** 다른 주인(discord 등)이 잠갔으면 거절하고(exit 2) 이유를 stderr 로 낸다. 4번 때문에 이게 없으면 Discord 개발 세션에서 누가 `/exit` 한 번 치는 순간 깨끗한 워크트리가 사라진다.
+- **잠금 이유 형식(표준 git 잠금 위의 약속):** `<주인> <설명> (pid N …)`. 판정 규칙은 이렇다.
+  - pid 가 적혀 있고 그 프로세스가 죽었으면 낡은 잠금으로 보고 무시한다. Claude Code 자기 잠금이 이 경우다.
+  - pid 가 없으면 주인이 풀 때까지 지킨다. discord 의 `marina-session <ref>` 가 이 경우다.
+  - runtime GC 도 같은 판정을 쓴다.
+- discord 는 세션을 `claude --worktree <이름>` 으로 띄우고, 기준 브랜치는 `MARINA_BASE` 환경변수로 넘긴다. runtime 이 없으면 Claude Code 기본(git 워크트리 + 자기 잠금)으로 동작한다. 이때는 4번 위험이 그대로라서, discord 는 runtime 이 없을 때 **세션을 띄우기 전에 자기 잠금을 건다**. 이 경우 Claude Code 기본 삭제가 잠금을 무시하는지는 ④ 때 한 번 더 확인한다. 무시하면 discord 혼자일 때는 `--worktree` 대신 `git worktree add` 로 만든다.
 
 ## 4. 레이아웃
 
