@@ -36,6 +36,8 @@ CHANNEL_RULES = (
     "- 아직 안 끝난 중간 보고(어디까지 했다·지금 무엇을 한다)는 무조건 progress 도구(message_id = 지시 메시지 ID)로 "
     "스레드에 한 줄 남긴다(알림 없음). 백그라운드 작업 알림 등 상대 메시지 없이 이어서 일할 때는 상대의 마지막 메시지 ID 를 쓴다.\n"
     "- 채널 reply 는 일이 끝났을 때(최종 결과·완료·실패) 또는 상대의 답이 필요할 때만 새로 보낸다(알림이 울리도록). 짧은 답은 progress 없이 reply 만.\n"
+    "- Discord 로 '/<이름> …' 이 오면 그 이름의 스킬을 Skill 도구로 실행한다. 단 정확히 '/compact'·'/model <이름>'·'/effort <단계>' 는 "
+    "마리나가 입력창에 직접 친다 — '[마리나] … 직접 실행한다' 안내가 같이 오면 그대로 두고, 안내 없이 왔으면(작업 중에 끼어든 경우) 쉬는 중에 다시 보내 달라고 답한다.\n"
     "- 지시에 대한 끝 보고·답은 reply_to = 그 지시 메시지 ID 로 단다(✅ 대신 '이 지시가 끝났다'는 표시). 여러 메시지를 한 번에 처리했으면 마지막 것에.\n"
     "- 질문은 번호 선택지 텍스트로 묻는다.\n"
     "- 이미지는 첨부한다. HTML 은 스크린샷과 열어볼 주소를 보낸다. 10MB 를 넘는 파일은 링크로 보낸다.\n"
@@ -629,6 +631,73 @@ def remove_state_dir(path: Path) -> None:
 _CHANNEL_TAG = re.compile(r'<channel source=\\?"plugin:discord:discord\\?" chat_id=\\?"(\d+)\\?" message_id=\\?"([^"\\]+)')
 
 
+SLASH_ALLOWED = ("/compact",)
+_SLASH_ARG = re.compile(r"/(model|effort) [A-Za-z0-9._\[\]-]{1,40}")   # 인자 한 단어 필수(없으면 선택 창이 떠 막힌다)
+
+
+def slash_emoji(cmd: str) -> str:
+    return "🗜️" if cmd == "/compact" else "⚙️"
+
+
+def slash_allowed(cmd: str) -> bool:
+    """입력창에 직접 칠 수 있는 명령. /clear 류는 막는다. 스킬(/이름)은 Claude 가 Skill 도구로 — 여기 없다."""
+    return cmd in SLASH_ALLOWED or bool(_SLASH_ARG.fullmatch(cmd))
+_CHANNEL_MSG = re.compile(r'<channel source=\\?"plugin:discord:discord\\?" chat_id=\\?"(\d+)\\?" message_id=\\?"([^"\\]+)[^>]*>(.*?)</channel>', re.S)
+
+
+def slash_command(prompt: str, channel: str | None = None) -> "tuple[str, str] | None":
+    """Discord 로 온 메시지가 정확히 허용된 명령(/compact)이면 (메시지 ID, 명령). 글자로 와서 Claude 는 실행할 수 없다."""
+    hits = [m for m in _CHANNEL_MSG.finditer(prompt or "") if channel is None or m.group(1) == channel]
+    if not hits:
+        return None
+    body = hits[-1].group(3).strip()
+    return (hits[-1].group(2), body) if slash_allowed(body) else None
+
+
+def _session_from_env() -> "dict[str, Any] | None":
+    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    s = next((x for x in load_sessions() if sdir and x.get("stateDir") == sdir), None)
+    return s if s and s.get("channelId") else None
+
+
+def hook_reply_to(payload: dict[str, Any]) -> "dict[str, Any] | None":
+    """답장 도구에 reply_to 가 빠졌으면 그 턴에 받은 마지막 지시 메시지로 채운다 — 답장이 곧 끝 표시(✅ 없음).
+    규칙 문구만으론 Claude 가 잊는다(실사용) — 훅이 기계적으로."""
+    s = _session_from_env()
+    inp = payload.get("tool_input") or {}
+    if not s or s.get("kind") in CHAT_KINDS or payload.get("tool_name") != _REPLY_TOOL or not isinstance(inp, dict):
+        return None
+    if inp.get("reply_to") or str(inp.get("chat_id") or "") != str(s["channelId"]):
+        return None
+    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), str(s["channelId"]))
+    if not ids:
+        return None
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
+                                   "updatedInput": dict(inp, reply_to=ids[-1])}}
+
+
+def _spawn_slash(tmux: str, cmd: str, mid: str) -> None:
+    s = _session_from_env() or {}
+    bot = Path(__file__).resolve().with_name("marina_discord_bot.py")
+    subprocess.Popen([sys.executable, str(bot), "slash", tmux, cmd, str(s.get("channelId") or ""), mid],
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def hook_prompt(payload: dict[str, Any]) -> "dict[str, Any] | None":
+    """받은 순간: Discord 로 온 '/compact' 는 마리나가 세션이 쉬는 순간 입력창에 직접 친다. Claude 에겐 짧게 답만 하라고."""
+    s = _session_from_env()
+    if not s or s.get("kind") in CHAT_KINDS:      # 채팅방(여자친구)엔 세션 명령을 열지 않는다
+        return None
+    hit = slash_command(str(payload.get("prompt") or ""), str(s["channelId"]))
+    if not hit:
+        return None
+    mid, cmd = hit
+    _spawn_slash(str(s.get("tmux") or ""), cmd, mid)      # 먼저 — 반응은 대기자가 단다(훅 시간 초과에 안 묶이게, 리뷰 I5)
+    return {"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext":
+            f"[마리나] 이 {cmd} 는 마리나가 이번 턴이 끝나는 대로 입력창에 직접 실행한다. "
+            f"진행 표시(🗜️·⚙️ → ✅)도 마리나가 하니 답장도 도구도 쓰지 말고 바로 턴을 끝내라."}}
+
+
 def _drop_ack_reaction(path: Path) -> None:
     """예전에 만든 상태 폴더: 도착 👀 를 끈다(실제로 받은 것만 표시, 형 결정)."""
     try:
@@ -667,7 +736,13 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
     settings["hooks"].setdefault("PreToolUse", []).append(       # 첨부 가드(있으면) 뒤에 붙인다 — 가드를 덮지 않게
         {"matcher": "*", "hooks": [{"type": "command", "command": typing, "timeout": 10}]})
     # 받은 순간 👀 — 플러그인은 도착만 해도 👀 를 달아 안 읽은 걸 읽은 것처럼 보였다(형 결정: 실제로 받은 것만)
-    settings["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command": typing, "timeout": 10}]}]
+    prompt_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-prompt"]) + " || true"
+    settings["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command": typing, "timeout": 10},
+                                                        {"type": "command", "command": prompt_hook, "timeout": 10}]}]
+    # 답장 = 끝 표시: reply_to 가 빠지면 훅이 채운다(규칙만으론 잊는다, 실사용)
+    reply_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-reply-to"]) + " || true"
+    settings["hooks"]["PreToolUse"].append({"matcher": _REPLY_TOOL,
+                                            "hooks": [{"type": "command", "command": reply_hook, "timeout": 10}]})
     if chat_root is None:
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
         settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress"]}
@@ -1024,8 +1099,8 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
     ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), ch)
     if prompt:      # 막 받은 메시지는 아직 기록에 없을 수 있다 — 넘겨받은 글에서 직접 읽는다
         tagged = [m.group(2) for m in _CHANNEL_TAG.finditer(str(payload.get("prompt") or "")) if m.group(1) == ch]
-        if not tagged:
-            return      # 터미널에서 친 말 — 옛 Discord 메시지에 표시하지 않는다(리뷰 B-M3)
+        if not tagged or slash_command(str(payload.get("prompt") or ""), ch):
+            return      # 터미널에서 친 말(옛 메시지에 표시 안 함, 리뷰 B-M3) · /compact(마리나가 🗜️ 로 따로 표시)
         ids += [m for m in tagged if m not in ids]
     mid = ids[-1] if ids else ""
     st = _activity_state(sd)
@@ -1727,6 +1802,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--all", action="store_true")
     sub.add_parser("hook-stop")
     sub.add_parser("hook-typing")
+    sub.add_parser("hook-reply-to")
+    sub.add_parser("hook-prompt")
     sub.add_parser("hook-activity-run")
     p = sub.add_parser("hook-chat-guard")
     p.add_argument("root")
@@ -1746,6 +1823,16 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "mcp-chat":
         mcp_chat()
+        return 0
+    if a.cmd in ("hook-reply-to", "hook-prompt"):
+        # 실패해도 도구 호출·입력은 그대로 지나가게 — 출력이 없으면 하네스는 아무것도 바꾸지 않는다
+        try:
+            fn = hook_reply_to if a.cmd == "hook-reply-to" else hook_prompt
+            out = fn(json.loads(sys.stdin.read() or "{}"))
+            if out:
+                print(json.dumps(out, ensure_ascii=False))
+        except Exception:
+            pass
         return 0
     if a.cmd == "hook-typing":
         # 표시용 — 도구 실행을 기다리게 하지 않는다: 입력만 넘기고 떼어 낸 프로세스가 Discord 를 부른다(리뷰 1)

@@ -375,6 +375,85 @@ def interrupt(channel: str, user: str, message: str) -> str:
     return "멈췄어"
 
 
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+_DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[(?:22|0)?m|$)")
+
+
+def _input_empty_text(line: str) -> bool:
+    """입력창 줄(❯)이 비었나. 흐린 글씨(다음 입력 추천)는 빈 것으로 본다. '❯ 1. Yes' 같은 선택·권한 창은 아니다."""
+    t = _ANSI.sub("", _DIM.sub("", line))
+    i = t.find("❯")
+    return i >= 0 and not t[i + 1:].strip()
+
+
+def _input_empty(tmux: str) -> bool:
+    lines = (ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or "").rstrip().splitlines()
+    box = [ln for ln in lines if "❯" in _ANSI.sub("", ln)]
+    return bool(box) and _input_empty_text(box[-1])
+
+
+def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, settle: float = 3.0,
+              timeout: float = 1800.0) -> None:
+    """Discord 로 온 /compact·/model X·/effort X: 세션이 쉬고 입력창이 정말 비었을 때만 직접 친다(허용 목록은 훅이 거른다).
+    권한·선택 창이 떠 있으면 Enter 가 '승인'이 되므로 치지 않는다(리뷰 I1). 대기자끼리는 잠금으로 하나씩(리뷰 I6).
+    🗜️/⚙️ → 끝나면 ✅, 못 하면 ⚠️ — 어떤 길로 끝나도 표시가 남지 않게(리뷰 I4)."""
+    import fcntl
+    emoji, ok, lockf = ms.slash_emoji(cmd), False, None
+    dc = None
+    try:
+        dc = _dc(ms.load_config())
+        try:
+            dc.add_reaction(channel, mid, emoji)
+        except ms.SessionError:
+            pass
+        end = time.time() + timeout
+        rec = next((x for x in ms.load_sessions() if str(x.get("channelId")) == str(channel)), {})
+        sd = Path(str(rec.get("stateDir") or ms.marina_home()))
+        lockf = open(sd / "slash.lock", "w")
+        while True:
+            try:
+                fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.time() > end:
+                    return
+                time.sleep(poll)
+        time.sleep(settle)                   # Claude 가 '실행할게' 답하고 턴을 끝낼 틈
+        typed = False
+        while time.time() < end:
+            alive, busy = _pane_busy(tmux)
+            if not alive:
+                return
+            if not busy and _input_empty(tmux):
+                ms._tmux("send-keys", "-t", tmux, "-l", cmd)
+                ms._tmux("send-keys", "-t", tmux, "Enter")
+                typed = True
+                break
+            time.sleep(poll)
+        if not typed:
+            return
+        seen, start = False, time.time()
+        while time.time() < end:             # 명령이 돌기 시작했다가(짧으면 못 볼 수도) 끝날 때까지
+            time.sleep(poll)
+            alive, busy = _pane_busy(tmux)
+            if not alive:
+                return
+            seen = seen or busy
+            if not busy and (seen or time.time() - start > 10 * poll):
+                ok = True
+                break
+    finally:
+        if dc is not None:
+            for fn, e in ((dc.remove_reaction, emoji), (dc.add_reaction, "✅" if ok else "⚠️")):
+                try:
+                    fn(channel, mid, e)
+                except ms.SessionError:
+                    pass
+        if lockf:
+            lockf.close()
+        mark_dirty()
+
+
 # ── 봇 프로세스·데몬 루프 ────────────────────────────────────────────────────
 
 def _bun() -> str:
@@ -520,7 +599,16 @@ def main(argv: list[str]) -> int:
     it.add_argument("--channel", required=True)
     it.add_argument("--user", required=True)
     it.add_argument("--message", required=True)
+    sl = sub.add_parser("slash")
+    sl.add_argument("tmux")
+    sl.add_argument("command")
+    sl.add_argument("channel")
+    sl.add_argument("message")
     a = p.parse_args(argv)
+    if a.cmd == "slash":
+        if ms.slash_allowed(a.command):
+            run_slash(a.tmux, a.command, a.channel, a.message)
+        return 0
     try:
         print(interrupt(a.channel, a.user, a.message))
         return 0
