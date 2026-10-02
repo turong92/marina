@@ -126,6 +126,18 @@ ts = [threading.Thread(target=mb.run_slash, args=(rec["tmux"], c, ch, m), kwargs
 [t.start() for t in ts]; [t.join(10) for t in ts]
 ms._tmux = orig_tmux
 check(not overlap[0], "두 대기자가 동시에 치지 않는다")
+# (실사용 원인) tmux 창이 보기 모드(run-shell 출력·스크롤)면 친 키가 Claude 가 아니라 보기 모드로 간다 — 먼저 빠져나온다
+mb._pane_busy = real_busy
+subprocess.run(base + ["kill-session", "-t", rec["tmux"]], capture_output=True)
+subprocess.run(base + ["new-session", "-d", "-s", rec["tmux"], "sh", "-c", "printf '✻ Worked\\n────\\n❯ \\n────\\n'; exec cat -v"], check=True)
+time.sleep(0.5)
+subprocess.run(base + ["copy-mode", "-t", rec["tmux"]], check=True)
+check(subprocess.run(base + ["display", "-p", "-t", rec["tmux"], "#{pane_in_mode}"], capture_output=True, text=True).stdout.strip() == "1", "준비: 보기 모드")
+os.environ["MARINA_ENTER_DELAY"] = "0.1"
+ok = mb.run_slash(rec["tmux"], "/compact", ch, "", poll=0.05, settle=0, timeout=3)
+time.sleep(0.3)
+pane = subprocess.run(base + ["capture-pane", "-p", "-t", rec["tmux"]], capture_output=True, text=True).stdout
+check(ok and "/compact" in pane, f"보기 모드에서 빠져나와 입력: {ok} {pane!r}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

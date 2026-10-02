@@ -231,6 +231,8 @@ def drive(tmux: str, channel: str, pause: float = 0.25) -> None:
     for i, seg in enumerate(segs):
         if i:
             _wait_quiet(tmux, 3.0)
+        if ms.tmux_alive(tmux):
+            ms.tmux_leave_mode(tmux)
         screen = _screen(tmux) if ms.tmux_alive(tmux) else ""
         ok = _question_visible(screen, st["questions"][i]) if i < len(st["questions"]) else _selector_visible(screen)
         if not ok:

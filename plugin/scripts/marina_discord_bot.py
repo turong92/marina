@@ -596,6 +596,7 @@ def interrupt(channel: str, user: str, message: str) -> str:
                 return "이미 멈췄어"
         except (OSError, ValueError):
             pass
+        ms.tmux_leave_mode(str(rec["tmux"]))        # 보기 모드면 Esc 가 보기 모드만 끈다
         ms._tmux("send-keys", "-t", str(rec["tmux"]), "Escape")
         if sd.is_dir():
             mark.write_text(f"{mid} {time.time()}\n")
@@ -981,6 +982,7 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
             alive, busy = _pane_busy(tmux)
             if not alive:
                 return False
+            ms.tmux_leave_mode(tmux)
             if not busy and _input_empty(tmux):
                 ms._tmux("send-keys", "-t", tmux, "-l", cmd)
                 # 글과 Enter 가 한꺼번에 들어가면 붙여넣기로 보고 Enter 를 줄바꿈으로 먹는다(실사용: '입력함' 인데 안 보내짐)

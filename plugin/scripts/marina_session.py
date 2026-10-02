@@ -431,6 +431,13 @@ def _tmux(*args: str) -> subprocess.CompletedProcess:
     return subprocess.run(_tmux_base() + list(args), capture_output=True, text=True)
 
 
+def tmux_leave_mode(name: str) -> None:
+    """창이 tmux 보기·복사 모드면 빠져나온다 — 그 상태에선 send-keys 가 Claude 가 아니라 보기 모드로 가서
+    입력·Esc 가 통째로 사라진다(실사용: run-shell 출력이 창을 보기 모드로 바꿔 이 세션만 입력이 안 먹었다)."""
+    if name and _tmux("display-message", "-p", "-t", name, "#{pane_in_mode}").stdout.strip() == "1":
+        _tmux("send-keys", "-t", name, "-X", "cancel")
+
+
 def tmux_alive(name: str) -> bool:
     if not name or not _tmux_exe():
         return False
