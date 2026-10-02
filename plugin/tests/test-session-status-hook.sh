@@ -71,6 +71,17 @@ done
 [ "$(grep -c "/messages/M2/reactions/%E2%9C%85" "$FD/log.jsonl")" = "$before" ] || fail "이미 ✅ 한 M2 를 다시 건드림"
 grep -q "/messages/M5/reactions/%E2%9C%85" "$FD/log.jsonl" && fail "아직 안 읽은 M5(대기열만)에 ✅"
 
+# 지워진 메시지(404)가 끼어 있어도 나머지는 ✅, 표시는 앞으로 간다(실사용: "1" 을 지웠더니 이후 ✅ 가 전부 멈춤)
+python3 - "$TMPROOT/t.jsonl" "$CH" <<'PY2'
+import json, sys
+t = lambda m: f'<channel source="plugin:discord:discord" chat_id="{sys.argv[2]}" message_id="{m}" user="u" ts="t">\nhi\n</channel>'
+open(sys.argv[1], "a").write("".join(json.dumps({"type": "user", "message": {"role": "user", "content": t(m)}}) + "\n" for m in ("M6", "M7")))
+PY2
+echo "M6" > "$FD/gone"
+printf '{"cwd":"%s","transcript_path":"%s"}' "$SRC" "$TMPROOT/t.jsonl" | hook "$SD" || fail "지워진 메시지에서 실패 코드"
+grep -q "\"PUT\", \"p\": \"/channels/$CH/messages/M7/reactions/%E2%9C%85/@me\"" "$FD/log.jsonl" || fail "지워진 M6 뒤의 M7 에 ✅ 없음"
+[ "$(cat "$SD/acked")" = "M7" ] || fail "✅ 표시가 앞으로 안 감: $(cat "$SD/acked")"
+
 n="$(wc -l < "$FD/log.jsonl")"
 printf '{"cwd":"/nowhere","transcript_path":"%s"}' "$TMPROOT/t.jsonl" | hook "/no/such/state" || fail "모르는 세션에서 실패 코드"
 printf 'not json' | hook "$SD" || fail "깨진 입력에서 실패 코드"

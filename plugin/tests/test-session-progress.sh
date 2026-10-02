@@ -46,6 +46,37 @@ for bad in ({"text": "x"}, {"message_id": "9001"}, {"message_id": "9001", "text"
         ms.chat_tool("progress", bad); check(False, f"잘못된 입력 통과: {bad}")
     except ms.SessionError:
         pass
+check(mk and mk[0]["b"].get("auto_archive_duration") == 60, "1시간 지나면 Discord 가 알아서 접는다")
+# 턴이 끝나 ✅ 가 붙으면 그 지시의 스레드를 접는다(채널 목록에 계속 쌓이지 않게)
+tr = Path(rec["stateDir"]) / "t.jsonl"
+tag = lambda mid: f'<channel source="plugin:discord:discord" chat_id="{rec["channelId"]}" message_id="{mid}" user="u">\nx\n</channel>'
+tr.write_text("".join(json.dumps({"type": "user", "message": {"role": "user", "content": tag(m)}}) + "\n" for m in ("9001", "9002")))
+tids = json.loads((Path(rec["stateDir"]) / "threads.json").read_text())
+ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
+arch = [x["p"] for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True]
+check(f"/channels/{tids['9001']}" in arch and f"/channels/{tids['9002']}" in arch, f"끝난 지시 스레드 접기: {arch}")
+check(sorted(json.loads((Path(rec["stateDir"]) / "threads-archived.json").read_text())) == ["9001", "9002"], "접은 스레드 기록")
+n = len(arch); ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
+check(len([x for x in log() if x["m"] == "PATCH"]) == n, "다음 턴에 다시 접지 않는다")
+# 작업 중 표시: 도구를 쓸 때마다 '입력 중…'(8초에 한 번만) — 개발·채팅 세션 모두
+for ref in ("proj/feat/p", "chat/room"):
+    r2 = ms.find_session(ref)
+    pre = json.loads((Path(r2["stateDir"]) / "settings.json").read_text())["hooks"]["PreToolUse"]
+    cmds = [h["command"] for e in pre for h in e["hooks"] if "hook-typing" in h["command"]]
+    check(len(cmds) == 1 and cmds[0].endswith("|| true"), f"{ref}: typing 훅: {pre}")
+import subprocess
+cmd = [h["command"] for e in json.loads((Path(rec["stateDir"]) / "settings.json").read_text())["hooks"]["PreToolUse"] for h in e["hooks"] if "hook-typing" in h["command"]][0]
+env = dict(os.environ, DISCORD_STATE_DIR=rec["stateDir"])
+for _ in range(3):
+    check(subprocess.run(["/bin/sh", "-c", cmd], input="{}", text=True, env=env, capture_output=True).returncode == 0, "typing 훅 exit 0")
+import time
+for _ in range(50):          # 훅은 떼어 낸 프로세스가 보낸다 — 잠깐 기다린다
+    typing = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{rec['channelId']}/typing"]
+    if typing: break
+    time.sleep(0.1)
+time.sleep(0.5)
+typing = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{rec['channelId']}/typing"]
+check(len(typing) == 1, f"연달아 불러도 한 번(8초 간격): {len(typing)}")
 (fd / "no_threads").write_text("1")
 msg = ms.chat_tool("progress", {"message_id": "9003", "text": "x"})
 check("권한" in msg and "edit_message" in msg, f"권한 없을 때 안내: {msg}")

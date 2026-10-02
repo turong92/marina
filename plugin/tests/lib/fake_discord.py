@@ -92,10 +92,14 @@ class H(BaseHTTPRequestHandler):
             if (state / "no_threads").exists():
                 self._send(403, {"message": "Missing Permissions"}); return
             with lock:
+                if any(c.get("type") == 11 and c.get("from_msg") == p[3] for c in channels.values()):
+                    self._send(400, {"message": "A thread has already been created for this message", "code": 160004}); return
                 next_id[0] += 1
-                ch = {"id": str(next_id[0]), "name": body.get("name"), "type": 11, "parent_id": p[1]}
+                ch = {"id": str(next_id[0]), "name": body.get("name"), "type": 11, "parent_id": p[1], "from_msg": p[3]}
                 channels[ch["id"]] = ch
             self._send(201, ch); return
+        if len(p) == 3 and p[0] == "channels" and p[2] == "typing":
+            self._send(204); return
         if len(p) == 3 and p[0] == "channels" and p[2] == "messages":
             self._send(200, {"id": "m-sent", "content": body.get("content")}); return
         if len(p) == 3 and p[0] == "guilds" and p[2] == "channels":
@@ -124,10 +128,21 @@ class H(BaseHTTPRequestHandler):
         self._send(404, {"message": "404"})
 
 
+    def do_PATCH(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = json.loads(self.rfile.read(n) or b"{}") if n else {}
+        log({"m": "PATCH", "p": self.path, "b": body})
+        if not self._auth():
+            return
+        self._send(200, {"id": self._parts()[-1], "thread_metadata": {"archived": bool(body.get("archived"))}})
+
     def do_PUT(self):
         log({"m": "PUT", "p": self.path})
         if not self._auth():
             return
+        gone = (state / "gone").read_text().split() if (state / "gone").exists() else []
+        if any(f"/messages/{g}/" in self.path for g in gone):
+            self._send(404, {"message": "Unknown Message"}); return   # 사용자가 지운 메시지
         self._send(204)
 
 srv = ThreadingHTTPServer(("127.0.0.1", 0), H)

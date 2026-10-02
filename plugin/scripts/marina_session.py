@@ -648,6 +648,10 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
             "deny": [f"Edit(/{real}/{f})" for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md")]}
         settings["hooks"]["PreToolUse"] = [{"matcher": f"{_REPLY_TOOL}|WebFetch|Write|Edit",
                                             "hooks": [{"type": "command", "command": guard, "timeout": 15}]}]
+    # 작업 중 표시: 도구를 쓸 때마다 채널에 '입력 중…'(8초에 한 번) — 👀 만으론 진행 여부를 알 수 없다(형 요청)
+    typing = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-typing"]) + " || true"
+    settings["hooks"].setdefault("PreToolUse", []).append(       # 첨부 가드(있으면) 뒤에 붙인다 — 가드를 덮지 않게
+        {"matcher": "*", "hooks": [{"type": "command", "command": typing, "timeout": 10}]})
     if chat_root is None:
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
         settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress"]}
@@ -814,14 +818,162 @@ def hook_stop(payload: dict[str, Any]) -> None:
         return
     cfg = load_config()
     dc = Discord(read_token(cfg))
+    act = _activity_state(Path(str(s.get("stateDir") or "/nonexistent")))
     for mid in todo[-20:]:
-        dc.add_reaction(str(s["channelId"]), mid, "✅")
+        if mark and mark.parent.is_dir():
+            mark.write_text(mid + "\n")          # 메시지마다 전진 — 중간에 잘려도 다음 턴이 처음부터 다시 하지 않게(리뷰 6)
         try:
-            dc.remove_reaction(str(s["channelId"]), mid, "👀")
-        except DiscordError:
-            pass
+            dc.add_reaction(str(s["channelId"]), mid, "✅")
+            for old in {"👀", str(act.get("emoji") or "") if act.get("mid") == mid else ""} - {""}:
+                try:
+                    dc.remove_reaction(str(s["channelId"]), mid, old)
+                except SessionError:
+                    pass
+        except SessionError:
+            pass        # 지워진 메시지(404) 등 — 하나 때문에 나머지와 표시 전진이 멈추면 안 된다(실사용)
     if mark and mark.parent.is_dir():
         mark.write_text(todo[-1] + "\n")
+    # 끝난 지시의 진행 스레드는 접는다 — 채널 목록에 계속 쌓이지 않게(열면 기록은 그대로)
+    # 턴이 끝났으니 이미 읽은 지시는 모두 끝난 것. 접은 스레드는 목록에서 뺀다(다음 턴에 다시 안 부르게).
+    tfile = Path(str(s.get("stateDir") or "")) / "threads.json"
+    try:
+        threads = json.loads(tfile.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        threads = {}
+    afile = tfile.with_name("threads-archived.json")
+    try:
+        archived = set(json.loads(afile.read_text(encoding="utf-8")))
+    except (OSError, ValueError, TypeError):
+        archived = set()
+    done = [m for m in ids if threads.get(m) and m not in archived]
+    for mid in done:
+        try:
+            dc._req("PATCH", f"/channels/{threads[mid]}", {"archived": True})
+        except SessionError:
+            pass
+    if done:
+        # 스레드 기록은 남긴다 — 같은 지시로 다시 progress 하면 그 스레드에 이어 쓰고 Discord 가 다시 연다(리뷰 4)
+        _write_json(afile, sorted(archived | set(done))[-200:])
+
+
+_TEST_CMD = re.compile(r"\b(pytest|run-affected|test-[\w-]+\.sh|npm (run )?test|gradlew\b.*\btest|jest|vitest|go test|cargo test)")
+
+
+def tool_activity(tool: str, inp: dict[str, Any]) -> tuple[str, str, str]:
+    """도구 → (이모지, 하는 일, 짧은 대상)."""
+    inp = inp if isinstance(inp, dict) else {}
+    base = lambda p: Path(str(p or "")).name
+    if tool == "Read":
+        return "📖", "파일 읽는 중", base(inp.get("file_path"))
+    if tool in ("Glob", "Grep"):
+        return "🔍", "찾는 중", str(inp.get("pattern") or "")[:40]
+    if tool in ("Edit", "Write", "NotebookEdit"):
+        return "✏️", "코드 고치는 중", base(inp.get("file_path") or inp.get("notebook_path"))
+    if tool == "Bash":
+        cmd = str(inp.get("command") or "")
+        what = str(inp.get("description") or "")[:60]     # 명령 원문엔 비밀값이 섞일 수 있다 — 설명만(리뷰 5)
+        return ("🧪", "테스트 중", what) if _TEST_CMD.search(cmd) else ("🔧", "명령 실행 중", what)
+    if tool in ("WebFetch", "WebSearch"):
+        url = str(inp.get("url") or "")
+        return "🌐", "웹 보는 중", urllib.parse.urlsplit(url).hostname or str(inp.get("query") or "")[:40]
+    if tool in ("Agent", "Task"):
+        return "🤖", "하위 작업 맡김", str(inp.get("description") or "")[:40]
+    if tool.startswith("mcp__plugin_discord_discord__"):
+        return "💬", "답장 쓰는 중", ""
+    return "⚙️", "작업 중", tool.replace("mcp__", "")[:40]
+
+
+def _write_json(path: Path, data: Any) -> None:
+    """동시에 도는 훅이 반쯤 쓴 파일을 읽지 않게 tmp 에 쓰고 바꾼다."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text(json.dumps(data, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _activity_state(sdir: Path) -> dict[str, Any]:
+    try:
+        d = json.loads((sdir / "activity.json").read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def hook_activity(payload: dict[str, Any], min_gap: float = 5.0) -> None:
+    """PreToolUse(모든 도구, 5초 간격): '입력 중…' + 지시 메시지 반응을 도구 종류로 교체 +
+    진행 스레드가 있으면 상태 줄 하나를 고쳐 쓴다. Claude 가 아니라 훅이 하므로 토큰 0."""
+    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    s = next((x for x in load_sessions() if sdir and x.get("stateDir") == sdir), None)
+    if not s or not s.get("channelId"):
+        return
+    sd, ch = Path(sdir), str(s["channelId"])
+    import fcntl
+    lockf = open(sd / "activity.lock", "w")
+    try:
+        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)   # 병렬 도구 호출 — 하나만 지나간다(리뷰 2)
+    except OSError:
+        lockf.close()
+        return
+    try:
+        _hook_activity_locked(payload, s, sd, ch, min_gap)
+    finally:
+        lockf.close()
+
+
+def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, ch: str, min_gap: float) -> None:
+    stamp = sd / "activity-at"
+    try:
+        if time.time() - stamp.stat().st_mtime < min_gap:
+            return
+    except OSError:
+        pass
+    stamp.touch()
+    dc = Discord(read_token(load_config()))
+    try:
+        dc._req("POST", f"/channels/{ch}/typing")
+    except SessionError:
+        pass
+    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), ch)
+    if not ids:
+        return
+    mid = ids[-1]
+    emoji, label, what = tool_activity(str(payload.get("tool_name") or ""), payload.get("tool_input") or {})
+    st = _activity_state(sd)
+    if st.get("mid") != mid:
+        if st.get("mid") and st.get("emoji"):              # 끼어든 새 지시 — 이전 지시의 진행 이모지는 뗀다(리뷰 3)
+            try:
+                dc.remove_reaction(ch, str(st["mid"]), str(st["emoji"]))
+            except SessionError:
+                pass
+        st = {"mid": mid, "since": time.time()}
+    if st.get("emoji") != emoji:
+        try:
+            dc.add_reaction(ch, mid, emoji)
+            for old in {str(st.get("emoji") or ""), "👀"} - {"", emoji}:
+                try:
+                    dc.remove_reaction(ch, mid, old)
+                except DiscordError:
+                    pass
+            st["emoji"] = emoji
+        except DiscordError:
+            pass
+    try:
+        tid = json.loads((sd / "threads.json").read_text(encoding="utf-8")).get(mid)
+    except (OSError, ValueError):
+        tid = None
+    if tid:
+        mins = int((time.time() - float(st.get("since") or time.time())) // 60)
+        line = f"{emoji} {label}" + (f" — {what}" if what else "") + (f" · {mins}분째" if mins else "")
+        try:
+            if st.get("status_tid") == tid and st.get("status_msg"):
+                dc._req("PATCH", f"/channels/{tid}/messages/{st['status_msg']}",
+                        {"content": line, "allowed_mentions": {"parse": []}})
+            else:
+                r = dc._req("POST", f"/channels/{tid}/messages",
+                            {"content": line, "flags": 4096, "allowed_mentions": {"parse": []}})
+                st.update(status_tid=tid, status_msg=str(r.get("id") or ""))
+        except SessionError:
+            pass
+    _write_json(sd / "activity.json", st)
 
 
 def notify_exit(ref: str, code: str) -> None:
@@ -1133,7 +1285,7 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
         name = ("진행 · " + re.sub(r"\s+", " ", text))[:90]
         try:
             tid = str(dc._req("POST", f"/channels/{rec['channelId']}/messages/{mid}/threads",
-                              {"name": name, "auto_archive_duration": 1440})["id"])
+                              {"name": name, "auto_archive_duration": 60})["id"])
         except DiscordError as exc:
             if exc.code == 403:
                 return ("스레드를 만들 권한이 없어(봇 역할에 '공개 스레드 만들기' 필요) — "
@@ -1143,6 +1295,13 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
         tf.write_text(json.dumps(dict(list(threads.items())[-50:]), ensure_ascii=False) + "\n", encoding="utf-8")
     dc._req("POST", f"/channels/{tid}/messages",
             {"content": text[:1900], "flags": 4096, "allowed_mentions": {"parse": []}})   # 4096 = 알림 없이
+    af = tf.with_name("threads-archived.json")                 # 다시 열렸으니 턴이 끝나면 다시 접는다
+    try:
+        arch = json.loads(af.read_text(encoding="utf-8"))
+        if mid in arch:
+            _write_json(af, [m for m in arch if m != mid])
+    except (OSError, ValueError, TypeError):
+        pass
     return f"스레드에 남겼어(thread {tid}). 끝나면 결과는 채널에 reply 로."
 
 
@@ -1450,6 +1609,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("ref", nargs="?", default="")
     p.add_argument("--all", action="store_true")
     sub.add_parser("hook-stop")
+    sub.add_parser("hook-typing")
+    sub.add_parser("hook-activity-run")
     p = sub.add_parser("hook-chat-guard")
     p.add_argument("root")
     p.add_argument("inbox")
@@ -1468,6 +1629,24 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "mcp-chat":
         mcp_chat()
+        return 0
+    if a.cmd == "hook-typing":
+        # 표시용 — 도구 실행을 기다리게 하지 않는다: 입력만 넘기고 떼어 낸 프로세스가 Discord 를 부른다(리뷰 1)
+        try:
+            data = sys.stdin.read()
+            p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "hook-activity-run"],
+                                 stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                 start_new_session=True)
+            p.stdin.write(data.encode())
+            p.stdin.close()
+        except Exception:
+            pass
+        return 0
+    if a.cmd == "hook-activity-run":
+        try:
+            hook_activity(json.loads(sys.stdin.read() or "{}"))
+        except Exception:
+            pass
         return 0
     if a.cmd == "hook-chat-guard":
         # 판정 실패는 거절로(첨부를 막는 쪽이 안전) — 잘못된 입력이면 exit 2 로 도구 호출을 막는다
