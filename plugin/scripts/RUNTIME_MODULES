@@ -10,3 +10,4 @@ marina_logtext
 marina_runtime_target
 marina_ssh_mux
 marina_worktrees
+marina_liveness

@@ -31,6 +31,7 @@ from marina_memory import enrich_session_memory, memory_snapshot
 from marina_agent_events import BLOCKED_REASONS, latest_agent_event
 from marina_term import term_list
 from marina_worktrees import (WORKTREE_DU_TTL, WORKTREE_INFO_MAX_STALE, WORKTREE_INFO_TTL, _HEAD_SUBJECT_TTL, _compute_du, _du_inflight, _du_info, _du_lock, _head_subject_cache, _info_inflight, _info_lock, _kick_worktree_refresh, _repo_status_entry, compose_scoped_subrepos, git_output, log_targets_for, repo_ahead_of_main, repo_branch, repo_head_subject, repo_last_commit_ts, session_payload, status_lines, svc_state, warm_worktree_info, worktree_info, worktree_status, worktree_status_cached)  # 분리 A: runtime 으로 옮김(이름은 그대로 노출)
+from marina_liveness import _crosses_nested_worktree, _live_agent_cwds, _parse_agent_pids, _root_has_live_agent  # 분리 A
 
 
 
@@ -828,49 +829,10 @@ def agent_belongs_to_root(root: Path, source: str, sid: str, refresh: bool = Fal
 # → 프롬프트 오염된 텍스트에서 sid 를 긁는 방식을 폐기하고, 인자가 전혀 없는 `ps comm=`(실행파일명)로 claude/codex
 #   프로세스를 식별해 그 cwd(=worktree root, marina 는 워크트리=세션 1:1)를 liveness 로 쓴다. 프롬프트 무관.
 
-def _parse_agent_pids(ps_output: str) -> list[str]:
-    # ps -axo pid=,comm= 출력(= "<pid> <실행파일경로>", 인자 없음) → claude/codex 프로세스 pid 목록.
-    # comm 에는 프롬프트/인자가 절대 안 붙으므로 파싱이 유저 입력에 오염되지 않는다(정석).
-    pids: list[str] = []
-    for line in ps_output.splitlines():
-        head, _, comm = line.strip().partition(" ")
-        if not head.isdigit() or not comm.strip():
-            continue
-        if Path(comm.strip()).name in ("claude", "codex"):
-            pids.append(head)
-    return pids
 
 
-_live_cwds_cache: tuple[float, set[Path]] = (0.0, set())
 
 
-def _live_agent_cwds(refresh: bool = False) -> set[Path]:
-    # 살아있는 claude/codex 프로세스들의 cwd(=worktree root) 집합 — 세션 liveness. 5s 캐시(세션마다 ps 방지).
-    global _live_cwds_cache
-    now = time.time()
-    if not refresh and now - _live_cwds_cache[0] < 5.0:
-        return _live_cwds_cache[1]
-    try:
-        result = subprocess.run(["ps", "-axo", "pid=,comm="], check=False,
-                                capture_output=True, text=True, timeout=1)
-    except (OSError, subprocess.SubprocessError):
-        return _live_cwds_cache[1]
-    pids = _parse_agent_pids(result.stdout)
-    cwds: set[Path] = set()
-    if pids:
-        try:
-            out = subprocess.run(["lsof", "-a", "-d", "cwd", "-p", ",".join(pids), "-Fn"],
-                                 check=False, capture_output=True, text=True, timeout=2)
-            for l in out.stdout.splitlines():
-                if l.startswith("n") and l[1:].strip():
-                    try:
-                        cwds.add(Path(l[1:].strip()).resolve())
-                    except OSError:
-                        pass
-        except (OSError, subprocess.SubprocessError):
-            pass
-    _live_cwds_cache = (now, cwds)
-    return cwds
 
 
 _live_tids_cache: tuple[float, dict[tuple[str, str], str]] = (0.0, {})
@@ -896,33 +858,8 @@ def _live_agent_tids(refresh: bool = False) -> dict[tuple[str, str], str]:
     return out
 
 
-def _crosses_nested_worktree(root: Path, cwd: Path) -> bool:
-    # root 아래로 내려가는 경로 도중 `.claude/worktrees/` 경계를 넘는지 — marina 워크트리는
-    # 물리적으로 메인 루트 밑에 중첩(<main>/.claude/worktrees/<wt>)되므로, 그 경계를 넘은 cwd 는
-    # main 이 아니라 그 중첩 워크트리에 속한다(방향: root→cwd 로 내려가며 검사).
-    try:
-        rel_parts = cwd.relative_to(root).parts
-    except ValueError:
-        return False
-    for i in range(len(rel_parts) - 1):
-        if rel_parts[i] == ".claude" and rel_parts[i + 1] == "worktrees":
-            return True
-    return False
 
 
-def _root_has_live_agent(root: Path | None, live_cwds: set[Path]) -> bool:
-    # root 자체가 어떤 살아있는 agent 의 cwd 이거나, 그 cwd 를 품고 있으면(서브폴더에서 실행) live —
-    # 단, 그 cwd 가 root 아래 중첩된 워크트리(.claude/worktrees/...) 안이면 제외한다. 그렇지 않으면
-    # 메인 체크아웃 root 가 그 밑 모든 워크트리의 살아있는 세션에 반응해 항상 live 로 오판된다
-    # (메인 세션이 실제로 종료돼도 idle 강등이 안 되는 원인).
-    if root is None:
-        return False
-    for cwd in live_cwds:
-        if cwd == root:
-            return True
-        if root in cwd.parents and not _crosses_nested_worktree(root, cwd):
-            return True
-    return False
 
 
 def _downgrade_if_dead(item: dict[str, Any], live_cwds: set[Path] | None = None,
