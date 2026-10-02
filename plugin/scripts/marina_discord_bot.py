@@ -234,12 +234,32 @@ def _session_born(name: str) -> float:
         return 0.0
 
 
+_TEAM = re.compile(r"^\s*[◯◐◑◒◓●○]\s+(\S+)\s+(.*)$")
+
+
+def _pane_team(name: str) -> list[dict[str, Any]]:
+    """화면 아래 에이전트 목록(⏺ main 아래) = SendMessage 로 맡긴 팀 에이전트(기록엔 백그라운드로 안 남는다, 실사용)."""
+    if not name or not ms.tmux_alive(name):
+        return []
+    lines = (ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()[-12:]
+    try:
+        i = next(k for k, l in enumerate(lines) if l.strip() == "⏺ main")
+    except StopIteration:
+        return []
+    out = []
+    for l in lines[i + 1:]:
+        m = _TEAM.match(l)
+        if m:
+            out.append({"id": m.group(1), "kind": "agent", "desc": m.group(2).strip()[:80]})
+    return out
+
+
 def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
     """기록만 믿으면 틀린다 — 재시작으로 죽은 셸은 끝남 알림이 없다(실측). 셸은 화면의 'N shell' 수만큼(최근 것),
     에이전트는 지금 세션이 뜬 뒤 기록이 움직인 것만."""
     tr = _session_transcript(rec)
     if not tr:
-        return []
+        return _pane_team(str(rec.get("tmux") or ""))
     tasks = background_tasks(tr)
     n = _pane_shells(str(rec.get("tmux") or ""))
     shells = [t for t in tasks if t["kind"] == "shell"]
@@ -254,7 +274,7 @@ def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
                     keep.add(t["id"])
             except OSError:
                 pass
-    return [t for t in tasks if t["id"] in keep]
+    return [t for t in tasks if t["id"] in keep] + _pane_team(str(rec.get("tmux") or ""))
 
 
 def snapshot(full: bool = True) -> dict[str, Any]:
@@ -264,14 +284,16 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         if str(rec.get("kind") or "").endswith("lobby") or not rec.get("channelId"):
             continue
         alive, busy = _pane_busy(str(rec.get("tmux") or ""))
+        bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_pane_team(str(rec.get("tmux") or ""))))
         act = ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent")))
         rows.append({"ref": f"{rec.get('project')}/{rec.get('task')}", "channelId": str(rec["channelId"]),
-                     "alive": alive, "busy": busy, "emoji": str(act.get("emoji") or "") if busy else "",
+                     "alive": alive, "busy": busy, "bg": bg, "emoji": str(act.get("emoji") or "") if busy else "",
                      "ctx": _ctx_percent(rec) if alive and full else None,
                      "tasks": live_tasks(rec) if alive and full else [],
                      "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists()})
     if not full:
-        return {"sessions": rows, "anyBusy": any(r["busy"] for r in rows)}
+        # 뒤에서 도는 일(셸·팀 에이전트)도 '바쁨'으로 쳐서 #상태를 30초마다 — 끝나면 바로 보이게(입력 중 표시는 busy 만)
+        return {"sessions": rows, "anyBusy": any(r["busy"] or r["bg"] for r in rows)}
     try:
         free = shutil.disk_usage(str(Path.home())).free
     except OSError:

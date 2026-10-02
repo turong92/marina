@@ -1210,11 +1210,7 @@ def hook_stop(payload: dict[str, Any]) -> None:
             lockf.close()
     if ids:
         _archive_threads(s, dc, ids)
-    # 다음 입력 추천 → 마지막 답장에 버튼(개발 세션만). 추천은 턴이 끝난 뒤 뜨니 떼어 낸 대기자가 읽는다
-    if s.get("kind") not in CHAT_KINDS and s.get("tmux"):
-        sent = last_reply_id(Path(str(payload.get("transcript_path") or "/nonexistent")))
-        if sent:
-            _spawn_suggest(str(s["tmux"]), str(s["channelId"]), sent)
+
 
 
 def _wait_lock(path: Path, timeout: float = 3.0) -> Any:

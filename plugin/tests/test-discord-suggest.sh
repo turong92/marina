@@ -83,27 +83,13 @@ n = len(log())
 mb.run_suggest(rec["tmux"], ch, "R4", settle=0, started=time.time())
 check(not (sd / "suggest.json").exists(), "늦은 대기자는 추천을 남기지 않는다")
 
-# 턴 끝 훅이 대기자를 띄운다 — 마지막 답장 메시지에
-tr = sd / "t.jsonl"
-def row(r): return json.dumps(r, ensure_ascii=False) + "\n"
-RT = "mcp__plugin_discord_discord__reply"
-tr.write_text(
-    row({"type": "user", "message": {"role": "user", "content": "<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"1\">old</channel>"}})
-    + row({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r0", "name": RT, "input": {}}]}})
-    + row({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "r0", "content": [{"type": "text", "text": "sent (id: 11111111)"}]}]}})
-    + row({"type": "user", "message": {"role": "user", "content": "<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">new</channel>"}})
-    + row({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "rd", "name": "Read", "input": {}}]}})
-    + row({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "rd", "content": "sent (id: 22222222)"}]}})
-    + row({"type": "assistant", "message": {"content": [{"type": "tool_use", "id": "r1", "name": RT, "input": {}}]}})
-    + row({"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "r1", "content": [{"type": "text", "text": "sent 2 parts (ids: 99887765, 99887766)"}]}]}}))
+# 추천 버튼은 접었다(형 결정 2026-10-02: 봇이 형 이름으로 못 써서 터미널에 대신 치는 게 어색·불안정) — 턴 끝에 버튼을 달지 않는다
 spawned = []
-ms._spawn_suggest = lambda tmux, channel, msg: spawned.append((tmux, channel, msg))
+ms._spawn_suggest = lambda *a: spawned.append(a)
+tr = sd / "t.jsonl"
+tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"2\">x</channel>"}}) + "\n")
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
-check(spawned and spawned[0][:3] == (rec["tmux"], ch, "99887766"), f"(리뷰 I6) 이번 턴의 답장 도구 결과(여러 조각이면 마지막): {spawned}")
-spawned.clear()
-tr.write_text(row({"type": "user", "message": {"role": "user", "content": "<channel source=\"plugin:discord:discord\" chat_id=\"1\" message_id=\"3\">x</channel>"}}))
-ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
-check(not spawned, "이번 턴에 Discord 답장이 없으면 버튼 안 단다(옛 답장에 붙이지 않음)")
+check(not spawned, "턴 끝에 추천 버튼 안 단다")
 check("[Discord 추천 버튼]" in " ".join(ms.CHANNEL_RULES.splitlines()), "규칙: 추천 버튼 입력은 Discord 로 답")
 # (실사용) 누른 추천을 2분 안에 못 쳤으면(세션이 계속 바쁨) 조용히 사라지지 않고 버튼이 '⚠️ 다시' 로 살아난다
 os.environ["MARINA_TYPE_TIMEOUT"] = "0.3"

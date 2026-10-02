@@ -114,6 +114,15 @@ check(all(t["id"] != "bshell1" for t in mb.background_tasks(tr)), "TaskStop 으�
 w(note("bshell1", "completed"), note("aagent1", "completed"))
 check(mb.background_tasks(tr) == [], "끝나면 사라진다")
 check("없어" in mb.view(ch, "U1"), "도는 일이 없으면 그렇게 말한다")
+# (실사용) SendMessage 로 맡긴 팀 에이전트 — 화면 아래 에이전트 목록에만 보인다 → 🤖 로, 그리고 바쁜 걸로 쳐서 #상태를 30초마다
+subprocess.run(base + ["kill-session", "-t", rec["tmux"]], capture_output=True)
+subprocess.run(base + ["new-session", "-d", "-s", rec["tmux"], "sh", "-c",
+                       "printf '✻ Worked\\n────\\n❯ \\n────\\n  ⏵⏵ bypass · ← for agents\\n  ⏺ main\\n  ◯ wall-mockups-2  Read and follow your brief\\n'; exec cat"], check=True)
+time.sleep(0.5)
+lt = mb.live_tasks(rec)
+check(any(t["kind"] == "agent" and t["id"] == "wall-mockups-2" and "brief" in t["desc"] for t in lt), f"팀 에이전트도 🤖: {lt}")
+light = next(s for s in mb.snapshot(full=False)["sessions"] if s["ref"] == "proj/feat/a")
+check(light.get("bg") is True and mb.snapshot(full=False)["anyBusy"] is True, f"뒤에서 도는 일이 있으면 #상태 30초 갱신: {light}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY
