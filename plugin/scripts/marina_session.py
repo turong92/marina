@@ -37,6 +37,7 @@ CHANNEL_RULES = (
     "끝나면 새 reply 를 보낸다(알림이 울리도록).\n"
     "- 질문은 번호 선택지 텍스트로 묻는다.\n"
     "- 이미지는 첨부한다. HTML 은 스크린샷과 열어볼 주소를 보낸다. 10MB 를 넘는 파일은 링크로 보낸다.\n"
+    "- 스크린샷·HTML 같은 결과물은 share_file 도구에 넘기고 돌려받은 파일을 reply 로 첨부한다(프로젝트 #자료실 에도 모인다).\n"
     "- 터미널에서 직접 받은 지시의 답은 터미널에 둬도 된다."
 )
 
@@ -58,6 +59,23 @@ CHAT_RULES = (
     "- 이 컴퓨터 주인의 다른 파일·설정·계정 정보는 묻더라도 다루지 않는다."
 )
 CHAT_LIMIT = 20
+LOBBY_KINDS = ("chat-lobby", "dev-lobby")
+CHAT_KINDS = ("chat",) + LOBBY_KINDS          # 제한 세션(--restricted)으로 뜨는 종류
+DEV_LOBBY_CHANNEL = "새-작업"
+DEV_LOBBY_TOPIC = "새 작업(워크트리+채널)을 여는 곳 — \"○○ 작업 열어줘\" 라고 말하면 돼"
+DEV_LOBBY_GUIDE = (
+    "🛠 **여기는 새 작업을 여는 곳이야.**\n"
+    "• \"로그인 버그 고치는 작업 열어줘\" 처럼 말하면 새 워크트리와 채널을 만들고 세션을 띄워.\n"
+    "• \"작업 목록 보여줘\" 라고 하면 지금 있는 작업 채널을 알려줘.\n"
+    "• 서비스는 자동으로 안 켜. 작업 채널에서 `marina start` 하라고 하면 돼.\n"
+    "• 결과물(스크린샷·HTML)은 #자료실 에 모여."
+)
+DEV_LOBBY_RULES = (
+    "이 세션은 Discord 의 '새-작업' 로비다. 하는 일은 새 개발 작업(워크트리+채널) 열기와 작업 목록 알려주기뿐이다.\n"
+    "- 작업을 열어 달라면 짧은 영문 소문자 이름(예: login-fix, 숫자·하이픈 가능)과 한글 제목을 정해 open_chat 을 부른다. "
+    "이미 있으면 다른 이름을 고르거나 기존 채널을 알려준다.\n"
+    "- 결과(채널 링크)는 discord reply 로 알린다. 그 밖의 부탁은 작업 채널에서 하라고 안내한다."
+)
 LOBBY_TASK = "lobby"
 LOBBY_CHANNEL = "새-대화"
 LOBBY_TOPIC = "새 대화방을 여는 곳 — \"○○ 얘기할 방 열어줘\" 라고 말하면 돼"
@@ -422,13 +440,23 @@ def clean_env_prefix(extra: dict[str, str]) -> list[str]:
     return out
 
 
-def claude_argv(project: str, task: str, resume: bool = False) -> list[str]:
+def claude_argv(project: str, task: str, resume: bool = False, session_id: str = "", from_id: str = "") -> list[str]:
+    """session_id 가 있으면(옮겨 온 대화) 자기 ID 로 잇는다 — 같은 워크트리의 다른 대화(--continue)를 집지 않게.
+    from_id = 그 대화의 복사본으로 시작(--fork-session)."""
     argv = ["claude"]
-    if resume:
+    if session_id:
+        if resume:
+            argv += ["--resume", session_id]
+        elif from_id:
+            argv += ["--resume", from_id, "--fork-session", "--session-id", session_id]
+        else:
+            argv += ["--session-id", session_id]
+    elif resume:
         argv.append("--continue")
     argv += ["--channels", PLUGIN,
              "--remote-control", rc_name(project, task),
              "--append-system-prompt", CHANNEL_RULES,
+             "--mcp-config", str(state_dir(project, task) / "mcp.json"),   # share_file(결과물 → #자료실)
              "--settings", str(state_dir(project, task) / "settings.json"),
              # 가변 인자라 뒤따르는 값을 삼킨다 — 맨 끝에 둔다(marina_term 실측 2026-09-10)
              "--disallowedTools", "AskUserQuestion"]
@@ -466,27 +494,88 @@ def transcript_path(cwd: Path, session_id: str) -> Path:
     return root / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(cwd))) / f"{session_id}.jsonl"
 
 
-def lobby_argv(project: str, task: str, session_id: str, resume: bool = False) -> list[str]:
+def lobby_argv(project: str, task: str, session_id: str, resume: bool = False, dev: bool = False) -> list[str]:
     """로비: 내장 도구 없이 마리나 MCP(open_chat·list_chats)와 Discord 도구만."""
     argv = chat_argv(project, task, session_id, resume=resume)
     argv[argv.index("--tools") + 1] = ""
-    argv[argv.index("--append-system-prompt") + 1] = LOBBY_RULES
+    argv[argv.index("--append-system-prompt") + 1] = DEV_LOBBY_RULES if dev else LOBBY_RULES
     return argv
 
 
+def find_transcript(session_id: str) -> Path | None:
+    root = Path(os.environ.get("MARINA_CLAUDE_PROJECTS") or "~/.claude/projects").expanduser()
+    hits = list(root.glob(f"*/{session_id}.jsonl"))
+    # 사본이 여럿이면(이동 잔재·백업) 가장 최근 것(리뷰 3)
+    return max(hits, key=lambda p: p.stat().st_mtime) if hits else None
+
+
+def conversation_home(path: Path) -> str:
+    """대화를 이어받을 폴더 = 기록이 저장된 폴더 키와 같은 cwd. 대화 중 하위 폴더로 cd 하거나
+    워크트리를 옮겨 다닐 수 있다 — claude 는 띄운(옮겨 간) 폴더 키 아래에 기록을 두고, --resume 은 거기서만 찾는다."""
+    want = path.parent.name
+    found = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                if '"cwd"' not in line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                cwd = str(row.get("cwd") or "") if isinstance(row, dict) else ""
+                if cwd and re.sub(r"[^A-Za-z0-9]", "-", cwd) == want:
+                    found = cwd
+    except OSError:
+        pass
+    return found
+
+def _check_uuid(value: str) -> str:
+    try:
+        if str(uuid.UUID(value)) == value.lower():
+            return value.lower()
+    except ValueError:
+        pass
+    raise SessionError(f"대화 ID 형식이 아니야(UUID): {value!r}")
+
+
 def session_argv(s: dict[str, Any], resume: bool = False) -> list[str]:
-    if s.get("kind") in ("chat", "chat-lobby"):
+    if s.get("kind") in CHAT_KINDS or not s.get("sessionId"):
+        return session_argv_simple(s, resume)
+    return session_launch(s, resume)[1]
+
+
+def session_argv_simple(s: dict[str, Any], resume: bool = False) -> list[str]:
+    if s.get("kind") in CHAT_KINDS:
         sid = str(s.get("sessionId") or "")
         if not sid:
             raise SessionError("sessionId 가 없는 옛 기록이야 — rm 후 다시 만들어")
         # 아무도 말을 안 건 채 껐다 켜면 기록이 없어 --resume 이 실패한다(복사본도 첫 메시지 때 생긴다, 실측)
         # → 같은 ID 로 새로 시작하되, 옮긴 대화면 다시 복사본으로
         has = transcript_path(Path(str(s["root"])), sid).is_file()
-        if s.get("kind") == "chat-lobby":
-            return lobby_argv(str(s["project"]), str(s["task"]), sid, resume=resume and has)
+        if s.get("kind") in LOBBY_KINDS:
+            return lobby_argv(str(s["project"]), str(s["task"]), sid, resume=resume and has,
+                              dev=s.get("kind") == "dev-lobby")
         return chat_argv(str(s["project"]), str(s["task"]), sid, resume=resume and has,
                          from_id="" if has else str(s.get("forkedFrom") or ""))
-    return claude_argv(str(s["project"]), str(s["task"]), resume=resume)
+    return claude_argv(str(s["project"]), str(s["task"]), resume=resume)       # 보통 개발 세션: --continue
+
+
+def session_launch(s: dict[str, Any], resume: bool = False) -> tuple[Path, list[str]]:
+    """(띄울 폴더, 인자). 옮겨 온 개발 대화는 기록을 전역에서 찾는다 — 세션 안에서 다른 워크트리로 옮겨 가면
+    기록도 그 폴더 키로 옮겨 가고 --resume 은 거기서만 찾는다(리뷰 2). 기록이 아직 없을 때만 다시 fork."""
+    root = Path(str(s.get("root") or ""))
+    sid = str(s.get("sessionId") or "")
+    if s.get("kind") in CHAT_KINDS or not sid:
+        return root, session_argv_simple(s, resume)
+    tr = find_transcript(sid)
+    home = conversation_home(tr) if tr else ""
+    if tr and not home and tr.parent.name == re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(root))):
+        home = str(root)                        # 기록에 cwd 줄이 아직 없어도 저장 폴더가 곧 세션 폴더
+    if tr and home and Path(home).is_dir():
+        return Path(home), claude_argv(str(s["project"]), str(s["task"]), resume=resume, session_id=sid)
+    return root, claude_argv(str(s["project"]), str(s["task"]), resume=False, session_id=sid,
+                             from_id=str(s.get("forkedFrom") or ""))
 
 
 def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str], notify_ref: str = "") -> None:
@@ -558,6 +647,12 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
             "deny": [f"Edit(/{real}/{f})" for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md")]}
         settings["hooks"]["PreToolUse"] = [{"matcher": f"{_REPLY_TOOL}|WebFetch|Write|Edit",
                                             "hooks": [{"type": "command", "command": guard, "timeout": 15}]}]
+    if chat_root is None:
+        # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
+        settings["permissions"] = {"allow": ["mcp__marina__share_file"]}
+        mcp = {"mcpServers": {"marina": {"command": sys.executable,
+                                         "args": [str(Path(__file__).resolve()), "mcp-chat"]}}}
+        (sdir / "mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if chat_root is not None:
         mcp = {"mcpServers": {"marina": {"command": sys.executable,
                                          "args": [str(Path(__file__).resolve()), "mcp-lobby" if lobby else "mcp-chat"]}}}
@@ -699,7 +794,7 @@ def _hook_target(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[s
     sdir = os.environ.get("DISCORD_STATE_DIR") or ""
     root = Path(str(payload.get("cwd") or "/nonexistent")).resolve()
     return next((x for x in items if sdir and x.get("stateDir") == sdir), None) \
-        or next((x for x in items if x.get("kind") not in ("chat", "chat-lobby") and _same_root(x, root)), None)
+        or next((x for x in items if x.get("kind") not in CHAT_KINDS and _same_root(x, root)), None)
 
 
 def hook_stop(payload: dict[str, Any]) -> None:
@@ -769,8 +864,9 @@ def marina_start(root: Path) -> str:
 
 # ── 명령 ─────────────────────────────────────────────────────────────────────
 
-def preflight(cfg: dict[str, Any], dc: Discord, project: str, task: str) -> dict[str, Any]:
-    """아무것도 만들기 전에 전부 본다 — 하나라도 걸리면 SessionError."""
+def preflight(cfg: dict[str, Any], dc: Discord, project: str, task: str,
+              existing: Path | None = None) -> dict[str, Any]:
+    """아무것도 만들기 전에 전부 본다 — 하나라도 걸리면 SessionError. existing = 옮겨 올 대화의 기존 폴더."""
     pc = project_config(cfg, project)
     root = project_root(project)
     tf = token_file(cfg)
@@ -780,10 +876,12 @@ def preflight(cfg: dict[str, Any], dc: Discord, project: str, task: str) -> dict
         raise SessionError("'tmux' 를 찾지 못했어 (brew install tmux)")
     if not shutil.which("claude"):
         raise SessionError("'claude' 를 찾지 못했어 (PATH 확인)")
-    wt = root / ".claude" / "worktrees" / worktree_dirname(task)
+    wt = existing or root / ".claude" / "worktrees" / worktree_dirname(task)
     name, sdir, chan = tmux_name(project, task), state_dir(project, task), channel_name(task)
-    if wt.exists():
+    if existing is None and wt.exists():
         raise SessionError(f"워크트리가 이미 있어: {wt}")
+    if existing is not None and any(s.get("kind") not in CHAT_KINDS and _same_root(s, existing) for s in load_sessions()):
+        raise SessionError(f"이 폴더엔 이미 세션이 있어: {existing}")
     if tmux_alive(name):
         raise SessionError(f"tmux 세션이 이미 있어: {name}")
     if sdir.exists():
@@ -894,6 +992,58 @@ def welcome_text(title: str, forked: bool) -> str:
     return "\n".join(lines)
 
 
+def cmd_dev_lobby(project: str) -> dict[str, Any]:
+    """개발 프로젝트 카테고리의 #새-작업 로비. 프로젝트 루트(이미 신뢰된 폴더)에서 도구 없는 제한 세션으로 뜬다.
+    첨부 가드 기준은 레포가 아닌 빈 폴더(inbox) — 로비가 레포 파일을 보낼 일은 없다."""
+    task = LOBBY_TASK
+    if any(s.get("project") == project and s.get("kind") == "dev-lobby" for s in load_sessions()):
+        raise SessionError("이 프로젝트엔 로비가 이미 있어 ('marina session ls' 로 확인)")
+    cfg = load_config()
+    pc = project_config(cfg, project)
+    project_root(project)                     # 등록된 프로젝트인지
+    dc = Discord(read_token(cfg))
+    tmux, sdir = tmux_name(project, task), state_dir(project, task)
+    root = sdir / "home"                      # 레포 루트에서 띄우면 레포 설정·훅·CLAUDE.md 가 섞일 수 있다(리뷰) → 빈 폴더
+    tf = token_file(cfg)
+    if not tf.is_file():
+        raise SessionError(f"토큰 파일이 없어: {tf}")
+    if tmux_alive(tmux) or sdir.exists():
+        raise SessionError(f"로비 흔적이 남아 있어: {tmux} / {sdir}")
+    root.mkdir(parents=True)
+    os.chmod(sdir, 0o700)
+    root = Path(os.path.realpath(str(root)))
+    ensure_trusted(root)          # 새 폴더는 신뢰 확인창에서 멈추고 그동안 플러그인이 안 뜬다(실측)
+    record = {"project": project, "task": task, "kind": "dev-lobby", "root": str(root), "tmux": tmux,
+              "stateDir": str(sdir), "rcName": "", "sessionId": str(uuid.uuid4()), "createdAt": int(time.time())}
+    channel_id = ""
+    try:
+        cat = ensure_category(dc, cfg, project)
+        ensure_archive(dc, cfg, project, cat)
+        channel_id = dc.create_text_channel(cfg["guildId"], DEV_LOBBY_CHANNEL, cat, DEV_LOBBY_TOPIC)
+        write_state_dir(sdir, channel_id, pc.get("allow") or [], tf)
+        (sdir / "inbox").mkdir(exist_ok=True)
+        write_settings(sdir, chat_root=sdir / "inbox", lobby=True)
+        tmux_start(tmux, root, lobby_argv(project, task, record["sessionId"], dev=True), chat_env(sdir),
+                   notify_ref=f"{project}/{task}")
+    except Exception as exc:
+        remove_state_dir(sdir)
+        if channel_id:
+            try:
+                dc.delete_channel(channel_id)
+            except SessionError:
+                pass
+        raise SessionError(str(exc))
+    record["channelId"] = channel_id
+    items = load_sessions()
+    items.append(record)
+    save_sessions(items)
+    try:
+        dc.send_message(channel_id, DEV_LOBBY_GUIDE)
+    except SessionError:
+        pass
+    return dict(record, url=f"https://discord.com/channels/{cfg['guildId']}/{channel_id}", warning="")
+
+
 def chat_env(sdir: Path) -> dict[str, str]:
     return dict(session_env(sdir), ENABLE_CLAUDEAI_MCP_SERVERS="false")   # 형의 claude.ai 커넥터 끔
 
@@ -915,10 +1065,14 @@ def lobby_tool(name: str, args: dict[str, Any]) -> str:
     """로비 MCP 도구 실행. 실패는 SessionError(사용자에게 그대로 보일 문장)."""
     cfg = load_config()
     link = "https://discord.com/channels/" + str(cfg["guildId"]) + "/{}"
+    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    me = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
+    project = str((me or {}).get("project") or CHAT_PROJECT)
+    dev = project != CHAT_PROJECT
     if name == "list_chats":
         rows = [f"- {s.get('title') or s['task']} ({s['task']}): {link.format(s.get('channelId'))}"
-                for s in load_sessions() if s.get("kind") == "chat"]
-        return "\n".join(rows) or "아직 대화방이 없어"
+                for s in load_sessions() if s.get("project") == project and s.get("kind") not in LOBBY_KINDS]
+        return "\n".join(rows) or ("아직 작업 채널이 없어" if dev else "아직 대화방이 없어")
     if name == "open_chat":
         slug, title = str(args.get("name") or ""), str(args.get("title") or "").strip()
         if not _SLUG.fullmatch(slug):
@@ -927,6 +1081,16 @@ def lobby_tool(name: str, args: dict[str, Any]) -> str:
             raise SessionError("제목이 필요해(80자 이내)")
         if re.search(r"[@<>\n\r`]", title):
             raise SessionError("제목에 @ < > ` 줄바꿈은 쓸 수 없어")
+        if dev:
+            # 서비스 자동 실행은 수 분 걸려 도구 호출이 끊긴다 — 세션 안에서 marina start
+            r = cmd_new(project, slug, start=False, title=title)
+            try:
+                Discord(read_token(cfg)).send_message(str(r["channelId"]),
+                    f"🛠 **'{title}' 작업 채널이야.** 워크트리: `{r['root']}`\n"
+                    "• 여기서 지시하면 돼. 서비스가 필요하면 'marina start 해줘' 라고 해.")
+            except SessionError:
+                pass
+            return f"열었어: {title} → {r['url']}"
         r = cmd_new_chat(slug, title=title)
         return f"열었어: {title} → {r['url']}" + (f"\n(참고: {r['warning']})" if r.get("warning") else "")
     raise SessionError(f"없는 도구: {name}")
@@ -963,7 +1127,9 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         raise SessionError(f"설정 파일은 공유할 수 없어: {raw}")
     files, notes = [path], []
     if path.suffix.lower() in (".html", ".htm"):
-        prev, why = marina_share.render_html(path, root, root / "미리보기")
+        # 개발 세션은 레포 밖(상태 폴더)에 — 워크트리에 두면 git add 로 커밋에 딸려 간다(리뷰)
+        outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else Path(str(rec["stateDir"])) / "미리보기"
+        prev, why = marina_share.render_html(path, root, outdir)
         if not prev:
             notes.append(f"미리보기를 만들지 못했어({why}) — HTML 파일만 보내")
         else:
@@ -972,7 +1138,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
                 notes.append(why)
     title = str(args.get("title") or path.stem).replace("@", "").replace("\n", " ")[:80]
     cfg = load_config()
-    arch = str((cfg["projects"].get(CHAT_PROJECT) or {}).get("archiveChannelId") or "")
+    arch = str((cfg["projects"].get(str(rec.get("project"))) or {}).get("archiveChannelId") or "")
     if arch:
         room = str(rec.get("title") or rec.get("task")).replace("@", "")
         big = [f for f in files if f.stat().st_size > 10 * 1024 * 1024]
@@ -1037,7 +1203,7 @@ def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id
     if project == CHAT_PROJECT:
         return cmd_new_chat(task, from_id, title=title)
     if from_id:
-        raise SessionError("--from 은 채팅 세션(new chat <이름>)에서만 쓸 수 있어")
+        return cmd_adopt(project, task, from_id)
     cfg = load_config()
     dc = Discord(read_token(cfg))
     plan = preflight(cfg, dc, project, task)
@@ -1047,7 +1213,8 @@ def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id
     channel_id = ""
     try:
         cat = ensure_category(dc, cfg, project)
-        channel_id = dc.create_text_channel(cfg["guildId"], plan["channel"], cat)
+        ensure_archive(dc, cfg, project, cat)
+        channel_id = dc.create_text_channel(cfg["guildId"], plan["channel"], cat, title)
         write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg))
         write_settings(sdir)
         tmux_start(plan["tmux"], wt, claude_argv(project, task), session_env(sdir), notify_ref=f"{project}/{task}")
@@ -1062,10 +1229,66 @@ def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id
     record = {"project": project, "task": task, "root": str(wt), "channelId": channel_id,
               "tmux": plan["tmux"], "stateDir": str(sdir), "rcName": rc_name(project, task),
               "createdAt": int(time.time())}
+    if title:
+        record["title"] = title
     items = load_sessions()
     items.append(record)
     save_sessions(items)
     return dict(record, url=f"https://discord.com/channels/{cfg['guildId']}/{channel_id}", warning=warning)
+
+
+def cmd_adopt(project: str, task: str, from_id: str) -> dict[str, Any]:
+    """하던 개발 대화를 Discord 채널로 옮긴다: 워크트리를 만들지 않고 그 대화가 돌던 폴더에서 복사본으로 잇는다.
+    실행 환경(marina start)은 건드리지 않는다 — 이미 떠 있을 수 있다."""
+    _check_task(task)
+    from_id = _check_uuid(from_id)
+    tr = find_transcript(from_id)
+    if not tr:
+        raise SessionError(f"대화를 찾지 못했어: {from_id}")
+    cwd = conversation_home(tr)
+    root = project_root(project)
+    here = Path(os.path.realpath(cwd)) if cwd else None
+    wtroot = root / ".claude" / "worktrees"
+    if here is not None and str(here).startswith(str(wtroot) + os.sep) and here.parent != wtroot:
+        raise SessionError(f"워크트리 안 하위 폴더에서 띄운 대화는 옮길 수 없어(워크트리 폴더에서 띄운 대화만): {here}")
+    inside = here is not None and (here == root or here.parent == wtroot)   # 워크트리 경계 = 세션 root(리뷰 1)
+    if not inside:
+        raise SessionError(f"그 대화는 프로젝트 '{project}' 의 폴더에서 한 게 아니야: {cwd or '?'}")
+    if not here.is_dir():
+        raise SessionError(f"그 대화의 폴더가 지워졌어(워크트리 삭제됨): {here}")
+    cfg = load_config()
+    dc = Discord(read_token(cfg))
+    plan = preflight(cfg, dc, project, task, existing=here)
+    sdir: Path = plan["stateDir"]
+    record = {"project": project, "task": task, "root": str(here), "tmux": plan["tmux"], "stateDir": str(sdir),
+              "rcName": rc_name(project, task), "sessionId": str(uuid.uuid4()), "forkedFrom": from_id,
+              "createdAt": int(time.time())}
+    channel_id = ""
+    try:
+        cat = ensure_category(dc, cfg, project)
+        ensure_archive(dc, cfg, project, cat)
+        channel_id = dc.create_text_channel(cfg["guildId"], plan["channel"], cat)
+        write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg))
+        write_settings(sdir)
+        tmux_start(plan["tmux"], here, claude_argv(project, task, session_id=record["sessionId"], from_id=from_id),
+                   session_env(sdir), notify_ref=f"{project}/{task}")
+    except Exception as exc:
+        remove_state_dir(sdir)
+        if channel_id:
+            try:
+                dc.delete_channel(channel_id)
+            except SessionError:
+                pass
+        raise SessionError(str(exc))
+    record["channelId"] = channel_id
+    items = load_sessions()
+    items.append(record)
+    save_sessions(items)
+    try:
+        dc.send_message(channel_id, f"🔁 하던 대화를 이어받았어 — `{here}`. 여기서 이어서 지시하면 돼.")
+    except SessionError:
+        pass
+    return dict(record, url=f"https://discord.com/channels/{cfg['guildId']}/{channel_id}", warning="")
 
 
 def cmd_ls() -> list[dict[str, Any]]:
@@ -1088,7 +1311,7 @@ def cmd_start(ref: str = "", all_: bool = False) -> tuple[list[str], list[str]]:
     for s in targets:
         label = f"{s.get('project')}/{s.get('task')}"
         name = str(s.get("tmux") or "")
-        chat = s.get("kind") in ("chat", "chat-lobby")
+        chat = s.get("kind") in CHAT_KINDS
         if tmux_alive(name):
             continue
         root = Path(str(s.get("root") or ""))
@@ -1099,10 +1322,12 @@ def cmd_start(ref: str = "", all_: bool = False) -> tuple[list[str], list[str]]:
             sdir = Path(str(s.get("stateDir") or ""))
             if s.get("stateDir") and sdir.is_dir():
                 # 업데이트로 바뀐 스크립트 경로를 다시 적는다
-                write_settings(sdir, chat_root=root if chat else None, lobby=s.get("kind") == "chat-lobby")
+                guard = sdir / "inbox" if s.get("kind") == "dev-lobby" else root
+                write_settings(sdir, chat_root=guard if chat else None, lobby=s.get("kind") in LOBBY_KINDS)
             if chat:
                 ensure_trusted(chat_home())
-            tmux_start(name, root, session_argv(s, resume=True),
+            cwd, argv = session_launch(s, resume=True)
+            tmux_start(name, cwd, argv,
                        chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
             started.append(label)
         except SessionError as exc:
@@ -1167,7 +1392,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-start", action="store_true")
     p.add_argument("--from", dest="from_id", default="", help="채팅 세션: 이어 갈 기존 대화 ID(복사본으로)")
     p.add_argument("--title", default="", help="채팅 세션: 한글 제목(채널 설명·첫 안내)")
-    sub.add_parser("lobby", help="CHAT 카테고리에 #새-대화 로비를 연다")
+    sub.add_parser("lobby", help="카테고리에 로비를 연다(인자 없음 = CHAT #새-대화, 프로젝트 = #새-작업)") \
+        .add_argument("project", nargs="?", default="")
     sub.add_parser("mcp-lobby")
     sub.add_parser("mcp-chat")
     p = sub.add_parser("ls")
@@ -1214,7 +1440,11 @@ def main(argv: list[str] | None = None) -> int:
             pass
         return 0
     try:
-        if a.cmd == "lobby":
+        if a.cmd == "lobby" and a.project and a.project != CHAT_PROJECT:
+            r = cmd_dev_lobby(a.project)
+            print(f"✓ 로비: #{DEV_LOBBY_CHANNEL} ({a.project})")
+            print(f"  Discord: {r['url']}")
+        elif a.cmd == "lobby":
             if any(s.get("kind") == "chat-lobby" for s in load_sessions()):
                 raise SessionError("로비가 이미 있어 ('marina session ls' 로 확인)")
             r = cmd_new_chat(LOBBY_TASK, lobby=True)
@@ -1264,7 +1494,7 @@ def main(argv: list[str] | None = None) -> int:
             s = find_session(a.ref)
             for x in teardown(s):
                 print("⚠ " + x, file=sys.stderr)
-            kept = f"폴더는 그대로: {s['root']}" if s.get("kind") in ("chat", "chat-lobby") else "워크트리는 그대로"
+            kept = f"폴더는 그대로: {s['root']}" if s.get("kind") in CHAT_KINDS else "워크트리는 그대로"
             print(f"✓ 정리: {s['project']}/{s['task']} ({kept})")
     except SessionError as exc:
         print(f"marina session: {exc}", file=sys.stderr)

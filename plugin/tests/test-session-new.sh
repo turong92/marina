@@ -28,7 +28,9 @@ def check(cond, msg):
 posts = [json.loads(l) for l in (fd / "log.jsonl").read_text().splitlines() if '"POST"' in l]
 cat = ms.load_config()["projects"]["proj"]["categoryId"]
 check(posts[0]["b"] == {"name": "PROJ", "type": 4}, "카테고리 생성")
-check(posts[1]["b"] == {"name": "feat-one", "type": 0, "parent_id": cat}, f"채널 생성: {posts[1]}")
+chposts = [x for x in posts if x["b"].get("name") == "feat-one"]
+check(chposts and chposts[0]["b"] == {"name": "feat-one", "type": 0, "parent_id": cat}, f"채널 생성: {chposts}")
+check(any(x["b"].get("name") == "자료실" and x["b"].get("parent_id") == cat for x in posts), "프로젝트 #자료실 도 깐다")
 rec = ms.find_session("proj/feat/one")
 check(rec["root"] == str(wt) and rec["tmux"] == "proj-feat-one" and rec["rcName"] == "proj/feat/one", f"기록: {rec}")
 sd = Path(rec["stateDir"])
