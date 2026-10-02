@@ -380,5 +380,5 @@ PY
   esac
   # start/restart 성공 직후(여기 도달=up 성공): 게이트웨이 자동 기동 + 라우트 반영(CLI 경로도 대시보드와 동일 UX)
   # (runtime 모듈을 직접 — 대시보드 진입점 marina-control.py 를 거치지 않는다, 분리 A)
-  case "$command" in start|restart|rebuild|clean-rebuild) PYTHONPATH="$SCRIPT_DIR" python3 -c 'import marina_lifecycle; marina_lifecycle.ensure_gateway()' >/dev/null 2>&1 || true ;; esac
+  case "$command" in start|restart|rebuild|clean-rebuild) python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import marina_lifecycle; marina_lifecycle.ensure_gateway()' "$SCRIPT_DIR" >/dev/null 2>&1 || true ;; esac
 }

@@ -143,7 +143,12 @@ wait_for_pid() {
   for _ in $(seq 1 50); do
     if [[ -f "$file" ]]; then
       pid="$(head -n 1 "$file" 2>/dev/null || true)"
-      [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null && return 0
+      if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+        # 기록된 watcher(python)가 실제 docker watch 를 띄울 때까지 — start 가 빨리 끝나면(분리 A 에서 start 끝의
+        # 게이트웨이 호출이 빨라짐) 다음 단언 시점에 아직 안 떠 있다. 제품 동작은 같고 테스트가 시점을 기다린다.
+        for _ in $(seq 1 40); do pgrep -P "$pid" >/dev/null 2>&1 && break; sleep 0.05; done
+        return 0
+      fi
     fi
     sleep 0.1
   done
