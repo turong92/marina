@@ -15,5 +15,11 @@ marina_worktree_gc
 marina_docker_gc
 marina_docker_gc_cli
 marina_reaper
+marina_lifecycle
+marina_cli
+marina_build
+marina_build_inputs
+marina_prebuild
+marina_pretooluse
+marina_protected_write
 # 아래 ? 는 아직 푸는 중(경고만) — Task 9 에서 비운다
-?marina_lifecycle

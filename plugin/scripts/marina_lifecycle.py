@@ -445,14 +445,17 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, 
     if not status["clean"] and not force:
         raise ValueError("변경사항이 있어 삭제할 수 없습니다 (force 로 폐기+삭제 가능): " + json.dumps(status, ensure_ascii=False))
 
+    # git 표준 잠금 = 쓰는 중(Discord 세션 등). 남이 잠갔으면 force 없이 안 지운다(분리 A, 스펙 3장).
+    # Discord 채널·세션 정리는 runtime 이 부르지 않는다 — discord 쪽이 워크트리가 사라진 걸 보고 정리한다.
+    from marina_liveness import lock_holds, worktree_lock
+    held = lock_holds(root)
+    if held and not force:
+        raise ValueError(f"잠김: {held['reason']} — 쓰는 중인 워크트리입니다(force 로 지울 수 있음)")
+    if worktree_lock(root):   # force 거나 낡은 잠금 — git 은 잠긴 워크트리를 안 지우므로 먼저 푼다
+        subprocess.run(["git", "-C", str(root), "worktree", "unlock", str(root)], capture_output=True, timeout=10)
+
     sid = session_id(root)
     stop_all(root)
-    # Discord 세션(tmux claude · 채널 · 상태 폴더) 정리 — 채널 수명 = 워크트리 수명. 실패해도 삭제는 진행.
-    try:
-        from marina_session import teardown_for_root
-        discord_warnings = teardown_for_root(root)
-    except Exception as exc:
-        discord_warnings = [f"세션 정리 실패: {exc}"]
     cleanup_session(root)
     bootout_session_dashboard(sid)
 
@@ -466,7 +469,6 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, 
     except Exception:
         root_branch = ""
     results: dict[str, Any] = {"subrepos": {}, "branches": {}, "root": None}
-    results["discordSessions"] = discord_warnings
     if not keep_images:
         # 워크트리 폴더가 사라지기 **전에** — compose images 조회가 --project-directory(=root)를 쓴다.
         try:
