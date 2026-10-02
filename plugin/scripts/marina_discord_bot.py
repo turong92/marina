@@ -23,6 +23,7 @@ _SEND = 1 << 11
 _HISTORY = 1 << 16
 TYPING_EVERY = 8.0       # Discord '입력 중…' 은 10초면 꺼진다
 BUSY_EVERY = 30.0        # 작업 중일 때만 대시보드를 이 간격으로 다시 그린다
+RECONCILE_EVERY = 60.0
 WEEKLY_EVERY = 600.0     # 채널 이름 변경은 10분 2회 제한
 USAGE_TTL = 120.0
 DASHBOARD_NAME = "상태"
@@ -1082,6 +1083,7 @@ class Loop:
         self.ty: dict[str, float] = {}
         self.last_render = -1.0          # 데몬이 막 떴으면 한 번은 그린다
         self.last_weekly = -WEEKLY_EVERY
+        self.last_reconcile = -RECONCILE_EVERY
         self.proc: subprocess.Popen | None = None
         self.next_start, self.backoff, self.started = 0.0, 5.0, 0.0
         self.lockf: Any = None
@@ -1165,6 +1167,11 @@ class Loop:
         if now - self.last_weekly >= WEEKLY_EVERY:
             self.last_weekly = now
             meter_tick(self.meters)
+        if now - self.last_reconcile >= RECONCILE_EVERY:
+            self.last_reconcile = now
+            gone = ms.reconcile_gone(now)      # 밖에서 지워진 워크트리의 채널 정리(runtime 은 Discord 를 모른다)
+            if gone:
+                _log(f"reconcile: 워크트리가 사라진 세션 정리 {gone}")
 
 
 def run_forever() -> None:

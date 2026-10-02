@@ -1902,6 +1902,73 @@ def mcp_serve(tools: list[dict[str, Any]], handler: Any, stdin: Any = None, stdo
         send({"jsonrpc": "2.0", "id": mid, "result": result})
 
 
+LOCK_OWNER = "marina-session"
+GONE_GRACE_S = 120          # 워크트리가 이만큼 넘게 계속 없을 때만 채널을 정리(잠깐 옮기거나 디스크가 안 보일 때 오탐 방지)
+
+
+def _dev(s: dict[str, Any]) -> bool:
+    return s.get("kind") not in CHAT_KINDS and bool(s.get("root"))
+
+
+def lock_root(s: dict[str, Any]) -> str:
+    """개발 세션 워크트리를 git 표준 잠금으로 '쓰는 중' 표시(스펙 3장) — runtime 삭제·7일 정리가 건너뛴다.
+    메인 체크아웃(잠글 수 없음)·남이 잠근 것은 조용히 넘긴다. 반환: 실패 이유(성공이면 "")."""
+    if not _dev(s):
+        return ""
+    try:
+        from marina_liveness import lock_worktree
+        lock_worktree(Path(str(s["root"])), LOCK_OWNER, f"{s.get('project')}/{s.get('task')}")
+        return ""
+    except Exception as exc:
+        return str(exc)
+
+
+def unlock_root(s: dict[str, Any]) -> None:
+    if not _dev(s):
+        return
+    try:
+        from marina_liveness import unlock_worktree
+        unlock_worktree(Path(str(s["root"])), LOCK_OWNER)
+    except Exception:
+        pass
+
+
+def reconcile_gone(now: float | None = None) -> list[str]:
+    """밖에서(대시보드 force·git) 지워진 워크트리의 세션을 정리한다 — runtime 은 Discord 를 모르므로(스펙 R1)
+    discord 가 스스로 본다. 두 번 관찰(≥ GONE_GRACE_S 간격)해야 정리. 절대 예외를 올리지 않는다."""
+    now = time.time() if now is None else now
+    done: list[str] = []
+    try:
+        items = load_sessions()
+    except Exception:
+        return done
+    changed = False
+    for s in items:
+        if not _dev(s):
+            continue
+        if Path(str(s["root"])).is_dir():
+            if s.pop("goneSince", None) is not None:
+                changed = True
+            continue
+        since = s.get("goneSince")
+        if since is None:
+            s["goneSince"] = now
+            changed = True
+        elif now - float(since) >= GONE_GRACE_S:
+            done.append(f"{s.get('project')}/{s.get('task')}")
+    if changed:
+        try:
+            save_sessions(items)
+        except Exception:
+            return []
+    for ref in done:
+        try:
+            teardown(find_session(ref))
+        except Exception:
+            pass
+    return done
+
+
 def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id: str = "",
             title: str = "") -> dict[str, Any]:
     if project == CHAT_PROJECT:
@@ -1938,6 +2005,7 @@ def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id
     items = load_sessions()
     items.append(record)
     save_sessions(items)
+    lock_root(record)
     return dict(record, url=f"https://discord.com/channels/{cfg['guildId']}/{channel_id}", warning=warning)
 
 
@@ -1988,6 +2056,7 @@ def cmd_adopt(project: str, task: str, from_id: str) -> dict[str, Any]:
     items = load_sessions()
     items.append(record)
     save_sessions(items)
+    lock_root(record)
     try:
         dc.send_message(channel_id, f"🔁 하던 대화를 이어받았어 — `{here}`. 여기서 이어서 지시하면 돼.")
     except SessionError:
@@ -2034,6 +2103,7 @@ def cmd_start(ref: str = "", all_: bool = False) -> tuple[list[str], list[str]]:
             cwd, argv = session_launch(s, resume=True)
             tmux_start(name, cwd, argv,
                        chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
+            lock_root(s)
             started.append(label)
             try:
                 resume_unanswered(s)          # 재시작 전에 받고 못 답한 메시지가 있으면 이어서 답하게
@@ -2048,6 +2118,7 @@ def teardown(s: dict[str, Any]) -> list[str]:
     """tmux · 채널 · 상태 폴더 · 기록을 지운다(워크트리는 안 건드림). 채널 404 는 이미 지워진 것."""
     warnings: list[str] = []
     tmux_stop(str(s.get("tmux") or ""))
+    unlock_root(s)
     if s.get("channelId"):
         try:
             cfg = load_config()
@@ -2109,6 +2180,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--json", action="store_true")
     for name in ("attach", "stop", "rm"):
         sub.add_parser(name).add_argument("ref")
+    sub.add_parser("lock-all")
     p = sub.add_parser("start")
     p.add_argument("ref", nargs="?", default="")
     p.add_argument("--all", action="store_true")
@@ -2272,6 +2344,12 @@ def main(argv: list[str] | None = None) -> int:
             s = find_session(a.ref)
             tmux_stop(str(s["tmux"]))
             print(f"✓ 정지: {s['project']}/{s['task']}")
+        elif a.cmd == "lock-all":
+            for x in load_sessions():
+                why = lock_root(x)
+                if why and _dev(x):
+                    print(f"· {x.get('project')}/{x.get('task')}: 안 잠금({why.splitlines()[0][:120]})")
+            print("✓ 개발 세션 워크트리 잠금")
         elif a.cmd == "rm":
             s = find_session(a.ref)
             for x in teardown(s):

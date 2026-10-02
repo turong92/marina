@@ -231,9 +231,9 @@ mb._spawn = P
 mb.BOT_DIR = mh / "botdir"
 mb.bot_command = lambda cfg: {"argv": ["bun", "bot.ts"], "cwd": str(mb.BOT_DIR), "env": {}, "bun": "bun"}
 (mb.BOT_DIR / "node_modules").mkdir(parents=True)
-mb.dashboard_tick = lambda st: calls.append("dash"); mb.meter_tick = lambda st: calls.append("week")
+mb.dashboard_tick = lambda st: calls.append("dash"); mb.meter_tick = lambda st: calls.append("week"); ms.reconcile_gone = lambda now: calls.append("gone") or []
 lp = mb.Loop(); t0 = time.time() + 5
-check(lp.step(t0) is True and calls == [["bun", "bot.ts"], "dash", "week"], f"첫 바퀴: {calls}")
+check(lp.step(t0) is True and calls == [["bun", "bot.ts"], "dash", "week", "gone"], f"첫 바퀴(+사라진 워크트리 정리): {calls}")
 calls.clear(); lp.step(t0 + 4)
 check(calls == [], f"다음 바퀴(신호·작업 없음)엔 아무것도: {calls}")
 lp.proc.returncode = 1; lp.step(t0 + 10)
