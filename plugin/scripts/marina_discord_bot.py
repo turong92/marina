@@ -80,8 +80,8 @@ def owner_ids(cfg: dict[str, Any]) -> list[str]:
 
 def claude_usage() -> list[dict[str, Any]]:
     try:
-        import marina_sessions
-        return list(marina_sessions.provider_account_usage("claude").get("windows") or [])
+        import marina_discord_usage        # discord 자기 사본(분리 B) — 대시보드 코드를 안 부른다
+        return marina_discord_usage.claude_windows()
     except Exception:
         return []
 
@@ -120,8 +120,8 @@ def _ctx_percent(rec: dict[str, Any]) -> float | None:
     if not path:
         return None
     try:
-        import marina_sessions
-        return marina_sessions.agent_usage_from_path(path, "claude").get("contextPercent")
+        import marina_discord_usage
+        return marina_discord_usage.context_percent(path)
     except Exception:
         return None
 

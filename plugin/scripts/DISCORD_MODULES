@@ -1,0 +1,7 @@
+# discord 모듈 목록(스펙 R0·R3) — 이 목록 안 모듈은 목록 안 모듈만 import 한다(test-discord-boundary).
+# runtime 은 PATH 의 `marina` 명령(CLI)으로만, dashboard 는 아예 안 부른다.
+marina_session
+marina_discord_bot
+marina_discord_ask
+marina_share
+marina_discord_usage
