@@ -21,7 +21,7 @@
 | `dashboard` (형) | 웹·모바일·로그인·펀넬·터미널·에이전트 대화·방·체인. **언제 버려도 되게** 만든다 |
 | `discord` (형) | Discord 세션(`marina session`)·봇·질문/권한 버튼·share_file |
 | 독립 | **셋 다 혼자 깔아도 동작한다**(형: "각자 역할이 다르고 서로 없어도 워킹해야 돼"). 같이 깔리면 기능이 붙는다 |
-| 의존 방향 | dashboard 만 runtime 이 **있으면** 쓴다. discord 는 표준(Claude Code 훅·git)으로만 만난다. dashboard·discord 는 서로 안 부르고, runtime 은 둘을 모른다 |
+| 의존 방향 | dashboard 는 runtime 입구 모듈, discord 는 `marina` CLI 로 — 둘 다 runtime 이 **있으면**만. dashboard·discord 는 서로 안 부르고, runtime 은 둘을 모른다 |
 
 ## 3. 표준에 맞춘다
 
@@ -81,7 +81,7 @@ plugin-discord/
 | discord | 채팅 세션·로비, 개발 세션(워크트리는 `claude --worktree` 표준 경로 = 그냥 git 워크트리), 봇·#상태·숫자판·🛑·질문/권한 버튼 | 서비스 자동 시작(runtime 의 `WorktreeCreate` 가 하게 됨) |
 | dashboard | 에이전트 대화·모바일·터미널·로그인·펀넬 | 워크트리·서비스·compose·연결·GC 탭(숨김. "runtime 을 깔면 생긴다" 안내 한 줄) |
 
-discord 는 runtime 을 **부르지 않는다**. 워크트리를 `claude --worktree` 로 만들면, runtime 이 깔려 있을 때 그 훅이 알아서 격리를 붙인다. dashboard 만 runtime 이 있는지 확인한다(`marina` 명령이 PATH 에 있는지). 확인은 쓸 때마다 다시 하므로 나중에 깔아도 재시작 없이 붙는다.
+discord 는 runtime 이 **있으면 `marina` 명령(CLI)으로만** 부른다(워크트리 생성·서비스 시작). 없으면 표준 git 워크트리(같은 위치·브랜치)+git 잠금으로 혼자 돈다. (B 구현 때 바꿈: Discord 세션을 Claude '워크트리 세션'(`--worktree`)으로 만들면 실측 4 — 깨끗하면 `/exit` 에 묻지 않고 삭제, resume 해도 같음 — 를 runtime 없이 막을 수단이 없다.) dashboard 만 runtime 이 있는지 확인한다(`marina` 명령이 PATH 에 있는지). 확인은 쓸 때마다 다시 하므로 나중에 깔아도 재시작 없이 붙는다.
 
 ### R1. runtime 은 다른 둘의 코드를 부르지 않는다
 
@@ -124,7 +124,7 @@ runtime 쪽 파일에서 `marina_session`·`marina_sessions`·`marina_rooms`·`m
 |---|---|---|
 | `marina-runtimed`(화면 없음) | runtime | 게이트웨이 주소 다시 연결(`_gw_loop`), 도커 GC·워크트리 7일 정리, 고아 리퍼 (자동 업데이트는 대시보드 재시작·터미널 판정에 묶여 있어 당분간 dashboard 에 둔다 — runtime 자체 업데이트는 C 이후) |
 | 대시보드 서버 | dashboard | 웹·모바일·펀넬·이벤트·데스크톱 인계·모바일 outbox. 청소 일은 하지 않는다 |
-| discord 데몬 | discord | 지금 `_discord_loop` 스레드가 하던 봇 루프(#상태·숫자판·typing·bun 봇 관리) |
+| discord 데몬 | discord | 봇 루프(#상태·숫자판·typing·bun 봇). launchd 대신 discord 가 스스로 띄운다 — 세션 훅·`marina session` 명령이 pid 파일을 보고 없을 때만(B). 플러그인이 업데이트되면 1분 안에 스스로 끝나고 다음 훅이 새 코드로 |
 
 셋 다 launchd(맥)·systemd --user(리눅스)로 띄운다. 띄우는 스크립트는 지금 `marina-dashboard.sh` 를 플러그인마다 하나씩 나눈다.
 
