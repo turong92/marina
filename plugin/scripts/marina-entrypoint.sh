@@ -255,6 +255,9 @@ case "$command" in
       *) echo "usage: marina dashboard {start|stop|restart|status|open}" >&2; exit 2 ;;
     esac
     ;;
+  runtimed)
+    exec bash "$SCRIPT_DIR/marina-runtimed.sh" "${@:-status}"
+    ;;
   mobile)
     case "${1:-url}" in
       enable)

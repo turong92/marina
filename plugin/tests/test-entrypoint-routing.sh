@@ -49,4 +49,12 @@ if [[ -s "$restart_launchctl_log" ]]; then
 fi
 rm -rf "$restart_home"
 
+# 분리 A: 플러그인 bin/marina(켜져 있으면 Claude 의 Bash PATH) = entrypoint, `marina runtimed` = 청소 상주 프로그램
+BIN="$HERE/../bin/marina"
+[[ -x "$BIN" ]] || { echo "FAIL: plugin/bin/marina 없음/실행 불가"; exit 1; }
+rt_home="$(mktemp -d)"
+out=$(MARINA_HOME="$rt_home" "$BIN" runtimed status 2>&1 || true)
+echo "$out" | grep -q "runtimed stopped" || { echo "FAIL: bin/marina runtimed status 미라우팅 — $out"; exit 1; }
+rm -rf "$rt_home"
+
 echo "PASS test-entrypoint-routing"

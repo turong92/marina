@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+# 플러그인 bin/ — 플러그인이 켜져 있으면 Claude 의 Bash PATH 에 들어간다(Claude Code 표준). 사람 셸은 ~/.local/bin/marina.
+exec "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../scripts/marina-entrypoint.sh" "$@"
