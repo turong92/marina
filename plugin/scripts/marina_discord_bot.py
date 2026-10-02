@@ -965,7 +965,14 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                 time.sleep(float(os.environ.get("MARINA_ENTER_DELAY") or 0.6))
                 ms._tmux("send-keys", "-t", tmux, "Enter")
                 typed = True
-                _log(f"type {tmux}: 입력함 {cmd[:60]!r}")
+                time.sleep(1.5)
+                after = ms._tmux("capture-pane", "-p", "-t", tmux).stdout or ""
+                box = [ln for ln in after.splitlines() if "❯" in ln]
+                head = cmd[:12]
+                if box and head in box[-1]:              # 아직 입력창에 남아 있다 — Enter 한 번 더
+                    ms._tmux("send-keys", "-t", tmux, "Enter")
+                    _log(f"type {tmux}: 입력창에 남아 Enter 다시")
+                _log(f"type {tmux}: 입력함 {cmd[:60]!r} · 화면 끝: {' | '.join(after.rstrip().splitlines()[-6:])[:400]!r}")
                 break
             time.sleep(poll)
         if not typed:
