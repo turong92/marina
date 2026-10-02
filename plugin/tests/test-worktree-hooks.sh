@@ -82,4 +82,16 @@ marina_worktrees.worktree_status = lambda root: {"clean": False, "repos": [{"nam
 code, msg = h.remove({"worktree_path": sys.argv[1]})
 assert code == 0 and not Path(sys.argv[1]).exists(), "루트만 더러우면 Claude 가 이미 물어본 것 — 지운다"
 PY2
+# 실측(homeserver): 서브레포에도 같은 이름 브랜치가 생긴다(attach 미러) — 지울 때 서브레포 브랜치도 정리(-d)
+SP="$H/sproj"; gi "$SP"; gi "$SP/sub"; printf 'sub/\n' > "$SP/.gitignore"; git -C "$SP" add .gitignore; git -C "$SP" commit -qm ig
+python3 - "$MARINA_HOME/projects.json" "$SP" <<'PY3'
+import json, sys
+d = json.load(open(sys.argv[1])); d["projects"].append({"id": "sproj", "root": sys.argv[2], "subrepos": ["sub"], "worktreeGlobs": [".claude/worktrees/*"]})
+json.dump(d, open(sys.argv[1], "w"))
+PY3
+SW="$(create agent-s "$SP" 2>/dev/null)"
+[ -e "$SW/sub/.git" ] || fail "서브레포 attach"
+git -C "$SP/sub" show-ref --verify --quiet refs/heads/agent-s || fail "서브레포에 같은 이름 브랜치(실측 전제)"
+remove "$SW" 2>/dev/null || fail "remove sproj"
+git -C "$SP/sub" show-ref --verify --quiet refs/heads/agent-s && fail "서브레포 브랜치 agent-s 가 남았다"
 echo "PASS test-worktree-hooks"

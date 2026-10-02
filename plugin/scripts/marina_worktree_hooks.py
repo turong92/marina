@@ -151,6 +151,7 @@ def remove(payload: dict[str, Any]) -> tuple[int, str]:
             from marina_lifecycle import remove_worktree
             remove_worktree(path, force=True, keep_images=False)
             _drop_branch(main, branch)
+            _drop_sub_branches(main, proj, branch)
             _log(f"remove marina {path}")
             return 0, ""
         except Exception as exc:
@@ -158,8 +159,20 @@ def remove(payload: dict[str, Any]) -> tuple[int, str]:
     subprocess.run(["git", "-C", str(main), "worktree", "unlock", str(path)], capture_output=True, timeout=10)
     _git(main, "worktree", "remove", "--force", str(path))
     _drop_branch(main, branch)
+    if proj:
+        _drop_sub_branches(main, proj, branch)
     _log(f"remove default {path}")
     return 0, ""
+
+
+def _drop_sub_branches(main: Path, proj: dict[str, Any], branch: str) -> None:
+    """서브레포에도 같은 이름 브랜치가 생긴다(attach 가 브랜치를 미러, 실측 homeserver) — 같이 정리(-d).
+    루트 폴더와 함께 사라진 서브레포 워크트리 등록이 남아 있으면 브랜치가 '체크아웃 중'으로 막히므로 prune 먼저."""
+    for sub in (proj.get("subrepos") or []):
+        repo = main / str(sub)
+        if (repo / ".git").exists():
+            subprocess.run(["git", "-C", str(repo), "worktree", "prune"], capture_output=True, timeout=30)
+            _drop_branch(repo, branch)
 
 
 def main(argv: list[str]) -> int:
