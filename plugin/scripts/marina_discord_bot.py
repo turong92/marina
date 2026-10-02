@@ -108,8 +108,8 @@ def _pane_busy(name: str) -> tuple[bool, bool]:
     box = max((i for i, l in enumerate(lines) if l.startswith("❯")), default=-1)
     # 입력창 위로 올라가며 빈 줄·구분선·들여쓴 줄(⎿ 팁·할 일 목록 등, 길이 무관)을 건너뛴 첫 줄이 표시 줄이다(리뷰 M1)
     for line in reversed(lines[:max(box, 0)]):
-        if not line.strip() or line.lstrip().startswith("─") or line[:1].isspace():
-            continue
+        if not line.strip() or line.lstrip().startswith(("─", "←")) or line[:1].isspace():
+            continue                          # '← discord · …' = 막 받은 메시지 알림 줄(실사용: 이걸 표시 줄로 봐서 일하는 세션을 쉰다고 봄)
         return True, bool(_SPINNER.search(line))
     return True, False
 
@@ -128,6 +128,7 @@ def _ctx_percent(rec: dict[str, Any]) -> float | None:
 
 _BG_SHELL = re.compile(r"Command running in background with ID: (\w+)")
 _BG_AGENT = re.compile(r"agentId: (\w+)")
+_BG_MOVED = re.compile(r"moved to the background \(ID: (\w+)\)")   # 시간 초과로 하네스가 백그라운드로 옮긴 명령(실측)
 _TASK_DONE = re.compile(r"<task-id>(\w+)</task-id>.*?<status>(\w+)</status>", re.S)
 
 
@@ -168,6 +169,8 @@ def background_tasks(transcript: Path) -> list[dict[str, Any]]:
                 descs[str(b.get("id"))] = str(b["input"].get("description") or b.get("name") or "")
                 if b["input"].get("run_in_background") and b.get("name") in ("Bash", "Agent", "Task"):
                     bg_use[str(b.get("id"))] = "shell" if b.get("name") == "Bash" else "agent"
+                elif b.get("name") == "Bash":
+                    bg_use[str(b.get("id"))] = "moved"
                 if b.get("name") in ("TaskStop", "KillShell", "KillBash"):    # 손으로 끈 건 알림이 없다(실측)
                     done.add(str(b["input"].get("task_id") or b["input"].get("shell_id") or b["input"].get("bash_id") or ""))
             elif b.get("type") == "tool_result":
@@ -175,9 +178,10 @@ def background_tasks(transcript: Path) -> list[dict[str, Any]]:
                 kind = bg_use.get(str(b.get("tool_use_id")))
                 if not kind:
                     continue
+                rx = {"shell": _BG_SHELL, "agent": _BG_AGENT, "moved": _BG_MOVED}[kind]
                 for t in _texts(b.get("content")):
-                    for m in (_BG_SHELL if kind == "shell" else _BG_AGENT).finditer(t):
-                        started[m.group(1)] = {"id": m.group(1), "kind": kind,
+                    for m in rx.finditer(t):
+                        started[m.group(1)] = {"id": m.group(1), "kind": "agent" if kind == "agent" else "shell",
                                                "desc": descs.get(str(b.get("tool_use_id")), "")}
     return [t for i, t in started.items() if i not in done]
 
@@ -315,6 +319,13 @@ def _tasks_tag(r: dict[str, Any]) -> str:
     return "  " + " ".join(([f"⏳{sh}"] if sh else []) + ([f"🤖{ag}"] if ag else [])) if t else ""
 
 
+def _tasks_desc(r: dict[str, Any]) -> str:
+    """무슨 일인지 한 줄(설명만 — 명령 원문 아님)."""
+    t = r.get("tasks") or []
+    d = " · ".join(f"{'⏳' if x['kind'] == 'shell' else '🤖'} {_clean(x['desc'] or x['id'])[:50]}" for x in t[:4])
+    return f"\n-# {d}" if d else ""
+
+
 def _view_button(r: dict[str, Any]) -> dict[str, Any]:
     return {"type": 2, "style": 2, "label": "보기", "custom_id": VIEW_PREFIX + r["channelId"]}
 
@@ -342,7 +353,7 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     out.append({"type": 14})
     out.append(_text(f"### 🔧 작업 중 {len(busy)}" + ("" if busy else "\n-# 없음")))
     left = [r for r in busy if not add(
-        [{"type": 9, "components": [_text(f"{r['emoji'] or '🔧'} {_row(r, proj_w)}{_tasks_tag(r)}")],
+        [{"type": 9, "components": [_text(f"{r['emoji'] or '🔧'} {_row(r, proj_w)}{_tasks_tag(r)}{_tasks_desc(r)}")],
           "accessory": {"type": 2, "style": 4, "label": "정지", "custom_id": STOP_PREFIX + r["channelId"]}}]
         + ([{"type": 1, "components": [_view_button(r)]}] if r.get("tasks") else []))]
     if left:
@@ -350,7 +361,7 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     if bg:
         out.append({"type": 14})
         out.append(_text(f"### ⏳ 백그라운드 {len(bg)}\n-# 턴은 끝났고 뒤에서 셸·에이전트가 도는 중 — 세션 재시작하면 같이 죽는다"))
-        left = [r for r in bg if not add([{"type": 9, "components": [_text(f"{_row(r, proj_w)}{_tasks_tag(r)}")],
+        left = [r for r in bg if not add([{"type": 9, "components": [_text(f"{_row(r, proj_w)}{_tasks_tag(r)}{_tasks_desc(r)}")],
                                             "accessory": _view_button(r)}])]
         if left:
             out.append(_text("-# 외 " + " ".join(f"<#{r['channelId']}>" for r in left)))
@@ -652,8 +663,8 @@ def run_suggest(tmux: str, channel: str, msg: str, settle: float = 6.0, started:
         ms.clear_suggest(sd, str(channel), dc)
 
 
-def _spawn_type(tmux: str, text: str, channel: str, mid: str) -> None:
-    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "type", tmux, text, channel, mid],
+def _spawn_type(tmux: str, text: str, channel: str, mid: str, button: str = "") -> None:
+    subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "type", tmux, text, channel, mid, button],
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
@@ -688,15 +699,19 @@ def say(channel: str, user: str, message: str = "") -> str:
         sug = {}
     finally:
         claim.unlink(missing_ok=True)
+    text = str(sug.get("text") or "")
+    # 누른 게 채널에 남게 — 버튼을 '✓ 보냄: …' 회색(못 누름)으로 바꾼다(실사용: 비밀 답장만 떠서 뭘 보냈는지 몰랐다)
     try:
-        dc._req("PATCH", f"/channels/{channel}/messages/{sug.get('msg')}", {"components": []})
+        dc._req("PATCH", f"/channels/{channel}/messages/{sug.get('msg')}", {"components": [{"type": 1, "components": [
+            {"type": 2, "style": 2, "label": ("✓ 보냄: " + text)[:80], "custom_id": "marina-said", "disabled": True}]}]} if text
+            else {"components": []})
     except ms.SessionError:
         pass
-    text = str(sug.get("text") or "")
     if not text:
         return "지금 누를 추천이 없어"
     # 봇 답장엔 진행 반응을 달지 않는다(✅ 없음 결정과 맞춤, 리뷰 M5)
-    _spawn_type(str(rec.get("tmux") or ""), text if ms.slash_allowed(text) else SUGGEST_MARK + text, str(channel), "")
+    _spawn_type(str(rec.get("tmux") or ""), text if ms.slash_allowed(text) else SUGGEST_MARK + text, str(channel), "",
+                str(sug.get("msg") or ""))
     return "입력할게"
 
 
@@ -745,7 +760,7 @@ def list_skills(rec: dict[str, Any], query: str = "") -> list[str]:
     return sorted(hits, key=lambda n: (not n.lower().startswith(q), n))[:25]
 
 
-def slash(channel: str, user: str, name: str, value: str = "", args: str = "") -> str:
+def slash(channel: str, user: str, name: str, value: str = "", args: str = "", message: str = "") -> str:
     """Discord 슬래시 명령. 기본 명령은 쉬는 순간 입력창에 그대로, 스킬은 '[Discord 슬래시]' 를 붙여(Claude 가 Skill 도구로)."""
     rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
     if not rec or rec.get("kind") in ms.CHAT_KINDS:
@@ -762,8 +777,17 @@ def slash(channel: str, user: str, name: str, value: str = "", args: str = "") -
         text = f"/{name}" + (f" {value.strip()}" if value.strip() else "")
         if not ms.slash_allowed(text):
             return "그 값은 못 넣어"
-    _spawn_type(str(rec.get("tmux") or ""), text, str(channel), "")
-    return "쉬는 순간 입력할게"
+    # 보낸 명령을 채널에 남긴다 — 그 메시지에 ⚙️/🗜️ → 입력·실행 끝나면 ✅, 못 하면 ⚠️(실사용: 보냈는지 몰랐다)
+    shown = text[len(SLASH_MARK):] if text.startswith(SLASH_MARK) else text
+    mid = message                        # 봇이 공개로 남긴 명령 응답 — 거기에 ⚙️ → ✅/⚠️
+    if not mid:
+        try:
+            mid = str(_dc(ms.load_config())._req("POST", f"/channels/{channel}/messages", {
+                "content": f"⌨️ `{shown[:300]}` — 쉬는 순간 입력할게", "allowed_mentions": {"parse": []}}).get("id") or "")
+        except ms.SessionError:
+            mid = ""
+    _spawn_type(str(rec.get("tmux") or ""), text, str(channel), mid)
+    return f"⌨️ `{shown[:300]}` — 쉬는 순간 입력할게"
 
 
 def perm(channel: str, user: str, token: str, allow: bool) -> str:
@@ -814,8 +838,74 @@ def clear_perms(sd: Path, channel: str) -> None:
 
 
 def typeable(text: str) -> bool:
-    """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글과 허용 명령만."""
-    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK))
+    """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글, 이어받기 안내, 허용 명령만."""
+    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK)) or text == ms.RESUME_TEXT
+
+
+def restart_blockers(rec: dict[str, Any]) -> list[str]:
+    """안전 재시작을 막는 이유(훅 기록 기준 — 화면 짐작 아님). 빈 목록이면 지금 재시작해도 된다."""
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    def num(name: str) -> float:
+        try:
+            return float((sd / name).read_text())
+        except (OSError, ValueError):
+            return 0.0
+    out = []
+    # 턴 끝 기록은 Esc·API 오류로 끝난 턴엔 안 남는다 — 10분 지난 턴은 화면만 본다(리뷰 I1)
+    turn = num("turn-at")
+    if (turn > num("stopped-at") and time.time() - turn < 600) or _pane_busy(str(rec.get("tmux") or ""))[1]:
+        out.append("작업 중")
+    t = live_tasks(rec) if ms.tmux_alive(str(rec.get("tmux") or "")) else []
+    if t:
+        out.append(f"백그라운드 {len(t)}")
+    name = str(rec.get("tmux") or "")
+    if name and ms.tmux_alive(name):
+        tail = (ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()[-8:]
+        if any(l.strip() == "⏺ main" for l in tail):    # 아래 에이전트 목록 = SendMessage 로 맡긴 팀 에이전트(재시작하면 같이 죽는다, 실사용)
+            out.append("팀 에이전트 일하는 중")
+    if (sd / "question.json").exists():
+        out.append("질문 답 기다림")
+    if list(sd.glob("perm-*.json")):
+        out.append("권한 버튼 기다림")
+    tr = _session_transcript(rec)
+    try:
+        if tr and time.time() - tr.stat().st_mtime < 30:
+            out.append("방금 메시지·작업 기록이 움직임")
+    except OSError:
+        pass
+    return out
+
+
+def safe_restart(refs: list[str], wait: float = 6 * 3600.0, poll: float = 15.0,
+                 log: Any = None) -> tuple[list[str], list[str]]:
+    """막는 이유가 없을 때만 하나씩 재시작한다. 풀릴 때까지 기다리다 시간이 지나면 남은 것을 돌려준다."""
+    pending, done, failures = list(dict.fromkeys(refs)), [], []
+    end = time.time() + wait
+    while pending:
+        for ref in list(pending):
+            try:
+                rec = ms.find_session(ref)
+            except ms.SessionError:
+                pending.remove(ref)          # 기다리는 사이 지워진 세션 — 나머지는 계속(리뷰 S3)
+                continue
+            why = restart_blockers(rec) if ms.tmux_alive(str(rec.get("tmux") or "")) else []
+            if why:
+                continue
+            ms.tmux_stop(str(rec.get("tmux") or ""))
+            started, failed = ms.cmd_start(ref)
+            pending.remove(ref)
+            if started:
+                done.append(ref)
+            else:
+                failures.append(ref)         # 꺼진 채 남았다 — 성공으로 세지 않는다(리뷰 I4)
+            if log:
+                log(f"✓ 재시작: {ref}" if started else f"✗ {failed}")
+        if not pending or time.time() >= end:
+            break
+        if log:
+            log("기다리는 중: " + ", ".join(f"{r}({'·'.join(restart_blockers(ms.find_session(r)))})" for r in pending))
+        time.sleep(poll)
+    return done, pending + failures
 
 
 def type_timeout(text: str) -> float:
@@ -823,8 +913,21 @@ def type_timeout(text: str) -> float:
     return 120.0 if text.startswith(SUGGEST_MARK) else 1800.0
 
 
+def _restore_suggest(channel: str, msg: str, text: str) -> None:
+    """누른 추천을 못 쳤다(세션이 계속 바쁨) — 조용히 사라지지 않게 버튼을 '⚠️ 다시' 로 되살린다(실사용: '둘다해' 유실)."""
+    rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
+    if not rec or not rec.get("stateDir"):
+        return
+    try:
+        _dc(ms.load_config())._req("PATCH", f"/channels/{channel}/messages/{msg}", {"components": [{"type": 1, "components": [
+            {"type": 2, "style": 1, "label": ("⚠️ 못 보냄 · 다시: " + text)[:80], "custom_id": SAY_PREFIX + str(channel)}]}]})
+    except ms.SessionError:
+        return
+    ms._write_json(Path(str(rec["stateDir"])) / "suggest.json", {"text": text, "msg": str(msg)})
+
+
 def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, settle: float = 3.0,
-              timeout: float = 1800.0) -> None:
+              timeout: float = 1800.0) -> bool:
     """Discord 로 온 /compact·/model X·/effort X: 세션이 쉬고 입력창이 정말 비었을 때만 직접 친다(허용 목록은 훅이 거른다).
     권한·선택 창이 떠 있으면 Enter 가 '승인'이 되므로 치지 않는다(리뷰 I1). 대기자끼리는 잠금으로 하나씩(리뷰 I6).
     🗜️/⚙️ → 끝나면 ✅, 못 하면 ⚠️ — 어떤 길로 끝나도 표시가 남지 않게(리뷰 I4)."""
@@ -848,14 +951,14 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                 break
             except OSError:
                 if time.time() > end:
-                    return
+                    return False
                 time.sleep(poll)
         time.sleep(settle)                   # Claude 가 '실행할게' 답하고 턴을 끝낼 틈
         typed = False
         while time.time() < end:
             alive, busy = _pane_busy(tmux)
             if not alive:
-                return
+                return False
             if not busy and _input_empty(tmux):
                 ms._tmux("send-keys", "-t", tmux, "-l", cmd)
                 ms._tmux("send-keys", "-t", tmux, "Enter")
@@ -863,17 +966,18 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                 break
             time.sleep(poll)
         if not typed:
-            return
+            return False
         seen, start = False, time.time()
         while time.time() < end:             # 명령이 돌기 시작했다가(짧으면 못 볼 수도) 끝날 때까지
             time.sleep(poll)
             alive, busy = _pane_busy(tmux)
             if not alive:
-                return
+                return typed
             seen = seen or busy
             if not busy and (seen or time.time() - start > 10 * poll):
                 ok = True
                 break
+        return typed          # 친 것까지가 성공 — 그 턴이 길어 끝을 못 봐도 입력은 들어갔다(리뷰 C1)
     finally:
         if dc is not None:
             for fn, e in ((dc.remove_reaction, emoji), (dc.add_reaction, "✅" if ok else "⚠️")):
@@ -1036,7 +1140,7 @@ def main(argv: list[str]) -> int:
     pm.add_argument("--token", required=True); pm.add_argument("--allow", action="store_true")
     sc = sub.add_parser("slash-cmd")
     sc.add_argument("--channel", required=True); sc.add_argument("--user", required=True); sc.add_argument("--name", required=True)
-    sc.add_argument("--value", default=""); sc.add_argument("--args", default="")
+    sc.add_argument("--value", default=""); sc.add_argument("--args", default=""); sc.add_argument("--message", default="")
     sk = sub.add_parser("skills")
     sk.add_argument("--channel", required=True); sk.add_argument("--query", default="")
     sub.add_parser("commands")
@@ -1046,6 +1150,7 @@ def main(argv: list[str]) -> int:
     sg.add_argument("tmux"); sg.add_argument("channel"); sg.add_argument("msg"); sg.add_argument("started", type=float)
     ty = sub.add_parser("type")
     ty.add_argument("tmux"); ty.add_argument("text"); ty.add_argument("channel"); ty.add_argument("mid")
+    ty.add_argument("button", nargs="?", default="")
     vw = sub.add_parser("view")
     vw.add_argument("--channel", required=True)
     vw.add_argument("--user", required=True)
@@ -1063,7 +1168,7 @@ def main(argv: list[str]) -> int:
         return 0
     if a.cmd == "slash-cmd":
         try:
-            print(slash(a.channel, a.user, a.name, a.value, a.args))
+            print(slash(a.channel, a.user, a.name, a.value, a.args, a.message))
         except ms.SessionError as exc:
             print(str(exc))
         return 0
@@ -1085,7 +1190,10 @@ def main(argv: list[str]) -> int:
         return 0
     if a.cmd == "type":
         if typeable(a.text):
-            run_slash(a.tmux, a.text, a.channel, a.mid, timeout=type_timeout(a.text))
+            typed = run_slash(a.tmux, a.text, a.channel, a.mid,
+                              timeout=float(os.environ.get("MARINA_TYPE_TIMEOUT") or type_timeout(a.text)))
+            if not typed and a.button:
+                _restore_suggest(a.channel, a.button, a.text[len(SUGGEST_MARK):] if a.text.startswith(SUGGEST_MARK) else a.text)
         return 0
     if a.cmd == "view":
         try:

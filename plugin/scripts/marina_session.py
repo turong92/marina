@@ -588,7 +588,7 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
     run = list(argv)
     if notify_ref:
         # claude 가 스스로 끝나면 채널에 알린다. kill-session(stop·rm)은 셸째 죽어 알리지 않는다.
-        notify = shlex.join([sys.executable, str(Path(__file__).resolve()), "notify-exit", notify_ref])
+        notify = shlex.join(_hook_entry() + ["notify-exit", notify_ref])
         # 알림은 떼어 보내 셸이 바로 끝나게 한다("기동 직후 죽음"을 tmux_alive 가 놓치지 않게).
         # nohup 은 셸 종료 시 tmux 의 HUP 과 경쟁해 같이 죽었다(실측) — 부모가 먼저 HUP 를 무시하고 띄운다.
         run = ["/bin/sh", "-c", f'"$@"; code=$?; trap "" HUP; {notify} "$code" >/dev/null 2>&1 </dev/null &', "sh"] + run
@@ -861,9 +861,63 @@ def _spawn_slash(tmux: str, cmd: str, mid: str) -> None:
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
+RESUME_TEXT = ("[마리나] 재시작 전에 받은 Discord 메시지에 답하지 못하고 끊겼어. "
+               "바로 위 그 메시지에 이어서 답하고, 답은 Discord reply 로 보내 줘.")
+
+
+def unanswered(transcript: Path) -> bool:
+    """기록이 'Discord 로 받은 지시 → (답장 도구 없이) 끝' 으로 끝났나 — 재시작으로 턴이 끊긴 흔적."""
+    try:
+        lines = transcript.read_bytes()[-1_000_000:].decode("utf-8", "replace").splitlines()
+    except OSError:
+        return False
+    pending = False
+    for raw in lines:
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        c = (row.get("message") or {}).get("content") if isinstance(row, dict) else None
+        if row.get("type") == "user":
+            texts = [c] if isinstance(c, str) else [str(b.get("text") or "") for b in c or []
+                                                    if isinstance(b, dict) and b.get("type") == "text"]
+            if texts:
+                pending = bool(_CHANNEL_TAG.search("\n".join(texts)))
+        elif row.get("type") == "assistant" and isinstance(c, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == _REPLY_TOOL for b in c):
+                pending = False
+    return pending
+
+
+def resume_unanswered(rec: dict[str, Any]) -> None:
+    """턴 도중(받은 순간 뒤·턴 끝 전)에 끊긴 지 1시간 안이고, 기록이 답장 없이 끝났을 때만 이어받기를 건다(리뷰 I2).
+    한 번 걸면 10분 안엔 다시 안 건다 — 연달아 재시작해도 두 번 입력되지 않게(리뷰 I3)."""
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    def num(name: str) -> float:
+        try:
+            return float((sd / name).read_text())
+        except (OSError, ValueError):
+            return 0.0
+    turn = num("turn-at")
+    if not (turn > num("stopped-at") and time.time() - turn < 3600) or time.time() - num("resume-at") < 600:
+        return
+    sid = str(rec.get("sessionId") or "")
+    tr = find_transcript(sid) if sid else None
+    if not tr or not unanswered(tr) or not rec.get("tmux"):
+        return
+    (sd / "resume-at").write_text(f"{time.time()}\n")
+    import marina_discord_bot as mb
+    mb._spawn_type(str(rec["tmux"]), RESUME_TEXT, str(rec.get("channelId") or ""), "")
+
+
 def hook_prompt(payload: dict[str, Any]) -> "dict[str, Any] | None":
     """받은 순간: Discord 로 온 '/compact' 는 마리나가 세션이 쉬는 순간 입력창에 직접 친다. Claude 에겐 짧게 답만 하라고."""
     s = _session_from_env()
+    if s and s.get("stateDir"):                   # 턴 시작 — 안전 재시작은 턴 끝(stopped-at)까지 기다린다
+        try:
+            (Path(str(s["stateDir"])) / "turn-at").write_text(f"{time.time()}\n")
+        except OSError:
+            pass
     if not s or s.get("kind") in CHAT_KINDS:      # 채팅방(여자친구)엔 세션 명령을 열지 않는다
         return None
     hit = slash_command(str(payload.get("prompt") or ""), str(s["channelId"]))
@@ -886,16 +940,67 @@ def _drop_ack_reaction(path: Path) -> None:
         path.write_text(json.dumps(acc, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _hook_entry() -> list[str]:
+    """세션이 부를 마리나 명령의 머리. 계약: hook-* 하위명령 이름·인자는 하위 호환으로만 바꾼다 — 떠 있는 세션의 옛 설정이
+    새 코드를 부른다(리뷰 I7). 설치본에서 돌면 고정 입구(~/.marina/bin/marina-session-hook) — 입구가 부를 때마다
+    설치 목록에서 지금 깔린 마리나를 찾으므로 새 버전을 깔면 떠 있는 세션도 재시작 없이 새 코드를 쓴다(형 요청: 재시작 걱정 줄이기).
+    설치본이 아닌 곳(작업 트리·테스트)에서 돌면 예전처럼 직접 경로."""
+    me = Path(__file__).resolve()
+    home = Path(os.environ.get("MARINA_CLAUDE_HOME") or Path.home() / ".claude")
+    plist = home / "plugins" / "installed_plugins.json"
+    try:
+        plugins = json.loads(plist.read_text(encoding="utf-8")).get("plugins") or {}
+    except (OSError, ValueError, AttributeError):
+        plugins = {}
+    key = ""
+    for k, entries in plugins.items():
+        for e in entries if isinstance(entries, list) else []:
+            ip = Path(str(e.get("installPath") or "/nonexistent")).resolve() if isinstance(e, dict) else None
+            if str(k).startswith("marina@") and ip and str(me).startswith(str(ip) + os.sep):
+                key = str(k)
+    if not key:
+        return [sys.executable, str(me)]
+    shim = marina_home() / "bin" / "marina-session-hook"
+    body = f"""#!/bin/sh
+# 마리나 세션 훅 입구 — 부를 때마다 설치 목록에서 지금 깔린 마리나를 찾아 실행한다(새 버전 = 재시작 없이 적용).
+# 파이썬은 쓴 프로세스 것이 아니라 흔한 고정 경로부터(세션마다 다른 venv 가 공유 입구를 바꾸지 않게, 리뷰 I5)
+PY=""
+for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 {shlex.quote(sys.executable)}; do
+  [ -x "$c" ] && PY="$c" && break
+done
+# 같은 이름 설치가 여럿이면 user 범위·가장 최근 것(리뷰 I6)
+ip=$("$PY" -c 'import json,sys
+try:
+    es=[e for e in json.load(open(sys.argv[1]))["plugins"][sys.argv[2]] if isinstance(e, dict)]
+    es.sort(key=lambda e: (e.get("scope") == "user", str(e.get("lastUpdated") or "")), reverse=True)
+    print(es[0]["installPath"])
+except Exception:
+    pass' {shlex.quote(str(plist))} {shlex.quote(key)} 2>/dev/null)
+if [ -n "$ip" ] && [ -f "$ip/scripts/marina_session.py" ]; then exec "$PY" "$ip/scripts/marina_session.py" "$@"; fi
+exec "$PY" {shlex.quote(str(me))} "$@"
+"""
+    try:
+        shim.parent.mkdir(parents=True, exist_ok=True)
+        if not shim.is_file() or shim.read_text() != body:
+            tmp = shim.with_name(f"{shim.name}.{os.getpid()}.tmp")
+            tmp.write_text(body)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, shim)
+    except OSError:
+        return [sys.executable, str(me)]
+    return [str(shim)]
+
+
 def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = False) -> Path:
     """채널 세션 전용 설정(--settings). 사용자 설정과 합쳐진다.
     Stop 훅 = 턴이 끝나면 진행 표시를 뗀다. enabledPlugins = 사용자 범위에서 플러그인을 꺼도 이 세션에서만 켜지게."""
     # 버전 캐시 경로가 지워지면 exit 2 가 claude 종료를 막는다 → 실패해도 0(최종 리뷰 I2). start 가 다시 쓴다.
-    cmd = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-stop"]) + " || true"
+    cmd = shlex.join(_hook_entry() + ["hook-stop"]) + " || true"
     settings = {"enabledPlugins": {"discord@claude-plugins-official": True},
                 "hooks": {"Stop": [{"hooks": [{"type": "command", "command": cmd, "timeout": 15}]}]}}
     if chat_root is not None:
         # 플러그인은 첨부 경로에서 자기 상태 폴더만 막는다 — 폴더 밖 파일은 훅으로 막는다(실측).
-        guard = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-chat-guard",
+        guard = shlex.join(_hook_entry() + ["hook-chat-guard",
                             str(chat_root), str(sdir / "inbox")])
         # 판정기가 어떤 이유로든 죽으면(파이썬 경로 바뀜 등) exit 2 = 도구 호출을 막는다(리뷰 I1)
         guard += " || exit 2"
@@ -910,38 +1015,38 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
         settings["hooks"]["PreToolUse"] = [{"matcher": f"{_REPLY_TOOL}|WebFetch|Write|Edit",
                                             "hooks": [{"type": "command", "command": guard, "timeout": 15}]}]
     # 작업 중 표시: 도구를 쓸 때마다 채널에 '입력 중…'(8초에 한 번) — 👀 만으론 진행 여부를 알 수 없다(형 요청)
-    typing = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-typing"]) + " || true"
+    typing = shlex.join(_hook_entry() + ["hook-typing"]) + " || true"
     settings["hooks"].setdefault("PreToolUse", []).append(       # 첨부 가드(있으면) 뒤에 붙인다 — 가드를 덮지 않게
         {"matcher": "*", "hooks": [{"type": "command", "command": typing, "timeout": 10}]})
     # 받은 순간 👀 — 플러그인은 도착만 해도 👀 를 달아 안 읽은 걸 읽은 것처럼 보였다(형 결정: 실제로 받은 것만)
-    prompt_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-prompt"]) + " || true"
+    prompt_hook = shlex.join(_hook_entry() + ["hook-prompt"]) + " || true"
     settings["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command": typing, "timeout": 10},
                                                         {"type": "command", "command": prompt_hook, "timeout": 10}]}]
     if chat_root is None:
         # 질문 버튼(봇 3단계): 질문이 뜨면 채널에 올리고, 어디서든 답하면 정리한다. 떼어 내서 질문 창을 막지 않는다
-        q_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-question"]) + " || true"
-        qd_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-question-done"]) + " || true"
+        q_hook = shlex.join(_hook_entry() + ["hook-question"]) + " || true"
+        qd_hook = shlex.join(_hook_entry() + ["hook-question-done"]) + " || true"
         settings["hooks"]["PreToolUse"].append({"matcher": "AskUserQuestion",
                                                 "hooks": [{"type": "command", "command": q_hook, "timeout": 10}]})
         settings["hooks"]["PostToolUse"] = [{"matcher": "AskUserQuestion",
                                              "hooks": [{"type": "command", "command": qd_hook, "timeout": 15}]}]
         # 권한 승인 버튼(봇 4): 채널에서 누를 때까지 기다린다 — 훅 제한은 기다림보다 넉넉히
-        p_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-permission"]) + " || true"
+        p_hook = shlex.join(_hook_entry() + ["hook-permission"]) + " || true"
         settings["hooks"]["PermissionRequest"] = [{"hooks": [{"type": "command", "command": p_hook,
                                                               "timeout": int(PERM_WAIT) + 30}]}]
     # 답장 = 끝 표시: reply_to 가 빠지면 훅이 채운다(규칙만으론 잊는다, 실사용)
-    reply_hook = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-reply-to"]) + " || true"
+    reply_hook = shlex.join(_hook_entry() + ["hook-reply-to"]) + " || true"
     settings["hooks"]["PreToolUse"].append({"matcher": _REPLY_TOOL,
                                             "hooks": [{"type": "command", "command": reply_hook, "timeout": 10}]})
     if chat_root is None:
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
         settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress"]}
-        mcp = {"mcpServers": {"marina": {"command": sys.executable,
-                                         "args": [str(Path(__file__).resolve()), "mcp-chat"]}}}
+        entry = _hook_entry()
+        mcp = {"mcpServers": {"marina": {"command": entry[0], "args": entry[1:] + ["mcp-chat"]}}}
         (sdir / "mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if chat_root is not None:
-        mcp = {"mcpServers": {"marina": {"command": sys.executable,
-                                         "args": [str(Path(__file__).resolve()), "mcp-lobby" if lobby else "mcp-chat"]}}}
+        entry = _hook_entry()
+        mcp = {"mcpServers": {"marina": {"command": entry[0], "args": entry[1:] + ["mcp-lobby" if lobby else "mcp-chat"]}}}
         (sdir / "mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     f = sdir / "settings.json"
     f.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -1927,6 +2032,10 @@ def cmd_start(ref: str = "", all_: bool = False) -> tuple[list[str], list[str]]:
             tmux_start(name, cwd, argv,
                        chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
             started.append(label)
+            try:
+                resume_unanswered(s)          # 재시작 전에 받고 못 답한 메시지가 있으면 이어서 답하게
+            except Exception:
+                pass
         except SessionError as exc:
             failed.append(f"{label}: {exc}")
     return started, failed
@@ -2000,6 +2109,10 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("start")
     p.add_argument("ref", nargs="?", default="")
     p.add_argument("--all", action="store_true")
+    p = sub.add_parser("restart")
+    p.add_argument("refs", nargs="*")
+    p.add_argument("--all", action="store_true")
+    p.add_argument("--wait", type=float, default=6 * 3600.0)
     sub.add_parser("hook-stop")
     sub.add_parser("hook-typing")
     sub.add_parser("hook-reply-to")
@@ -2135,6 +2248,23 @@ def main(argv: list[str] | None = None) -> int:
             for x in failed:
                 print(f"✗ {x}", file=sys.stderr)
             return 1 if failed else 0
+        elif a.cmd == "restart":
+            # 안전 재시작: 쉬고(턴 끝)·뒤에서 도는 일·질문·권한 대기가 없을 때만. 아니면 풀릴 때까지 기다린다
+            import marina_discord_bot as mb
+            refs = [f"{x['project']}/{x['task']}" for x in load_sessions()] if a.all else \
+                [f"{find_session(r)['project']}/{find_session(r)['task']}" for r in a.refs]
+            me = _session_from_env()                  # 세션 안에서 부르면 자기 자신은 빼고(자기를 기다리며 멈춘다, 리뷰 I8)
+            if me:
+                mine = f"{me['project']}/{me['task']}"
+                if mine in refs:
+                    refs.remove(mine)
+                    print(f"⚠ 자기 세션({mine})은 빼고 한다 — 다른 곳에서 restart 해 줘", file=sys.stderr)
+            if not refs:
+                raise SessionError("restart <작업…> 또는 restart --all")
+            done, waiting = mb.safe_restart(refs, wait=a.wait, log=print)
+            for x in waiting:
+                print(f"✗ 못 함(계속 바쁨): {x}", file=sys.stderr)
+            return 1 if waiting else 0
         elif a.cmd == "stop":
             s = find_session(a.ref)
             tmux_stop(str(s["tmux"]))

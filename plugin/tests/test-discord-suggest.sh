@@ -50,12 +50,17 @@ check(not (sd / "suggest.json").exists(), "추천 기억도 지움")
 # 누르면: 글은 '[Discord 추천 버튼]' 을 붙여 입력창에
 ms._write_json(sd / "suggest.json", {"text": "1 내가 올릴게", "msg": "R1"})
 typed = []
-mb._spawn_type = lambda tmux, text, channel, mid: typed.append((tmux, text, channel, mid))
+mb._spawn_type = lambda tmux, text, channel, mid, button="": typed.append((tmux, text, channel, mid))
 check("권한" in mb.say(ch, "U2", "R1"), "허용 목록 밖은 못 누른다")
 n = len(log())
 check("지난" in mb.say(ch, "U1", "OLD") and not typed, "(리뷰 I3) 옛 메시지의 버튼은 지금 추천을 치지 않는다")
 check(any(x["m"] == "PATCH" and x["p"].endswith("/messages/OLD") for x in log()[n:]), "옛 버튼은 떼 준다")
+n = len(log())
 out = mb.say(ch, "U1", "R1")
+sent = [x for x in log()[n:] if x["m"] == "PATCH" and x["p"].endswith("/messages/R1")]
+btn = sent and sent[-1]["b"]["components"][0]["components"][0]
+check(btn and btn.get("disabled") is True and "1 내가 올릴게" in btn["label"] and "보냄" in btn["label"],
+      f"(실사용) 누른 게 채널에 남는다 — 버튼을 '✓ 보냄' 으로: {sent}")
 check(typed == [(rec["tmux"], "[Discord 추천 버튼] 1 내가 올릴게", ch, "")], f"입력창에 칠 글(봇 답장엔 반응 안 닮): {typed} {out}")
 ms._write_json(sd / "suggest.json", {"text": "/compact", "msg": "R2"})
 typed.clear(); mb.say(ch, "U1", "R2")
@@ -100,6 +105,28 @@ tr.write_text(row({"type": "user", "message": {"role": "user", "content": "<chan
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
 check(not spawned, "이번 턴에 Discord 답장이 없으면 버튼 안 단다(옛 답장에 붙이지 않음)")
 check("[Discord 추천 버튼]" in " ".join(ms.CHANNEL_RULES.splitlines()), "규칙: 추천 버튼 입력은 Discord 로 답")
+# (실사용) 누른 추천을 2분 안에 못 쳤으면(세션이 계속 바쁨) 조용히 사라지지 않고 버튼이 '⚠️ 다시' 로 살아난다
+os.environ["MARINA_TYPE_TIMEOUT"] = "0.3"
+mb._pane_busy = lambda name: (True, True)
+n = len(log())
+mb.main(["type", rec["tmux"], "[Discord 추천 버튼] 둘다해", ch, "", "R9"])
+pat = [x for x in log()[n:] if x["m"] == "PATCH" and x["p"].endswith("/messages/R9")]
+b = pat and pat[-1]["b"]["components"][0]["components"][0]
+check(b and not b.get("disabled") and "⚠️" in b["label"] and "둘다해" in b["label"] and b["custom_id"] == f"marina-say:{ch}",
+      f"못 쳤으면 다시 누를 수 있는 버튼: {pat}")
+check(json.loads((sd / "suggest.json").read_text()) == {"text": "둘다해", "msg": "R9"}, "다시 누르면 같은 추천")
+# (리뷰 C1) 입력은 됐는데 그 턴이 길어 끝을 못 본 경우 — 되살리지 않는다(두 번 입력 방지)
+(sd / "suggest.json").unlink()
+subprocess.run(base + ["kill-session", "-t", rec["tmux"]], capture_output=True)
+subprocess.run(base + ["new-session", "-d", "-s", rec["tmux"], "sh", "-c", "printf '✻ Worked\\n────\\n❯ \\n────\\n'; exec cat -v"], check=True)
+time.sleep(0.5)
+os.environ["MARINA_TYPE_TIMEOUT"] = "5"      # 기다림(3초) 뒤 치고, 그 턴이 끝나기 전에 시간이 다 됨
+seq = iter([False] + [True] * 100000)
+mb._pane_busy = lambda name: (True, next(seq))
+n = len(log())
+mb.main(["type", rec["tmux"], "[Discord 추천 버튼] 커밋해", ch, "", "R10"])
+check(not any(x["m"] == "PATCH" and x["p"].endswith("/messages/R10") for x in log()[n:]) and not (sd / "suggest.json").exists(),
+      "입력된 추천은 되살리지 않는다")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

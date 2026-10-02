@@ -67,6 +67,12 @@ time.sleep(0.5)
 snap = mb.snapshot()
 me = next(s for s in snap["sessions"] if s["ref"] == "proj/feat/a")
 check(me["busy"] is True, f"작업 중 판정: {me}")
+# (실사용) 막 받은 Discord 메시지 알림 줄('← discord · …')이 표시 줄과 입력창 사이에 끼어도 작업 중
+subprocess.run(base + ["kill-session", "-t", rec["tmux"]], capture_output=True)
+subprocess.run(base + ["new-session", "-d", "-s", rec["tmux"], "sh", "-c",
+                       "printf '✽ Forming… (7s · thinking)\\n← discord · u: 안녕\\n────\\n❯ \\n────\\n'; exec cat -v"], check=True)
+time.sleep(0.5)
+check(mb._pane_busy(rec["tmux"]) == (True, True), "알림 줄은 건너뛰고 표시 줄을 본다")
 check(snap["anyBusy"] is True, "작업 중 세션 있음")
 n = len(log()); mb.dashboard_tick(st)
 patches = [x for x in log()[n:] if x["m"] == "PATCH" and x["p"] == f"/channels/{st['channelId']}/messages/{st['messageId']}"]

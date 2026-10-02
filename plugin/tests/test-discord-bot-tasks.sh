@@ -47,11 +47,16 @@ w(use("t1", "Bash", {"command": "sleep 999", "description": "prod 정리", "run_
   use("t4", "Agent", {"description": "동기 조사", "prompt": "…"}),
   res("t4", [{"type": "text", "text": "결과…\nagentId: async0 (for resuming)"}]),
   use("t5", "Read", {"file_path": "/x"}),
-  res("t5", "Command running in background with ID: bfake1"))
+  res("t5", "Command running in background with ID: bfake1"),
+  # (실사용) 일반 명령이 10분을 넘겨 하네스가 백그라운드로 옮긴 것
+  use("t6", "Bash", {"command": "sleep 9999", "description": "DMS 기다리기"}),
+  res("t6", "Command did not complete within its 600s timeout and was moved to the background (ID: bmoved1). Output is being written to: z"))
 
 tasks = mb.background_tasks(tr)
 got = {(t["id"], t["kind"], t["desc"]) for t in tasks}
-check(got == {("bshell1", "shell", "prod 정리"), ("aagent1", "agent", "코드 리뷰")}, f"도는 일 = 시작 − 끝남: {tasks}")
+check(got == {("bshell1", "shell", "prod 정리"), ("aagent1", "agent", "코드 리뷰"), ("bmoved1", "shell", "DMS 기다리기")},
+      f"도는 일 = 시작 − 끝남(자동으로 옮겨진 것 포함): {tasks}")
+w(note("bmoved1", "completed"))
 
 # 셸 출력·에이전트 기록
 tdir = Path(os.environ["MARINA_CLAUDE_TMP"]) / "claude-501" / tr.parent.name / sid / "tasks"; tdir.mkdir(parents=True)
@@ -73,6 +78,7 @@ def txt(cs):
     return "\n".join([c.get("content", "") for c in cs if c.get("content")] + [txt(c.get("components") or []) for c in cs])
 t = txt(comps)
 check("### ⏳ 백그라운드 1" in t and "⏳1 🤖1" in t and "### 💤 대기 0" in t, f"백그라운드 섹션: {t}")
+check("-# ⏳ prod 정리 · 🤖 코드 리뷰" in t, f"(실사용) 무슨 일인지 설명도 보인다: {t}")
 views = [c for c in comps if c.get("type") == 9 and c["accessory"]["custom_id"] == f"marina-view:{ch}"]
 check(views, f"[보기] 버튼: {comps}")
 # 작업 중이면서 도는 일도 있으면: [정지] 는 그대로, [보기] 는 아래 버튼 줄

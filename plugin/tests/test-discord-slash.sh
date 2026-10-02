@@ -29,8 +29,8 @@ check({"aside-browser", "standup", "superpowers:brainstorming", "superpowers:pla
 check(mb.list_skills(rec, "brain") == ["superpowers:brainstorming"], f"자동완성 거르기: {mb.list_skills(rec, 'brain')}")
 check(len(mb.list_skills(rec, "")) <= 25, "Discord 자동완성 최대 25")
 
-typed = []
-mb._spawn_type = lambda tmux, text, channel, mid: typed.append(text)
+typed = []; mids = []
+mb._spawn_type = lambda tmux, text, channel, mid, button="": (typed.append(text), mids.append(mid))
 check("권한" in mb.slash(ch, "U2", "compact"), "허용 목록 밖은 못 씀")
 mb.slash(ch, "U1", "compact"); mb.slash(ch, "U1", "model", "opus"); mb.slash(ch, "U1", "effort", "high")
 check(typed == ["/compact", "/model opus", "/effort high"], f"기본 명령은 그대로: {typed}")
@@ -38,8 +38,15 @@ typed.clear()
 check("못" in mb.slash(ch, "U1", "model", "a; rm") and not typed, "인자 검사")
 mb.slash(ch, "U1", "skill", "superpowers:brainstorming", "새 기능 아이디어")
 check(typed == ["[Discord 슬래시] /superpowers:brainstorming 새 기능 아이디어"], f"스킬은 표시 붙여 입력: {typed}")
+log = [json.loads(l) for l in (Path(sys.argv[1]) / "log.jsonl").read_text().splitlines()]
+post = [x for x in log if x["m"] == "POST" and x["p"] == f"/channels/{ch}/messages" and "brainstorming" in json.dumps(x["b"], ensure_ascii=False)]
+check(post and mids[-1] == "m-sent", f"(실사용) 보낸 명령이 채널에 보이고, 그 메시지에 ⚙️→✅ 가 붙는다: {post} {mids}")
 typed.clear()
 check("없는" in mb.slash(ch, "U1", "skill", "nope") and not typed, "없는 스킬 거절")
+n = len(json.loads("[" + ",".join((Path(sys.argv[1]) / "log.jsonl").read_text().splitlines()) + "]"))
+mids.clear(); mb.slash(ch, "U1", "compact", message="REPLY1")
+log2 = [json.loads(l) for l in (Path(sys.argv[1]) / "log.jsonl").read_text().splitlines()][n:]
+check(mids == ["REPLY1"] and not any(x["m"] == "POST" for x in log2), "봇 공개 답(명령 응답)이 있으면 거기에 표시 — 따로 안 올림")
 check("[Discord 슬래시]" in ms.CHANNEL_RULES, "규칙: 슬래시 입력은 Skill 도구 + Discord 로 답")
 check(mb.typeable("[Discord 슬래시] /x y") and mb.typeable("/compact") and not mb.typeable("rm -rf ~"), "(리뷰 M6) type 이 받는 글")
 check(mb.type_timeout("[Discord 추천 버튼] a") == 120 and mb.type_timeout("[Discord 슬래시] /x") == 1800 and mb.type_timeout("/compact") == 1800,

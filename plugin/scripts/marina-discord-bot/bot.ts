@@ -36,12 +36,12 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
 client.on(Events.InteractionCreate, async (it) => {
   if (!it.isButton() || !it.customId.startsWith("marina-stop:")) return;
   const channelId = it.customId.slice("marina-stop:".length);
-  await it.deferReply({ ephemeral: true }).catch(() => {});
+  await it.deferUpdate().catch(() => {});      // 비밀 답장 없음(형 결정) — 결과는 ⏹️ 반응·#상태가 보여 준다
   execFile(py, [script, "interrupt", "--channel", channelId, "--user", it.user.id, "--message", ""],
     { timeout: 20000, env: childEnv }, (err, out, errOut) => {
       const msg = (out || errOut || String(err ?? "")).trim() || "처리 못 했어";
       console.log(new Date().toISOString(), "stop-button", channelId, msg);
-      it.editReply(`<#${channelId}> ${msg}`).catch(() => {});
+      if (msg !== "멈췄어") it.followUp({ content: `<#${channelId}> ${msg}`, allowedMentions: { parse: [] } }).catch(() => {});
     });
 });
 
@@ -49,7 +49,7 @@ client.on(Events.InteractionCreate, async (it) => {
 client.on(Events.InteractionCreate, async (it) => {
   if (!it.isButton() || !it.customId.startsWith("marina-view:")) return;
   const channelId = it.customId.slice("marina-view:".length);
-  await it.deferReply({ ephemeral: true }).catch(() => {});
+  await it.deferReply().catch(() => {});        // #상태는 형만 보는 채널 — 공개로
   execFile(py, [script, "view", "--channel", channelId, "--user", it.user.id],
     { timeout: 20000, env: childEnv }, (err, out, errOut) => {
       const msg = (out || errOut || String(err ?? "")).trim() || "못 읽었어";
@@ -61,11 +61,11 @@ client.on(Events.InteractionCreate, async (it) => {
 client.on(Events.InteractionCreate, async (it) => {
   if (!it.isButton() || !it.customId.startsWith("marina-say:")) return;
   const channelId = it.customId.slice("marina-say:".length);
-  await it.deferReply({ ephemeral: true }).catch(() => {});
+  await it.deferUpdate().catch(() => {});   // 비밀 답장 대신 — 결과는 버튼 자리에 '✓ 보냄: …' 으로 남는다
   execFile(py, [script, "say", "--channel", channelId, "--user", it.user.id, "--message", it.message.id],
     { timeout: 20000, env: childEnv }, (err, out, errOut) => {
-      const msg = (out || errOut || String(err ?? "")).trim() || "처리 못 했어";
-      it.editReply({ content: msg, allowedMentions: { parse: [] } }).catch(() => {});
+      const msg = (out || errOut || String(err ?? "")).trim();
+      if (msg !== "입력할게") it.followUp({ content: msg || "처리 못 했어", allowedMentions: { parse: [] } }).catch(() => {});   // 안 됐을 때만 알림
     });
 });
 
@@ -75,7 +75,8 @@ function answer(it: any, channelId: string, q: string, extra: string[]) {
   execFile(py, [askPy, "answer", "--channel", channelId, "--user", it.user.id, "--q", q, `--message=${it.message?.id ?? ""}`, ...extra],
     { timeout: 20000, env: childEnv }, (err, out, errOut) => {
       const msg = (out || errOut || String(err ?? "")).trim() || "처리 못 했어";
-      it.editReply({ content: msg, allowedMentions: { parse: [] } }).catch(() => {});
+      // 잘 됐으면 질문 메시지 자체가 바뀐다 — 안 됐을 때만 공개로 알린다(비밀 답장 없음)
+      if (!["골랐어", "다 골랐어 — 세션에 입력할게"].includes(msg)) it.followUp({ content: msg, allowedMentions: { parse: [] } }).catch(() => {});
     });
 }
 client.on(Events.InteractionCreate, async (it) => {
@@ -89,19 +90,19 @@ client.on(Events.InteractionCreate, async (it) => {
   }
   if (it.isButton() && it.customId.startsWith("mq:")) {
     const [, ch, q, o] = it.customId.split(":");
-    await it.deferReply({ ephemeral: true }).catch(() => {});
+    await it.deferUpdate().catch(() => {});
     answer(it, ch, q, ["--picks", o]);
     return;
   }
   if (it.isStringSelectMenu() && it.customId.startsWith("mqm:")) {
     const [, ch, q] = it.customId.split(":");
-    await it.deferReply({ ephemeral: true }).catch(() => {});
+    await it.deferUpdate().catch(() => {});
     answer(it, ch, q, ["--picks", it.values.join(",")]);
     return;
   }
   if (it.isModalSubmit() && it.customId.startsWith("mqt:")) {
     const [, ch, q] = it.customId.split(":");
-    await it.deferReply({ ephemeral: true }).catch(() => {});
+    if (it.isFromMessage()) await it.deferUpdate().catch(() => {}); else await it.deferReply().catch(() => {});
     answer(it, ch, q, [`--text=${it.fields.getTextInputValue("text")}`]); // = 로 붙여 '-' 로 시작하는 글도 값으로
   }
 });
@@ -138,11 +139,13 @@ client.on(Events.InteractionCreate, async (it) => {
   }
   if (!it.isChatInputCommand()) return;
   if (!["compact", "model", "effort", "stop", "skill"].includes(it.commandName)) return;
-  await it.deferReply({ ephemeral: true }).catch(() => {});
+  await it.deferReply().catch(() => {});        // 공개 — "○○님이 /skill 을 사용함" 밑 이 답에 ⚙️ → ✅/⚠️ 가 붙는다
+  const reply = await it.fetchReply().catch(() => null);
   const ch = await sessionChannel(it);
   const value = it.options.getString("name") ?? it.options.getString("level") ?? "";
   const args = it.options.getString("args") ?? "";
-  runPy(["slash-cmd", "--channel", ch, "--user", it.user.id, "--name", it.commandName, `--value=${value}`, `--args=${args}`],
+  runPy(["slash-cmd", "--channel", ch, "--user", it.user.id, "--name", it.commandName, `--value=${value}`, `--args=${args}`,
+         `--message=${reply?.id ?? ""}`],
     (out) => it.editReply({ content: out || "처리 못 했어", allowedMentions: { parse: [] } }).catch(() => {}));
 });
 
@@ -150,10 +153,10 @@ client.on(Events.InteractionCreate, async (it) => {
 client.on(Events.InteractionCreate, async (it) => {
   if (!it.isButton() || !it.customId.startsWith("mperm:")) return;
   const [, act, ch, token] = it.customId.split(":");
-  await it.deferReply({ ephemeral: true }).catch(() => {});
-  if (ch !== (await sessionChannel(it))) { it.editReply("이 채널의 요청이 아니야").catch(() => {}); return; }   // 위조 방어선
+  await it.deferUpdate().catch(() => {});      // 결과는 요청 메시지 자체가 '✅ 허용함/⛔ 거부함' 으로 바뀐다
+  if (ch !== (await sessionChannel(it))) { it.followUp("이 채널의 요청이 아니야").catch(() => {}); return; }   // 위조 방어선
   runPy(["perm", "--channel", ch, "--user", it.user.id, "--token", token, ...(act === "a" ? ["--allow"] : [])],
-    (out) => it.editReply({ content: out || "처리 못 했어", allowedMentions: { parse: [] } }).catch(() => {}));
+    (out) => { if (!["허용했어", "거부했어"].includes(out)) it.followUp({ content: out || "처리 못 했어", allowedMentions: { parse: [] } }).catch(() => {}); });
 });
 
 client.once(Events.ClientReady, (c) => {
