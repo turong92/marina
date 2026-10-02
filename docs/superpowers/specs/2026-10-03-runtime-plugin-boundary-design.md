@@ -29,7 +29,7 @@
 
 | 필요한 것 | 쓰는 표준 | 효과 |
 |---|---|---|
-| 플러그인 셋 묶기 | Claude Code 마켓플레이스(플러그인 여러 개) + 플러그인 `dependencies`·git 태그 `<플러그인>--v<버전>` | 형은 묶음 플러그인 `marina`(셋을 dependencies 로)를 깔고, 남은 `marina-runtime` 하나만 깐다 |
+| 플러그인 셋 묶기 | Claude Code 마켓플레이스(플러그인 여러 개) | runtime 은 **지금 이름 `marina`(폴더 `plugin/`) 그대로** — 팀원 설치·`~/.local/bin/marina`·codex 가 `marina@marina-dev` 에 묶여 있어서 이름을 바꾸면 다 끊긴다(계획 A 조사). 나머지는 `marina-dashboard`·`marina-discord`. 묶음 플러그인은 안 만든다(형은 셋을 깐다) |
 | 워크트리 만들기·지우기 | Claude Code 훅 `WorktreeCreate`·`WorktreeRemove` | runtime 이 이 둘을 구현한다. 그러면 `claude --worktree`·서브에이전트 `isolation: worktree`·백그라운드 세션이 전부 마리나 격리(포트·compose·links)를 탄다 |
 | 지우기 직전 정리 | 같은 `WorktreeRemove` 훅 — 여러 플러그인의 같은 훅은 다 돈다 | discord 가 자기 `WorktreeRemove` 훅에서 채널·세션을 정리한다. runtime 은 discord 를 몰라도 된다 |
 | "쓰는 중이니 지우지 마" | `git worktree lock --reason` | discord 는 세션이 살아 있는 동안 워크트리를 잠근다. runtime GC 는 잠긴 워크트리를 건너뛴다. git·다른 도구(`git worktree prune` 등)도 같은 뜻으로 읽는다 |
@@ -60,11 +60,10 @@
 ## 4. 레이아웃
 
 ```
-.claude-plugin/marketplace.json   # marina(묶음) · marina-runtime · marina-dashboard · marina-discord
-plugins/runtime/    (지금 plugin/ 의 실행 부분)
-plugins/dashboard/
-plugins/discord/
-plugins/marina/     (dependencies 만 있는 묶음)
+.claude-plugin/marketplace.json   # marina(=runtime) · marina-dashboard · marina-discord
+plugin/             (runtime — 지금 폴더 그대로)
+plugin-dashboard/
+plugin-discord/
 ```
 
 공개 설명서(README)는 runtime 만 다룬다. dashboard·discord 는 "형이 이렇게 쓴다"는 예시로만 남긴다.
@@ -120,7 +119,7 @@ runtime 쪽 파일에서 `marina_session`·`marina_sessions`·`marina_rooms`·`m
 
 | 프로그램 | 플러그인 | 하는 일 |
 |---|---|---|
-| `marina-runtimed`(화면 없음) | runtime | 게이트웨이 주소 다시 연결(`_gw_loop`), 도커 GC·워크트리 7일 정리, 고아 리퍼, 워크트리 warm, 자동 업데이트(**기본 꺼짐**, 팀원은 `~/.marina` 설정으로 켬) |
+| `marina-runtimed`(화면 없음) | runtime | 게이트웨이 주소 다시 연결(`_gw_loop`), 도커 GC·워크트리 7일 정리, 고아 리퍼 (자동 업데이트는 대시보드 재시작·터미널 판정에 묶여 있어 당분간 dashboard 에 둔다 — runtime 자체 업데이트는 C 이후) |
 | 대시보드 서버 | dashboard | 웹·모바일·펀넬·이벤트·데스크톱 인계·모바일 outbox. 청소 일은 하지 않는다 |
 | discord 데몬 | discord | 지금 `_discord_loop` 스레드가 하던 봇 루프(#상태·숫자판·typing·bun 봇 관리) |
 
