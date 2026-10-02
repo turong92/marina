@@ -961,6 +961,8 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                 return False
             if not busy and _input_empty(tmux):
                 ms._tmux("send-keys", "-t", tmux, "-l", cmd)
+                # 글과 Enter 가 한꺼번에 들어가면 붙여넣기로 보고 Enter 를 줄바꿈으로 먹는다(실사용: '입력함' 인데 안 보내짐)
+                time.sleep(float(os.environ.get("MARINA_ENTER_DELAY") or 0.6))
                 ms._tmux("send-keys", "-t", tmux, "Enter")
                 typed = True
                 _log(f"type {tmux}: 입력함 {cmd[:60]!r}")
