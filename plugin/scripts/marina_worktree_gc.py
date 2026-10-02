@@ -191,23 +191,21 @@ def idle_verdict(root: Path, info: dict[str, Any], agents: list[dict[str, Any]] 
     섞은 lastTs 가 아니라). 세션 폴더는 데몬이 부팅 때마다 건드려 "지금"이 되므로 활동 신호가 못 된다
     (실측 2026-09-14: 재시작 후 워크트리 6개 전부 당일 mtime). 세션·프로세스는 ①②가 따로 본다.
     mtime 스캔은 커밋 기준으로 이미 K일을 넘긴 것에만 한다(대부분의 활성 워크트리는 여기서 끝)."""
-    from marina_sessions import _root_has_live_agent
+    from marina_liveness import lock_holds, root_has_live_agent
     days = GC_DAYS_DEFAULT if days is None else int(days)
     now = time.time() if now is None else now
     attached = attached_agents(agents)
-    live_proc = _root_has_live_agent(root, live_cwds or set())
-    if not live_proc:
-        try:   # 마리나 PTY 밖(tmux)에서 도는 Discord 세션도 활동 신호다
-            from marina_session import has_live_session
-            live_proc = has_live_session(root)
-        except Exception:
-            pass
+    live_proc = root_has_live_agent(root, live_cwds or set())
+    # git 표준 잠금 = "쓰는 중"(Discord 세션·Claude Code 세션 등). 죽은 프로세스가 남긴 낡은 잠금은 무시(스펙 실측 6)
+    lock = None if live_proc else lock_holds(root)
     out: dict[str, Any] = {"gcDays": days, "gcIdle": False, "gcIdleDays": None,
                            "gcAgents": len(attached), "gcLiveProcess": bool(live_proc)}
+    if lock:
+        out["gcLocked"] = lock["reason"]
     last_ts = int(info.get("lastCommitTs") if info.get("lastCommitTs") is not None else (info.get("lastTs") or 0))
     if last_ts:
         out["gcIdleDays"] = round((now - last_ts) / 86400, 1)
-    if attached or live_proc:
+    if attached or live_proc or lock:
         return out
     if last_ts and (now - last_ts) / 86400 <= days:
         return out                                   # 커밋/세션이 최근 — 스캔 없이 활성
@@ -371,16 +369,17 @@ def gc_plan(days: int | None = None, roots: list[Path] | None = None, apply: boo
             refresh: bool = False, can_root=None, strict: bool = False) -> list[dict[str, Any]]:
     """유휴 워크트리 목록(가드 포함). apply=True 면 가드 (a)(b) 를 실제로 적용(백업 브랜치 생성).
     삭제는 여기서 하지 않는다."""
-    from marina_sessions import _live_agent_cwds, agents_payload, worktree_info
+    from marina_liveness import live_agent_cwds
+    from marina_worktrees import worktree_info
     days = GC_DAYS_DEFAULT if days is None else int(days)
-    live = _live_agent_cwds(refresh)
+    live = live_agent_cwds(refresh)
     entries: list[dict[str, Any]] = []
     for root in (roots if roots is not None else discover_all_roots(refresh)):
         if is_source_checkout(root) or (can_root and not can_root(root)):
             continue
         try:
             info = worktree_info(root, refresh)
-            agents = agents_payload(root, refresh)
+            agents = None   # 붙은 에이전트 = 살아 있는 프로세스 → live_cwds 가 잡는다(runtime 은 대화 기록을 안 본다)
         except Exception as exc:
             entries.append({"root": str(root), "id": session_id(root), "gcIdle": False, "error": str(exc)[-200:]})
             continue

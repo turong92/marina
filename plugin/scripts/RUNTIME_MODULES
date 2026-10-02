@@ -11,3 +11,9 @@ marina_runtime_target
 marina_ssh_mux
 marina_worktrees
 marina_liveness
+marina_worktree_gc
+marina_docker_gc
+marina_docker_gc_cli
+marina_reaper
+# 아래 ? 는 아직 푸는 중(경고만) — Task 9 에서 비운다
+?marina_lifecycle

@@ -95,6 +95,21 @@ check(v6["gcIdle"] is False and v6["gcIdleDays"] < 1, f"최근 커밋 워크트�
 v7 = gc.idle_verdict(W("wt-nested-dirty"), ms.worktree_info(W("wt-nested-dirty"), refresh=True), [], set(), days=14)
 check(v7["gcIdle"] is False, f"파일 mtime 이 최근이면 유휴 아님: {v7}")
 (W("wt-nested-dirty") / "touched.md").unlink(); gc._mtime_cache.clear()
+# ④ git 잠금(분리 A) — 쓰는 중이라는 표준 신호. Discord 세션이 잠근 건 정리 안 하고, 죽은 Claude 가 남긴 잠금은 무시
+def lock(reason):
+    subprocess.run(["git", "-C", str(src), "worktree", "lock", "--reason", reason, str(W("wt-idle"))], check=True)
+def unlock():
+    subprocess.run(["git", "-C", str(src), "worktree", "unlock", str(W("wt-idle"))], check=True)
+lock("marina-session proj/x")
+v8 = gc.idle_verdict(W("wt-idle"), info_idle, [], set(), days=14)
+check(v8["gcIdle"] is False and "marina-session" in (v8.get("gcLocked") or ""), f"잠긴 워크트리는 정리 안 함: {v8}")
+unlock(); lock("claude session x (pid 999999 start y)")
+v9 = gc.idle_verdict(W("wt-idle"), info_idle, [], set(), days=14)
+check(v9["gcIdle"] is True, f"죽은 Claude 잠금은 무시: {v9}")
+unlock()
+gsrc = Path(gc.__file__).read_text()
+check("marina_session" not in gsrc and "agents_payload" not in gsrc and "marina_sessions" not in gsrc,
+      "GC 는 discord·대시보드 코드를 안 부른다")
 
 # ── 가드 (dry) ─────────────────────────────────────────────────────
 date = "20260914"
