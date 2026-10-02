@@ -26,7 +26,6 @@ from typing import Any
 
 PLUGIN = "plugin:discord@claude-plugins-official"
 API_DEFAULT = "https://discord.com/api/v10"
-MARINA_SH = Path(__file__).resolve().parent / "marina.sh"
 _TASK_RE = re.compile(r"[A-Za-z0-9._/-]+")
 _KEEP_ENV = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "SSH_AUTH_SOCK")
 
@@ -1487,12 +1486,46 @@ def notify_exit(ref: str, code: str) -> None:
         str(s["channelId"]), f"⚠ 세션이 꺼졌어 (종료 코드 {code}) — 다시 켜기: `marina session start {ref}`")
 
 
+def runtime_bin() -> "str | None":
+    """runtime(마리나 실행 격리) 명령 — 있으면 `marina` CLI 로만 부른다(스펙 R0·R2, 분리 B). 없으면 None.
+    MARINA_RUNTIME_BIN 이 있으면 그것만 본다(테스트·고정 경로, 'none' = 없음). 데몬은 PATH 가 짧아
+    ~/.local/bin·플러그인 bin 도 본다."""
+    forced = os.environ.get("MARINA_RUNTIME_BIN")
+    if forced is not None:
+        return forced if forced not in ("", "none") and os.access(forced, os.X_OK) else None
+    for cand in (shutil.which("marina"), str(Path.home() / ".local" / "bin" / "marina"),
+                 str(Path(__file__).resolve().parent.parent / "bin" / "marina")):
+        if cand and os.access(cand, os.X_OK):
+            return cand
+    return None
+
+
 def _run_marina(args: list[str], cwd: Path | None = None, timeout: int = 300) -> subprocess.CompletedProcess:
-    return subprocess.run(["bash", str(MARINA_SH)] + args, cwd=str(cwd) if cwd else None,
+    rb = runtime_bin()
+    if not rb:
+        raise SessionError("runtime(marina) 이 없어")
+    return subprocess.run([rb] + args, cwd=str(cwd) if cwd else None,
                           capture_output=True, text=True, timeout=timeout)
 
 
+def _git_worktree_add(project: str, task: str, base: str = "") -> Path:
+    """runtime 없이 표준 git 워크트리 — runtime 과 같은 위치·브랜치(<root>/.claude/worktrees/<task 의 /:→->, 브랜치=task)."""
+    root = project_root(project)
+    wt = root / ".claude" / "worktrees" / re.sub(r"[/:]", "-", task)
+    if wt.exists():
+        raise SessionError(f"이미 있어: {wt}")
+    wt.parent.mkdir(parents=True, exist_ok=True)
+    has = subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet", f"refs/heads/{task}"]).returncode == 0
+    args = ["worktree", "add", str(wt), task] if has else ["worktree", "add", "-b", task, str(wt)] + ([base] if base else [])
+    r = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=300)
+    if r.returncode != 0:
+        raise SessionError("워크트리 생성 실패: " + (r.stderr or r.stdout).strip()[-800:])
+    return wt
+
+
 def worktree_create(project: str, task: str, base: str = "") -> Path:
+    if not runtime_bin():
+        return _git_worktree_add(project, task, base)
     r = _run_marina(["worktree", "create", task] + ([base] if base else []) + ["--project", project])
     out = (r.stdout or "") + (r.stderr or "")
     if r.returncode != 0:
@@ -1504,7 +1537,10 @@ def worktree_create(project: str, task: str, base: str = "") -> Path:
 
 
 def marina_start(root: Path) -> str:
-    """실행 환경 시작. 실패해도 세션은 연다 — 실행 환경은 나중에 켜도 된다. 성공이면 빈 문자열."""
+    """실행 환경 시작. 실패해도 세션은 연다 — 실행 환경은 나중에 켜도 된다. 성공이면 빈 문자열.
+    runtime 이 없으면 시작할 실행 환경이 없다(조용히 건너뜀)."""
+    if not runtime_bin():
+        return ""
     try:
         r = _run_marina(["start", "--all"], cwd=root, timeout=900)
     except subprocess.TimeoutExpired:
@@ -1910,23 +1946,51 @@ def _dev(s: dict[str, Any]) -> bool:
     return s.get("kind") not in CHAT_KINDS and bool(s.get("root"))
 
 
+def _git_lock_info(root: Path) -> "dict[str, Any] | None":
+    """git 표준 잠금 정보 — runtime 의 판정과 같은 규칙(사본, 스펙 R3): 이유 첫 낱말 = 주인, `(pid N` 이 있고
+    그 프로세스가 죽었으면 낡은 잠금."""
+    try:
+        r = subprocess.run(["git", "-C", str(root), "rev-parse", "--absolute-git-dir"], capture_output=True, text=True, timeout=10)
+        reason = (Path(r.stdout.strip()) / "locked").read_text(encoding="utf-8").strip() if r.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        reason = None
+    if reason is None:
+        return None
+    m = re.search(r"\(pid (\d+)", reason)
+    pid = int(m.group(1)) if m else None
+    stale = False
+    if pid:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            stale = True
+        except OSError:
+            pass
+    return {"reason": reason, "owner": (reason.split() or [""])[0], "pid": pid, "stale": stale}
+
+
 def lock_root(s: dict[str, Any]) -> str:
     """개발 세션 워크트리를 git 표준 잠금으로 '쓰는 중' 표시(스펙 3장) — runtime 삭제·7일 정리가 건너뛴다.
     메인 체크아웃(잠글 수 없음)·남이 잠근 것은 조용히 넘긴다. 반환: 실패 이유(성공이면 "")."""
     if not _dev(s):
         return ""
     try:
-        from marina_liveness import lock_worktree, worktree_lock
         root = Path(str(s["root"]))
-        cur = worktree_lock(root)
+        cur = _git_lock_info(root)
         if cur and cur["owner"] == LOCK_OWNER:
             return ""
         if cur and cur["owner"] == "claude":
             # 데스크톱 claude --worktree 대화를 adopt — Claude 자기 잠금은 /exit 때 스스로 무시하고 지우므로(실측) 지켜 주지
             # 못한다. marina-session 잠금으로 바꿔 건다(리뷰 I4).
             subprocess.run(["git", "-C", str(root), "worktree", "unlock", str(root)], capture_output=True, timeout=10)
-        lock_worktree(root, LOCK_OWNER, f"{s.get('project')}/{s.get('task')}")
-        return ""
+        if cur and cur["owner"] not in (LOCK_OWNER, "claude") and not cur["stale"]:
+            return f"이미 잠김: {cur['reason']}"
+        if cur and cur["owner"] != "claude":     # 낡은 잠금
+            subprocess.run(["git", "-C", str(root), "worktree", "unlock", str(root)], capture_output=True, timeout=10)
+        r = subprocess.run(["git", "-C", str(root), "worktree", "lock", "--reason",
+                            f"{LOCK_OWNER} {s.get('project')}/{s.get('task')}", str(root)],
+                           capture_output=True, text=True, timeout=10)
+        return "" if r.returncode == 0 else (r.stderr or r.stdout).strip()
     except Exception as exc:
         return str(exc)
 
@@ -1935,8 +1999,10 @@ def unlock_root(s: dict[str, Any]) -> None:
     if not _dev(s):
         return
     try:
-        from marina_liveness import unlock_worktree
-        unlock_worktree(Path(str(s["root"])), LOCK_OWNER)
+        root = Path(str(s["root"]))
+        cur = _git_lock_info(root)
+        if cur and cur["owner"] == LOCK_OWNER:
+            subprocess.run(["git", "-C", str(root), "worktree", "unlock", str(root)], capture_output=True, timeout=10)
     except Exception:
         pass
 
