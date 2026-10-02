@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# discord 플러그인 명령(분리 B) — 개발·채팅 세션 = Discord 채널. 플러그인이 켜져 있으면 Claude 의 Bash PATH 에 들어간다.
+D="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts" && pwd -P)"
+PYTHONPATH="$D" exec python3 "$D/marina_session.py" "$@"

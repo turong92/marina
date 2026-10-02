@@ -57,4 +57,14 @@ out=$(MARINA_HOME="$rt_home" "$BIN" runtimed status 2>&1 || true)
 echo "$out" | grep -q "runtimed stopped" || { echo "FAIL: bin/marina runtimed status 미라우팅 — $out"; exit 1; }
 rm -rf "$rt_home"
 
+# 분리 B: discord 명령은 marina-session(discord 플러그인 bin). runtime 의 `marina session …` 은 그쪽으로 넘겨줄 뿐
+SBIN="$HERE/../bin/marina-session"
+[[ -x "$SBIN" ]] || { echo "FAIL: plugin/bin/marina-session 없음"; exit 1; }
+fwd="$(mktemp -d)"; printf '#!/usr/bin/env bash\necho "FORWARDED $*"\n' > "$fwd/marina-session"; chmod +x "$fwd/marina-session"
+out=$(MARINA_SESSION_BIN="$fwd/marina-session" MARINA_HOME="$fwd" bash "$EP" session ls 2>&1 || true)
+echo "$out" | grep -q "FORWARDED ls" || { echo "FAIL: marina session 이 marina-session 으로 안 넘어감 — $out"; exit 1; }
+out=$(MARINA_SESSION_BIN=none MARINA_HOME="$fwd" bash "$EP" session ls 2>&1 || true)
+echo "$out" | grep -q "discord" || { echo "FAIL: discord 플러그인이 없을 때 안내 — $out"; exit 1; }
+rm -rf "$fwd"
+
 echo "PASS test-entrypoint-routing"

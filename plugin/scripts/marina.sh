@@ -447,7 +447,15 @@ print(f"런타임: 원격 ({t.host})" if t.is_remote else "런타임: 로컬")
     session)
       # 워크트리 하나 = Discord 채널 하나 = tmux 안의 claude --channels 하나.
       # 설계: docs/superpowers/specs/2026-10-01-discord-sessions-design.md
-      PYTHONPATH="$SCRIPT_DIR" MARINA_HOME="$MARINA_HOME" exec python3 "$SCRIPT_DIR/marina_session.py" "$@" ;;
+      # discord 플러그인의 명령(marina-session)으로 넘겨줄 뿐 — runtime 은 Discord 코드를 모른다(분리 B, 스펙 R5).
+      _ms="${MARINA_SESSION_BIN:-}"
+      if [[ -z "$_ms" ]]; then
+        for _c in "$(command -v marina-session 2>/dev/null)" "$HOME/.local/bin/marina-session" "$SCRIPT_DIR/../bin/marina-session"; do
+          [[ -n "$_c" && -x "$_c" ]] && { _ms="$_c"; break; }
+        done
+      fi
+      [[ -n "$_ms" && "$_ms" != none && -x "$_ms" ]] || die "marina session 은 discord 플러그인(marina-discord) 명령이야 — 설치돼 있지 않아"
+      MARINA_HOME="$MARINA_HOME" exec "$_ms" "$@" ;;
     worktree)
       # 브랜치명 지정 워크트리 생성(= 작업 시작) — git worktree + 서브레포 attach(브랜치 전체 미러).
       # Claude 자동 워크트리는 claude/<id> 라, feature/{task} 등 원하는 이름으로 만들 때 사용.
