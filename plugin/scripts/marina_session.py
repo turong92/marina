@@ -33,8 +33,9 @@ _KEEP_ENV = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPD
 CHANNEL_RULES = (
     "이 세션은 Discord 채널에 연결돼 있다. 상대는 Discord 만 보고 이 터미널은 보지 않는다.\n"
     "- 결과·질문·실패/막힘·완료는 반드시 discord reply 도구로 보낸다.\n"
-    "- 여러 단계 작업은 단계마다 progress 도구(message_id = 지시 메시지 ID)로 스레드에 진행 한 줄을 남긴다(알림 없음). "
-    "최종 결과는 채널에 새 reply 로 보낸다(알림이 울리도록). 짧은 답은 progress 없이 reply 만.\n"
+    "- 아직 안 끝난 중간 보고(어디까지 했다·지금 무엇을 한다)는 무조건 progress 도구(message_id = 지시 메시지 ID)로 "
+    "스레드에 한 줄 남긴다(알림 없음). 백그라운드 작업 알림 등 상대 메시지 없이 이어서 일할 때는 상대의 마지막 메시지 ID 를 쓴다.\n"
+    "- 채널 reply 는 일이 끝났을 때(최종 결과·완료·실패) 또는 상대의 답이 필요할 때만 새로 보낸다(알림이 울리도록). 짧은 답은 progress 없이 reply 만.\n"
     "- 질문은 번호 선택지 텍스트로 묻는다.\n"
     "- 이미지는 첨부한다. HTML 은 스크린샷과 열어볼 주소를 보낸다. 10MB 를 넘는 파일은 링크로 보낸다.\n"
     "- 스크린샷·HTML 같은 결과물은 share_file 도구에 넘기고 돌려받은 파일을 reply 로 첨부한다(프로젝트 #자료실 에도 모인다).\n"
@@ -591,6 +592,7 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
     r = _tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), cmd)
     if r.returncode != 0:
         raise SessionError(f"tmux 실행 실패: {(r.stderr or r.stdout).strip()}")
+    dashboard_signal()
     time.sleep(float(os.environ.get("MARINA_SESSION_BOOT_WAIT") or 2.0))
     if not tmux_alive(name):
         raise SessionError(f"claude 가 바로 꺼졌어 — 직접 확인: cd {shlex.quote(str(cwd))} && claude --channels {PLUGIN}")
@@ -598,6 +600,7 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
 def tmux_stop(name: str) -> None:
     if tmux_alive(name):
         _tmux("kill-session", "-t", f"={name}")
+        dashboard_signal()
 
 
 # ── 상태 폴더 · 마리나 실행 계층 ─────────────────────────────────────────────
@@ -610,7 +613,7 @@ def write_state_dir(path: Path, channel_id: str, allow: list[str], token_path: P
     # 최상위 allowFrom = DM 허용 목록. 같은 봇을 쓰는 모든 세션이 DM 을 동시에 받으므로 비운다(최종 리뷰 I1).
     access = {"dmPolicy": "allowlist", "allowFrom": [],
               "groups": {channel_id: {"requireMention": False, "allowFrom": list(allow)}},
-              "ackReaction": "👀", "replyToMode": "first"}
+              "replyToMode": "first"}    # 도착 👀(ackReaction)는 끈다 — 실제로 받으면 훅이 단다
     (path / "access.json").write_text(json.dumps(access, ensure_ascii=False) + "\n", encoding="utf-8")
     env = path / ".env"
     if env.is_symlink() or env.exists():
@@ -625,9 +628,19 @@ def remove_state_dir(path: Path) -> None:
 _CHANNEL_TAG = re.compile(r'<channel source=\\?"plugin:discord:discord\\?" chat_id=\\?"(\d+)\\?" message_id=\\?"([^"\\]+)')
 
 
+def _drop_ack_reaction(path: Path) -> None:
+    """예전에 만든 상태 폴더: 도착 👀 를 끈다(실제로 받은 것만 표시, 형 결정)."""
+    try:
+        acc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if isinstance(acc, dict) and acc.pop("ackReaction", None) is not None:
+        path.write_text(json.dumps(acc, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = False) -> Path:
     """채널 세션 전용 설정(--settings). 사용자 설정과 합쳐진다.
-    Stop 훅 = 턴이 끝나면 👀→✅. enabledPlugins = 사용자 범위에서 플러그인을 꺼도 이 세션에서만 켜지게."""
+    Stop 훅 = 턴이 끝나면 진행 표시를 뗀다. enabledPlugins = 사용자 범위에서 플러그인을 꺼도 이 세션에서만 켜지게."""
     # 버전 캐시 경로가 지워지면 exit 2 가 claude 종료를 막는다 → 실패해도 0(최종 리뷰 I2). start 가 다시 쓴다.
     cmd = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-stop"]) + " || true"
     settings = {"enabledPlugins": {"discord@claude-plugins-official": True},
@@ -652,6 +665,8 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
     typing = shlex.join([sys.executable, str(Path(__file__).resolve()), "hook-typing"]) + " || true"
     settings["hooks"].setdefault("PreToolUse", []).append(       # 첨부 가드(있으면) 뒤에 붙인다 — 가드를 덮지 않게
         {"matcher": "*", "hooks": [{"type": "command", "command": typing, "timeout": 10}]})
+    # 받은 순간 👀 — 플러그인은 도착만 해도 👀 를 달아 안 읽은 걸 읽은 것처럼 보였다(형 결정: 실제로 받은 것만)
+    settings["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command": typing, "timeout": 10}]}]
     if chat_root is None:
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
         settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress"]}
@@ -764,7 +779,7 @@ def session_env(sdir: Path) -> dict[str, str]:
 def inbound_messages(transcript: Path, channel_id: str) -> list[str]:
     """세션 기록 끝 2MB 에서 Claude 가 **실제로 읽은** 이 채널 메시지 ID 들(순서대로, 중복 제거).
     읽은 것 = user 기록(턴을 연 메시지) · attachment queued_command(처리 중 끼어든 메시지).
-    queue-operation(도착만 함, 아직 안 읽음)은 세지 않는다 — 안 읽은 메시지에 ✅ 가 붙지 않게(실측 2026-10-01)."""
+    queue-operation(도착만 함, 아직 안 읽음)은 세지 않는다 — 안 읽은 메시지를 읽은 것으로 표시하지 않게(실측 2026-10-01)."""
     try:
         data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
     except OSError:
@@ -803,36 +818,60 @@ def _hook_target(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[s
 
 
 def hook_stop(payload: dict[str, Any]) -> None:
+    """턴 끝: 이번 턴에 읽은 지시들의 진행 표시(👀·도구 이모지·🛑)를 전부 뗀다. 끝났다는 표시는 답장이 한다(✅ 없음, 형 결정 B).
+    백그라운드 알림으로 이어서 일한 턴(새 메시지 없음)이 단 이모지도 여기서 뗀다."""
     items = load_sessions()
     s = _hook_target(payload, items)
     if not s or not s.get("channelId"):
         return
+    dashboard_signal()
     ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), str(s["channelId"]))
-    if not ids:
-        return
-    # 연달아 온 메시지는 한 턴에 처리된다 → 지난번 ✅ 이후 받은 것 전부(최대 20). 기록이 없으면 마지막 것만.
-    mark = Path(str(s.get("stateDir") or "")) / "acked" if s.get("stateDir") else None
-    last = mark.read_text().strip() if mark and mark.is_file() else ""
-    todo = ids[ids.index(last) + 1:] if last in ids else ids[-1:]
-    if not todo:
-        return
+    sd = Path(str(s.get("stateDir") or "/nonexistent"))
     cfg = load_config()
     dc = Discord(read_token(cfg))
-    act = _activity_state(Path(str(s.get("stateDir") or "/nonexistent")))
-    for mid in todo[-20:]:
-        if mark and mark.parent.is_dir():
-            mark.write_text(mid + "\n")          # 메시지마다 전진 — 중간에 잘려도 다음 턴이 처음부터 다시 하지 않게(리뷰 6)
+    # 진행 훅(분리 실행)이 반응을 다는 중이면 끝나길 기다린 뒤 읽는다 — 안 그러면 🔧 가 남는다(실사용).
+    # 최대 3초: Stop 훅 제한 15초 안에 반응 정리·스레드 접기까지 끝내야 한다(리뷰 I5)
+    lockf = _wait_lock(sd / "activity.lock")
+    try:
+        _clear_locked(s, sd, dc, ids)
+    finally:
+        if lockf:
+            lockf.close()
+    if ids:
+        _archive_threads(s, dc, ids)
+
+
+def _wait_lock(path: Path, timeout: float = 3.0) -> Any:
+    import fcntl
+    try:
+        f = open(path, "w")
+    except OSError:
+        return None
+    end = time.time() + timeout
+    while True:
         try:
-            dc.add_reaction(str(s["channelId"]), mid, "✅")
-            for old in {"👀", str(act.get("emoji") or "") if act.get("mid") == mid else ""} - {""}:
-                try:
-                    dc.remove_reaction(str(s["channelId"]), mid, old)
-                except SessionError:
-                    pass
-        except SessionError:
-            pass        # 지워진 메시지(404) 등 — 하나 때문에 나머지와 표시 전진이 멈추면 안 된다(실사용)
-    if mark and mark.parent.is_dir():
-        mark.write_text(todo[-1] + "\n")
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.time() > end:
+                return f          # 못 잡아도 표시는 진행한다
+            time.sleep(0.1)
+
+
+def _clear_locked(s: dict[str, Any], sd: Path, dc: "Discord", ids: list[str]) -> None:
+    """턴 끝·정지 공통: 달아 둔 진행 표시를 기록대로 전부 뗀다. 끝 표시를 먼저 전진 — 중간에 잘려도 같은 일을 반복하지 않게(리뷰 6·B-I4)."""
+    ch = str(s["channelId"])
+    if sd.is_dir():
+        (sd / "stopped-at").write_text(f"{time.time()}\n")   # 이 시각 전에 떠난 진행 훅은 늦게 도착해도 아무것도 안 단다
+        if ids:
+            (sd / "acked").write_text(ids[-1] + "\n")
+    st = _activity_state(sd)
+    clear_marks(dc, ch, st)
+    if sd.is_dir():
+        _write_json(sd / "activity.json", st)
+
+
+def _archive_threads(s: dict[str, Any], dc: "Discord", ids: list[str]) -> None:
     # 끝난 지시의 진행 스레드는 접는다 — 채널 목록에 계속 쌓이지 않게(열면 기록은 그대로)
     # 턴이 끝났으니 이미 읽은 지시는 모두 끝난 것. 접은 스레드는 목록에서 뺀다(다음 턴에 다시 안 부르게).
     tfile = Path(str(s.get("stateDir") or "")) / "threads.json"
@@ -883,6 +922,18 @@ def tool_activity(tool: str, inp: dict[str, Any]) -> tuple[str, str, str]:
     return "⚙️", "작업 중", tool.replace("mcp__", "")[:40]
 
 
+def dashboard_signal_path() -> Path:
+    return marina_home() / "discord-dirty"
+
+
+def dashboard_signal() -> None:
+    """#상태 대시보드에 '바로 다시 그려' 신호(턴 시작·끝, 세션 켜짐·꺼짐). 봇이 없으면 아무도 안 읽는다."""
+    try:
+        dashboard_signal_path().touch()
+    except OSError:
+        pass
+
+
 def _write_json(path: Path, data: Any) -> None:
     """동시에 도는 훅이 반쯤 쓴 파일을 읽지 않게 tmp 에 쓰고 바꾼다."""
     tmp = path.with_name(f".{path.name}.{os.getpid()}")
@@ -907,22 +958,79 @@ def hook_activity(payload: dict[str, Any], min_gap: float = 5.0) -> None:
         return
     sd, ch = Path(sdir), str(s["channelId"])
     import fcntl
-    lockf = open(sd / "activity.lock", "w")
-    try:
-        fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)   # 병렬 도구 호출 — 하나만 지나간다(리뷰 2)
-    except OSError:
-        lockf.close()
-        return
+    if payload.get("hook_event_name") == "UserPromptSubmit":
+        lockf = _wait_lock(sd / "activity.lock")        # 받은 순간 👀 는 버리지 않는다(리뷰 B-M2)
+        if lockf is None:
+            return
+    else:
+        lockf = open(sd / "activity.lock", "w")
+        try:
+            fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)   # 병렬 도구 호출 — 하나만 지나간다(리뷰 2)
+        except OSError:
+            lockf.close()
+            return
     try:
         _hook_activity_locked(payload, s, sd, ch, min_gap)
     finally:
         lockf.close()
 
 
-def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, ch: str, min_gap: float) -> None:
-    stamp = sd / "activity-at"
+def _mark(dc: "Discord", ch: str, st: dict[str, Any], mid: str, emoji: str) -> None:
+    """반응을 달고 activity.json 에 적어 둔다 — 떼는 쪽(턴 끝·정지)은 추론하지 않고 적힌 것을 그대로 뗀다(리뷰 B-I1~I4)."""
+    marked = st.setdefault("marked", {})
+    if emoji in marked.get(mid, []):
+        return
     try:
-        if time.time() - stamp.stat().st_mtime < min_gap:
+        dc.add_reaction(ch, mid, emoji)
+    except SessionError:
+        return
+    marked.setdefault(mid, []).append(emoji)
+
+
+def _unmark(dc: "Discord", ch: str, st: dict[str, Any], mid: str, emoji: str) -> None:
+    marked = st.setdefault("marked", {})
+    if emoji not in marked.get(mid, []):
+        return
+    try:
+        dc.remove_reaction(ch, mid, emoji)
+    except SessionError:
+        pass
+    marked[mid].remove(emoji)
+    if not marked[mid]:
+        marked.pop(mid)
+
+
+def clear_marks(dc: "Discord", ch: str, st: dict[str, Any]) -> None:
+    for mid, emojis in list((st.get("marked") or {}).items()):
+        for e in list(emojis):
+            _unmark(dc, ch, st, mid, e)
+    st["marked"] = {}
+    st.pop("emoji", None)
+
+
+def _stopped_after(sd: Path, at: float) -> bool:
+    try:
+        return at < float((sd / "stopped-at").read_text())
+    except (OSError, ValueError):
+        return False
+
+
+def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, ch: str, min_gap: float) -> None:
+    at = float(payload.get("_at") or time.time())
+    if _stopped_after(sd, at):      # 턴이 끝나기 전에 떠난 훅이 늦게 도착했다 — 끝난 지시에 다시 달지 않는다(실사용)
+        return
+    prompt = payload.get("hook_event_name") == "UserPromptSubmit"
+    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), ch)
+    if prompt:      # 막 받은 메시지는 아직 기록에 없을 수 있다 — 넘겨받은 글에서 직접 읽는다
+        tagged = [m.group(2) for m in _CHANNEL_TAG.finditer(str(payload.get("prompt") or "")) if m.group(1) == ch]
+        if not tagged:
+            return      # 터미널에서 친 말 — 옛 Discord 메시지에 표시하지 않는다(리뷰 B-M3)
+        ids += [m for m in tagged if m not in ids]
+    mid = ids[-1] if ids else ""
+    st = _activity_state(sd)
+    stamp = sd / "activity-at"
+    try:   # 같은 지시면 5초 간격. 새 지시(끼어든 메시지 포함)는 바로(리뷰 B-M1)
+        if not prompt and str(st.get("mid") or "") == mid and time.time() - stamp.stat().st_mtime < min_gap:
             return
     except OSError:
         pass
@@ -932,30 +1040,34 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
         dc._req("POST", f"/channels/{ch}/typing")
     except SessionError:
         pass
-    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), ch)
-    if not ids:
+    if not mid:
         return
-    mid = ids[-1]
-    emoji, label, what = tool_activity(str(payload.get("tool_name") or ""), payload.get("tool_input") or {})
-    st = _activity_state(sd)
+    try:
+        acked = (sd / "acked").read_text().strip()
+    except OSError:
+        acked = ""
+    fresh = ids[ids.index(acked) + 1:] if acked in ids else [mid]
+    emoji, label, what = ("👀", "받음", "") if prompt else \
+        tool_activity(str(payload.get("tool_name") or ""), payload.get("tool_input") or {})
     if st.get("mid") != mid:
-        if st.get("mid") and st.get("emoji"):              # 끼어든 새 지시 — 이전 지시의 진행 이모지는 뗀다(리뷰 3)
-            try:
-                dc.remove_reaction(ch, str(st["mid"]), str(st["emoji"]))
-            except SessionError:
-                pass
-        st = {"mid": mid, "since": time.time()}
+        old = str(st.get("mid") or "")
+        if old:        # 끼어든 새 지시 — 이전 지시는 '받음'(👀)으로 돌리고, 정지 버튼은 지금 지시에만(리뷰 3·B-I1)
+            _unmark(dc, ch, st, old, str(st.get("emoji") or ""))
+            _unmark(dc, ch, st, old, "🛑")
+            if old in fresh:
+                _mark(dc, ch, st, old, "👀")
+        for m in fresh[:-1]:                        # 한 번에 읽은 앞 메시지들도 '받음'
+            if not (st.get("marked") or {}).get(m):
+                _mark(dc, ch, st, m, "👀")
+        st.update(mid=mid, since=time.time())
+        st.pop("emoji", None)
+        dashboard_signal()
+    _mark(dc, ch, st, mid, "🛑")                    # 누르면 봇이 이 세션에 Esc(봇 1단계). 턴 끝에 뗀다
     if st.get("emoji") != emoji:
-        try:
-            dc.add_reaction(ch, mid, emoji)
-            for old in {str(st.get("emoji") or ""), "👀"} - {"", emoji}:
-                try:
-                    dc.remove_reaction(ch, mid, old)
-                except DiscordError:
-                    pass
-            st["emoji"] = emoji
-        except DiscordError:
-            pass
+        _mark(dc, ch, st, mid, emoji)
+        for o in {str(st.get("emoji") or ""), "👀"} - {"", emoji}:
+            _unmark(dc, ch, st, mid, o)
+        st["emoji"] = emoji
     try:
         tid = json.loads((sd / "threads.json").read_text(encoding="utf-8")).get(mid)
     except (OSError, ValueError):
@@ -973,6 +1085,9 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
                 st.update(status_tid=tid, status_msg=str(r.get("id") or ""))
         except SessionError:
             pass
+    if _stopped_after(sd, at):
+        # 잠금을 오래 쥔 사이 턴 끝·정지가 잠금 없이 정리했다 — 방금 단 것을 되돌린다(리뷰 B-I3)
+        clear_marks(dc, ch, st)
     _write_json(sd / "activity.json", st)
 
 
@@ -1258,7 +1373,7 @@ _CHAT_TOOLS_MCP = [
                                     "title": {"type": "string", "description": "결과물 제목(자료실 표시용)"}},
                      "required": ["path"]}},
     {"name": "progress",
-     "description": "긴 작업의 진행 기록을 지시 메시지의 스레드에 남긴다(알림 없이). 같은 message_id 면 같은 스레드에 이어 쓴다. "
+     "description": "아직 안 끝난 작업의 중간 보고를 지시 메시지의 스레드에 남긴다(알림 없이). 같은 message_id 면 같은 스레드에 이어 쓴다. "
                     "최종 결과는 스레드가 아니라 채널에 reply 로 보낸다.",
      "inputSchema": {"type": "object",
                      "properties": {"message_id": {"type": "string", "description": "지시한 Discord 메시지 ID(<channel> 태그의 message_id)"},
@@ -1529,6 +1644,7 @@ def cmd_start(ref: str = "", all_: bool = False) -> tuple[list[str], list[str]]:
                 # 업데이트로 바뀐 스크립트 경로를 다시 적는다
                 guard = sdir / "inbox" if s.get("kind") == "dev-lobby" else root
                 write_settings(sdir, chat_root=guard if chat else None, lobby=s.get("kind") in LOBBY_KINDS)
+                _drop_ack_reaction(sdir / "access.json")
             if chat:
                 ensure_trusted(chat_home())
             cwd, argv = session_launch(s, resume=True)
@@ -1633,7 +1749,10 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "hook-typing":
         # 표시용 — 도구 실행을 기다리게 하지 않는다: 입력만 넘기고 떼어 낸 프로세스가 Discord 를 부른다(리뷰 1)
         try:
-            data = sys.stdin.read()
+            try:
+                data = json.dumps(dict(json.loads(sys.stdin.read() or "{}"), _at=time.time()))
+            except (ValueError, TypeError):
+                data = "{}"
             p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "hook-activity-run"],
                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)
