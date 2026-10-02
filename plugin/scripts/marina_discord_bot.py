@@ -963,9 +963,11 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                 ms._tmux("send-keys", "-t", tmux, "-l", cmd)
                 ms._tmux("send-keys", "-t", tmux, "Enter")
                 typed = True
+                _log(f"type {tmux}: 입력함 {cmd[:60]!r}")
                 break
             time.sleep(poll)
         if not typed:
+            _log(f"type {tmux}: 못 침(쉬는 순간이 안 옴) {cmd[:60]!r}")
             return False
         seen, start = False, time.time()
         while time.time() < end:             # 명령이 돌기 시작했다가(짧으면 못 볼 수도) 끝날 때까지
