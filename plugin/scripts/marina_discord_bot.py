@@ -141,10 +141,15 @@ def _texts(content: Any) -> list[str]:
 
 def background_tasks(transcript: Path) -> list[dict[str, Any]]:
     """지금 뒤에서 도는 일(백그라운드 셸·서브에이전트) = 기록에서 시작됨 − 끝남 알림. 기록 끝 2MB 만 본다."""
+    started, done = _scan_tasks(transcript)
+    return [t for i, t in started.items() if i not in done]
+
+
+def _scan_tasks(transcript: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
     try:
         data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
     except OSError:
-        return []
+        return {}, set()
     descs: dict[str, str] = {}
     bg_use: dict[str, str] = {}          # tool_use_id → 'shell'|'agent' (백그라운드로 띄운 것만, 리뷰 I1)
     started: dict[str, dict[str, Any]] = {}
@@ -182,7 +187,7 @@ def background_tasks(transcript: Path) -> list[dict[str, Any]]:
                     for m in rx.finditer(t):
                         started[m.group(1)] = {"id": m.group(1), "kind": "agent" if kind == "agent" else "shell",
                                                "desc": descs.get(str(b.get("tool_use_id")), "")}
-    return [t for i, t in started.items() if i not in done]
+    return started, done
 
 
 def _task_output(transcript: Path, task_id: str) -> Path | None:
@@ -259,7 +264,8 @@ def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
     tr = _session_transcript(rec)
     if not tr:
         return _pane_team(str(rec.get("tmux") or ""))
-    tasks = background_tasks(tr)
+    started, done = _scan_tasks(tr)
+    tasks = [t for i, t in started.items() if i not in done]
     n = _pane_shells(str(rec.get("tmux") or ""))
     shells = [t for t in tasks if t["kind"] == "shell"]
     keep = {t["id"] for t in (shells[-n:] if n else [])}
@@ -273,7 +279,60 @@ def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
                     keep.add(t["id"])
             except OSError:
                 pass
-    return [t for t in tasks if t["id"] in keep] + _pane_team(str(rec.get("tmux") or ""))
+    out = [t for t in tasks if t["id"] in keep]
+    seen = {t["id"] for t in out}
+    out += [t for t in _recent_agents(tr, born) if t["id"] not in seen and t["id"] not in done]
+    return out + _pane_team(str(rec.get("tmux") or ""))
+
+
+AGENT_FRESH = 300.0      # 빌드·긴 도구 호출로 몇 분 조용한 에이전트도 — 끝난 것은 끝남 알림으로 뺀다(리뷰 I2)
+
+
+def _recent_agents(tr: Path, born: float = 0.0) -> list[dict[str, Any]]:
+    """subagents/ 에서 최근 움직인 에이전트 = 도는 중. 띄운 줄이 기록 끝 2MB 밖이거나(긴 세션) 팀·중첩 에이전트라
+    agentId 형식이 아니어도 잡힌다(실사용: ovation 19MB 기록, 팀장 에이전트가 띄운 손자 에이전트). 설명은 .meta.json."""
+    d = tr.parent / tr.stem / "subagents"
+    now, out = time.time(), []
+    try:
+        files = list(d.glob("agent-*.jsonl"))
+    except OSError:
+        return []
+    for f in files:
+        try:
+            m = f.stat().st_mtime
+        except OSError:
+            continue
+        if now - m > AGENT_FRESH or m < born:
+            continue
+        try:
+            meta = json.loads(f.with_suffix(".meta.json").read_text())
+        except (OSError, ValueError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        out.append({"id": f.stem[len("agent-"):], "kind": "agent", "desc": str(meta.get("description") or meta.get("name") or "")[:80]})
+    return out
+
+
+def _has_recent_agents(rec: dict[str, Any]) -> bool:
+    """4초 판정용 — 파일이 사라지는 경합 등으로 루프를 막지 않게 실패는 '없음'(리뷰 I3)."""
+    try:
+        tr = _session_transcript(rec)
+        return bool(tr and _recent_agents(tr, _session_born(str(rec.get("tmux") or ""))))
+    except Exception:
+        return False
+
+
+_PERM = re.compile(r"^\s*❯\s*1\.\s")
+
+
+def _pane_permission(name: str) -> bool:
+    """터미널 권한 창(Do you want to proceed? / ❯ 1. Yes)에서 멈춤 — 서브에이전트 것은 PermissionRequest 버튼이 안 와서
+    형이 모른 채 '대기'로 보였다(실사용 2026-10-04)."""
+    if not name or not ms.tmux_alive(name):
+        return False
+    lines = (ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()[-12:]
+    return any("Do you want to " in l for l in lines) and any(_PERM.match(l) for l in lines)
 
 
 def snapshot(full: bool = True) -> dict[str, Any]:
@@ -283,13 +342,15 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         if str(rec.get("kind") or "").endswith("lobby") or not rec.get("channelId"):
             continue
         alive, busy = _pane_busy(str(rec.get("tmux") or ""))
-        bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_pane_team(str(rec.get("tmux") or ""))))
+        bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_pane_team(str(rec.get("tmux") or "")))
+                        or (not busy and _has_recent_agents(rec)))
         act = ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent")))
         rows.append({"ref": f"{rec.get('project')}/{rec.get('task')}", "channelId": str(rec["channelId"]),
                      "alive": alive, "busy": busy, "bg": bg, "emoji": str(act.get("emoji") or "") if busy else "",
                      "ctx": _ctx_percent(rec) if alive and full else None,
                      "tasks": live_tasks(rec) if alive and full else [],
-                     "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists()})
+                     "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists(),
+                     "permission": alive and full and _pane_permission(str(rec.get("tmux") or ""))})
     if not full:
         # 뒤에서 도는 일(셸·팀 에이전트)도 '바쁨'으로 쳐서 #상태를 30초마다 — 끝나면 바로 보이게(입력 중 표시는 busy 만)
         return {"sessions": rows, "anyBusy": any(r["busy"] or r["bg"] for r in rows)}
@@ -360,6 +421,7 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     rows = sorted(snap["sessions"], key=lambda r: (r["ref"].split("/", 1)[0], r["ref"]))
     proj_w = max([len(r["ref"].split("/", 1)[0]) for r in rows] + [4])
     rows = [dict(r, busy=True, emoji="❓") if r.get("asking") and not r["busy"] else r for r in rows]   # 답 기다리는 질문
+    rows = [dict(r, busy=True, emoji="🔐") if r.get("permission") and not r["busy"] else r for r in rows]   # 터미널 권한 창
     busy = [r for r in rows if r["busy"]]
     bg = [r for r in rows if r["alive"] and not r["busy"] and r.get("tasks")]
     idle = [r for r in rows if r["alive"] and not r["busy"] and not r.get("tasks")]
