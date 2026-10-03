@@ -889,14 +889,14 @@ def slash(channel: str, user: str, name: str, value: str = "", args: str = "", m
 
 
 _YES = re.compile(r"^\s*❯\s*1\.\s*Yes\s*$")
-_NO = re.compile(r"^\s*2\.\s*No\s*$")
+_NO = re.compile(r"^\s*[23]\.\s*No\s*$")
 PANE_PERM_TTL = 600.0
 
 
 def _pane_prompt(name: str) -> "tuple[str, list[str], str, bool] | None | bool":
     """화면 아래 권한 창 → (서명, 머리말, 명령 앞부분, 누를 수 있나). 창이 없으면 None, 화면을 못 읽으면 False(판단 보류 — 리뷰 I7).
     머리말 = 질문 위로 구분선(─)까지의 설명 줄. 서명은 머리말~선택지 끝까지(다른 창·다른 선택지면 달라진다).
-    누를 수 있음 = 선택지가 정확히 '❯ 1. Yes' / '2. No' 두 개 — 영구 허용·폴더 신뢰 같은 창엔 Enter 를 안 친다(리뷰 C1)."""
+    누를 수 있음 = 1번이 정확히 '❯ 1. Yes', 끝이 'No' 인 2·3지선다 — 그 밖의 창(폴더 신뢰 등)엔 Enter 를 안 친다(리뷰 C1)."""
     if not name or not ms.tmux_alive(name):
         return None
     r = ms._tmux("capture-pane", "-p", "-t", f"={name}:")
@@ -921,7 +921,8 @@ def _pane_prompt(name: str) -> "tuple[str, list[str], str, bool] | None | bool":
             continue
         head.append(t[:100])
     opts = [l for l in lines[q + 1:] if re.match(r"^\s*(❯\s*)?\d+\.", l)]
-    ok = len(opts) == 2 and bool(_YES.match(opts[0])) and bool(_NO.match(opts[1]))
+    # 2지선다(Yes/No) 또는 3지선다(Yes / Yes, and don't ask again… / No) — 어느 쪽이든 1번 평범한 Yes 에서 Enter = 이번 한 번
+    ok = len(opts) in (2, 3) and bool(_YES.match(opts[0])) and bool(_NO.match(opts[-1]))
     sig = hashlib.sha1("\n".join(lines[top:]).encode("utf-8", "replace")).hexdigest()[:16]
     return sig, list(reversed(head))[-3:], _clean(cmd)[:80], ok
 
@@ -981,11 +982,11 @@ def _pane_perm_one(rec: dict[str, Any], names: "set[str] | None") -> None:
     token = uuid.uuid4().hex[:12]
     title = "🔐 **권한 창에서 멈춤** — " + (" · ".join(head) or "터미널 확인 필요") + (f"\n`{cmd}`" if cmd else "")
     tail = ("\n-# 누르면 터미널에 Yes(Enter)/취소(Esc)를 대신 쳐" if ok
-            else "\n-# 선택지가 Yes/No 가 아니라 버튼을 안 달았어 — 터미널에서 골라 줘")
+            else "\n-# 평범한 Yes/No 창이 아니라 버튼을 안 달았어 — 터미널에서 골라 줘")
     body: dict[str, Any] = {"content": title + tail, "allowed_mentions": {"parse": []}}
     if ok:
         body["components"] = [{"type": 1, "components": [
-            {"type": 2, "style": 3, "label": "허용", "custom_id": f"mperm:a:{ch}:{token}"},
+            {"type": 2, "style": 3, "label": "한 번만 허용", "custom_id": f"mperm:a:{ch}:{token}"},
             {"type": 2, "style": 4, "label": "거부", "custom_id": f"mperm:d:{ch}:{token}"}]}]
     try:
         msg = str(_dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", body).get("id") or "")

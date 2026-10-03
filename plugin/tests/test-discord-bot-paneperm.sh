@@ -77,6 +77,15 @@ for d in perm_files():
     check("권한 창이 아니" in mb.perm(ch, "U1", d["token"], True) or keys == [], f"눌러도 안 친다: {keys}")
 check(keys == [], f"Enter 안 감: {keys}")
 pane("✻ Worked\\n────\\n❯ \\n────\\n"); mb.pane_perm_tick()
+# (형 2026-10-04) 3지선다(Yes / Yes, and don't ask again / No) → [한 번만 허용][거부] — 영구 허용은 버튼으로 안 만든다
+keys.clear()
+pane("────\\n Bash command\\n Do you want to proceed?\\n ❯ 1. Yes\\n   2. Yes, and don\\x27t ask again for npm commands\\n   3. No\\n")
+mb.pane_perm_tick()
+last = json.dumps(posts()[-1]["b"], ensure_ascii=False)
+check("한 번만 허용" in last and "mperm:a:" in last and "ask again" not in last.split("components")[1], f"3지선다 버튼: {last}")
+tok = perm_files()[0]["token"]
+check("허용" in mb.perm(ch, "U1", tok, True) and keys == ["Enter"], f"한 번만 허용 → 1번에서 Enter: {keys}")
+pane("✻ Worked\\n────\\n❯ \\n────\\n"); mb.pane_perm_tick()
 # (리뷰 I6) 버튼 올리기 실패 → 다음 판에 다시
 real_dc = mb._dc
 class Boom:
