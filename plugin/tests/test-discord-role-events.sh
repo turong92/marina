@@ -31,6 +31,12 @@ def thread_posts():
     return [x["b"]["content"] for x in log() if x["m"] == "POST" and x["p"].startswith("/channels/")
             and x["p"].endswith("/messages") and x["p"] != f"/channels/{ch}/messages"]
 
+# (리뷰 I4) 오프셋이 없으면(처음·지워짐) 지난 이벤트를 재생하지 않고 지금 끝에서 시작
+(sd / "activity.json").write_text(json.dumps({"mid": "9000"}))
+put({"ev": "start", "ts": 0, "session": "S1", "agent": "old", "role": "qa", "model": "haiku", "effort": "low", "skills": [], "desc": "옛날 일"})
+mb.role_events_tick()
+check(thread_posts() == [], f"옛 이벤트 재생 안 함: {thread_posts()}")
+(sd / "activity.json").unlink()
 # 지시 메시지 없음 → 게시 안 하고 오프셋만 전진
 put({"ev": "start", "ts": 1, "session": "S1", "agent": "a0", "role": "developer", "model": "sonnet", "effort": "medium",
      "skills": ["superpowers:test-driven-development"], "desc": "이전 일"})
@@ -57,6 +63,25 @@ want = ["⚠️ developer 모델 지정(opus) 무시 — 역할표대로 sonnet"
 check(got == want, f"줄 형식: {got}")
 mb.role_events_tick()
 check(len(thread_posts()) == 4, "오프셋 — 같은 줄 두 번 안 올림")
+# (리뷰 I5) 게시 중 예상 밖 예외(네트워크 등)여도 오프셋은 저장 — 같은 줄 반복 게시 없음
+real = ms._progress
+calls = []
+def boom(rec, args):
+    calls.append(args["text"])
+    if len(calls) == 2: raise OSError("network down")
+    return real(rec, args)
+ms._progress = boom
+n0 = len(thread_posts())
+put({"ev": "start", "ts": 6, "session": "S1", "agent": "x1", "role": "-", "model": "inherit", "effort": "", "skills": [], "desc": "하나"},
+    {"ev": "start", "ts": 7, "session": "S1", "agent": "x2", "role": "-", "model": "inherit", "effort": "", "skills": [], "desc": "둘"},
+    {"ev": "start", "ts": 8, "session": "S1", "agent": "x3", "role": "-", "model": "inherit", "effort": "", "skills": [], "desc": "셋"})
+try:
+    mb.role_events_tick()
+except Exception:
+    pass
+mb.role_events_tick(); mb.role_events_tick()
+ms._progress = real
+check(calls.count("🤖 서브에이전트 시작 · 하나") == 1, f"반복 게시 없음: {calls}")
 # 회전(파일이 줄어듦) → 처음부터
 ev.write_text(json.dumps({"ev": "stop", "ts": 5, "session": "S1", "agent": "a2", "role": "-", "model": "inherit", "effort": "",
                           "skills": [], "desc": "코드 찾기", "secs": 12.0, "tokens": {"in": 1, "out": 2, "cache_read": 0, "cache_write": 0},

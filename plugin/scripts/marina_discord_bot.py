@@ -1140,10 +1140,13 @@ def role_events_tick() -> None:
         size = path.stat().st_size
     except OSError:
         return
+    if not off_f.exists():                       # 처음(또는 지워짐) — 지난 일을 지금 스레드에 쏟지 않게 끝에서 시작(리뷰 I4)
+        off_f.write_text(str(size))
+        return
     try:
         off = int(off_f.read_text().strip() or 0)
     except (OSError, ValueError):
-        off = 0
+        off = size
     if off > size:
         off = 0
     if off == size:
@@ -1153,6 +1156,13 @@ def role_events_tick() -> None:
         chunk = fh.read(256_000)
     lines = chunk.split(b"\n")[:-1][:ROLE_EVENTS_MAX]          # 끝나지 않은 마지막 줄은 다음 판에
     by_sid = {str(r.get("sessionId")): r for r in ms.load_sessions() if r.get("sessionId") and r.get("channelId")}
+    try:
+        _role_events_post(lines, off, by_sid, off_f)
+    except Exception as exc:                      # 예상 밖 오류여도 오프셋은 이미 줄마다 저장됨(리뷰 I5)
+        _log(f"role event: {exc!r}")
+
+
+def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_f: Path) -> None:
     for raw in lines:
         off += len(raw) + 1
         try:
@@ -1166,6 +1176,7 @@ def role_events_tick() -> None:
         text = _fmt_role_event(ev)
         if not mid or not text:
             continue
+        off_f.write_text(str(off))                # 보내기 전에 — 보내다 죽어도 같은 줄을 다시 안 보낸다
         try:
             ms._progress(rec, {"message_id": mid, "text": text})
         except ms.SessionError as exc:
