@@ -1021,6 +1021,96 @@ def _pane_answer(rec: dict[str, Any], sd: Path, token: str, d: dict[str, Any], a
     return "허용했어" if allow else "거부했어"
 
 
+def _role_events_path() -> Path:
+    return Path(os.environ.get("ROLE_EVENTS") or Path.home() / ".local/state/roles/events.jsonl")
+
+
+def _fmt_secs(x: Any) -> str:
+    if not isinstance(x, (int, float)):
+        return ""
+    x = int(x)
+    if x < 60:
+        return f"{x}초"
+    if x < 3600:
+        return f"{x // 60}분"
+    return f"{x // 3600}시간 {x % 3600 // 60}분"
+
+
+def _fmt_tokens(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    return f"{round(n / 1000)}k" if n >= 1000 else str(n)
+
+
+def _fmt_role_event(ev: dict[str, Any]) -> str:
+    """역할 이벤트 한 줄(role-hook 형식). 비역할 서브에이전트는 '서브에이전트'."""
+    role = str(ev.get("role") or "-")
+    who = role if role != "-" else "서브에이전트"
+    desc = _clean(str(ev.get("desc") or ""))[:80]
+    kind = ev.get("ev")
+    if kind == "override_blocked":
+        return f"⚠️ {who} 모델 지정({ev.get('asked')}) 무시 — 역할표대로 {ev.get('model')}"
+    if kind == "start":
+        parts = [f"🤖 {who} 시작"]
+        if role != "-":
+            parts.append(f"{ev.get('model')}/{ev.get('effort')}" if ev.get("effort") else str(ev.get("model")))
+            sk = [str(x).split(":")[-1] for x in ev.get("skills") or []]
+            if sk:
+                parts.append(", ".join(sk))
+        if desc:
+            parts.append(desc)
+        return " · ".join(parts)
+    if kind == "stop":
+        t = ev.get("tokens") if isinstance(ev.get("tokens"), dict) else {}
+        n = sum(int(t.get(k) or 0) for k in ("in", "out", "cache_write"))
+        return " · ".join([f"✅ {who} 끝"] + [x for x in (_fmt_secs(ev.get("secs")), _fmt_tokens(n)) if x])
+    return ""
+
+
+ROLE_EVENTS_MAX = 20
+
+
+def role_events_tick() -> None:
+    """role-hook 이벤트 파일을 오프셋부터 읽어, Discord 세션이면 지금 지시 메시지 스레드에 한 줄씩(역할 에이전트 2026-10-04).
+    파일이 줄었으면(회전) 처음부터. 깨진 줄·남의 세션·지시 메시지 없는 세션은 건너뛰고 오프셋만 전진."""
+    path, off_f = _role_events_path(), ms.marina_home() / "role-events.offset"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    try:
+        off = int(off_f.read_text().strip() or 0)
+    except (OSError, ValueError):
+        off = 0
+    if off > size:
+        off = 0
+    if off == size:
+        return
+    with open(path, "rb") as fh:
+        fh.seek(off)
+        chunk = fh.read(256_000)
+    lines = chunk.split(b"\n")[:-1][:ROLE_EVENTS_MAX]          # 끝나지 않은 마지막 줄은 다음 판에
+    by_sid = {str(r.get("sessionId")): r for r in ms.load_sessions() if r.get("sessionId") and r.get("channelId")}
+    for raw in lines:
+        off += len(raw) + 1
+        try:
+            ev = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        rec = by_sid.get(str(ev.get("session") or "")) if isinstance(ev, dict) else None
+        if not rec:
+            continue
+        mid = str(ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent"))).get("mid") or "")
+        text = _fmt_role_event(ev)
+        if not mid or not text:
+            continue
+        try:
+            ms._progress(rec, {"message_id": mid, "text": text})
+        except ms.SessionError as exc:
+            _log(f"role event: {exc}")
+    off_f.write_text(str(off))
+
+
 def perm(channel: str, user: str, token: str, allow: bool) -> str:
     """권한 요청 [허용]/[거부] — 기다리는 훅이 읽어 결정한다. 먼저 누른 것만(O_EXCL, 리뷰 I1).
     허용 목록이 빈 채널(역할로 보이는 누구나)은 승인 못 한다 — 메시지와 달리 실행 권한이다(리뷰 I6)."""
@@ -1366,6 +1456,10 @@ class Loop:
             pane_perm_tick()
         except Exception as exc:
             _log(f"pane_perm failed: {exc!r}")
+        try:
+            role_events_tick()
+        except Exception as exc:
+            _log(f"role_events failed: {exc!r}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
