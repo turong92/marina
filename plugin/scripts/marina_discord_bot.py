@@ -364,7 +364,12 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         load = os.getloadavg()[0]
     except OSError:
         load = 0.0
-    return {"usage": _usage(), "diskFree": free, "load": load, "sessions": rows,
+    use = _usage()
+    try:
+        ru = role_usage(_week_start(use))
+    except Exception:
+        ru = []
+    return {"usage": use, "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
             "anyBusy": any(r["busy"] for r in rows)}
 
 
@@ -429,7 +434,7 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     idle = [r for r in rows if r["alive"] and not r["busy"] and not r.get("tasks")]
     off = [r for r in rows if not r["alive"]]
     # 메시지당 구성요소 40개(중첩 포함) — 아래 대기·꺼짐·꼬리말 몫(6)을 남기고 넘치면 '외 N개'(리뷰 I2)
-    room = [40 - 6 - _count(out) - 4]
+    room = [40 - 6 - (2 if snap.get("roleUsage") else 0) - _count(out) - 4]
     def add(block: list[dict[str, Any]]) -> bool:
         if _count(block) > room[0]:
             return False
@@ -450,6 +455,9 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
                                             "accessory": _view_button(r)}])]
         if left:
             out.append(_text("-# 외 " + " ".join(f"<#{r['channelId']}>" for r in left)))
+    if snap.get("roleUsage"):
+        out.append({"type": 14})
+        out.append(_text(_role_block(snap["roleUsage"])))
     out.append({"type": 14})
     out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) for r in idle)))
     if off:
@@ -1068,6 +1076,60 @@ def _fmt_role_event(ev: dict[str, Any]) -> str:
 
 
 ROLE_EVENTS_MAX = 20
+ROLE_ROWS = 6
+
+
+def _week_start(usage: list[dict[str, Any]]) -> float:
+    """이번 주 시작 = 주간 한도 리셋 − 7일. 모르면 최근 7일."""
+    for w in usage or []:
+        if w.get("key") == "weekly" and isinstance(w.get("resetsAt"), (int, float)):
+            return float(w["resetsAt"]) - 7 * 86400
+    return time.time() - 7 * 86400
+
+
+def role_usage(since: float) -> list[dict[str, Any]]:
+    """역할별 호출 수·토큰(입력+출력+캐시 쓰기 — 캐시 읽기는 싸서 뺀다)·모델. 많은 순, 비역할·넘친 역할은 '기타'."""
+    try:
+        with open(_role_events_path(), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 4_000_000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    agg: dict[str, dict[str, Any]] = {}
+    for raw in lines:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("ev") != "stop" or float(ev.get("ts") or 0) < since:
+            continue
+        t = ev.get("tokens") if isinstance(ev.get("tokens"), dict) else {}
+        role = str(ev.get("role") or "-")
+        role = "기타" if role == "-" else role
+        a = agg.setdefault(role, {"role": role, "calls": 0, "tokens": 0, "models": []})
+        a["calls"] += 1
+        a["tokens"] += sum(int(t.get(k) or 0) for k in ("in", "out", "cache_write"))
+        for m in ev.get("models") or []:
+            m = str(m).replace("claude-", "", 1)
+            if m not in a["models"]:
+                a["models"].append(m)
+    rows = sorted((a for a in agg.values() if a["role"] != "기타"), key=lambda a: -a["tokens"])
+    other = [agg["기타"]] if "기타" in agg else []
+    if len(rows) > ROLE_ROWS - 1:
+        extra = rows[ROLE_ROWS - 1:]
+        rows = rows[:ROLE_ROWS - 1]
+        o = other[0] if other else {"role": "기타", "calls": 0, "tokens": 0, "models": []}
+        for a in extra:
+            o["calls"] += a["calls"]; o["tokens"] += a["tokens"]
+        other = [o]
+    return rows + other
+
+
+def _role_block(rows: list[dict[str, Any]]) -> str:
+    return "### 🤖 이번 주 역할별" + "".join(
+        f"\n`{r['role']:<12}{r['calls']:>3}회  {_fmt_tokens(r['tokens']):>5}`" + (f" {','.join(r['models'])}" if r["models"] and r["role"] != "기타" else "")
+        for r in rows)
 
 
 def role_events_tick() -> None:
