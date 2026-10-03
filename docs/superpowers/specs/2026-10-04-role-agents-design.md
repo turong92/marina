@@ -1,6 +1,6 @@
 # 역할 에이전트 — 정해진 대로, 보이게, 아끼게
 
-2026-10-04 · 상태: 초안(형 검토 대기)
+2026-10-04 · 상태: 형 결정 반영(역할표·shared git)
 
 ## 1. 왜
 
@@ -50,27 +50,27 @@ model: sonnet
 effort: medium
 skills: [superpowers:test-driven-development]
 tools: Read, Edit, Write, Bash, Grep, Glob
-x-executor: claude          # claude | codex — 다른 하네스가 읽는 칸(Claude 는 무시)
 ---
 ```
 
 연결: Claude 는 `~/.claude/agents/<역할>.md` 심볼릭 링크, Codex 는 `~/.codex/agents/<역할>.toml` shim(정본을 읽게만). 리뷰어와 똑같다.
 
-**역할표 초안** — 형이 고친다:
+**역할표** (형 결정 2026-10-04 — Codex 없음, 1주 사용량 보고 조정):
 
-| 역할 | 실행 | 모델 | effort | 스킬 | 권한 | 하는 일 |
-|---|---|---|---|---|---|---|
-| planner 기획자 | claude | opus | high | brainstorming·writing-plans | 읽기 + 문서 쓰기 | 요구 → 스펙 초안·작업 목록 + **정해야 할 것 목록** |
-| designer 디자이너 | claude | opus | medium | (형 UI 취향 메모) | 읽기 + 목업 파일 | 화면·흐름 설계, HTML 목업 + 정해야 할 것 목록 |
-| developer 개발자 | claude | sonnet | medium | test-driven-development | 전부(워크트리 안) | 작업 하나 TDD 구현, 테스트 결과 반환 |
-| qa | claude | sonnet | low | aside-browser | 읽기 + 브라우저 | 실제 화면 눌러 보고 스크린샷·재현 단계 |
-| code-reviewer 리뷰어 | codex | gpt-5.6-sol | high | — | 읽기 전용 | 변경분 리뷰(기존 정본) |
+| 역할 | 모델 | effort | 스킬 | 권한 | 하는 일 |
+|---|---|---|---|---|---|
+| planner 기획자 | opus (Opus 5.5) | high | brainstorming·writing-plans | 읽기 + 문서 쓰기 | 요구 → 스펙 초안·작업 목록 + **정해야 할 것 목록** |
+| designer 디자이너 | sonnet (Sonnet 5.5) | medium | (형 UI 취향 메모) | 읽기 + 목업 파일 | 화면·흐름 설계, HTML 목업 + 정해야 할 것 목록 |
+| developer 개발자 | sonnet | medium | test-driven-development | 전부(워크트리 안) | 작업 하나 TDD 구현, 테스트 결과 반환 |
+| qa | haiku (Haiku 4.5) | low | aside-browser | 읽기 + 브라우저 | 실제 화면 눌러 보고 스크린샷·재현 단계 |
+| code-reviewer 리뷰어 | opus | high | — | 읽기 전용 | 변경분 리뷰(기존 정본, model 만 sonnet→opus) |
 
-- 무거운 판단(기획·디자인)만 opus, 반복 구현은 sonnet, 리뷰는 Codex 한도로 뺀다 → 절감.
+- 기준 = 불리는 횟수 × 판단 난이도. 제일 많이 불리는 개발자를 Sonnet 으로 두는 게 절감의 대부분. 기획·리뷰는 작업당 1~2번이라 Opus.
+- Fable 5.1 은 기본으로 안 쓴다(형이 지정할 때만).
 - **서브에이전트는 형에게 직접 못 묻는다.** 기획자·디자이너는 묻지 않고 "정해야 할 것" 목록을 돌려주고, 지휘 세션이 형에게 버튼으로 묻는다.
-- codex 실행 역할은 지휘 세션이 `shared/bin/role-run <역할> <할 일 파일>` 로 부른다(`codex exec` + shim, 같은 시작·끝 로그를 남김). Agent 도구로 부르면 훅이 막고 role-run 을 쓰라고 돌려준다.
+- Codex 실행 역할은 나중에(형이 Codex 를 다시 쓰게 되면). 정본은 모델 중립으로 써서 그때 shim 만 붙인다.
 
-정본 폴더는 git 밖이다 → 이번에 `shared/` 를 git 레포로 만든다(이력·되돌리기). push 는 안 한다(로컬).
+정본 폴더는 git 밖이었다 → `shared/` 를 로컬 git 레포로 만든다(형 결정, push 안 함).
 
 ### 4.2 고정 훅 (`shared/bin/role-hook`, 사용자 설정 `~/.claude/settings.json` 에 등록)
 
@@ -78,7 +78,6 @@ x-executor: claude          # claude | codex — 다른 하네스가 읽는 칸(
 
 - **PreToolUse(Agent)**: `subagent_type` 이 역할이면
   - `model` 인자가 있으면 지우고(`updatedInput`) 이벤트에 `override_blocked` 기록 — frontmatter 가 이긴다.
-  - `x-executor: codex` 역할이면 거부 + "role-run 으로" 안내.
 - **SubagentStart / SubagentStop**: 이벤트를 `~/.local/state/roles/events.jsonl` 에 한 줄씩.
   - 시작: 시각·세션·agent_id·역할·모델·effort·스킬·할 일 설명(Agent 입력의 description).
   - 끝: 시각·agent_id·걸린 시간·토큰(기록 파일 usage 합: 입력·출력·캐시 읽기)·모델별.
@@ -113,20 +112,18 @@ marina-discord 는 이벤트 파일만 읽는다 — 역할 쪽 코드를 import
 
 ## 5. 경계
 
-- `shared/` (역할 정본·role-hook·role-run·/team) — 마리나 없이 돈다. 공개 대상 아님.
+- `shared/` (역할 정본·role-hook·/team) — 마리나 없이 돈다. 공개 대상 아님.
 - marina-discord — 이벤트 파일을 읽어 보여 주기만. 이벤트 파일이 없으면 아무것도 안 한다.
 - runtime 플러그인 — 무관.
 
 ## 6. 검증
 
-- 단위: role-hook(모델 인자 제거·codex 거부·이벤트 줄 형식·usage 합), role-run(가짜 codex), Discord 표시(가짜 Discord), 주간 집계.
+- 단위: role-hook(모델 인자 제거·이벤트 줄 형식·usage 합), Discord 표시(가짜 Discord), 주간 집계.
 - 실측:
   1. 이 세션에서 `developer` 를 `model: opus` 로 불러도 실제 sonnet 으로 도는지(기록 파일의 message.model).
   2. `effort`·`skills` frontmatter 가 실제로 먹는지(기록 첫 줄·시스템 프롬프트).
   3. Discord 테스트 채널에서 시작·끝 줄, #상태 역할별 사용량.
-  4. code-reviewer 를 role-run(codex)으로 한 번.
 
-## 7. 형이 정할 것
+## 7. 결정 기록
 
-1. 역할표 초안(모델·effort) — 특히 디자이너 opus 냐 sonnet 이냐, 리뷰어를 Codex 로 옮기냐.
-2. `shared/` 를 git 레포로 만들어도 되나(로컬만).
+- 2026-10-04 형: 역할표 추천대로(Codex 없음), `shared/` 로컬 git.
