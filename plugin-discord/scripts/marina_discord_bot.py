@@ -6,6 +6,7 @@ discord.json 이 있을 때만 마리나 데몬이 run_forever 를 돌린다(선
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -142,10 +144,15 @@ def _texts(content: Any) -> list[str]:
 
 def background_tasks(transcript: Path) -> list[dict[str, Any]]:
     """지금 뒤에서 도는 일(백그라운드 셸·서브에이전트) = 기록에서 시작됨 − 끝남 알림. 기록 끝 2MB 만 본다."""
+    started, done = _scan_tasks(transcript)
+    return [t for i, t in started.items() if i not in done]
+
+
+def _scan_tasks(transcript: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
     try:
         data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
     except OSError:
-        return []
+        return {}, set()
     descs: dict[str, str] = {}
     bg_use: dict[str, str] = {}          # tool_use_id → 'shell'|'agent' (백그라운드로 띄운 것만, 리뷰 I1)
     started: dict[str, dict[str, Any]] = {}
@@ -183,7 +190,7 @@ def background_tasks(transcript: Path) -> list[dict[str, Any]]:
                     for m in rx.finditer(t):
                         started[m.group(1)] = {"id": m.group(1), "kind": "agent" if kind == "agent" else "shell",
                                                "desc": descs.get(str(b.get("tool_use_id")), "")}
-    return [t for i, t in started.items() if i not in done]
+    return started, done
 
 
 def _task_output(transcript: Path, task_id: str) -> Path | None:
@@ -260,7 +267,8 @@ def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
     tr = _session_transcript(rec)
     if not tr:
         return _pane_team(str(rec.get("tmux") or ""))
-    tasks = background_tasks(tr)
+    started, done = _scan_tasks(tr)
+    tasks = [t for i, t in started.items() if i not in done]
     n = _pane_shells(str(rec.get("tmux") or ""))
     shells = [t for t in tasks if t["kind"] == "shell"]
     keep = {t["id"] for t in (shells[-n:] if n else [])}
@@ -274,7 +282,60 @@ def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
                     keep.add(t["id"])
             except OSError:
                 pass
-    return [t for t in tasks if t["id"] in keep] + _pane_team(str(rec.get("tmux") or ""))
+    out = [t for t in tasks if t["id"] in keep]
+    seen = {t["id"] for t in out}
+    out += [t for t in _recent_agents(tr, born) if t["id"] not in seen and t["id"] not in done]
+    return out + _pane_team(str(rec.get("tmux") or ""))
+
+
+AGENT_FRESH = 300.0      # 빌드·긴 도구 호출로 몇 분 조용한 에이전트도 — 끝난 것은 끝남 알림으로 뺀다(리뷰 I2)
+
+
+def _recent_agents(tr: Path, born: float = 0.0) -> list[dict[str, Any]]:
+    """subagents/ 에서 최근 움직인 에이전트 = 도는 중. 띄운 줄이 기록 끝 2MB 밖이거나(긴 세션) 팀·중첩 에이전트라
+    agentId 형식이 아니어도 잡힌다(실사용: ovation 19MB 기록, 팀장 에이전트가 띄운 손자 에이전트). 설명은 .meta.json."""
+    d = tr.parent / tr.stem / "subagents"
+    now, out = time.time(), []
+    try:
+        files = list(d.glob("agent-*.jsonl"))
+    except OSError:
+        return []
+    for f in files:
+        try:
+            m = f.stat().st_mtime
+        except OSError:
+            continue
+        if now - m > AGENT_FRESH or m < born:
+            continue
+        try:
+            meta = json.loads(f.with_suffix(".meta.json").read_text())
+        except (OSError, ValueError):
+            meta = {}
+        if not isinstance(meta, dict):
+            meta = {}
+        out.append({"id": f.stem[len("agent-"):], "kind": "agent", "desc": str(meta.get("description") or meta.get("name") or "")[:80]})
+    return out
+
+
+def _has_recent_agents(rec: dict[str, Any]) -> bool:
+    """4초 판정용 — 파일이 사라지는 경합 등으로 루프를 막지 않게 실패는 '없음'(리뷰 I3)."""
+    try:
+        tr = _session_transcript(rec)
+        return bool(tr and _recent_agents(tr, _session_born(str(rec.get("tmux") or ""))))
+    except Exception:
+        return False
+
+
+_PERM = re.compile(r"^\s*❯\s*1\.\s")
+
+
+def _pane_permission(name: str) -> bool:
+    """터미널 권한 창(Do you want to proceed? / ❯ 1. Yes)에서 멈춤 — 서브에이전트 것은 PermissionRequest 버튼이 안 와서
+    형이 모른 채 '대기'로 보였다(실사용 2026-10-04)."""
+    if not name or not ms.tmux_alive(name):
+        return False
+    lines = (ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()[-12:]
+    return any("Do you want to " in l for l in lines) and any(_PERM.match(l) for l in lines)
 
 
 def snapshot(full: bool = True) -> dict[str, Any]:
@@ -284,13 +345,15 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         if str(rec.get("kind") or "").endswith("lobby") or not rec.get("channelId"):
             continue
         alive, busy = _pane_busy(str(rec.get("tmux") or ""))
-        bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_pane_team(str(rec.get("tmux") or ""))))
+        bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_pane_team(str(rec.get("tmux") or "")))
+                        or (not busy and _has_recent_agents(rec)))
         act = ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent")))
         rows.append({"ref": f"{rec.get('project')}/{rec.get('task')}", "channelId": str(rec["channelId"]),
                      "alive": alive, "busy": busy, "bg": bg, "emoji": str(act.get("emoji") or "") if busy else "",
                      "ctx": _ctx_percent(rec) if alive and full else None,
                      "tasks": live_tasks(rec) if alive and full else [],
-                     "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists()})
+                     "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists(),
+                     "permission": alive and full and _pane_permission(str(rec.get("tmux") or ""))})
     if not full:
         # 뒤에서 도는 일(셸·팀 에이전트)도 '바쁨'으로 쳐서 #상태를 30초마다 — 끝나면 바로 보이게(입력 중 표시는 busy 만)
         return {"sessions": rows, "anyBusy": any(r["busy"] or r["bg"] for r in rows)}
@@ -302,7 +365,12 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         load = os.getloadavg()[0]
     except OSError:
         load = 0.0
-    return {"usage": _usage(), "diskFree": free, "load": load, "sessions": rows,
+    use = _usage()
+    try:
+        ru = role_usage(_week_start(use))
+    except Exception:
+        ru = []
+    return {"usage": use, "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
             "anyBusy": any(r["busy"] for r in rows)}
 
 
@@ -341,10 +409,34 @@ def _tasks_tag(r: dict[str, Any]) -> str:
     return "  " + " ".join(([f"⏳{sh}"] if sh else []) + ([f"🤖{ag}"] if ag else [])) if t else ""
 
 
+def _agent_roles() -> dict[str, str]:
+    """agent_id → '역할(모델)' — role-hook 시작 이벤트(끝 500KB). 역할 아닌 서브에이전트는 없음."""
+    try:
+        with open(_role_events_path(), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 500_000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for raw in lines:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("ev") == "start" and ev.get("agent") and ev.get("role") not in (None, "-"):
+            out[str(ev["agent"])] = f"{ev['role']}({ev.get('model')})"
+    return out
+
+
 def _tasks_desc(r: dict[str, Any]) -> str:
-    """무슨 일인지 한 줄(설명만 — 명령 원문 아님)."""
+    """무슨 일인지 한 줄(설명만 — 명령 원문 아님). 역할 에이전트면 앞에 역할(모델)."""
     t = r.get("tasks") or []
-    d = " · ".join(f"{'⏳' if x['kind'] == 'shell' else '🤖'} {_clean(x['desc'] or x['id'])[:50]}" for x in t[:4])
+    roles = _agent_roles() if any(x["kind"] == "agent" for x in t) else {}
+    def one(x: dict[str, Any]) -> str:
+        who = roles.get(x["id"], "") if x["kind"] == "agent" else ""
+        return f"{'⏳' if x['kind'] == 'shell' else '🤖'} " + (who + " " if who else "") + _clean(x["desc"] or x["id"])[:50]
+    d = " · ".join(one(x) for x in t[:4])
     return f"\n-# {d}" if d else ""
 
 
@@ -361,12 +453,13 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     rows = sorted(snap["sessions"], key=lambda r: (r["ref"].split("/", 1)[0], r["ref"]))
     proj_w = max([len(r["ref"].split("/", 1)[0]) for r in rows] + [4])
     rows = [dict(r, busy=True, emoji="❓") if r.get("asking") and not r["busy"] else r for r in rows]   # 답 기다리는 질문
+    rows = [dict(r, busy=True, emoji="🔐") if r.get("permission") and not r["busy"] else r for r in rows]   # 터미널 권한 창
     busy = [r for r in rows if r["busy"]]
     bg = [r for r in rows if r["alive"] and not r["busy"] and r.get("tasks")]
     idle = [r for r in rows if r["alive"] and not r["busy"] and not r.get("tasks")]
     off = [r for r in rows if not r["alive"]]
     # 메시지당 구성요소 40개(중첩 포함) — 아래 대기·꺼짐·꼬리말 몫(6)을 남기고 넘치면 '외 N개'(리뷰 I2)
-    room = [40 - 6 - _count(out) - 4]
+    room = [40 - 6 - (2 if snap.get("roleUsage") else 0) - _count(out) - 4]
     def add(block: list[dict[str, Any]]) -> bool:
         if _count(block) > room[0]:
             return False
@@ -387,6 +480,9 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
                                             "accessory": _view_button(r)}])]
         if left:
             out.append(_text("-# 외 " + " ".join(f"<#{r['channelId']}>" for r in left)))
+    if snap.get("roleUsage"):
+        out.append({"type": 14})
+        out.append(_text(_role_block(snap["roleUsage"])))
     out.append({"type": 14})
     out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) for r in idle)))
     if off:
@@ -825,6 +921,294 @@ def slash(channel: str, user: str, name: str, value: str = "", args: str = "", m
     return f"⌨️ `{shown[:300]}` — 쉬는 순간 입력할게"
 
 
+_YES = re.compile(r"^\s*❯\s*1\.\s*Yes\s*$")
+_NO = re.compile(r"^\s*[23]\.\s*No\s*$")
+PANE_PERM_TTL = 600.0
+
+
+def _pane_prompt(name: str) -> "tuple[str, list[str], str, bool] | None | bool":
+    """화면 아래 권한 창 → (서명, 머리말, 명령 앞부분, 누를 수 있나). 창이 없으면 None, 화면을 못 읽으면 False(판단 보류 — 리뷰 I7).
+    머리말 = 질문 위로 구분선(─)까지의 설명 줄. 서명은 머리말~선택지 끝까지(다른 창·다른 선택지면 달라진다).
+    누를 수 있음 = 1번이 정확히 '❯ 1. Yes', 끝이 'No' 인 2·3지선다 — 그 밖의 창(폴더 신뢰 등)엔 Enter 를 안 친다(리뷰 C1)."""
+    if not name or not ms.tmux_alive(name):
+        return None
+    r = ms._tmux("capture-pane", "-p", "-t", f"={name}:")
+    if r.returncode != 0:
+        return False
+    lines = (r.stdout or "").rstrip().splitlines()[-20:]
+    q = max((i for i, l in enumerate(lines) if "Do you want to " in l), default=-1)
+    if q < 0 or not any(_PERM.match(l) for l in lines[q:]):
+        return None
+    head: list[str] = []
+    cmd = ""
+    top = q
+    for i in range(q - 1, max(-1, q - 16), -1):
+        t = lines[i].strip()
+        top = i
+        if t and set(t) <= set("─━"):
+            break
+        if t.startswith("│"):
+            cmd = t.lstrip("│ ").strip() or cmd       # 위로 올라가며 — 마지막에 남는 게 첫 줄
+            continue
+        if not t or set(t) <= set("╌┄-"):
+            continue
+        head.append(t[:100])
+    opts = [l for l in lines[q + 1:] if re.match(r"^\s*(❯\s*)?\d+\.", l)]
+    # 2지선다(Yes/No) 또는 3지선다(Yes / Yes, and don't ask again… / No) — 어느 쪽이든 1번 평범한 Yes 에서 Enter = 이번 한 번
+    ok = len(opts) in (2, 3) and bool(_YES.match(opts[0])) and bool(_NO.match(opts[-1]))
+    sig = hashlib.sha1("\n".join(lines[top:]).encode("utf-8", "replace")).hexdigest()[:16]
+    return sig, list(reversed(head))[-3:], _clean(cmd)[:80], ok
+
+
+def _perm_entries(sd: Path) -> "list[tuple[Path, dict[str, Any]]]":
+    out = []
+    for f in sd.glob("perm-*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict):
+            out.append((f, d))
+    return out
+
+
+def _pane_perm_close(f: Path, d: dict[str, Any], channel: str, note: str) -> None:
+    for x in (f, f.with_suffix(".answer")):
+        try:
+            x.unlink()
+        except OSError:
+            pass
+    if d.get("msg"):
+        try:
+            _dc(ms.load_config())._req("PATCH", f"/channels/{channel}/messages/{d['msg']}",
+                                       {"content": str(d.get("title") or "🔐 권한 요청") + f"\n-# {note}", "components": []})
+        except ms.SessionError:
+            pass
+
+
+def pane_perm_tick(names: "set[str] | None" = None) -> None:
+    """터미널 권한 창(서브에이전트 것은 훅 버튼이 안 온다) → 채널에 [허용][거부]. 풀리면 버튼을 거둔다(실사용 2026-10-04)."""
+    for rec in ms.load_sessions():
+        try:
+            _pane_perm_one(rec, names)
+        except Exception as exc:                      # 한 세션 오류가 나머지를 막지 않게(리뷰 I9)
+            _log(f"pane_perm {rec.get('tmux')}: {exc!r}")
+
+
+def _pane_perm_one(rec: dict[str, Any], names: "set[str] | None") -> None:
+    name, ch = str(rec.get("tmux") or ""), str(rec.get("channelId") or "")
+    if not ch or not rec.get("stateDir") or (names is not None and name not in names):
+        return
+    sd = Path(str(rec["stateDir"]))
+    got = _pane_prompt(name)
+    if got is False:
+        return
+    entries = _perm_entries(sd)
+    mine = [(f, d) for f, d in entries if d.get("pane")]
+    if got and any(d.get("sig") == got[0] and d.get("msg") for _, d in mine):
+        return
+    for f, d in mine:
+        _pane_perm_close(f, d, ch, "터미널에서 처리됨" if not got else "창이 바뀜")
+    if not got or any(not d.get("pane") for _, d in entries):     # 훅이 이미 버튼을 올린 요청(본 세션)
+        return
+    sig, head, cmd, ok = got
+    token = uuid.uuid4().hex[:12]
+    title = "🔐 **권한 창에서 멈춤** — " + (" · ".join(head) or "터미널 확인 필요") + (f"\n`{cmd}`" if cmd else "")
+    tail = ("\n-# 누르면 터미널에 Yes(Enter)/취소(Esc)를 대신 쳐" if ok
+            else "\n-# 평범한 Yes/No 창이 아니라 버튼을 안 달았어 — 터미널에서 골라 줘")
+    body: dict[str, Any] = {"content": title + tail, "allowed_mentions": {"parse": []}}
+    if ok:
+        body["components"] = [{"type": 1, "components": [
+            {"type": 2, "style": 3, "label": "한 번만 허용", "custom_id": f"mperm:a:{ch}:{token}"},
+            {"type": 2, "style": 4, "label": "거부", "custom_id": f"mperm:d:{ch}:{token}"}]}]
+    try:
+        msg = str(_dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", body).get("id") or "")
+    except ms.SessionError:
+        return                                        # 파일을 안 남겨 다음 판에 다시 올린다(리뷰 I6)
+    if msg:
+        ms._write_json(sd / f"perm-{token}.json", {"token": token, "msg": msg, "pane": True, "sig": sig, "ok": ok,
+                                                    "title": title, "at": time.time()})
+
+
+def _pane_answer(rec: dict[str, Any], sd: Path, token: str, d: dict[str, Any], allow: bool) -> str:
+    f = sd / f"perm-{token}.json"
+    ch, name = str(rec.get("channelId")), str(rec.get("tmux") or "")
+    if not d.get("ok"):
+        return "누를 수 있는 권한 창이 아니야 — 터미널에서 골라 줘"
+    try:                                              # 두 번 눌러도 한 번만 친다
+        os.close(os.open(str(f.with_suffix(".answer")), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except OSError:
+        return "이미 결정됐어"
+    if time.time() - float(d.get("at") or 0) > PANE_PERM_TTL:
+        _pane_perm_close(f, d, ch, "오래된 버튼이라 안 눌렀어")
+        return "오래된 버튼이라 안 눌렀어 — 아직 창이 있으면 새 버튼이 와"
+    got = _pane_prompt(name)
+    if not got or got[0] != d.get("sig") or not got[3]:
+        _pane_perm_close(f, d, ch, "화면이 바뀌어서 안 눌렀어")
+        return "화면이 바뀌어서 안 눌렀어 — 지금 창이 있으면 새 버튼이 와"
+    ms.tmux_leave_mode(name)
+    r = ms._tmux("send-keys", "-t", f"={name}:", "Enter" if allow else "Escape")
+    if r.returncode != 0:
+        return "터미널에 못 쳤어 — 터미널에서 직접 골라 줘"
+    _pane_perm_close(f, d, ch, "✅ 허용함" if allow else "⛔ 거부함")
+    return "허용했어" if allow else "거부했어"
+
+
+def _role_events_path() -> Path:
+    return Path(os.environ.get("ROLE_EVENTS") or Path.home() / ".local/state/roles/events.jsonl")
+
+
+def _fmt_secs(x: Any) -> str:
+    if not isinstance(x, (int, float)):
+        return ""
+    x = int(x)
+    if x < 60:
+        return f"{x}초"
+    if x < 3600:
+        return f"{x // 60}분"
+    return f"{x // 3600}시간 {x % 3600 // 60}분"
+
+
+def _fmt_tokens(n: int) -> str:
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    return f"{round(n / 1000)}k" if n >= 1000 else str(n)
+
+
+def _fmt_role_event(ev: dict[str, Any]) -> str:
+    """역할 이벤트 한 줄(role-hook 형식). 비역할 서브에이전트는 '서브에이전트'."""
+    role = str(ev.get("role") or "-")
+    who = role if role != "-" else "서브에이전트"
+    desc = _clean(str(ev.get("desc") or ""))[:80]
+    kind = ev.get("ev")
+    if kind == "override_blocked":
+        return f"⚠️ {who} 모델 지정({ev.get('asked')}) 무시 — 역할표대로 {ev.get('model')}"
+    if kind == "start":
+        parts = [f"🤖 {who} 시작"]
+        if role != "-":
+            parts.append(f"{ev.get('model')}/{ev.get('effort')}" if ev.get("effort") else str(ev.get("model")))
+            sk = [str(x).split(":")[-1] for x in ev.get("skills") or []]
+            if sk:
+                parts.append(", ".join(sk))
+        if desc:
+            parts.append(desc)
+        return " · ".join(parts)
+    if kind == "stop":
+        t = ev.get("tokens") if isinstance(ev.get("tokens"), dict) else {}
+        n = sum(int(t.get(k) or 0) for k in ("in", "out", "cache_write"))
+        return " · ".join([f"✅ {who} 끝"] + [x for x in (_fmt_secs(ev.get("secs")), _fmt_tokens(n)) if x])
+    return ""
+
+
+ROLE_EVENTS_MAX = 20
+ROLE_ROWS = 6
+
+
+def _week_start(usage: list[dict[str, Any]]) -> float:
+    """이번 주 시작 = 주간 한도 리셋 − 7일. 모르면 최근 7일."""
+    for w in usage or []:
+        if w.get("key") == "weekly" and isinstance(w.get("resetsAt"), (int, float)):
+            return float(w["resetsAt"]) - 7 * 86400
+    return time.time() - 7 * 86400
+
+
+def role_usage(since: float) -> list[dict[str, Any]]:
+    """역할별 호출 수·토큰(입력+출력+캐시 쓰기 — 캐시 읽기는 싸서 뺀다)·모델. 많은 순, 비역할·넘친 역할은 '기타'."""
+    try:
+        with open(_role_events_path(), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 4_000_000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return []
+    agg: dict[str, dict[str, Any]] = {}
+    for raw in lines:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(ev, dict) or ev.get("ev") != "stop" or float(ev.get("ts") or 0) < since:
+            continue
+        t = ev.get("tokens") if isinstance(ev.get("tokens"), dict) else {}
+        role = str(ev.get("role") or "-")
+        role = "기타" if role == "-" else role
+        a = agg.setdefault(role, {"role": role, "calls": 0, "tokens": 0, "models": []})
+        a["calls"] += 1
+        a["tokens"] += sum(int(t.get(k) or 0) for k in ("in", "out", "cache_write"))
+        for m in ev.get("models") or []:
+            m = str(m).replace("claude-", "", 1)
+            if m not in a["models"]:
+                a["models"].append(m)
+    rows = sorted((a for a in agg.values() if a["role"] != "기타"), key=lambda a: -a["tokens"])
+    other = [agg["기타"]] if "기타" in agg else []
+    if len(rows) > ROLE_ROWS - 1:
+        extra = rows[ROLE_ROWS - 1:]
+        rows = rows[:ROLE_ROWS - 1]
+        o = other[0] if other else {"role": "기타", "calls": 0, "tokens": 0, "models": []}
+        for a in extra:
+            o["calls"] += a["calls"]; o["tokens"] += a["tokens"]
+        other = [o]
+    return rows + other
+
+
+def _role_block(rows: list[dict[str, Any]]) -> str:
+    return "### 🤖 이번 주 역할별" + "".join(
+        f"\n`{r['role']:<12}{r['calls']:>3}회  {_fmt_tokens(r['tokens']):>5}`" + (f" {','.join(r['models'])}" if r["models"] and r["role"] != "기타" else "")
+        for r in rows)
+
+
+def role_events_tick() -> None:
+    """role-hook 이벤트 파일을 오프셋부터 읽어, Discord 세션이면 지금 지시 메시지 스레드에 한 줄씩(역할 에이전트 2026-10-04).
+    파일이 줄었으면(회전) 처음부터. 깨진 줄·남의 세션·지시 메시지 없는 세션은 건너뛰고 오프셋만 전진."""
+    path, off_f = _role_events_path(), ms.marina_home() / "role-events.offset"
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return
+    if not off_f.exists():                       # 처음(또는 지워짐) — 지난 일을 지금 스레드에 쏟지 않게 끝에서 시작(리뷰 I4)
+        off_f.write_text(str(size))
+        return
+    try:
+        off = int(off_f.read_text().strip() or 0)
+    except (OSError, ValueError):
+        off = size
+    if off > size:
+        off = 0
+    if off == size:
+        return
+    with open(path, "rb") as fh:
+        fh.seek(off)
+        chunk = fh.read(256_000)
+    lines = chunk.split(b"\n")[:-1][:ROLE_EVENTS_MAX]          # 끝나지 않은 마지막 줄은 다음 판에
+    by_sid = {str(r.get("sessionId")): r for r in ms.load_sessions() if r.get("sessionId") and r.get("channelId")}
+    try:
+        _role_events_post(lines, off, by_sid, off_f)
+    except Exception as exc:                      # 예상 밖 오류여도 오프셋은 이미 줄마다 저장됨(리뷰 I5)
+        _log(f"role event: {exc!r}")
+
+
+def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_f: Path) -> None:
+    for raw in lines:
+        off += len(raw) + 1
+        try:
+            ev = json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            continue
+        rec = by_sid.get(str(ev.get("session") or "")) if isinstance(ev, dict) else None
+        if not rec:
+            continue
+        mid = str(ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent"))).get("mid") or "")
+        text = _fmt_role_event(ev)
+        if not mid or not text:
+            continue
+        off_f.write_text(str(off))                # 보내기 전에 — 보내다 죽어도 같은 줄을 다시 안 보낸다
+        try:
+            ms._progress(rec, {"message_id": mid, "text": text})
+        except ms.SessionError as exc:
+            _log(f"role event: {exc}")
+    off_f.write_text(str(off))
+
+
 def perm(channel: str, user: str, token: str, allow: bool) -> str:
     """권한 요청 [허용]/[거부] — 기다리는 훅이 읽어 결정한다. 먼저 누른 것만(O_EXCL, 리뷰 I1).
     허용 목록이 빈 채널(역할로 보이는 누구나)은 승인 못 한다 — 메시지와 달리 실행 권한이다(리뷰 I6)."""
@@ -840,6 +1224,12 @@ def perm(channel: str, user: str, token: str, allow: bool) -> str:
         return "누를 권한이 없어"
     if not (sd / f"perm-{token}.json").exists():
         return "이미 끝났거나 없는 요청이야"
+    try:
+        pd = json.loads((sd / f"perm-{token}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pd = {}
+    if isinstance(pd, dict) and pd.get("pane"):       # 화면 권한 창 — 기다리는 훅이 없다, 여기서 친다(리뷰 I8: 선점 전에 판정)
+        return _pane_answer(rec, sd, token, pd, allow)
     try:
         fd = os.open(str(sd / f"perm-{token}.answer"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -1170,6 +1560,14 @@ class Loop:
                 _log(f"reconcile 실패: {exc!r}")
         light = snapshot(full=False)
         typing_tick(light, self.ty, now)
+        try:
+            pane_perm_tick()
+        except Exception as exc:
+            _log(f"pane_perm failed: {exc!r}")
+        try:
+            role_events_tick()
+        except Exception as exc:
+            _log(f"role_events failed: {exc!r}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
