@@ -8,6 +8,7 @@ set -euo pipefail
 start_fake_discord
 fail() { echo "FAIL: $*"; exit 1; }
 msess new proj feat/a --no-start >/dev/null 2>&1 || fail "new"
+export ROLE_EVENTS="$TMPROOT/role-events.jsonl" TMPROOT_EV="$TMPROOT/role-events.jsonl"
 
 PYTHONPATH="$SCRIPTS" python3 - <<'PY'
 import json, os, subprocess, sys, time
@@ -47,6 +48,13 @@ with open(tr, "a") as fh:
 check(all(t["id"] != "adone1" for t in mb.live_tasks(rec)), f"끝난 에이전트 제외: {mb.live_tasks(rec)}")
 (sub / "agent-abad1.jsonl").write_text("{}\n"); (sub / "agent-abad1.meta.json").write_text("null")
 check(any(t["id"] == "abad1" for t in mb.live_tasks(rec)), "(리뷰 I3) 깨진 meta 도 죽지 않는다")
+# (형 2026-10-04) 역할 에이전트면 #상태 줄에 역할(모델)
+ev = Path(os.environ["TMPROOT_EV"])
+ev.write_text(json.dumps({"ev": "start", "ts": time.time(), "session": sid, "agent": "anest1", "role": "developer",
+                          "model": "sonnet", "effort": "medium", "skills": [], "desc": "x"}) + "\n")
+r0 = next(s for s in mb.snapshot()["sessions"] if s["ref"] == "proj/feat/a")
+d0 = mb._tasks_desc(r0)
+check("🤖 developer(sonnet) Implement Task G3: dark mode" in d0, f"역할·모델 붙음: {d0} {r0}")
 light = next(s for s in mb.snapshot(full=False)["sessions"] if s["ref"] == "proj/feat/a")
 check(light["bg"] is True, f"#상태 30초 갱신 대상: {light}")
 # 권한 창 — 서브에이전트가 터미널에서 Yes/No 를 기다림

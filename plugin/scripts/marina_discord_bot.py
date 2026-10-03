@@ -408,10 +408,34 @@ def _tasks_tag(r: dict[str, Any]) -> str:
     return "  " + " ".join(([f"⏳{sh}"] if sh else []) + ([f"🤖{ag}"] if ag else [])) if t else ""
 
 
+def _agent_roles() -> dict[str, str]:
+    """agent_id → '역할(모델)' — role-hook 시작 이벤트(끝 500KB). 역할 아닌 서브에이전트는 없음."""
+    try:
+        with open(_role_events_path(), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 500_000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for raw in lines:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("ev") == "start" and ev.get("agent") and ev.get("role") not in (None, "-"):
+            out[str(ev["agent"])] = f"{ev['role']}({ev.get('model')})"
+    return out
+
+
 def _tasks_desc(r: dict[str, Any]) -> str:
-    """무슨 일인지 한 줄(설명만 — 명령 원문 아님)."""
+    """무슨 일인지 한 줄(설명만 — 명령 원문 아님). 역할 에이전트면 앞에 역할(모델)."""
     t = r.get("tasks") or []
-    d = " · ".join(f"{'⏳' if x['kind'] == 'shell' else '🤖'} {_clean(x['desc'] or x['id'])[:50]}" for x in t[:4])
+    roles = _agent_roles() if any(x["kind"] == "agent" for x in t) else {}
+    def one(x: dict[str, Any]) -> str:
+        who = roles.get(x["id"], "") if x["kind"] == "agent" else ""
+        return f"{'⏳' if x['kind'] == 'shell' else '🤖'} " + (who + " " if who else "") + _clean(x["desc"] or x["id"])[:50]
+    d = " · ".join(one(x) for x in t[:4])
     return f"\n-# {d}" if d else ""
 
 
