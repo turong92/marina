@@ -26,7 +26,7 @@
 - 프로젝트별 #메인 PM + 팀장 회의 — 이 바닥 위에 별도 스펙. Claude 세션간 메시징 vs 헤르메스 칸반은 3번 사용량을 보고 정한다.
 - 헤르메스 — 보류(형 2026-10-04). 역할 정의는 나중에 헤르메스 프로필이 같은 정본을 읽을 수 있게 모델 중립으로 쓴다.
 - 밤샘 무인 모드 — 이 위에 나중에.
-- Jev·다른 API 모델 — 실행 주체 칸만 열어 두고 이번엔 claude·codex 두 가지.
+- Jev·Codex·다른 API 모델 — 이번엔 Claude 만. 정본은 모델 중립으로 써서 나중에 shim 만 붙인다.
 
 ## 3. 표준 우선
 
@@ -53,7 +53,7 @@ tools: Read, Edit, Write, Bash, Grep, Glob
 ---
 ```
 
-연결: Claude 는 `~/.claude/agents/<역할>.md` 심볼릭 링크, Codex 는 `~/.codex/agents/<역할>.toml` shim(정본을 읽게만). 리뷰어와 똑같다.
+연결: Claude 는 `~/.claude/agents/<역할>.md` 심볼릭 링크(리뷰어와 같다). Codex shim 은 나중에.
 
 **역할표** (형 결정 2026-10-04 — Codex 없음, 1주 사용량 보고 조정):
 
@@ -83,7 +83,7 @@ tools: Read, Edit, Write, Bash, Grep, Glob
   - 끝: 시각·agent_id·걸린 시간·토큰(기록 파일 usage 합: 입력·출력·캐시 읽기)·모델별.
 - 역할이 아닌 서브에이전트(general-purpose 등)도 같은 이벤트로 남긴다(역할 = `-`). 블랙박스는 그쪽이 더 크다.
 
-훅은 1초 안에 끝나고 실패해도 도구를 막지 않는다(`|| true`, 거부는 codex 경우만).
+훅은 1초 안에 끝나고 실패해도 도구를 막지 않는다(`|| true`).
 
 ### 4.3 Discord 에 보이기 (marina-discord)
 
