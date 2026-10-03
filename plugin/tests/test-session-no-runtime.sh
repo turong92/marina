@@ -26,6 +26,15 @@ check(ms.runtime_bin() is None, "runtime 없음 판정")
 import os
 os.environ["MARINA_RUNTIME_BIN"] = "/nonexistent/marina"
 check(ms.runtime_bin() is None, "가리킨 runtime 이 없으면 없음")
+# 리뷰 D-I3: 데몬 PATH 가 짧아도 설치된 marina(runtime) 플러그인의 bin/marina 를 찾는다(옮기며 옛 '같은 플러그인 bin' 은 없어짐)
+del os.environ["MARINA_RUNTIME_BIN"]
+import tempfile
+t = Path(tempfile.mkdtemp()); rt = t / "rt"; (rt / "bin").mkdir(parents=True)
+(rt / "bin" / "marina").write_text("#!/bin/sh\n"); (rt / "bin" / "marina").chmod(0o755)
+(t / "ch" / "plugins").mkdir(parents=True)
+(t / "ch" / "plugins" / "installed_plugins.json").write_text(json.dumps({"plugins": {"marina@m": [{"installPath": str(rt)}]}}))
+os.environ.update(MARINA_CLAUDE_HOME=str(t / "ch"), HOME=str(t), PATH="/usr/bin:/bin")
+check(ms.runtime_bin() == str(rt / "bin" / "marina"), f"설치된 runtime bin: {ms.runtime_bin()}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

@@ -46,6 +46,18 @@ check(r.returncode == 0 and "V2" not in r.stdout, f"폴백: {r.stdout!r} {r.stde
 ms.write_settings(sd)
 st = json.loads((sd / "settings.json").read_text())
 check("marina-session-hook" not in json.dumps(st), "설치본 밖이면 직접 경로")
+# 리뷰 D-I1: 입구는 키 하나에 묶이지 않는다 — marina-discord@ 를 먼저, 그 설치본에 파일이 없으면 다음 키(옛 marina@)
+nv = tmp / "nodiscord"; (nv / "scripts").mkdir(parents=True)          # 새 marina@ 설치본(discord 파일 없음)
+disc = Path(ms.__file__).resolve().parent.parent
+def which(plugins):
+    (chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": plugins}))
+    return subprocess.run([str(shim)], capture_output=True, text=True, env=dict(os.environ, MARINA_SHIM_WHICH="1")).stdout.strip()
+got = which({"marina@test-market": [{"installPath": str(nv)}], "marina-discord@test-market": [{"installPath": str(disc)}]})
+check(got == str(disc / "scripts" / "marina_session.py"), f"marina-discord 설치본: {got}")
+got = which({"marina@test-market": [{"installPath": str(disc)}]})
+check(got == str(disc / "scripts" / "marina_session.py"), f"옛 marina@ 에 파일이 있으면 그것: {got}")
+got = which({"marina@test-market": [{"installPath": str(nv)}]})
+check(got.endswith("marina_session.py") and str(nv) not in got, f"어디에도 없으면 박힌 경로: {got}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

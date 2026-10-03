@@ -978,16 +978,24 @@ PY=""
 for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 {shlex.quote(sys.executable)}; do
   [ -x "$c" ] && PY="$c" && break
 done
-# 같은 이름 설치가 여럿이면 user 범위·가장 최근 것(리뷰 I6)
-ip=$("$PY" -c 'import json,sys
+# 같은 이름 설치가 여럿이면 user 범위·가장 최근 것(리뷰 I6). 키는 marina-discord@ → marina@ 순으로, 파일이 있는 첫 설치본
+# (분리 D: marina 를 먼저 업데이트하면 새 marina@ 엔 이 파일이 없다 — 키 하나에 묶이면 옛 코드로 되돌아간다)
+target=$("$PY" -c 'import json,os,sys
 try:
-    es=[e for e in json.load(open(sys.argv[1]))["plugins"][sys.argv[2]] if isinstance(e, dict)]
-    es.sort(key=lambda e: (e.get("scope") == "user", str(e.get("lastUpdated") or "")), reverse=True)
-    print(es[0]["installPath"])
+    d=json.load(open(sys.argv[1]))["plugins"]
+    for pre in ("marina-discord@", "marina@"):
+        for k in [k for k in d if k.startswith(pre)]:
+            es=[e for e in d[k] if isinstance(e, dict)]
+            es.sort(key=lambda e: (e.get("scope") == "user", str(e.get("lastUpdated") or "")), reverse=True)
+            for e in es[:1]:
+                f=os.path.join(e["installPath"], "scripts", "marina_session.py")
+                if os.path.isfile(f):
+                    print(f); sys.exit(0)
 except Exception:
-    pass' {shlex.quote(str(plist))} {shlex.quote(key)} 2>/dev/null)
-if [ -n "$ip" ] && [ -f "$ip/scripts/marina_session.py" ]; then exec "$PY" "$ip/scripts/marina_session.py" "$@"; fi
-exec "$PY" {shlex.quote(str(me))} "$@"
+    pass' {shlex.quote(str(plist))} 2>/dev/null)
+[ -n "$target" ] || target={shlex.quote(str(me))}
+if [ -n "${{MARINA_SHIM_WHICH:-}}" ]; then echo "$target"; exit 0; fi
+exec "$PY" "$target" "$@"
 """
     try:
         shim.parent.mkdir(parents=True, exist_ok=True)
@@ -1606,8 +1614,17 @@ def runtime_bin() -> "str | None":
     forced = os.environ.get("MARINA_RUNTIME_BIN")
     if forced is not None:
         return forced if forced not in ("", "none") and os.access(forced, os.X_OK) else None
-    for cand in (shutil.which("marina"), str(Path.home() / ".local" / "bin" / "marina"),
-                 str(Path(__file__).resolve().parent.parent / "bin" / "marina")):
+    inst = ""
+    try:      # 설치된 marina(runtime) 플러그인의 bin — 데몬 PATH 가 짧아도 찾게(리뷰 D-I3)
+        home = Path(os.environ.get("MARINA_CLAUDE_HOME") or Path.home() / ".claude")
+        d = json.loads((home / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))["plugins"]
+        es = [e for k, v in d.items() if str(k).startswith("marina@") for e in (v or []) if isinstance(e, dict)]
+        es.sort(key=lambda e: (e.get("scope") == "user", str(e.get("lastUpdated") or "")), reverse=True)
+        inst = str(Path(str(es[0]["installPath"])) / "bin" / "marina") if es else ""
+    except (OSError, ValueError, KeyError, AttributeError):
+        inst = ""
+    for cand in (shutil.which("marina"), inst, str(Path.home() / ".local" / "bin" / "marina"),
+                 str(Path(__file__).resolve().parent.parent.parent / "plugin" / "bin" / "marina")):   # 레포 개발
         if cand and os.access(cand, os.X_OK):
             return cand
     return None

@@ -156,3 +156,15 @@ runtime 쪽 파일에서 `marina_session`·`marina_sessions`·`marina_rooms`·`m
 - 마리나만의 확장 등록 장치(`~/.marina/ext` 같은 것). 표준(Claude Code 훅·git 잠금)으로 대신한다
 - runtime 이 dashboard 를 확장하는 플러그인 API(데몬 하나에 끼워 넣기). 상주 프로그램을 셋 두는 쪽을 택했다
 - 헤르메스 연결(⑤)
+
+## 10. 배포 순서 (분리 D 이후, 형 맥)
+
+순서가 틀리면 떠 있는 세션 훅이 옛 코드로 되돌아가고 봇이 꺼진 채 남는다(D 리뷰 I1 — 새 marina@ 설치본엔 marina_session.py 가 없다).
+
+1. push → `claude plugin marketplace update marina-dev`
+2. `claude plugin install marina-discord@marina-dev` (처음 한 번)
+3. `claude plugin update marina@marina-dev` → `marina dashboard restart` (대시보드는 더는 봇을 안 돈다)
+4. `marina-session daemon-ensure` — 고정 입구(~/.marina/bin/marina-session-hook)를 새 본문(키 두 개)으로 다시 쓰고 봇 데몬을 띄운다
+5. 확인: 입구에 `marina-discord@` 가 있는지, `discord-daemon.pid` 프로세스, #상태 갱신, 🛑
+
+marina-discord 는 marina 의 강제 자동 업데이트 대상이 아니다(그건 marina@ 만 갱신). discord 갱신은 형이 손으로(`plugin update marina-discord@marina-dev`) — 데몬은 설치본이 바뀌면 1분 안에 스스로 교체된다.
