@@ -6,7 +6,7 @@ set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/session_fixture.sh"
 export CLAUDECODE=1 CLAUDE_CODE_CHILD_SESSION=1 CLAUDE_PLUGIN_ROOT=/x   # Claude 세션 안에서 부른 상황
 
-PYTHONPATH="$SCRIPTS" python3 - "$SRC" "$FAKE_OUT" "$TMPROOT" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$SRC" "$FAKE_OUT" "$TMPROOT" <<'PY'
 import os, subprocess, sys, time
 from pathlib import Path
 import marina_session as ms

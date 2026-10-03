@@ -947,6 +947,9 @@ def _drop_ack_reaction(path: Path) -> None:
         path.write_text(json.dumps(acc, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+_PLUGIN_KEYS = ("marina-discord@", "marina@")    # 분리 D: discord 는 자기 플러그인(marina-discord), 옛 설치(marina)도 허용
+
+
 def _hook_entry() -> list[str]:
     """세션이 부를 마리나 명령의 머리. 계약: hook-* 하위명령 이름·인자는 하위 호환으로만 바꾼다 — 떠 있는 세션의 옛 설정이
     새 코드를 부른다(리뷰 I7). 설치본에서 돌면 고정 입구(~/.marina/bin/marina-session-hook) — 입구가 부를 때마다
@@ -963,7 +966,7 @@ def _hook_entry() -> list[str]:
     for k, entries in plugins.items():
         for e in entries if isinstance(entries, list) else []:
             ip = Path(str(e.get("installPath") or "/nonexistent")).resolve() if isinstance(e, dict) else None
-            if str(k).startswith("marina@") and ip and str(me).startswith(str(ip) + os.sep):
+            if str(k).startswith(_PLUGIN_KEYS) and ip and str(me).startswith(str(ip) + os.sep):
                 key = str(k)
     if not key:
         return [sys.executable, str(me)]
@@ -1284,7 +1287,10 @@ def _code_updated(me: "Path | None" = None, home: "Path | None" = None) -> bool:
         data = json.loads((home / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins") or {}
     except (OSError, ValueError, AttributeError):
         return False
-    es = [e for k, v in data.items() if str(k).startswith("marina@") for e in (v or []) if isinstance(e, dict)]
+    # 이 파일이 깔린 플러그인(분리 D 이후 marina-discord@, 그 전엔 marina@)에서만 최신을 고른다
+    key = next((k for k in data if str(k).startswith("marina-discord@")), None) or \
+        next((k for k in data if str(k).startswith("marina@")), None)
+    es = [e for e in (data.get(key) or []) if isinstance(e, dict)] if key else []
     es.sort(key=lambda e: (e.get("scope") == "user", str(e.get("lastUpdated") or "")), reverse=True)
     if not es:
         return False

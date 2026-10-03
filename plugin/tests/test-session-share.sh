@@ -24,7 +24,7 @@ export MARINA_CHROME="$TMPROOT/bin/fake-chrome"
 out="$(msess new chat wedding --title "웨딩 준비" 2>&1)" || fail "new chat: $out"
 for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done
 
-PYTHONPATH="$SCRIPTS" python3 - "$FD" "$MARINA_HOME" "$FAKE_OUT" "$TMPROOT" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" "$MARINA_HOME" "$FAKE_OUT" "$TMPROOT" <<'PY'
 import json, os, socket, subprocess, sys, urllib.request
 from pathlib import Path
 import marina_session as ms, marina_share as sh

@@ -9,7 +9,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 git -C "$SRC" branch dev-base; echo b > "$SRC/b"; git -C "$SRC" add b; git -C "$SRC" commit -qm b; git -C "$SRC" checkout -q -b dummy; git -C "$SRC" checkout -q main
 export MARINA_RUNTIME_BIN=none     # runtime 없음
 out="$(msess new proj feat/nr 2>&1)" || fail "runtime 없이 new: $out"
-PYTHONPATH="$SCRIPTS" python3 - "$SRC" "$FD" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$SRC" "$FD" <<'PY'
 import json, sys, subprocess
 from pathlib import Path
 src, fd = Path(sys.argv[1]), Path(sys.argv[2])

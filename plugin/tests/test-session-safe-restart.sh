@@ -8,7 +8,7 @@ start_fake_discord
 fail() { echo "FAIL: $*"; exit 1; }
 msess new proj feat/a >/dev/null 2>&1 || fail "new"
 
-PYTHONPATH="$SCRIPTS" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - <<'PY'
 import json, os, subprocess, sys, time
 from pathlib import Path
 import marina_session as ms

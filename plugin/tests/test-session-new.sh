@@ -17,7 +17,7 @@ tmux -L "$MARINA_TMUX_SOCKET" has-session -t =proj-feat-one 2>/dev/null || fail 
 echo "$out" | grep -q "discord.com/channels/G1/" || fail "채널 링크 출력 없음: $out"
 for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done   # tmux 안 claude 기동은 비동기
 
-PYTHONPATH="$SCRIPTS" python3 - "$FD" "$WT" "$MARINA_HOME" "$FAKE_OUT" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" "$WT" "$MARINA_HOME" "$FAKE_OUT" <<'PY'
 import json, os, stat, sys
 from pathlib import Path
 import marina_session as ms
@@ -78,7 +78,7 @@ out="$(msess new nope feat/x --no-start 2>&1)" && fail "미등록 프로젝트�
 echo "$out" | grep -q "discord.json" || fail "프로젝트 추가 안내 없음: $out"
 
 # 6) marina start 실패는 경고만(세션은 연다) — 함수 단위
-PYTHONPATH="$SCRIPTS" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - <<'PY'
 import subprocess, sys
 import marina_session as ms
 ms.subprocess.run = lambda *a, **k: subprocess.CompletedProcess(a, 1, stdout="", stderr="compose 없음")

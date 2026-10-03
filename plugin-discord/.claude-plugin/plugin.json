@@ -1,0 +1,11 @@
+{
+  "name": "marina-discord",
+  "description": "Marina Discord sessions — one Discord channel per worktree/chat session (Claude Code in tmux with --channels), #status dashboard, stop/question/permission buttons. Works alone; uses the marina runtime CLI when installed.",
+  "author": {
+    "name": "Jeon Sumin"
+  },
+  "homepage": "https://github.com/turong92/marina",
+  "repository": "https://github.com/turong92/marina",
+  "license": "MIT",
+  "keywords": ["discord", "claude-code", "sessions", "tmux"]
+}

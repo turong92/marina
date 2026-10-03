@@ -11,7 +11,7 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY'
 import json
 import os
 import tempfile
@@ -126,7 +126,7 @@ print("PASS part A: 목록(created/edited·횟수·밖 제외·없는 파일) + 
 PY
 
 # ---------- 모바일 UI 배선 ----------
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY'
 from marina_mobile import render_mobile_html
 html = render_mobile_html()
 for needle in ('data-gallery-tab="images"', 'data-gallery-tab="files"', 'id="galleryFiles"',

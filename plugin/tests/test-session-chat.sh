@@ -32,7 +32,7 @@ echo "$out" | grep -q "discord.com/channels/G1/" || fail "채널 링크 출력 �
 echo "$out" | grep -q "chat 역할에게만" || fail "역할 안내 없음: $out"
 for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done
 
-PYTHONPATH="$SCRIPTS" python3 - "$FD" "$MARINA_HOME" "$FAKE_OUT" "$MARINA_CLAUDE_JSON" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" "$MARINA_HOME" "$FAKE_OUT" "$MARINA_CLAUDE_JSON" <<'PY'
 import json, os, stat, subprocess, sys
 from pathlib import Path
 import marina_session as ms
@@ -199,7 +199,7 @@ PY2
 rm -f "$FD/no_chat_role"
 
 # 이미 있는 CHAT 카테고리가 공개(@everyone 차단 없음)면 거절 — 서버 기본값에 기대지 않는다
-PYTHONPATH="$SCRIPTS" python3 - "$FD" <<'PY2' || fail "기존 카테고리 권한 검사"
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" <<'PY2' || fail "기존 카테고리 권한 검사"
 import json, sys
 import marina_session as ms
 cfg = ms.load_config(); dc = ms.Discord(ms.read_token(cfg))
@@ -229,7 +229,7 @@ KEY="$(python3 -c 'import os,re,sys; print(re.sub(r"[^A-Za-z0-9]","-",os.path.re
 mkdir -p "$MARINA_CLAUDE_PROJECTS/$KEY"; echo '{}' > "$MARINA_CLAUDE_PROJECTS/$KEY/$OLD.jsonl"
 out="$(msess new chat moved --from $OLD 2>&1)" || fail "--from 실패: $out"
 for _ in $(seq 50); do grep -lq -- "--fork-session" "$FAKE_OUT"/*/argv 2>/dev/null && break; sleep 0.1; done
-PYTHONPATH="$SCRIPTS" python3 - "$FAKE_OUT" "$OLD" <<'PY2' || fail "--from 인자"
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FAKE_OUT" "$OLD" <<'PY2' || fail "--from 인자"
 import sys
 from pathlib import Path
 import marina_session as ms

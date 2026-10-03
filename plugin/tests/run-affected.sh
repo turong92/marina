@@ -69,7 +69,7 @@ if not changed:
 
 # ② import 그래프(정방향) → 바뀐 모듈을 물고 있는 모듈들(역방향 폐포).
 imports: dict[str, set[str]] = {}
-for path in scripts.glob("*.py"):
+for path in [*scripts.glob("*.py"), *(scripts.parent.parent / "plugin-discord" / "scripts").glob("*.py")]:   # 분리 D: discord 폴더도
     text = path.read_text(encoding="utf-8", errors="ignore")
     imports[path.stem] = set(re.findall(r"^\s*(?:from|import)\s+(marina_\w+)", text, re.M))
 
@@ -78,7 +78,7 @@ changed_modules = {Path(c).stem for c in changed if c.endswith(".py") and "/scri
 # ②-1 **무엇이** 바뀌었나 — 모듈 이름만으로 고르면 그 모듈을 쓰는 테스트 전부가 걸린다.
 # diff 에서 실제로 손댄 함수·상수 이름을 뽑아, 그걸 부르는 테스트를 정조준한다.
 symbol = re.compile(r"^[+-]\s*(?:def|class)\s+(\w+)|^[+-]\s*(_?[A-Z][A-Z0-9_]{2,})\s*(?::[^=]+)?=")
-scoped = ["--", "plugin/scripts"]      # 테스트 파일의 HERE=/TMP= 같은 것까지 심볼로 세면 전부 걸린다
+scoped = ["--", "plugin/scripts", "plugin-discord/scripts"]      # 테스트 파일의 HERE=/TMP= 같은 것까지 심볼로 세면 전부 걸린다
 diff_args = (["diff", "-U0", base] if base else ["diff", "-U0", "HEAD"]) + scoped
 changed_symbols = set()
 for line in git(*diff_args) or git("diff", "-U0", "HEAD~1"):
@@ -110,7 +110,7 @@ daemon_affected = bool(seen & closure) or any(c.endswith("marina-control.py") fo
 # `"/plugin/" in c` 는 **한 번도 참이 된 적이 없어** 웹 JS·CSS·훅·셸 변경이 선택에서 통째로
 # 빠졌다(실측 2026-09-10: app-11-chat.js 를 고쳐도 "돌릴 테스트가 없다").
 asset_names = {Path(c).name for c in changed
-               if not c.endswith(".py") and (c.startswith("plugin/") or "/plugin/" in c)}
+               if not c.endswith(".py") and (c.startswith(("plugin/", "plugin-discord/")) or "/plugin/" in c)}
 changed_tests = {Path(c).name for c in changed if "/tests/" in c and c.endswith(".sh")}
 
 deep = os.environ.get("DEEP") == "1"

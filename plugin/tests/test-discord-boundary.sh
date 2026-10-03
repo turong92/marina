@@ -3,7 +3,7 @@
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"
 SCRIPTS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts" && pwd -P)"
-python3 - "$SCRIPTS" <<'PY'
+python3 - "$DSCRIPTS" <<'PY'
 import ast, re, sys
 from pathlib import Path
 S = Path(sys.argv[1])

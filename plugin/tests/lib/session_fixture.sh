@@ -37,6 +37,7 @@ chmod +x "$TMPROOT/bin/claude"
 printf '#!/usr/bin/env bash\nexec bash "%s" "$@"\n' "$MARINA_SH" > "$TMPROOT/bin/marina"; chmod +x "$TMPROOT/bin/marina"
 export MARINA_RUNTIME_BIN="$TMPROOT/bin/marina"
 export MARINA_DISCORD_DAEMON=off      # 테스트가 실제 봇 데몬을 띄우지 않게(test-discord-daemon 만 켠다)
+export MARINA_SESSION_BIN="$DSCRIPTS/../bin/marina-session"   # runtime 의 `marina session` → discord 명령(분리 D)
 export PATH="$TMPROOT/bin:$PATH"
 
 gi() { mkdir -p "$1"; git -C "$1" init -q -b main; git -C "$1" config user.email t@t.invalid; git -C "$1" config user.name T; echo ok > "$1/r"; git -C "$1" add r; git -C "$1" commit -qm init; }

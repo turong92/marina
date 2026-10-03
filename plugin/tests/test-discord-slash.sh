@@ -13,7 +13,7 @@ touch "$CH/skills/aside-browser/SKILL.md" "$CH/commands/standup.md" "$CH/plugins
 printf '{"version":2,"plugins":{"superpowers@m":[{"installPath":"%s"}]}}\n' "$CH/plugins/cache/m/sp/1" > "$CH/plugins/installed_plugins.json"
 export MARINA_CLAUDE_HOME="$CH"
 
-PYTHONPATH="$SCRIPTS" python3 - "$FD" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" <<'PY'
 import json, os, sys
 from pathlib import Path
 import marina_session as ms

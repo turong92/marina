@@ -41,3 +41,7 @@ export MARINA_E2E=1
 # 모르는 호출이라 exit 99 로 죽어(entrypoint-lifecycle-env) x-marina 가 {} 로 사라진다. 위의 MARINA_* 초기화 뒤에 세운다.
 MARINA_YAML_DOCKER="$(command -v docker 2>/dev/null || true)"
 export MARINA_YAML_DOCKER
+
+# 분리 D: discord 코드는 plugin-discord/scripts — discord 테스트는 PYTHONPATH="$DSCRIPTS:$SCRIPTS"
+DSCRIPTS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../../../plugin-discord/scripts" 2>/dev/null && pwd -P || true)"
+export DSCRIPTS

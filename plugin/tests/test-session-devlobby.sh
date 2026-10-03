@@ -21,7 +21,7 @@ echo "$out" | grep -q "#새-작업" || fail "로비 이름: $out"
 out="$(msess lobby proj 2>&1)" && fail "개발 로비가 두 개"
 for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done
 
-PYTHONPATH="$SCRIPTS" python3 - "$FD" "$SRC" "$FAKE_OUT" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" "$SRC" "$FAKE_OUT" <<'PY'
 import json, os, subprocess, sys
 from pathlib import Path
 import marina_session as ms

@@ -450,7 +450,16 @@ print(f"런타임: 원격 ({t.host})" if t.is_remote else "런타임: 로컬")
       # discord 플러그인의 명령(marina-session)으로 넘겨줄 뿐 — runtime 은 Discord 코드를 모른다(분리 B, 스펙 R5).
       _ms="${MARINA_SESSION_BIN:-}"
       if [[ -z "$_ms" ]]; then
-        for _c in "$(command -v marina-session 2>/dev/null)" "$HOME/.local/bin/marina-session" "$SCRIPT_DIR/../bin/marina-session"; do
+        # 설치된 marina-discord 플러그인(설치 목록) · 레포 안 옆 폴더(개발) · PATH 순
+        _inst="$(python3 -c 'import json,os,sys
+try:
+    d=json.load(open(os.path.expanduser(os.environ.get("CLAUDE_CONFIG_DIR","~/.claude")+"/plugins/installed_plugins.json")))["plugins"]
+    es=[e for k,v in d.items() if k.startswith("marina-discord@") for e in v if isinstance(e,dict)]
+    es.sort(key=lambda e:(e.get("scope")=="user",str(e.get("lastUpdated") or "")),reverse=True)
+    print(es[0]["installPath"]+"/bin/marina-session")
+except Exception:
+    pass' 2>/dev/null)"
+        for _c in "$_inst" "$SCRIPT_DIR/../../plugin-discord/bin/marina-session" "$(command -v marina-session 2>/dev/null)" "$HOME/.local/bin/marina-session"; do
           [[ -n "$_c" && -x "$_c" ]] && { _ms="$_c"; break; }
         done
       fi

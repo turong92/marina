@@ -24,7 +24,7 @@ echo "$out" | grep -q "discord.com/channels/G1/" || fail "채널 링크 없음: 
 [ ! -e "$SRC/.claude/worktrees/gcp-review" ] || fail "워크트리를 새로 만듦"
 for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done
 
-PYTHONPATH="$SCRIPTS" python3 - "$WT" "$OLD" "$FAKE_OUT" "$SRC" "$ROOTSID" "$OUTSID" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$WT" "$OLD" "$FAKE_OUT" "$SRC" "$ROOTSID" "$OUTSID" <<'PY'
 import os, sys, time
 from pathlib import Path
 import marina_session as ms

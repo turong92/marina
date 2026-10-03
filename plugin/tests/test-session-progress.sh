@@ -12,7 +12,7 @@ printf '{"projects":{}}\n' > "$MARINA_CLAUDE_JSON"
 msess new proj feat/p --no-start >/dev/null 2>&1 || fail "new"
 msess new chat room --title "방" >/dev/null 2>&1 || fail "new chat"
 
-PYTHONPATH="$SCRIPTS" python3 - "$FD" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" <<'PY'
 import json, os, sys
 from pathlib import Path
 import marina_session as ms

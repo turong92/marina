@@ -11,7 +11,7 @@ fail() { echo "FAIL: $*"; exit 1; }
 msess new proj feat/a --no-start >/dev/null 2>&1 || fail "new a"
 msess new proj feat/b --no-start >/dev/null 2>&1 || fail "new b"
 
-PYTHONPATH="$SCRIPTS" python3 - "$SRC" "$FD" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$SRC" "$FD" <<'PY'
 import json, subprocess, sys, time
 from pathlib import Path
 src, fd = Path(sys.argv[1]), Path(sys.argv[2])

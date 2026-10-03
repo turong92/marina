@@ -5,7 +5,7 @@ set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/session_fixture.sh"
 start_fake_discord
 
-PYTHONPATH="$SCRIPTS" python3 - "$FD" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" <<'PY'
 import json, sys
 from pathlib import Path
 import marina_session as ms

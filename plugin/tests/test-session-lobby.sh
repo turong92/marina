@@ -15,7 +15,7 @@ echo "$out" | grep -q "discord.com/channels/G1/" || fail "로비 링크 없음: 
 out2="$(msess lobby 2>&1)" && fail "로비가 두 개 만들어짐"
 for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done
 
-PYTHONPATH="$SCRIPTS" python3 - "$FD" "$MARINA_HOME" "$FAKE_OUT" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" "$MARINA_HOME" "$FAKE_OUT" <<'PY'
 import json, os, subprocess, sys, time
 from pathlib import Path
 import marina_session as ms

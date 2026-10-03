@@ -12,6 +12,14 @@
       "author": {
         "name": "Jeon Sumin"
       }
+    },
+    {
+      "name": "marina-discord",
+      "description": "Marina Discord sessions — channel per session, #status dashboard, stop/question/permission buttons. Optional; uses the marina runtime CLI when installed.",
+      "source": "./plugin-discord",
+      "author": {
+        "name": "Jeon Sumin"
+      }
     }
   ]
 }

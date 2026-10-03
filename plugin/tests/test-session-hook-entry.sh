@@ -7,11 +7,11 @@ set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/session_fixture.sh"
 fail() { echo "FAIL: $*"; exit 1; }
 CHOME="$TMPROOT/claudehome"; mkdir -p "$CHOME/plugins"
-V1="$(cd "$SCRIPTS/.." && pwd -P)"
-printf '{"version":2,"plugins":{"marina@test-market":[{"installPath":"%s"}]}}\n' "$V1" > "$CHOME/plugins/installed_plugins.json"
+V1="$(cd "$DSCRIPTS/.." && pwd -P)"
+printf '{"version":2,"plugins":{"marina-discord@test-market":[{"installPath":"%s"}]}}\n' "$V1" > "$CHOME/plugins/installed_plugins.json"
 export MARINA_CLAUDE_HOME="$CHOME"
 
-PYTHONPATH="$SCRIPTS" python3 - "$TMPROOT" "$CHOME" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$TMPROOT" "$CHOME" <<'PY'
 import json, os, subprocess, sys
 from pathlib import Path
 import marina_session as ms
@@ -34,7 +34,7 @@ check(r.returncode == 0, f"입구로 훅 실행: {r.stderr}")
 # 새 버전 설치 → 같은 입구가 새 버전을 부른다(재시작 없음)
 v2 = tmp / "v2" / "scripts"; v2.mkdir(parents=True)
 (v2 / "marina_session.py").write_text("import sys; print('V2', sys.argv[1:])\n")
-(chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"marina@test-market": [{"installPath": str(v2.parent)}]}}))
+(chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"marina-discord@test-market": [{"installPath": str(v2.parent)}]}}))
 r = subprocess.run([str(shim), "hook-stop"], input="{}", text=True, capture_output=True)
 check(r.stdout.strip() == "V2 ['hook-stop']", f"새 버전을 부른다: {r.stdout!r} {r.stderr!r}")
 # 설치 목록이 깨지면 만들 때의 경로로(멈추지 않게)

@@ -27,5 +27,5 @@ msess rm proj/feat/one >/dev/null 2>&1 || fail "rm"
 sleep 1
 [ "$(notices)" = 1 ] || fail "rm 으로 끈 세션을 알림: $(notices)"
 
-PYTHONPATH="$SCRIPTS" python3 "$SCRIPTS/marina_session.py" notify-exit nope/x 1 || fail "모르는 세션 알림이 실패 코드"
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 "$DSCRIPTS/marina_session.py" notify-exit nope/x 1 || fail "모르는 세션 알림이 실패 코드"
 echo "PASS test-session-exit-notice"

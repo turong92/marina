@@ -8,7 +8,7 @@ set -euo pipefail
 start_fake_discord
 fail() { echo "FAIL: $*"; exit 1; }
 
-PYTHONPATH="$SCRIPTS" python3 - "$TMPROOT" "$SRC" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$TMPROOT" "$SRC" <<'PY'
 import json, sys
 from pathlib import Path
 import marina_session as ms
@@ -36,7 +36,7 @@ def line(cid, mid):
 (tmp / "chan").write_text(ch); (tmp / "sd").write_text(str(sd))
 PY
 CH="$(cat "$TMPROOT/chan")"; SD="$(cat "$TMPROOT/sd")"
-hook() { DISCORD_STATE_DIR="$1" PYTHONPATH="$SCRIPTS" python3 "$SCRIPTS/marina_session.py" hook-stop; }
+hook() { DISCORD_STATE_DIR="$1" PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 "$DSCRIPTS/marina_session.py" hook-stop; }
 # 진행 훅이 달아 둔 표시(activity.json marked) — 턴 끝은 이 기록대로 뗀다(추론하지 않음, 리뷰 B-I1~I4)
 seed() { printf '{"mid":"%s","marked":%s}' "$1" "$2" > "$SD/activity.json"; }
 

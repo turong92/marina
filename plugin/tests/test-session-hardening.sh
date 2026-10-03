@@ -23,7 +23,7 @@ export SSH_AUTH_SOCK="$TMPROOT/agent.sock"
 msess new proj feat/one --no-start >/dev/null 2>&1 || fail "new"
 for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done
 
-PYTHONPATH="$SCRIPTS" python3 - "$FAKE_OUT" "$TMPROOT" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FAKE_OUT" "$TMPROOT" <<'PY'
 import json, os, socket, subprocess, sys, threading
 from pathlib import Path
 import marina_session as ms

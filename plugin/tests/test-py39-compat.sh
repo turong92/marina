@@ -11,7 +11,7 @@ SCRIPTS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../scripts"
 
 # 1) 정적 가드 — 어느 인터프리터로 돌든 잡는다
 bad=""
-for f in "$SCRIPTS"/*.py; do
+for f in "$SCRIPTS"/*.py "$DSCRIPTS"/*.py; do
   grep -q '^from __future__ import annotations' "$f" && continue
   hits="$(grep -nE '^\s*def .*(:|->)\s*[A-Za-z_][A-Za-z0-9_.]*(\[[^]]*\])?\s*\|\s*[A-Za-z_]' "$f" || true)"
   [ -n "$hits" ] && bad="$bad\n$(basename "$f"): $hits"
@@ -29,8 +29,8 @@ if [ -z "$PY39" ]; then
   echo "SKIP(3.9 없음) — 정적 가드만 통과"; echo "PASS test-py39-compat"; exit 0
 fi
 fail=0
-for f in "$SCRIPTS"/*.py; do
-  out="$(cd "$SCRIPTS" && PYTHONPATH="$SCRIPTS" "$PY39" - "$f" 2>&1 <<'PY' || true
+for f in "$SCRIPTS"/*.py "$DSCRIPTS"/*.py; do
+  out="$(cd "$SCRIPTS" && PYTHONPATH="$SCRIPTS:$DSCRIPTS" "$PY39" - "$f" 2>&1 <<'PY' || true
 import importlib.util, os, re, sys
 path = sys.argv[1]
 name = "m_" + re.sub(r"\W", "_", os.path.basename(path)[:-3])

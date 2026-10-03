@@ -11,7 +11,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 
 # ---------- ① 정렬: 순서 반영 + 노드 재사용 ----------
-PYTHONPATH="$SCR" python3 - <<'PY' | node
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY' | node
 from marina_mobile import render_mobile_html
 import json
 
@@ -90,7 +90,7 @@ console.log("PASS ① reconciler: 순서 반영 + 노드 재사용 + 추가/삭�
 PY
 
 # ---------- ②③④ 배선/CSS ----------
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY'
 import re
 from marina_mobile import render_mobile_html
 
@@ -153,7 +153,7 @@ print("PASS ②③④ 배선: 밀도(CSS·기기별) · 핀(워크트리·서버
 PY
 
 # ---------- 서버: 핀 저장 ----------
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY'
 from pathlib import Path
 import marina_mobile as mm
 
@@ -194,7 +194,7 @@ echo "PASS 라우트: /mobile/api/{pins,worktree-create} + 웹·모바일 공용
 
 
 # ---------- ⑤ 전체보기 · 숨기기 · 작업중 오탐 ----------
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY'
 import time
 from pathlib import Path
 import marina_sessions as ms
@@ -245,7 +245,7 @@ mm.HIDDEN_FILE.unlink(missing_ok=True)
 print("PASS ⑤ 작업중 오탐 강등 + 전체보기 창/캐시 분리 + 숨기기 저장")
 PY
 
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY'
 from marina_mobile import render_mobile_html
 html = render_mobile_html()
 assert 'id="showAllBtn"' in html, "전체보기 버튼 없음"

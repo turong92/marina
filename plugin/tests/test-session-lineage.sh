@@ -9,7 +9,7 @@ set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"   # 실 ~/.marina 격리
 SCRIPTS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/../scripts"
 
-PYTHONPATH="$SCRIPTS" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - <<'PY'
 import json, os, tempfile, time, unittest
 from pathlib import Path
 

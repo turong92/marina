@@ -15,7 +15,7 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 SCR="$HERE/../scripts"
 
-PYTHONPATH="$SCR" python3 - <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY'
 from marina_sessions import _tool_file_targets
 
 # ① SendUserFile 은 "이 파일을 형에게 건넨다"는 뜻이다 — 결과물 신호로 이보다 분명한 게 없다.
@@ -31,7 +31,7 @@ print("ok SendUserFile 로 건넨 파일도 결과물로 센다")
 PY
 
 # ② 채팅방은 폴더에 있는 것을 그대로 보여준다.
-PYTHONPATH="$SCR" python3 - <<'PY2'
+PYTHONPATH="$DSCRIPTS:$SCR" python3 - <<'PY2'
 import json
 from pathlib import Path
 

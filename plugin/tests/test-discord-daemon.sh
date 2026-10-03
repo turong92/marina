@@ -6,7 +6,7 @@ set -euo pipefail
 fail() { echo "FAIL: $*"; exit 1; }
 unset MARINA_DISCORD_DAEMON
 python3 -c "import time; time.sleep(60)" marina_session.py daemon & DUMMY=$!
-PYTHONPATH="$SCRIPTS" python3 - "$DUMMY" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$DUMMY" <<'PY'
 import sys, time
 import marina_session as ms
 fails = []

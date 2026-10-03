@@ -3,7 +3,7 @@
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"
 SCRIPTS="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../scripts" && pwd -P)"
-PYTHONPATH="$SCRIPTS" python3 - "$MARINA_HOME" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$MARINA_HOME" <<'PY'
 import json, sys, time
 from pathlib import Path
 import marina_discord_usage as du
