@@ -1306,6 +1306,105 @@ def _code_updated(me: "Path | None" = None, home: "Path | None" = None) -> bool:
     return latest.exists() and latest.resolve() != me
 
 
+UPDATE_EVERY_S = 3600.0
+_DISCORD_PLUGIN = "marina-discord@marina-dev"
+_PREFLIGHT_MODULES = ("marina_session", "marina_discord_bot", "marina_discord_ask", "marina_share", "marina_discord_usage")
+
+
+def _claude_home() -> Path:
+    return Path(os.environ.get("MARINA_CLAUDE_HOME") or Path.home() / ".claude")
+
+
+def _marketplace_scripts() -> Path:
+    return _claude_home() / "plugins" / "marketplaces" / "marina-dev" / "plugin-discord" / "scripts"
+
+
+def _run_claude(argv: list[str]) -> tuple[int, str]:
+    exe = shutil.which("claude") or str(Path.home() / ".local" / "bin" / "claude")
+    env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+    try:
+        r = subprocess.run([exe, *argv[1:]], capture_output=True, text=True, timeout=300, env=env)
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return 1, str(exc)
+
+
+def _preflight(scripts: Path) -> tuple[bool, str]:
+    """새 코드가 데몬 파이썬(sys.executable)으로 import 되는지 — 격리 홈에서. 깨진 버전을 깔지 않는다(3.9 사고 교훈)."""
+    import tempfile
+    code = "import sys; sys.path.insert(0, sys.argv[1])\n" + "".join(f"import {m}\n" for m in _PREFLIGHT_MODULES)
+    with tempfile.TemporaryDirectory() as tmp:
+        try:
+            r = subprocess.run([sys.executable, "-c", code, str(scripts)], capture_output=True, text=True, timeout=60,
+                               env={"HOME": tmp, "MARINA_HOME": tmp, "PATH": "/usr/bin:/bin"})
+        except (OSError, subprocess.SubprocessError) as exc:
+            return False, str(exc)
+    return r.returncode == 0, (r.stderr or "")[-400:]
+
+
+def _marketplace_sha() -> str:
+    r = subprocess.run(["git", "-C", str(_marketplace_scripts().parent.parent), "rev-parse", "HEAD"],
+                       capture_output=True, text=True, timeout=10)
+    return r.stdout.strip()
+
+
+def self_update_tick(now: float, installed: "bool | None" = None, run=None, preflight=None, new_sha=None) -> str:
+    """discord 자동 업데이트(형 결정 2026-10-03: discord 도 자동) — marina 강제 업데이트는 marina@ 만 갱신하므로 스스로.
+    한 시간마다: 마켓플레이스 갱신 → 새 코드 import 사전 검사 → plugin update. 깔고 나면 _code_updated 가 데몬을 교체한다.
+    실패한 버전(sha)은 기록해 다시 시도하지 않는다. MARINA_AUTO_UPDATE=0 이면 끔(marina 와 같은 스위치)."""
+    if os.environ.get("MARINA_AUTO_UPDATE") == "0":
+        return "off"
+    if installed is None:
+        try:
+            Path(__file__).resolve().relative_to((_claude_home() / "plugins" / "cache").resolve())
+            installed = True
+        except ValueError:
+            installed = False
+    if not installed:
+        return "skip:dev"
+    run = run or _run_claude
+    preflight = preflight or _preflight
+    new_sha = new_sha or _marketplace_sha
+    sf = marina_home() / "discord-update.json"
+    try:
+        st = json.loads(sf.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        st = {}
+    if st.get("lastAt") and now - float(st["lastAt"]) < UPDATE_EVERY_S:
+        return "skip:not-due"
+    st["lastAt"] = now
+    out = "updated"
+    run(["claude", "plugin", "marketplace", "update", "marina-dev"])
+    sha = new_sha()
+    if sha and sha in (st.get("rejected") or []):
+        out = "skip:rejected"
+    else:
+        ok, why = preflight(_marketplace_scripts())
+        if not ok:
+            st["rejected"] = ((st.get("rejected") or []) + [sha])[-20:]
+            st["lastError"] = why
+            out = "rejected"
+        else:
+            rc, msg = run(["claude", "plugin", "update", _DISCORD_PLUGIN])
+            if rc != 0:
+                st["lastError"] = msg[-400:]
+                out = "failed"
+    try:
+        sf.write_text(json.dumps(st, ensure_ascii=False))
+    except OSError:
+        pass
+    return out
+
+
+def _daemon_stop_check() -> bool:
+    """데몬이 1분마다 부른다: 자동 업데이트(한 시간에 한 번) 뒤 설치본이 바뀌었으면 끝낸다."""
+    try:
+        self_update_tick(time.time())
+    except Exception:
+        pass
+    return _code_updated()
+
+
 def _ensure_daemon_quiet() -> None:
     try:
         if config_path().exists():
@@ -2565,7 +2664,7 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "daemon":
             daemon_pid_path().write_text(f"{os.getpid()}\n")
             import marina_discord_bot
-            marina_discord_bot.run_forever(stop=_code_updated)
+            marina_discord_bot.run_forever(stop=_daemon_stop_check)
         elif a.cmd == "daemon-ensure":
             print(ensure_daemon())
         elif a.cmd == "lock-all":

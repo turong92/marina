@@ -167,4 +167,4 @@ runtime 쪽 파일에서 `marina_session`·`marina_sessions`·`marina_rooms`·`m
 4. `marina-session daemon-ensure` — 고정 입구(~/.marina/bin/marina-session-hook)를 새 본문(키 두 개)으로 다시 쓰고 봇 데몬을 띄운다
 5. 확인: 입구에 `marina-discord@` 가 있는지, `discord-daemon.pid` 프로세스, #상태 갱신, 🛑
 
-marina-discord 는 marina 의 강제 자동 업데이트 대상이 아니다(그건 marina@ 만 갱신). discord 갱신은 형이 손으로(`plugin update marina-discord@marina-dev`) — 데몬은 설치본이 바뀌면 1분 안에 스스로 교체된다.
+marina-discord 는 marina 의 강제 자동 업데이트 대상이 아니다(그건 marina@ 만 갱신). 그래서 discord 데몬이 **스스로** 한 시간마다 갱신한다(형 결정): 마켓플레이스 갱신 → 새 코드 import 사전 검사(데몬 파이썬, 격리 홈) → `plugin update marina-discord@marina-dev` → 1분 안에 새 코드로 교체. 실패한 버전은 다시 안 깐다. `MARINA_AUTO_UPDATE=0` 이면 끔.
