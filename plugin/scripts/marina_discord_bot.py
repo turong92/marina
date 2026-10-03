@@ -6,6 +6,7 @@ discord.json 이 있을 때만 마리나 데몬이 run_forever 를 돌린다(선
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -13,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -886,6 +888,138 @@ def slash(channel: str, user: str, name: str, value: str = "", args: str = "", m
     return f"⌨️ `{shown[:300]}` — 쉬는 순간 입력할게"
 
 
+_YES = re.compile(r"^\s*❯\s*1\.\s*Yes\s*$")
+_NO = re.compile(r"^\s*2\.\s*No\s*$")
+PANE_PERM_TTL = 600.0
+
+
+def _pane_prompt(name: str) -> "tuple[str, list[str], str, bool] | None | bool":
+    """화면 아래 권한 창 → (서명, 머리말, 명령 앞부분, 누를 수 있나). 창이 없으면 None, 화면을 못 읽으면 False(판단 보류 — 리뷰 I7).
+    머리말 = 질문 위로 구분선(─)까지의 설명 줄. 서명은 머리말~선택지 끝까지(다른 창·다른 선택지면 달라진다).
+    누를 수 있음 = 선택지가 정확히 '❯ 1. Yes' / '2. No' 두 개 — 영구 허용·폴더 신뢰 같은 창엔 Enter 를 안 친다(리뷰 C1)."""
+    if not name or not ms.tmux_alive(name):
+        return None
+    r = ms._tmux("capture-pane", "-p", "-t", f"={name}:")
+    if r.returncode != 0:
+        return False
+    lines = (r.stdout or "").rstrip().splitlines()[-20:]
+    q = max((i for i, l in enumerate(lines) if "Do you want to " in l), default=-1)
+    if q < 0 or not any(_PERM.match(l) for l in lines[q:]):
+        return None
+    head: list[str] = []
+    cmd = ""
+    top = q
+    for i in range(q - 1, max(-1, q - 16), -1):
+        t = lines[i].strip()
+        top = i
+        if t and set(t) <= set("─━"):
+            break
+        if t.startswith("│"):
+            cmd = t.lstrip("│ ").strip() or cmd       # 위로 올라가며 — 마지막에 남는 게 첫 줄
+            continue
+        if not t or set(t) <= set("╌┄-"):
+            continue
+        head.append(t[:100])
+    opts = [l for l in lines[q + 1:] if re.match(r"^\s*(❯\s*)?\d+\.", l)]
+    ok = len(opts) == 2 and bool(_YES.match(opts[0])) and bool(_NO.match(opts[1]))
+    sig = hashlib.sha1("\n".join(lines[top:]).encode("utf-8", "replace")).hexdigest()[:16]
+    return sig, list(reversed(head))[-3:], _clean(cmd)[:80], ok
+
+
+def _perm_entries(sd: Path) -> "list[tuple[Path, dict[str, Any]]]":
+    out = []
+    for f in sd.glob("perm-*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict):
+            out.append((f, d))
+    return out
+
+
+def _pane_perm_close(f: Path, d: dict[str, Any], channel: str, note: str) -> None:
+    for x in (f, f.with_suffix(".answer")):
+        try:
+            x.unlink()
+        except OSError:
+            pass
+    if d.get("msg"):
+        try:
+            _dc(ms.load_config())._req("PATCH", f"/channels/{channel}/messages/{d['msg']}",
+                                       {"content": str(d.get("title") or "🔐 권한 요청") + f"\n-# {note}", "components": []})
+        except ms.SessionError:
+            pass
+
+
+def pane_perm_tick(names: "set[str] | None" = None) -> None:
+    """터미널 권한 창(서브에이전트 것은 훅 버튼이 안 온다) → 채널에 [허용][거부]. 풀리면 버튼을 거둔다(실사용 2026-10-04)."""
+    for rec in ms.load_sessions():
+        try:
+            _pane_perm_one(rec, names)
+        except Exception as exc:                      # 한 세션 오류가 나머지를 막지 않게(리뷰 I9)
+            _log(f"pane_perm {rec.get('tmux')}: {exc!r}")
+
+
+def _pane_perm_one(rec: dict[str, Any], names: "set[str] | None") -> None:
+    name, ch = str(rec.get("tmux") or ""), str(rec.get("channelId") or "")
+    if not ch or not rec.get("stateDir") or (names is not None and name not in names):
+        return
+    sd = Path(str(rec["stateDir"]))
+    got = _pane_prompt(name)
+    if got is False:
+        return
+    entries = _perm_entries(sd)
+    mine = [(f, d) for f, d in entries if d.get("pane")]
+    if got and any(d.get("sig") == got[0] and d.get("msg") for _, d in mine):
+        return
+    for f, d in mine:
+        _pane_perm_close(f, d, ch, "터미널에서 처리됨" if not got else "창이 바뀜")
+    if not got or any(not d.get("pane") for _, d in entries):     # 훅이 이미 버튼을 올린 요청(본 세션)
+        return
+    sig, head, cmd, ok = got
+    token = uuid.uuid4().hex[:12]
+    title = "🔐 **권한 창에서 멈춤** — " + (" · ".join(head) or "터미널 확인 필요") + (f"\n`{cmd}`" if cmd else "")
+    tail = ("\n-# 누르면 터미널에 Yes(Enter)/취소(Esc)를 대신 쳐" if ok
+            else "\n-# 선택지가 Yes/No 가 아니라 버튼을 안 달았어 — 터미널에서 골라 줘")
+    body: dict[str, Any] = {"content": title + tail, "allowed_mentions": {"parse": []}}
+    if ok:
+        body["components"] = [{"type": 1, "components": [
+            {"type": 2, "style": 3, "label": "허용", "custom_id": f"mperm:a:{ch}:{token}"},
+            {"type": 2, "style": 4, "label": "거부", "custom_id": f"mperm:d:{ch}:{token}"}]}]
+    try:
+        msg = str(_dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", body).get("id") or "")
+    except ms.SessionError:
+        return                                        # 파일을 안 남겨 다음 판에 다시 올린다(리뷰 I6)
+    if msg:
+        ms._write_json(sd / f"perm-{token}.json", {"token": token, "msg": msg, "pane": True, "sig": sig, "ok": ok,
+                                                    "title": title, "at": time.time()})
+
+
+def _pane_answer(rec: dict[str, Any], sd: Path, token: str, d: dict[str, Any], allow: bool) -> str:
+    f = sd / f"perm-{token}.json"
+    ch, name = str(rec.get("channelId")), str(rec.get("tmux") or "")
+    if not d.get("ok"):
+        return "누를 수 있는 권한 창이 아니야 — 터미널에서 골라 줘"
+    try:                                              # 두 번 눌러도 한 번만 친다
+        os.close(os.open(str(f.with_suffix(".answer")), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except OSError:
+        return "이미 결정됐어"
+    if time.time() - float(d.get("at") or 0) > PANE_PERM_TTL:
+        _pane_perm_close(f, d, ch, "오래된 버튼이라 안 눌렀어")
+        return "오래된 버튼이라 안 눌렀어 — 아직 창이 있으면 새 버튼이 와"
+    got = _pane_prompt(name)
+    if not got or got[0] != d.get("sig") or not got[3]:
+        _pane_perm_close(f, d, ch, "화면이 바뀌어서 안 눌렀어")
+        return "화면이 바뀌어서 안 눌렀어 — 지금 창이 있으면 새 버튼이 와"
+    ms.tmux_leave_mode(name)
+    r = ms._tmux("send-keys", "-t", f"={name}:", "Enter" if allow else "Escape")
+    if r.returncode != 0:
+        return "터미널에 못 쳤어 — 터미널에서 직접 골라 줘"
+    _pane_perm_close(f, d, ch, "✅ 허용함" if allow else "⛔ 거부함")
+    return "허용했어" if allow else "거부했어"
+
+
 def perm(channel: str, user: str, token: str, allow: bool) -> str:
     """권한 요청 [허용]/[거부] — 기다리는 훅이 읽어 결정한다. 먼저 누른 것만(O_EXCL, 리뷰 I1).
     허용 목록이 빈 채널(역할로 보이는 누구나)은 승인 못 한다 — 메시지와 달리 실행 권한이다(리뷰 I6)."""
@@ -901,6 +1035,12 @@ def perm(channel: str, user: str, token: str, allow: bool) -> str:
         return "누를 권한이 없어"
     if not (sd / f"perm-{token}.json").exists():
         return "이미 끝났거나 없는 요청이야"
+    try:
+        pd = json.loads((sd / f"perm-{token}.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pd = {}
+    if isinstance(pd, dict) and pd.get("pane"):       # 화면 권한 창 — 기다리는 훅이 없다, 여기서 친다(리뷰 I8: 선점 전에 판정)
+        return _pane_answer(rec, sd, token, pd, allow)
     try:
         fd = os.open(str(sd / f"perm-{token}.answer"), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -1221,6 +1361,10 @@ class Loop:
     def view(self, now: float) -> None:
         light = snapshot(full=False)
         typing_tick(light, self.ty, now)
+        try:
+            pane_perm_tick()
+        except Exception as exc:
+            _log(f"pane_perm failed: {exc!r}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
