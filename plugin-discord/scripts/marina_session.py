@@ -16,6 +16,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import uuid
@@ -1282,6 +1283,10 @@ def ensure_daemon() -> str:
 
 
 def _code_updated(me: "Path | None" = None, home: "Path | None" = None) -> bool:
+    return _newest_scripts(me, home) is not None
+
+
+def _newest_scripts(me: "Path | None" = None, home: "Path | None" = None) -> "Path | None":
     """설치본으로 도는데 설치 목록의 최신이 이 파일이 아니면 참(업데이트됨) — 데몬이 스스로 끝나고 다음 훅이 새 코드로.
     업데이트하면 installPath 가 새 해시로 바뀌고 옛 캐시는 남으므로 '설치본인가'는 캐시 폴더 아래인지로 본다(리뷰 C1).
     최신 고르기는 셸 입구(shim)와 같은 규칙: user 범위·lastUpdated 최신."""
@@ -1290,20 +1295,20 @@ def _code_updated(me: "Path | None" = None, home: "Path | None" = None) -> bool:
     try:
         me.relative_to((home / "plugins" / "cache").resolve())
     except ValueError:
-        return False                              # 작업 트리·테스트
+        return None                              # 작업 트리·테스트
     try:
         data = json.loads((home / "plugins" / "installed_plugins.json").read_text(encoding="utf-8")).get("plugins") or {}
     except (OSError, ValueError, AttributeError):
-        return False
+        return None
     # 이 파일이 깔린 플러그인(분리 D 이후 marina-discord@, 그 전엔 marina@)에서만 최신을 고른다
     key = next((k for k in data if str(k).startswith("marina-discord@")), None) or \
         next((k for k in data if str(k).startswith("marina@")), None)
     es = [e for e in (data.get(key) or []) if isinstance(e, dict)] if key else []
     es.sort(key=lambda e: (e.get("scope") == "user", str(e.get("lastUpdated") or "")), reverse=True)
     if not es:
-        return False
+        return None
     latest = Path(str(es[0].get("installPath") or "")) / "scripts" / "marina_session.py"
-    return latest.exists() and latest.resolve() != me
+    return latest.parent if latest.exists() and latest.resolve() != me else None
 
 
 UPDATE_EVERY_S = 3600.0
@@ -1352,8 +1357,8 @@ def self_update_tick(now: float, installed: "bool | None" = None, run=None, pref
     """discord 자동 업데이트(형 결정 2026-10-03: discord 도 자동) — marina 강제 업데이트는 marina@ 만 갱신하므로 스스로.
     한 시간마다: 마켓플레이스 갱신 → 새 코드 import 사전 검사 → plugin update. 깔고 나면 _code_updated 가 데몬을 교체한다.
     실패한 버전(sha)은 기록해 다시 시도하지 않는다. MARINA_AUTO_UPDATE=0 이면 끔(marina 와 같은 스위치)."""
-    if os.environ.get("MARINA_AUTO_UPDATE") == "0":
-        return "off"
+    if str(os.environ.get("MARINA_AUTO_UPDATE", "1")).strip().lower() in ("0", "off", "false", "no"):
+        return "off"                                 # marina enabled() 와 같은 값(리뷰 I3)
     if installed is None:
         try:
             Path(__file__).resolve().relative_to((_claude_home() / "plugins" / "cache").resolve())
@@ -1373,6 +1378,10 @@ def self_update_tick(now: float, installed: "bool | None" = None, run=None, pref
     if st.get("lastAt") and now - float(st["lastAt"]) < UPDATE_EVERY_S:
         return "skip:not-due"
     st["lastAt"] = now
+    try:
+        sf.write_text(json.dumps(st, ensure_ascii=False))   # 먼저 — 아래서 예외가 나도 1시간 쉰다(리뷰 M1)
+    except OSError:
+        pass
     out = "updated"
     run(["claude", "plugin", "marketplace", "update", "marina-dev"])
     sha = new_sha()
@@ -1396,13 +1405,44 @@ def self_update_tick(now: float, installed: "bool | None" = None, run=None, pref
     return out
 
 
-def _daemon_stop_check() -> bool:
-    """데몬이 1분마다 부른다: 자동 업데이트(한 시간에 한 번) 뒤 설치본이 바뀌었으면 끝낸다."""
+_UPDATE_LOCK = threading.Lock()
+
+
+def _update_in_background(tick) -> None:
+    """업데이트(최대 수 분)는 뒤에서, 하나만 — 봇 루프(#상태·권한 버튼)를 막지 않는다(리뷰 I4)."""
+    if not _UPDATE_LOCK.acquire(blocking=False):
+        return
+    def go() -> None:
+        try:
+            tick(time.time())
+        except Exception:
+            pass
+        finally:
+            _UPDATE_LOCK.release()
+    threading.Thread(target=go, daemon=True).start()
+
+
+def _daemon_stop_check(updated=None, preflight=None, tick=None) -> bool:
+    """데몬이 1분마다 부른다: 자동 업데이트(한 시간에 한 번, 뒤에서) + 설치본이 바뀌었으면 끝낸다.
+    단 새 설치본이 데몬 파이썬으로 import 안 되면 끝내지 않는다 — 옛 코드로 계속 돈다(리뷰 I2: 봇 벽돌 방지)."""
+    _update_in_background(tick or self_update_tick)
+    newest = (updated or _newest_scripts)()
+    if not newest:
+        return False
+    ok, why = (preflight or _preflight)(Path(newest))
+    if not ok:
+        sys.stderr.write(f"새 설치본 import 실패 — 옛 코드로 계속: {why[-200:]}\n")
+    return ok
+
+
+def _daemon_handoff() -> None:
+    """업데이트로 끝난 데몬이 새 코드로 스스로 다시 띄운다 — 다음 훅(사람)을 기다리면 그사이 🛑·권한 버튼이 멈춘다(리뷰 I1)."""
     try:
-        self_update_tick(time.time())
-    except Exception:
+        if daemon_pid_path().read_text().strip() == str(os.getpid()):
+            daemon_pid_path().unlink()
+    except OSError:
         pass
-    return _code_updated()
+    ensure_daemon()
 
 
 def _ensure_daemon_quiet() -> None:
@@ -2665,6 +2705,7 @@ def main(argv: list[str] | None = None) -> int:
             daemon_pid_path().write_text(f"{os.getpid()}\n")
             import marina_discord_bot
             marina_discord_bot.run_forever(stop=_daemon_stop_check)
+            _daemon_handoff()
         elif a.cmd == "daemon-ensure":
             print(ensure_daemon())
         elif a.cmd == "lock-all":

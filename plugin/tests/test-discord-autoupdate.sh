@@ -28,6 +28,43 @@ check(ms.self_update_tick(1000.0 + 7400, installed=True, run=run, preflight=ok, 
 import os
 os.environ["MARINA_AUTO_UPDATE"] = "0"
 check(ms.self_update_tick(1000.0 + 20000, installed=True, run=run, preflight=ok, new_sha=lambda: "s9") == "off", "MARINA_AUTO_UPDATE=0 이면 끔")
+# (리뷰 I3) 끄기 값은 marina 와 같게(off/false/no 도)
+for v in ("off", "false", "no", "OFF"):
+    os.environ["MARINA_AUTO_UPDATE"] = v
+    check(ms.self_update_tick(1000.0 + 30000, installed=True, run=run, preflight=ok, new_sha=lambda: "s9") == "off", f"{v} 도 끔")
+del os.environ["MARINA_AUTO_UPDATE"]
+# (리뷰 M1) 도중에 예외가 나도 lastAt 은 먼저 저장 — 1분마다 다시 받는 루프가 안 된다
+def boom(): raise RuntimeError("git 멈춤")
+try:
+    ms.self_update_tick(1000.0 + 40000, installed=True, run=run, preflight=ok, new_sha=boom)
+except RuntimeError:
+    pass
+check(ms.self_update_tick(1000.0 + 40060, installed=True, run=run, preflight=ok, new_sha=lambda: "s9") == "skip:not-due", "예외 뒤에도 1시간 쉼")
+# (리뷰 I2) 설치본이 바뀌었어도 새 설치본이 import 안 되면 끝내지 않는다(옛 코드로 계속 — 봇 벽돌 방지)
+import threading, time
+calls = []
+check(ms._daemon_stop_check(updated=lambda: Path("/new/scripts"), preflight=lambda d: (False, "SyntaxError"),
+                            tick=lambda now: calls.append(now)) is False, "깨진 새 설치본이면 계속 돈다")
+check(ms._daemon_stop_check(updated=lambda: Path("/new/scripts"), preflight=lambda d: (True, ""), tick=lambda now: None) is True,
+      "멀쩡한 새 설치본이면 끝낸다")
+check(ms._daemon_stop_check(updated=lambda: None, preflight=ok, tick=lambda now: None) is False, "안 바뀌었으면 계속")
+# (리뷰 I4) 업데이트(최대 수 분)가 봇 루프를 막지 않는다 — 뒤에서, 하나만
+gate = threading.Event()
+slow_calls = []
+def slow(now):
+    slow_calls.append(now); gate.wait(5)
+t0 = time.time()
+ms._daemon_stop_check(updated=lambda: None, preflight=ok, tick=slow)
+ms._daemon_stop_check(updated=lambda: None, preflight=ok, tick=slow)
+check(time.time() - t0 < 1.0, "업데이트를 기다리지 않는다")
+time.sleep(0.2); gate.set()
+check(len(slow_calls) == 1, f"동시에 하나만: {slow_calls}")
+# (리뷰 I1) 데몬이 업데이트로 끝나면 사람(훅)을 기다리지 않고 새 코드로 스스로 다시 띄운다
+spawned = []
+ms._spawn_daemon = lambda: spawned.append(1) or 4242
+ms.daemon_pid_path().write_text(f"{os.getpid()}\n")
+ms._daemon_handoff()
+check(spawned == [1] and ms.daemon_pid_path().read_text().strip() == "4242", f"새 데몬 띄움: {spawned}")
 # 실제 사전 검사: 지금 코드는 통과, 깨진 코드는 거절
 import tempfile, shutil
 okk, why = ms._preflight(Path(ms.__file__).resolve().parent)
