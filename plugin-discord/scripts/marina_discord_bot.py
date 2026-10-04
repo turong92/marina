@@ -1194,6 +1194,8 @@ def role_events_tick() -> None:
 
 
 def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_f: Path) -> None:
+    """한 판의 줄들은 스레드마다 메시지 하나로 묶는다 — 서브에이전트가 몰려도 도배 안 함(리뷰 M3)."""
+    groups: dict[tuple[str, str], tuple[dict[str, Any], list[str]]] = {}
     for raw in lines:
         off += len(raw) + 1
         try:
@@ -1207,12 +1209,13 @@ def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_
         text = _fmt_role_event(ev)
         if not mid or not text:
             continue
-        off_f.write_text(str(off))                # 보내기 전에 — 보내다 죽어도 같은 줄을 다시 안 보낸다
+        groups.setdefault((str(rec.get("stateDir")), mid), (rec, []))[1].append(text)
+    off_f.write_text(str(off))                    # 보내기 전에 — 보내다 죽어도 같은 줄을 다시 안 보낸다
+    for (_, mid), (rec, texts) in groups.items():
         try:
-            ms._progress(rec, {"message_id": mid, "text": text})
+            ms._progress(rec, {"message_id": mid, "text": "\n".join(texts)})
         except ms.SessionError as exc:
             _log(f"role event: {exc}")
-    off_f.write_text(str(off))
 
 
 def perm(channel: str, user: str, token: str, allow: bool) -> str:

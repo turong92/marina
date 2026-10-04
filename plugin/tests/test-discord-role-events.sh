@@ -55,20 +55,21 @@ put({"ev": "override_blocked", "ts": 2, "session": "S1", "agent": "", "role": "d
     {"ev": "start", "ts": 4, "session": "S1", "agent": "a2", "role": "-", "model": "inherit", "effort": "", "skills": [], "desc": "코드 찾기"})
 mb.role_events_tick()
 got = thread_posts()
-check(len(got) == 4, f"내 세션 것 4줄: {got}")
+check(len(got) == 1, f"(리뷰 M3) 한 판의 줄들은 메시지 하나로 — 서브에이전트가 몰려도 도배 안 함: {got}")
+got = got[0].split("\n") if got else []
 want = ["⚠️ developer 모델 지정(opus) 무시 — 역할표대로 sonnet",
         "🤖 developer 시작 · sonnet/medium · test-driven-development · 결제 버그 Task 3",
         "✅ developer 끝 · 4분 · 52k",
         "🤖 서브에이전트 시작 · 코드 찾기"]
 check(got == want, f"줄 형식: {got}")
 mb.role_events_tick()
-check(len(thread_posts()) == 4, "오프셋 — 같은 줄 두 번 안 올림")
+check(len(thread_posts()) == 1, "오프셋 — 같은 줄 두 번 안 올림")
 # (리뷰 I5) 게시 중 예상 밖 예외(네트워크 등)여도 오프셋은 저장 — 같은 줄 반복 게시 없음
 real = ms._progress
 calls = []
 def boom(rec, args):
     calls.append(args["text"])
-    if len(calls) == 2: raise OSError("network down")
+    if len(calls) == 1: raise OSError("network down")
     return real(rec, args)
 ms._progress = boom
 n0 = len(thread_posts())
@@ -81,7 +82,7 @@ except Exception:
     pass
 mb.role_events_tick(); mb.role_events_tick()
 ms._progress = real
-check(calls.count("🤖 서브에이전트 시작 · 하나") == 1, f"반복 게시 없음: {calls}")
+check(sum("하나" in c for c in calls) == 1, f"반복 게시 없음: {calls}")
 # 회전(파일이 줄어듦) → 처음부터
 ev.write_text(json.dumps({"ev": "stop", "ts": 5, "session": "S1", "agent": "a2", "role": "-", "model": "inherit", "effort": "",
                           "skills": [], "desc": "코드 찾기", "secs": 12.0, "tokens": {"in": 1, "out": 2, "cache_read": 0, "cache_write": 0},
