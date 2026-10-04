@@ -592,6 +592,76 @@ def set_xmarina_forward(stored: str, port: str, target: str = "host", remove: bo
     return _edit_xmarina_block(stored, _m)
 
 
+_FWD_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")      # 서비스명·호스트명 — 사이드카 sh 스크립트에 들어가니 문자 제한(fullmatch: 개행 우회 차단)
+
+
+def _port_key(p):
+    """포트 키 정규화 — ASCII 숫자 1~65535 만, '09092'→'9092'. 아니면 None."""
+    s = str(p)
+    if not (s.isascii() and s.isdigit()) or not 0 < int(s) < 65536:
+        return None
+    return str(int(s))
+
+
+def forward_target_error(target, services=None):
+    """엮기 타겟 검증 — None 이면 OK, 아니면 이유. host · 서비스명 · 외부 주소(host:port).
+    공백·개행이 섞이면 거부한다(값 그대로 사이드카 sh 에 들어가므로 정규화하지 않는다).
+    services 가 주어지면 서비스명은 그 안에 있어야 한다(None 이면 문법만 본다 — 파일을 읽을 때)."""
+    t = target if isinstance(target, str) else ""
+    if t == "host":
+        return None
+    if ":" in t:
+        h, _, p = t.rpartition(":")
+        if not _FWD_NAME.fullmatch(h) or _port_key(p) is None or p != _port_key(p):
+            return f"외부 주소는 호스트:포트 형식이어야 합니다: {t!r}"
+        if h == "host":
+            return "host:포트 는 모호합니다 — 맥의 같은 포트면 host, 다른 기계면 그 IP:포트"
+        return None
+    if not _FWD_NAME.fullmatch(t):
+        return f"타겟은 host · 서비스명 · 호스트:포트 중 하나: {t!r}"
+    if services is not None and t not in services:
+        return f"이 프로젝트에 없는 서비스: {t!r} (있는 것: {', '.join(sorted(services))})"
+    return None
+
+
+def session_forward(session_dir) -> dict:
+    """워크트리별 엮기 덮어쓰기 <세션폴더>/forward.json → {port: target}. 없거나 깨졌으면 {} — 프로젝트 기본으로 뜬다."""
+    try:
+        d = json.loads((Path(session_dir) / "forward.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return {_port_key(p): t for p, t in d.items()
+            if _port_key(p) and isinstance(t, str) and forward_target_error(t) is None}
+
+
+def set_session_forward(session_dir, port, target) -> None:
+    """워크트리 덮어쓰기 한 포트 쓰기(target=None 이면 지움 → 프로젝트 기본). 다 지우면 파일도 지운다."""
+    cur = session_forward(session_dir)
+    if target is None:
+        cur.pop(str(port), None)
+    else:
+        cur[str(port)] = target
+    path = Path(session_dir) / "forward.json"
+    if not cur:
+        path.unlink(missing_ok=True)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(cur, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def effective_forward(conn: dict, xm: dict, config: dict, session_dir=None) -> dict:
+    """실제 적용할 엮기. legacy hostForward < 자동 서비스타겟 < 명시 forward(backing.json < x-marina) < 워크트리 덮어쓰기.
+    _port_targets 포트범위 ValueError 가능 — 호출측 try 안에서(코덱스 리뷰 P3)."""
+    return {**_legacy_host_forward(conn), **_legacy_host_forward(xm),
+            **_auto_service_forward(config),
+            **_normalize_forward(conn), **_normalize_forward(xm),
+            **(session_forward(session_dir) if session_dir else {})}
+
+
 def set_xmarina_expose(stored: str, consumer: str, var: str, target: str = "", mode: str = "gateway",
                        remove: bool = False) -> bool:
     """x-marina.gateway.expose 편집(SoT) — 연결 탭의 서비스↔서비스 배선.
@@ -860,17 +930,26 @@ def _bind_script(pairs):
     """[(port, target)] → 엮기 사이드카의 `sh -c` 스크립트. target=host → host.docker.internal(없으면 리눅스
     default gateway 폴백 — network_mode:service 라 extra_hosts 무시), 그 외 → 같은 compose 서비스명(컨테이너 DNS).
     포트별 socat 1개를 백그라운드로 띄우고 wait. $$ = compose 가 리터럴 $ 로(변수확장 회피)."""
+    bad = [(p, t) for p, t in pairs if forward_target_error(t) is not None]
+    if bad:                              # x-marina·대시보드 경로는 검증 없이 들어올 수 있다 — sh 에 넣기 전 마지막 관문
+        sys.stderr.write("warning: 엮기 타겟이 잘못돼 건너뜀 — " + ", ".join(f"{p}→{t!r}" for p, t in bad) + "\n")
+        pairs = [x for x in pairs if x not in bad]
     lines = []
     if any(t == "host" for _, t in pairs):
         lines.append('H=host.docker.internal; nslookup "$$H" >/dev/null 2>&1 || '
                      "H=$$(ip route 2>/dev/null | awk '/default/{print $$3; exit}')")
     for port, target in pairs:
-        dst = '"$$H"' if target == "host" else target
-        lines.append(f'socat TCP4-LISTEN:{port},fork,reuseaddr TCP:{dst}:{port} &')
+        if target == "host":
+            to = f'"$$H":{port}'
+        elif ":" in target:              # 외부 주소(host:port) — 듣는 포트와 붙는 포트가 다를 수 있다(9092 → dev 31092)
+            to = target
+        else:
+            to = f"{target}:{port}"
+        lines.append(f'socat TCP4-LISTEN:{port},fork,reuseaddr TCP:{to} &')
         # localhost 를 ::1 로 먼저 푸는 런타임(Node 등)도 닿아야 한다 — IPv4 만 듣던 시절엔
         # 앱이 localhost:<port> 로 붙으면 Connection refused 였다(Java 는 IPv4 우선이라 안 보였을 뿐).
         # ipv6only=1 로 소켓을 따로 열어, IPv6 가 꺼진 컨테이너에서도 v4 는 그대로 살게 한다(v6 는 best-effort).
-        lines.append(f'socat TCP6-LISTEN:{port},fork,reuseaddr,ipv6only=1 TCP:{dst}:{port} &')
+        lines.append(f'socat TCP6-LISTEN:{port},fork,reuseaddr,ipv6only=1 TCP:{to} &')
     lines.append("wait")
     return "\n".join(lines)
 
@@ -2079,6 +2158,51 @@ def _effective_build_slot(session_dir, enabled, project_dir):
                 _active_build_tokens(active_dir)
 
 
+def _stored_services(stored, project_dir):
+    """보관 compose 의 서비스 이름들 — 못 읽으면 None(서비스명 검사를 건너뛴다)."""
+    if not stored:
+        return None
+    argv = ["docker", "compose", "-f", stored] + (["--project-directory", project_dir] if project_dir else []) + ["config", "--services"]
+    try:
+        out = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return set(out.stdout.split()) if out.returncode == 0 else None
+
+
+def cmd_forward(a):
+    """marina forward [<포트> <타겟>|<포트> --reset] — 이 워크트리만 엮기를 다르게. 다음 start 부터 적용."""
+    if not a.port:
+        own = session_forward(a.session_dir)
+        if not own:
+            print("이 워크트리는 프로젝트 기본 엮기를 따릅니다(덮어쓰기 없음).")
+        for p, t in sorted(own.items(), key=lambda x: int(x[0])):
+            print(f"localhost:{p} → {t}")
+        return 0
+    port = _port_key(a.port)
+    if port is None:
+        sys.stderr.write(f"error: 포트는 1~65535 숫자: {a.port!r}\n")
+        return 2
+    a.port = port
+    if a.reset and a.target:
+        sys.stderr.write("error: 타겟과 --reset 은 같이 못 씁니다\n")
+        return 2
+    if a.reset:
+        set_session_forward(a.session_dir, a.port, None)
+        print(f"forward: localhost:{a.port} → 프로젝트 기본으로 (다음 start 부터)")
+        return 0
+    if not a.target:
+        sys.stderr.write("error: 타겟이 필요합니다 — host · 서비스명 · 호스트:포트, 또는 --reset\n")
+        return 2
+    err = forward_target_error(a.target, _stored_services(a.stored, a.project_dir))
+    if err:
+        sys.stderr.write(f"error: {err}\n")
+        return 2
+    set_session_forward(a.session_dir, a.port, a.target)
+    print(f"forward: 이 워크트리 localhost:{a.port} → {a.target} (다음 start 부터 — 실행 중이면 marina restart)")
+    return 0
+
+
 def cmd_build_active(a):
     return 0 if _has_active_builds(a.session_dir) else 1
 
@@ -2255,9 +2379,11 @@ def cmd_up(a):
         sys.stderr.write("warning: services.*.hostForward 는 지원되지 않습니다 — top-level forward 또는 x-marina.forward 로 선언하세요.\n")
     xm = xmarina_for_stored(a.stored)                                # x-marina 가 forward/prebuild/gateway 의 새 SoT — backing.json(레거시) 위에 우선
     try:
-        forward = {**_legacy_host_forward(conn), **_legacy_host_forward(xm),
-                   **_auto_service_forward(config),
-                   **_normalize_forward(conn), **_normalize_forward(xm)}   # legacy hostForward < 자동 서비스타겟 < 명시 forward(backing.json < x-marina). _port_targets 포트범위 ValueError 가능 → try 안(코덱스 리뷰 P3)
+        forward = effective_forward(conn, xm, config, a.session_dir)
+        _own = session_forward(a.session_dir)
+        if _own:                                                   # 이 워크트리만 다르게 엮였다 — 조용히 다른 데 붙지 않게 알린다
+            sys.stderr.write("notice: 이 워크트리 엮기 덮어쓰기 — "
+                             + ", ".join(f"{p}→{t}" for p, t in sorted(_own.items(), key=lambda x: int(x[0]))) + " (되돌리기: marina forward <포트> --reset)\n")
         _xm_all = {**_legacy_host_forward(xm), **_normalize_forward(xm)}
         _conn_all = {**_legacy_host_forward(conn), **_normalize_forward(conn)}
         if any(forward.get(p) == t and _xm_all.get(p) != t for p, t in _conn_all.items()):   # backing.json 이 실효 소스일 때만 — 이전 완료 사용자에게 영구 반복 안 함(셀프 리뷰)
@@ -2462,6 +2588,7 @@ def main(argv=None):
     p = sub.add_parser("prebuild-run"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--legacy-prebuild"); p.add_argument("--compose-version", required=True); p.set_defaults(fn=cmd_prebuild_run)
     p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir"); p.add_argument("--with-signature", action="store_true"); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
     p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
+    p = sub.add_parser("forward"); p.add_argument("--session-dir", required=True); p.add_argument("--stored"); p.add_argument("--project-dir"); p.add_argument("port", nargs="?"); p.add_argument("target", nargs="?"); p.add_argument("--reset", action="store_true"); p.set_defaults(fn=cmd_forward)
     p = sub.add_parser("build-active"); p.add_argument("--session-dir", required=True); p.set_defaults(fn=cmd_build_active)
     p = sub.add_parser("down"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
     p = sub.add_parser("stop"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_stop)

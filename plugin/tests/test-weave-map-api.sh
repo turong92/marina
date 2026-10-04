@@ -55,6 +55,18 @@ assert d.get('appServices') == ['app', 'cache'], d.get('appServices')   # 엮기
 print('ok forward/applied/services', d['forward'], d['applied'])
 " || { echo 'FAIL: weave-map ok payload'; exit 1; }
 
+# ── (a2) 워크트리 덮어쓰기(<세션폴더>/forward.json)가 연결 탭에도 보인다 — cmd_up 과 같은 병합(리뷰 I2) ──
+SDIR="$(PYTHONPATH="$HERE/../scripts" python3 -c "import sys; from pathlib import Path; from marina_paths import session_dir; print(session_dir(Path(sys.argv[1])))" "$P")"
+mkdir -p "$SDIR" && printf '{"6379": "10.0.0.5:6380"}' > "$SDIR/forward.json"
+curl -s "${hdr[@]}" "$base/api/weave-map?root=$P" | python3 -c "
+import json, sys
+d = json.load(sys.stdin)
+assert d['forward'].get('6379') == '10.0.0.5:6380', d['forward']
+assert d['applied'].get('app') == [['6379', '10.0.0.5:6380']], d['applied']
+print('ok override', d['forward'])
+" || { echo 'FAIL: weave-map 워크트리 덮어쓰기 미반영'; exit 1; }
+rm -f "$SDIR/forward.json"
+
 # ── (b) 미등록/미탐색 root → 4xx 또는 ok:false ────────────────────
 code="$(curl -s -o /dev/null -w '%{http_code}' "${hdr[@]}" "$base/api/weave-map?root=$TMP/never-registered")"
 if [[ "$code" == 4* ]]; then

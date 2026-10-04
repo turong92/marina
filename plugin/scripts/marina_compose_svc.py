@@ -18,7 +18,7 @@ import importlib.util as _ilu
 
 from marina_state import MARINA_HOME, _SUBREPO_MAP_CACHE, _bin, _mc
 from marina_dockerfile import _detect_injections, _prebuild_suggest, detect_profile_var, dockerfile_doctor, is_profile_var
-from marina_paths import log_run_payload, service_log, session_id
+from marina_paths import log_run_payload, service_log, session_dir, session_id
 
 def _docker_cmd(*args: str) -> list[str]:
     return [_bin("docker"), *args]
@@ -646,7 +646,7 @@ def compose_start_targets(root: Path, project: dict, requested: list[str]) -> li
 
 def weave_map(root: Path, project: dict) -> dict:
     """엮기(forward) 최종 맵 — `marina up` 과 동일한 병합 우선순위(legacy hostForward < 자동 서비스타겟 < 명시
-    forward(backing.json < x-marina))를 marina-compose.py 순수 함수로 재계산(연결 탭 P3 데이터 소스). docker 는
+    forward(backing.json < x-marina) < 워크트리 덮어쓰기 <세션폴더>/forward.json)를 marina-compose.py 순수 함수로 재계산(연결 탭 P3 데이터 소스). docker 는
     config 해석 1회만(가볍게 — up/ps 안 돌림, 컨테이너 기동 없음). 실패 → {ok:False, error}."""
     try:
         sp = MARINA_HOME / str(project["id"]) / project.get("composeFile", "docker-compose.yml")
@@ -667,10 +667,8 @@ def weave_map(root: Path, project: dict) -> dict:
             warnings.append(f"connectivity(backing.json) 읽기 실패 — 엮기 선언 건너뜀: {exc}")
     mc = _mc()
     xm = mc.xmarina_for_stored(str(sp))
-    try:   # cmd_up(marina-compose.py) 과 동일 순서 — legacy hostForward < 자동 서비스타겟 < 명시(backing.json < x-marina)
-        forward = {**mc._legacy_host_forward(conn), **mc._legacy_host_forward(xm),
-                   **mc._auto_service_forward(cfg),
-                   **mc._normalize_forward(conn), **mc._normalize_forward(xm)}
+    try:   # cmd_up(marina-compose.py) 과 같은 함수 — legacy hostForward < 자동 서비스타겟 < 명시(backing.json < x-marina) < 워크트리 덮어쓰기
+        forward = mc.effective_forward(conn, xm, cfg, str(session_dir(root)))
     except ValueError as exc:   # _port_targets 포트범위 파싱 실패 등(marina-compose.py 코덱스 리뷰 P3 와 동일 가드)
         return {"ok": False, "error": str(exc)}
     services_cfg = cfg.get("services") or {}
