@@ -61,10 +61,25 @@ time.sleep(0.2); gate.set()
 check(len(slow_calls) == 1, f"동시에 하나만: {slow_calls}")
 # (리뷰 I1) 데몬이 업데이트로 끝나면 사람(훅)을 기다리지 않고 새 코드로 스스로 다시 띄운다
 spawned = []
+real_spawn = ms._spawn_daemon
 ms._spawn_daemon = lambda: spawned.append(1) or 4242
 ms.daemon_pid_path().write_text(f"{os.getpid()}\n")
 ms._daemon_handoff()
 check(spawned == [1] and ms.daemon_pid_path().read_text().strip() == "4242", f"새 데몬 띄움: {spawned}")
+# (실배포 2026-10-04) 넘겨줄 때 자기 경로(옛 코드)로 띄우면 옛 데몬이 1분마다 다시 뜬다 → 고정 입구(설치 목록의 최신)로
+import subprocess as sp
+argvs = []
+class P:
+    def __init__(self, argv, **kw): argvs.append(argv); self.pid = 5151
+real_popen = sp.Popen
+ms.subprocess.Popen = P
+ms._spawn_daemon = real_spawn
+shim = ms.marina_home() / "bin" / "marina-session-hook"; shim.parent.mkdir(parents=True, exist_ok=True)
+shim.write_text("#!/bin/sh\n"); shim.chmod(0o755)
+ms.daemon_pid_path().write_text(f"{os.getpid()}\n")
+ms._daemon_handoff()
+ms.subprocess.Popen = real_popen
+check(argvs and argvs[-1][0] == str(shim) and argvs[-1][-1] == "daemon", f"고정 입구로 띄움: {argvs}")
 # 실제 사전 검사: 지금 코드는 통과, 깨진 코드는 거절
 import tempfile, shutil
 okk, why = ms._preflight(Path(ms.__file__).resolve().parent)

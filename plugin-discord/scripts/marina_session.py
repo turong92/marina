@@ -1224,7 +1224,7 @@ def _daemon_env() -> dict[str, str]:
     return env
 
 
-def _spawn_daemon() -> int:
+def _spawn_daemon(entry: "list[str] | None" = None) -> int:
     log_path = marina_home() / "discord-daemon.log"
     try:
         if log_path.stat().st_size > 1 << 20:        # 1MB 넘으면 새로(리뷰 M7)
@@ -1233,7 +1233,7 @@ def _spawn_daemon() -> int:
         pass
     log = open(log_path, "a")
     # cwd 를 홈으로 — 세션 워크트리를 cwd 로 물면 그 워크트리가 지워진 뒤 고아 리퍼가 데몬을 죽인다(리뷰 I2)
-    proc = subprocess.Popen([*_hook_entry(), "daemon"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
+    proc = subprocess.Popen([*(entry or _hook_entry()), "daemon"], stdin=subprocess.DEVNULL, stdout=log, stderr=log,
                             start_new_session=True, cwd=str(marina_home()), env=_daemon_env())
     return proc.pid
 
@@ -1258,7 +1258,7 @@ def _daemon_alive() -> bool:
     return _is_daemon_cmd(cmd.strip())
 
 
-def ensure_daemon() -> str:
+def ensure_daemon(entry: "list[str] | None" = None) -> str:
     """discord 봇(#상태·🛑·숫자판·typing·bun 봇)을 discord 가 스스로 띄운다(분리 B — 대시보드가 안 띄운다).
     떠 있으면 그대로, 없을 때만 하나. 훅마다 불리므로 싸야 한다. 동시에 여러 훅이 불러도 하나만(잠금, 리뷰 I1)."""
     if os.environ.get("MARINA_DISCORD_DAEMON") == "off":
@@ -1275,7 +1275,7 @@ def ensure_daemon() -> str:
     try:
         if _daemon_alive():
             return "running"
-        pid = _spawn_daemon()
+        pid = _spawn_daemon(entry) if entry else _spawn_daemon()
         daemon_pid_path().write_text(f"{pid}\n")
         return "started"
     finally:
@@ -1442,7 +1442,10 @@ def _daemon_handoff() -> None:
             daemon_pid_path().unlink()
     except OSError:
         pass
-    ensure_daemon()
+    # 고정 입구로 — 이 프로세스는 옛 설치본이라 _hook_entry() 가 자기 경로(옛 코드)를 돌려준다. 그러면 옛 데몬이
+    # 1분마다 다시 뜬다(실배포 2026-10-04). 입구는 부를 때마다 설치 목록의 최신을 찾는다
+    shim = marina_home() / "bin" / "marina-session-hook"
+    ensure_daemon([str(shim)] if shim.is_file() and os.access(shim, os.X_OK) else None)
 
 
 def _ensure_daemon_quiet() -> None:
