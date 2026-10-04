@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>터미널에서 열기 · Marina</title>
+  <link rel="icon" type="image/png" href="/web/favicon.png" />
+  <link rel="stylesheet" href="/web/vendor-xterm.css" />
+  <style>
+    :root { color-scheme: dark; --bg: #0f1115; --fg: #e8eaed; --mute: #9aa0a6; --line: #2a2f38; --accent: #4f8cff; }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; background: var(--bg); color: var(--fg);
+                 font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif; }
+    body { display: flex; flex-direction: column; height: 100dvh; padding: env(safe-area-inset-top) 0 env(safe-area-inset-bottom); }
+    header { padding: 12px 16px 10px; border-bottom: 1px solid var(--line); }
+    #why { font-weight: 600; margin: 0 0 6px; overflow-wrap: anywhere; }
+    #cmd { display: block; margin: 0; padding: 8px 10px; background: #181b21; border: 1px solid var(--line); border-radius: 8px;
+           font: 13px/1.4 ui-monospace, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 7.5em; overflow: auto; }
+    #hint { margin: 8px 0 0; color: var(--mute); font-size: 13px; }
+    #state { padding: 24px 16px; color: var(--mute); }
+    #state.err { color: #ff8a80; }
+    #term { flex: 1; min-height: 0; padding: 6px 8px; }
+    #term .xterm { height: 100%; }
+    footer { display: flex; gap: 10px; padding: 10px 16px; border-top: 1px solid var(--line); }
+    button { font: inherit; font-weight: 600; padding: 12px 18px; border-radius: 10px; border: 0; background: var(--accent); color: #fff; min-height: 44px; }
+    button:disabled { opacity: .45; }
+    [hidden] { display: none !important; }
+  </style>
+</head>
+<body>
+  <header id="head" hidden>
+    <p id="why"></p>
+    <code id="cmd"></code>
+    <p id="hint">입력만 해 뒀어 — 확인하고 Enter</p>
+  </header>
+  <div id="state">불러오는 중…</div>
+  <main id="term" hidden></main>
+  <footer id="foot" hidden><button id="enter" type="button" disabled>Enter</button></footer>
+  <script src="/web/app-0-auth.js"></script>
+  <script src="/web/vendor-xterm.js"></script>
+  <script src="/web/vendor-xterm-fit.js"></script>
+  <script src="/web/term-run.js"></script>
+</body>
+</html>

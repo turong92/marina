@@ -15,6 +15,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import unicodedata
 import sys
 import threading
 import time
@@ -44,6 +45,8 @@ CHANNEL_RULES = (
     "- 선택지가 있는 질문은 AskUserQuestion 도구로 묻는다 — Discord 에 버튼으로 뜨고 상대가 누르면 답이 들어온다.\n"
     "- 이미지는 첨부한다. HTML 은 스크린샷과 열어볼 주소를 보낸다. 10MB 를 넘는 파일은 링크로 보낸다.\n"
     "- 스크린샷·HTML 같은 결과물은 share_file 도구에 넘기고 돌려받은 파일을 reply 로 첨부한다(프로젝트 #자료실 에도 모인다).\n"
+    "- 사람이 직접 실행해야 하는 명령(사람 확인이 박힌 래퍼 — 예 `cloud prod db --admin`)은 `!` 부탁 대신 ask_terminal 도구에 넘긴다 "
+    "(Discord 에 [터미널에서 열기] 버튼이 뜨고, 상대가 열어 Enter 를 친다). 래퍼의 안전장치를 우회해 직접 붙지 않는다.\n"
     "- 터미널에서 직접 받은 지시의 답은 터미널에 둬도 된다."
 )
 
@@ -1059,7 +1062,7 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
                                             "hooks": [{"type": "command", "command": reply_hook, "timeout": 10}]})
     if chat_root is None:
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
-        settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress"]}
+        settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__ask_terminal"]}
         entry = _hook_entry()
         mcp = {"mcpServers": {"marina": {"command": entry[0], "args": entry[1:] + ["mcp-chat"]}}}
         (sdir / "mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -2095,6 +2098,13 @@ _CHAT_TOOLS_MCP = [
                      "properties": {"path": {"type": "string", "description": "이 폴더 안 파일 경로(상대·절대)"},
                                     "title": {"type": "string", "description": "결과물 제목(자료실 표시용)"}},
                      "required": ["path"]}},
+    {"name": "ask_terminal",
+     "description": "사람이 직접 실행해야 하는 명령(사람 확인이 박힌 래퍼 등)을 Discord 에 [터미널에서 열기] 버튼으로 넘긴다. "
+                    "상대가 누르면 이 워크트리 폴더의 터미널에 명령이 입력만 돼 있고 Enter 는 상대가 친다. 개발 세션 전용. 한 줄 명령만.",
+     "inputSchema": {"type": "object",
+                     "properties": {"command": {"type": "string", "description": "입력해 둘 명령(한 줄, 개행 불가)"},
+                                    "why": {"type": "string", "description": "왜 필요한지 한 줄(Discord 메시지에 표시)"}},
+                     "required": ["command"]}},
     {"name": "progress",
      "description": "아직 안 끝난 작업의 중간 보고를 지시 메시지의 스레드에 남긴다(알림 없이). 같은 message_id 면 같은 스레드에 이어 쓴다. "
                     "최종 결과는 스레드가 아니라 채널에 reply 로 보낸다.",
@@ -2143,8 +2153,39 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
     return f"스레드에 남겼어(thread {tid}). 끝나면 결과는 채널에 reply 로."
 
 
+def _ask_terminal(rec: dict[str, Any], args: dict[str, Any]) -> str:
+    """사람이 직접 실행할 명령을 [터미널에서 열기] 링크 버튼으로 채널에 보낸다. runtime 은 `marina term-request` 로만 부른다."""
+    if rec.get("kind") in CHAT_KINDS:
+        raise SessionError("ask_terminal 은 개발 세션 전용이야")
+    command, why = str(args.get("command") or ""), str(args.get("why") or "").strip()
+    if not command.strip():
+        raise SessionError("command 가 필요해")
+    # 개행·보이지 않는 문자·1500자 초과 검증은 runtime(`marina term-request`)이 한다 — 거부되면 아래에서 SessionError.
+    argv = ["term-request"] + (["--why", why] if why else []) + ["--", command]
+    r = _run_marina(argv, cwd=Path(str(rec["root"])), timeout=30)
+    url = (r.stdout or "").strip().splitlines()[-1] if (r.stdout or "").strip() else ""
+    if r.returncode != 0 or not url.startswith(("http://", "https://")):
+        raise SessionError(f"터미널 링크를 만들지 못했어: {(r.stderr or r.stdout or '').strip()[:200]}")
+    # 보이는 명령 = 실제 명령: 자르지 않고, 명령 안의 백틱보다 긴 울타리로 감싼다
+    fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", command)), default=0) + 1)
+    why = "".join(c for c in re.sub(r"\s+", " ", why) if unicodedata.category(c) not in ("Cc", "Cf"))   # 한 줄·보이지 않는 문자 제거
+    esc_why = re.sub(r"([\\`*_~|>#\[\]()])", r"\\\1", why.replace("@", ""))[:300]   # 마크다운 링크·서식이 렌더되지 않게
+    head = ("🖥 " + esc_why + "\n") if why else "🖥 터미널에서 직접 실행해 줘\n"
+    cfg = load_config()
+    Discord(read_token(cfg))._req("POST", f"/channels/{rec['channelId']}/messages", {
+        "content": f"{head}{fence}\n{command}\n{fence}", "allowed_mentions": {"parse": []},
+        "components": [{"type": 1, "components": [{"type": 2, "style": 5, "label": "터미널에서 열기", "url": url}]}]})
+    return "버튼 보냈어 — 형이 실행하고 알려 주면 이어서"
+
+
 def chat_tool(name: str, args: dict[str, Any]) -> str:
     """채팅·개발 세션 MCP 도구. 실패는 SessionError."""
+    if name == "ask_terminal":
+        sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+        rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
+        if not rec or not rec.get("channelId"):
+            raise SessionError("이 세션의 기록을 찾지 못했어")
+        return _ask_terminal(rec, args)
     if name == "progress":
         sdir = os.environ.get("DISCORD_STATE_DIR") or ""
         rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)

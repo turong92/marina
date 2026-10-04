@@ -52,6 +52,7 @@ def _apply_now(root: Path, service: str = "") -> None:
 from marina_update import _serving_sha, update_claude, update_codex, update_status
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
+from marina_term_requests import claim as term_request_claim, peek as term_request_peek
 from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_escape, mobile_harness, mobile_interrupt, mobile_launch, mobile_clear_uploads, mobile_close_chat, mobile_restart_chat, mobile_forget_chat, mobile_relogin, mobile_remove_room, mobile_rename_room, mobile_request_ok, mobile_set_archived, mobile_set_hidden, mobile_set_pin, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
 from marina_sessions import _live_agent_cwds, agent_activity, agent_belongs_to_root, agent_session_file_bytes, agent_session_files, agent_transcript, agent_transcript_image, agent_transcript_images, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
@@ -826,6 +827,38 @@ class Handler(BaseHTTPRequestHandler):
             controller.add_security_headers(self)
             self.end_headers()
             self.wfile.write(data)
+            return
+        if parsed.path == "/term-run":     # 터미널 넘기기 — 로그인 필요(authorize 가 비로그인은 /login 으로 보냈다)
+            data = (_WEB_DIR / "term-run.html").read_bytes()
+            self.send_response(200)
+            self.send_header("content-type", "text/html; charset=utf-8")
+            self.send_header("cache-control", "no-store, no-cache, must-revalidate")
+            self.send_header("content-length", str(len(data)))
+            controller.add_security_headers(self)
+            self.end_headers()
+            self.wfile.write(data)
+            return
+        if parsed.path == "/api/term-request":   # 1회용 토큰 → {root, command, why}. 터미널과 같은 가드·정책(root 접근권한)
+            if principal is None and (self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host")):
+                self.send_json({"error": "터미널은 로컬 대시보드에서만 쓸 수 있어요"}, 403)
+                return
+            token = urllib.parse.parse_qs(parsed.query).get("t", [""])[0]
+            req = term_request_peek(token)       # 먼저 읽기만 — 쓸 수 있다고 확인되기 전에 토큰을 태우지 않는다
+            if req is None:
+                self.send_json({"error": "없거나 만료됐거나 이미 쓴 요청이야"}, 404)
+                return
+            try:
+                root = safe_root(str(req["root"]))
+            except ValueError:
+                self.send_json({"error": "그 워크트리는 더 이상 없어"}, 404)
+                return
+            if not self._require_root_access(root):
+                return
+            req = term_request_claim(token)      # 통과했다 — 이제 소모
+            if req is None:
+                self.send_json({"error": "없거나 만료됐거나 이미 쓴 요청이야"}, 404)
+                return
+            self.send_json({"root": req["root"], "command": req["command"], "why": req.get("why", "")})
             return
         if parsed.path == "/mobile":
             data = render_mobile_html(auth_enabled=principal is not None).encode("utf-8")

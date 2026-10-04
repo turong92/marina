@@ -16,6 +16,7 @@ marina_worktree_gc
 marina_docker_gc
 marina_docker_gc_cli
 marina_reaper
+marina_term_requests
 marina_lifecycle
 marina_cli
 marina_build

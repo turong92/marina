@@ -429,7 +429,7 @@ class AuthHTTPController:
                 return None
             principal = self._principal(handler)
             if principal is None:
-                if method == "GET" and parsed.path in ("/", "/mobile"):
+                if method == "GET" and parsed.path in ("/", "/mobile", "/term-run"):
                     self._redirect_login(handler, parsed)
                 else:
                     handler.send_json({"error": "authentication_required", "message": "Sign in to continue."}, 401)
@@ -449,7 +449,7 @@ class AuthHTTPController:
             return principal
         except Exception as exc:
             print(f"[marina] auth unavailable: {exc!r}")
-            if method == "GET" and parsed.path in ("/", "/mobile"):
+            if method == "GET" and parsed.path in ("/", "/mobile", "/term-run"):
                 self._redirect_login(handler, parsed)
             else:
                 handler.send_json({

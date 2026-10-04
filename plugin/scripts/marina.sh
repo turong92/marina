@@ -107,6 +107,8 @@ usage (marina.sh = 내부 launcher; 평소엔 `marina <명령>` 래퍼로 — �
     marina.sh project infer <path> | ls | rm <id> | default <id> <a,b,c>
   forward (이 워크트리만 엮기를 다르게 — 기본은 프로젝트 x-marina.forward, 다음 start 부터):
     marina.sh forward [<포트> <host|서비스명|호스트:포트> | <포트> --reset]   # 예: forward 9092 host(맥의 공용 브로커) · forward 9092 3.35.225.62:31092(dev)
+  term-request (사람이 직접 실행해야 하는 명령을 터미널 링크로 넘김 — 입력만 해 두고 실행은 사람의 Enter):
+    marina.sh term-request <command> [--why <text>]   # 1회용 15분 링크 주소를 한 줄 출력
   reap (고아 백그라운드 프로세스 정리 — 데몬이 주기적으로 돌리는 것과 같은 판정):
     marina.sh reap [--dry-run] [--min-age-hours N]   # ppid=1 + Claude tasks/*.output 출력 | cwd 사라짐, N시간(기본 6) 넘은 것만
 
@@ -454,6 +456,10 @@ print(f"런타임: 원격 ({t.host})" if t.is_remote else "런타임: 로컬")
       fi
       python3 "$SCRIPT_DIR/marina-compose.py" forward --session-dir "$(session_dir)" \
         ${_fstored:+--stored "$_fstored"} --project-dir "$ROOT" "$@" ;;
+    term-request)
+      # 세션이 "형이 터미널에서 직접 실행해 줘" 를 부탁(2026-10-05) — 1회용 링크 주소를 한 줄 출력. 링크를 열면 대시보드가
+      # 이 워크트리에서 셸을 열고 명령을 입력만 해 둔다(실행은 사람의 Enter). 설계: docs/superpowers/specs/2026-10-05-terminal-handoff-design.md
+      MARINA_HOME="$MARINA_HOME" exec python3 "$SCRIPT_DIR/marina_term_requests.py" --root "$ROOT" "$@" ;;
     reap)
       # 고아 백그라운드 프로세스 정리(Claude 태스크 출력 고아·cwd 사라진 고아). 데몬도 주기적으로 돌린다. marina reap [--dry-run] [--min-age-hours N]
       MARINA_HOME="$MARINA_HOME" exec python3 "$SCRIPT_DIR/marina_reaper.py" "$@" ;;

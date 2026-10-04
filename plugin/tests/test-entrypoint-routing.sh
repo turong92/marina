@@ -23,6 +23,10 @@ echo "$out" | grep -qE "running|stopped" || { echo "FAIL: gateway 미라우팅 �
 # forward: 워크트리별 엮기 덮어쓰기(2026-10-04) — 배포 직후 전역 marina 가 unknown command 로 막았다
 out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" forward 2>&1 || true)
 echo "$out" | grep -q "unknown command" && { echo "FAIL: forward 가 unknown command"; exit 1; }
+# term-request: 터미널 넘기기(2026-10-05) — forward 때처럼 입구에 안 걸면 unknown command
+out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" term-request 2>&1 || true)
+echo "$out" | grep -q "unknown command" && { echo "FAIL: term-request 가 unknown command"; exit 1; }
+echo "$out" | grep -q "usage: marina term-request" || { echo "FAIL: term-request 미라우팅 — $out"; exit 1; }
 # link: 등록 안 된 tmp cwd 에서도 전역 usage 가 아닌 marina.sh 응답(성공/무출력/자체 에러)이어야 함
 out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" link 2>&1 || true)
 echo "$out" | grep -q "전역 CLI" && { echo "FAIL: link 가 전역 usage 로 떨어짐"; exit 1; }
