@@ -1189,7 +1189,7 @@ def role_events_tick() -> None:
     by_sid = {str(r.get("sessionId")): r for r in ms.load_sessions() if r.get("sessionId") and r.get("channelId")}
     try:
         _role_events_post(lines, off, by_sid, off_f)
-    except Exception as exc:                      # 예상 밖 오류여도 오프셋은 이미 줄마다 저장됨(리뷰 I5)
+    except Exception as exc:                      # 예상 밖 오류여도 오프셋은 보내기 전에 저장됨(리뷰 I5)
         _log(f"role event: {exc!r}")
 
 
@@ -1212,10 +1212,18 @@ def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_
         groups.setdefault((str(rec.get("stateDir")), mid), (rec, []))[1].append(text)
     off_f.write_text(str(off))                    # 보내기 전에 — 보내다 죽어도 같은 줄을 다시 안 보낸다
     for (_, mid), (rec, texts) in groups.items():
-        try:
-            ms._progress(rec, {"message_id": mid, "text": "\n".join(texts)})
-        except ms.SessionError as exc:
-            _log(f"role event: {exc}")
+        chunks, cur = [], ""
+        for t in texts:                               # 1900자에서 잘리지 않게 줄 경계로 나눈다(리뷰 I1)
+            if cur and len(cur) + 1 + len(t) > 1900:
+                chunks.append(cur); cur = ""
+            cur = (cur + "\n" + t) if cur else t[:1900]
+        if cur:
+            chunks.append(cur)
+        for c in chunks:
+            try:
+                ms._progress(rec, {"message_id": mid, "text": c})
+            except Exception as exc:                  # 한 그룹 실패가 나머지를 막지 않게(리뷰 M3)
+                _log(f"role event: {exc!r}")
 
 
 def perm(channel: str, user: str, token: str, allow: bool) -> str:

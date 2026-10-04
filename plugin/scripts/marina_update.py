@@ -161,6 +161,17 @@ def update_codex() -> dict[str, Any]:
 
 def update_claude() -> dict[str, Any]:
     # claude 는 plugin marketplace update → plugin update 두 단계로 설치 복사본을 교체
+    from marina_autoupdate import _update_lock
+    lock = _update_lock()                     # 자동 업데이트(runtime·discord)와 같은 공용 잠금(리뷰 I2)
+    if lock is None:
+        raise ValueError("다른 업데이트가 진행 중이야 — 잠시 뒤 다시 눌러 줘")
+    try:
+        return _update_claude_locked()
+    finally:
+        lock.close()
+
+
+def _update_claude_locked() -> dict[str, Any]:
     if os.environ.get("MARINA_UPDATE_CLAUDE_DRY_RUN") == "1":
         MARINA_HOME.mkdir(parents=True, exist_ok=True)
         with (MARINA_HOME / "update-claude-dry-run.log").open("a", encoding="utf-8") as fh:

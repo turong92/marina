@@ -130,6 +130,15 @@ assert r == "deferred:lock" and not cmds, (r, cmds)
 fcntl.flock(lk, fcntl.LOCK_UN); lk.close()
 r = tick(status_fn=status("new"))
 assert r.startswith(("updated", "installed")), r
+# (리뷰 I2) 대시보드 수동 업데이트도 같은 잠금 — 자동 업데이트 중이면 '진행 중'으로 거절
+import marina_update as mu
+os.environ["MARINA_UPDATE_CLAUDE_DRY_RUN"] = "1"      # 실제 claude 를 부르지 않게
+lk = open(MARINA_HOME / "plugin-update.lock", "w"); fcntl.flock(lk, fcntl.LOCK_EX)
+try:
+    mu.update_claude(); assert False, "잠금 중인데 진행함"
+except ValueError as exc:
+    assert "진행 중" in str(exc), exc
+fcntl.flock(lk, fcntl.LOCK_UN); lk.close()
 print("ok")
 PY
 

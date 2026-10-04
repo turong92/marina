@@ -83,6 +83,17 @@ except Exception:
 mb.role_events_tick(); mb.role_events_tick()
 ms._progress = real
 check(sum("하나" in c for c in calls) == 1, f"반복 게시 없음: {calls}")
+# (리뷰 I1) 한 판에 줄이 많아 1900자를 넘으면 잘리지 않고 여러 메시지로
+n1 = len(thread_posts())
+put(*[{"ev": "start", "ts": 9, "session": "S1", "agent": f"m{i}", "role": "-", "model": "inherit", "effort": "", "skills": [],
+       "desc": f"{i:02d} " + "가" * 78} for i in range(20)])
+for _ in range(3):
+    mb.role_events_tick()
+new_posts = thread_posts()[n1:]
+check(all(len(p) <= 1900 and not p.endswith("가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가")
+          or p.endswith("가" * 78) for p in new_posts), f"줄 중간에서 안 잘림: {[len(p) for p in new_posts]}")
+check(all(l.startswith("🤖") for p in new_posts for l in p.split("\n")), f"모든 줄이 온전: {[p[-20:] for p in new_posts]}")
+check(sum(p.count("🤖 서브에이전트 시작") for p in new_posts) == 20, "20줄 다 감")
 # 회전(파일이 줄어듦) → 처음부터
 ev.write_text(json.dumps({"ev": "stop", "ts": 5, "session": "S1", "agent": "a2", "role": "-", "model": "inherit", "effort": "",
                           "skills": [], "desc": "코드 찾기", "secs": 12.0, "tokens": {"in": 1, "out": 2, "cache_read": 0, "cache_write": 0},

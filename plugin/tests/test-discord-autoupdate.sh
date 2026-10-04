@@ -93,6 +93,10 @@ fail_mk = lambda argv: (runs.append(argv[1:]) or (1, "network")) if argv[2] == "
 check(ms.self_update_tick(95000.0, installed=True, run=fail_mk, preflight=ok, new_sha=lambda: "s8") == "failed:marketplace"
       and ["plugin", "update", "marina-discord@marina-dev"] not in runs, f"받기 실패: {runs}")
 check("failed:marketplace" in (ms.marina_home() / "discord-update.log").read_text(), "기록 남김")
+runs.clear()
+check(ms.self_update_tick(95000.0 + 4000, installed=True, run=run, preflight=ok, new_sha=lambda: "s10") == "updated", "다음엔 성공")
+check((ms.marina_home() / "discord-update.log").read_text().splitlines()[-1].split(" ", 4)[-1].strip() in ("", "s10"),
+      f"(리뷰 M4) 성공 줄에 옛 오류 안 붙음: {(ms.marina_home() / 'discord-update.log').read_text().splitlines()[-1]}")
 # 실제 사전 검사: 지금 코드는 통과, 깨진 코드는 거절
 import tempfile, shutil
 okk, why = ms._preflight(Path(ms.__file__).resolve().parent)

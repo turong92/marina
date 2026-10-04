@@ -1379,6 +1379,7 @@ def self_update_tick(now: float, installed: "bool | None" = None, run=None, pref
         return "skip:not-due"
     import fcntl
     try:                                             # runtime 자동 업데이트와 같은 공용 잠금(리뷰 M3) — 잡혀 있으면 다음 분에
+        marina_home().mkdir(parents=True, exist_ok=True)
         lk = open(marina_home() / "plugin-update.lock", "w")
         fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
@@ -1391,6 +1392,7 @@ def self_update_tick(now: float, installed: "bool | None" = None, run=None, pref
 
 def _self_update_locked(st: dict[str, Any], sf: Path, now: float, run, preflight, new_sha) -> str:
     st["lastAt"] = now
+    st.pop("lastError", None)                        # 이번 판 결과만 남긴다(리뷰 M4)
     try:
         sf.write_text(json.dumps(st, ensure_ascii=False))   # 먼저 — 아래서 예외가 나도 1시간 쉰다(리뷰 M1)
     except OSError:
