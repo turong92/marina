@@ -28,6 +28,17 @@ u = mb.role_usage(now - 7 * 86400)
 check([(r["role"], r["calls"], r["tokens"]) for r in u] == [("developer", 2, 1_200_200), ("planner", 1, 300_000), ("기타", 2, 2002)],
       f"역할별 합(캐시 읽기 제외)·많은 순·비역할=기타·기간 밖 제외: {u}")
 check(u[1]["models"] == ["opus-5-5"], f"모델 이름 짧게: {u[1]}")
+# (형 2026-10-04) 비역할도 종류별로 — '기타'는 종류를 모를 때만, 토큰 0(하네스 내부)은 빼고
+def stop2(role, typ, tin, ts):
+    r = stop(role, tin, 0, ts); r["type"] = typ; return r
+with open(ev, "a") as fh:
+    for r in (stop2("-", "Explore", 50_000, now - 5), stop2("-", "general-purpose", 400_000, now - 5),
+              stop2("-", "general-purpose", 100_000, now - 4), stop2("-", "Explore", 0, now - 3)):
+        fh.write(json.dumps(r) + "\n")
+u2 = mb.role_usage(now - 7 * 86400)
+check([(r["role"], r["calls"]) for r in u2] == [("developer", 2), ("general-purpose", 2), ("planner", 1), ("Explore", 1), ("기타", 2)],
+      f"종류별·토큰 0 제외: {[(r['role'], r['calls'], r['tokens']) for r in u2]}")
+ev.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 snap = {"usage": [{"key": "weekly", "label": "주간", "usedPercent": 40, "resetsAt": int(now + 86400)}], "sessions": [], "roleUsage": u}
 def txt(cs):
     return "\n".join([c.get("content", "") for c in cs if c.get("content")] + [txt(c.get("components") or []) for c in cs])

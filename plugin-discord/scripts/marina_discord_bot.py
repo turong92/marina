@@ -1130,11 +1130,16 @@ def role_usage(since: float) -> list[dict[str, Any]]:
         if not isinstance(ev, dict) or ev.get("ev") != "stop" or float(ev.get("ts") or 0) < since:
             continue
         t = ev.get("tokens") if isinstance(ev.get("tokens"), dict) else {}
+        n = sum(int(t.get(k) or 0) for k in ("in", "out", "cache_write"))
+        if not n:
+            continue                                  # 토큰 0 = 하네스 내부·기록 못 읽음 — 통계에서 뺀다
         role = str(ev.get("role") or "-")
-        role = "기타" if role == "-" else role
+        if role == "-":                               # 비역할은 종류(Explore·general-purpose …)로, 모르면 기타(형 2026-10-04)
+            role = str(ev.get("type") or "-")
+            role = "기타" if role == "-" else role
         a = agg.setdefault(role, {"role": role, "calls": 0, "tokens": 0, "models": []})
         a["calls"] += 1
-        a["tokens"] += sum(int(t.get(k) or 0) for k in ("in", "out", "cache_write"))
+        a["tokens"] += n
         for m in ev.get("models") or []:
             m = str(m).replace("claude-", "", 1)
             if m not in a["models"]:
@@ -1152,8 +1157,9 @@ def role_usage(since: float) -> list[dict[str, Any]]:
 
 
 def _role_block(rows: list[dict[str, Any]]) -> str:
+    w = max([12] + [len(r["role"]) + 1 for r in rows])     # general-purpose 같은 긴 종류 이름에도 줄이 맞게
     return "### 🤖 이번 주 역할별" + "".join(
-        f"\n`{r['role']:<12}{r['calls']:>3}회  {_fmt_tokens(r['tokens']):>5}`" + (f" {','.join(r['models'])}" if r["models"] and r["role"] != "기타" else "")
+        f"\n`{r['role']:<{w}}{r['calls']:>3}회  {_fmt_tokens(r['tokens']):>5}`" + (f" {','.join(r['models'])}" if r["models"] and r["role"] != "기타" else "")
         for r in rows)
 
 
