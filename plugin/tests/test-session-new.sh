@@ -65,7 +65,8 @@ echo "$out" | grep -q "#feat-two" || fail "채널 겹침 안내 없음: $out"
 
 # 4) 되돌리기 — claude 가 바로 죽으면 채널·상태 폴더 삭제, 워크트리는 남김, 기록 없음
 touch "$TMPROOT/claude-fail"
-out="$(msess new proj feat/three --no-start 2>&1)" && fail "claude 실패가 성공으로 끝남"
+# 바로 죽는지 보는 기다림은 부하가 크면 0.5초로 모자란다(실측 load 50) — 이 경우만 넉넉히
+out="$(MARINA_SESSION_BOOT_WAIT=3 msess new proj feat/three --no-start 2>&1)" && fail "claude 실패가 성공으로 끝남"
 rm -f "$TMPROOT/claude-fail"
 echo "$out" | grep -q "워크트리는 남겨" || fail "워크트리 남김 안내 없음: $out"
 [ -d "$SRC/.claude/worktrees/feat-three" ] || fail "워크트리를 지움(남겨야 함)"

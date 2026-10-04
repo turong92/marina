@@ -30,8 +30,12 @@ check(ms.claude_argv("proj", "feat/one", resume=True)[:2] == ["claude", "--conti
 
 ms.tmux_start("proj-feat-one", src, argv, {"DISCORD_STATE_DIR": "/state/x"})
 check(ms.tmux_alive("proj-feat-one"), "tmux 세션 살아 있음")
-time.sleep(0.3)
-call = last_call()
+call = None
+for _ in range(100):                         # 고정 0.3초는 부하가 크면 모자란다(실측 load 50) — 기록이 생길 때까지
+    call = last_call()
+    if call is not None and (call / "cwd").exists():
+        break
+    time.sleep(0.1)
 check(call is not None, "가짜 claude 가 실행됨")
 if call:
     got = (call / "argv").read_bytes().split(b"\0")[:-1]
@@ -48,6 +52,7 @@ check(not ms.tmux_alive("proj-feat-one"), "tmux_stop 후 꺼짐")
 ms.tmux_stop("proj-feat-one")                                   # 없는 세션 정지는 조용히
 
 (tmproot / "claude-fail").touch()
+os.environ["MARINA_SESSION_BOOT_WAIT"] = "3"     # 부하가 크면 0.5초 안에 못 죽는다(실측 load 50)
 try:
     ms.tmux_start("proj-dies", src, argv, {}); check(False, "바로 죽으면 SessionError")
 except ms.SessionError as exc:

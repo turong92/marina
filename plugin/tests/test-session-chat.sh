@@ -30,7 +30,8 @@ grep -q '"DELETE"' "$FD/log.jsonl" || fail "실패했는데 채널 삭제 요청
 out="$(msess new chat shopping 2>&1)" || fail "new chat 실패: $out"
 echo "$out" | grep -q "discord.com/channels/G1/" || fail "채널 링크 출력 없음: $out"
 echo "$out" | grep -q "chat 역할에게만" || fail "역할 안내 없음: $out"
-for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done
+# 앞의 broken 기동도 argv 를 남긴다 — shopping 것까지 둘이 될 때까지(부하 때 broken 것을 집던 경합)
+for _ in $(seq 100); do [ "$(ls "$FAKE_OUT"/*/argv 2>/dev/null | wc -l)" -ge 2 ] && break; sleep 0.1; done
 
 PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" "$MARINA_HOME" "$FAKE_OUT" "$MARINA_CLAUDE_JSON" <<'PY'
 import json, os, stat, subprocess, sys
