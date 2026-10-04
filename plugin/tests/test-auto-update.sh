@@ -120,6 +120,16 @@ with marina_term._lock:
 assert au._live_terminals() == 1
 with marina_term._lock:
     marina_term._by_tid.clear(); marina_term._by_tid.update(saved)
+# (리뷰 M3) runtime·discord 업데이트가 같은 마켓플레이스 사본을 동시에 만지지 않게 — 공용 잠금이 잡혀 있으면 이번엔 미룸
+import fcntl
+from marina_state import MARINA_HOME
+au.STATE_FILE.unlink(missing_ok=True); reset()
+lk = open(MARINA_HOME / "plugin-update.lock", "w"); fcntl.flock(lk, fcntl.LOCK_EX)
+r = tick(status_fn=status("new"))
+assert r == "deferred:lock" and not cmds, (r, cmds)
+fcntl.flock(lk, fcntl.LOCK_UN); lk.close()
+r = tick(status_fn=status("new"))
+assert r.startswith(("updated", "installed")), r
 print("ok")
 PY
 

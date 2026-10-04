@@ -1377,15 +1377,31 @@ def self_update_tick(now: float, installed: "bool | None" = None, run=None, pref
         st = {}
     if st.get("lastAt") and now - float(st["lastAt"]) < UPDATE_EVERY_S:
         return "skip:not-due"
+    import fcntl
+    try:                                             # runtime 자동 업데이트와 같은 공용 잠금(리뷰 M3) — 잡혀 있으면 다음 분에
+        lk = open(marina_home() / "plugin-update.lock", "w")
+        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return "skip:busy"
+    try:
+        return _self_update_locked(st, sf, now, run, preflight, new_sha)
+    finally:
+        lk.close()
+
+
+def _self_update_locked(st: dict[str, Any], sf: Path, now: float, run, preflight, new_sha) -> str:
     st["lastAt"] = now
     try:
         sf.write_text(json.dumps(st, ensure_ascii=False))   # 먼저 — 아래서 예외가 나도 1시간 쉰다(리뷰 M1)
     except OSError:
         pass
     out = "updated"
-    run(["claude", "plugin", "marketplace", "update", "marina-dev"])
-    sha = new_sha()
-    if sha and sha in (st.get("rejected") or []):
+    rc, msg = run(["claude", "plugin", "marketplace", "update", "marina-dev"])
+    sha = new_sha() if rc == 0 else ""
+    if rc != 0:                                      # 리뷰 M2: 받기 실패를 '설치됨'으로 적지 않는다
+        st["lastError"] = f"marketplace: {msg[-300:]}"
+        out = "failed:marketplace"
+    elif sha and sha in (st.get("rejected") or []):
         out = "skip:rejected"
     else:
         ok, why = preflight(_marketplace_scripts())
@@ -1400,6 +1416,8 @@ def self_update_tick(now: float, installed: "bool | None" = None, run=None, pref
                 out = "failed"
     try:
         sf.write_text(json.dumps(st, ensure_ascii=False))
+        with open(sf.with_name("discord-update.log"), "a", encoding="utf-8") as fh:     # 무슨 일이 있었나(리뷰 M2)
+            fh.write(f"{time.strftime('%m-%d %H:%M:%S')} {out} {sha or '-'} {str(st.get('lastError') or '')[-200:]}\n")
     except OSError:
         pass
     return out

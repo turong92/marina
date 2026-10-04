@@ -207,6 +207,52 @@ def _gated_restart(state: dict[str, Any], now: float, installed: str | None, bus
     return "restarted"
 
 
+def _install_new(state: dict[str, Any], st: dict, origin: Any, now: float, run_fn, preflight_fn, gate, keep_due) -> str:
+    """새 버전 받기 → 데몬 인터프리터로 import 검사 → 설치 → 재시작 관문. 공용 잠금 안에서만 부른다."""
+    claude = _bin("claude")
+    rc, out = run_fn([claude, "plugin", "marketplace", "update", MARKETPLACE])
+    if rc != 0:
+        state["lastError"] = f"marketplace update: {out[-200:]}"
+        _save_state(state); _log(f"FAILED marketplace update {origin}: {out[-200:]}")
+        return "failed:marketplace"
+    ok, err = preflight_fn(marketplace_scripts_dir())
+    if not ok:
+        state.update({"badSha": origin, "lastError": f"preflight: {err}"})
+        _save_state(state)
+        _log(f"REJECTED {origin} — 새 버전이 데몬 인터프리터에서 안 뜬다, 설치 안 함: {err}")
+        return "rejected:preflight"
+    rc, out = run_fn([claude, "plugin", "update", PLUGIN_ID])
+    if rc != 0:
+        state["lastError"] = f"plugin update: {out[-200:]}"
+        _save_state(state); _log(f"FAILED plugin update {origin}: {out[-200:]}")
+        return "failed:plugin-update"
+    state.update({"installedAt": now, "updatedFrom": st.get("serving"), "updatedTo": origin, "lastError": None})
+    res = gate(origin)
+    if res.startswith("deferred"):
+        _save_state(keep_due()); _log(f"INSTALLED {origin} — 재시작은 미룸({res})")
+        return f"installed:{res}"
+    _save_state(state)
+    _log(f"UPDATED {st.get('serving')} → {origin} ({res})")
+    return "updated" if res == "restarted" else f"installed:{res}"
+
+
+def _update_lock():
+    """runtime·discord 자동 업데이트가 같은 마켓플레이스 사본·설치 목록을 동시에 만지지 않게 하는 공용 잠금(리뷰 M3).
+    잡혀 있으면 None — 이번엔 미룬다. discord(marina_session.self_update_tick)도 같은 파일을 쓴다."""
+    import fcntl
+    try:
+        MARINA_HOME.mkdir(parents=True, exist_ok=True)
+        fh = open(MARINA_HOME / "plugin-update.lock", "w")
+    except OSError:
+        return None
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return None
+    return fh
+
+
 def auto_update_tick(port: int, now: float | None = None, primary: bool | None = None,
                      status_fn: Callable[[], dict] | None = None,
                      run_fn: Callable[[list[str]], tuple[int, str]] | None = None,
@@ -255,31 +301,14 @@ def auto_update_tick(port: int, now: float | None = None, primary: bool | None =
             if busy_fn():
                 _save_state({**state, "checkedAt": last if isinstance(last, (int, float)) else 0})
                 return "deferred:busy"                              # 기동 중 — 다음 틱에 다시(주기를 소모하지 않음)
-            claude = _bin("claude")
-            rc, out = run_fn([claude, "plugin", "marketplace", "update", MARKETPLACE])
-            if rc != 0:
-                state["lastError"] = f"marketplace update: {out[-200:]}"
-                _save_state(state); _log(f"FAILED marketplace update {origin}: {out[-200:]}")
-                return "failed:marketplace"
-            ok, err = preflight_fn(marketplace_scripts_dir())
-            if not ok:
-                state.update({"badSha": origin, "lastError": f"preflight: {err}"})
-                _save_state(state)
-                _log(f"REJECTED {origin} — 새 버전이 데몬 인터프리터에서 안 뜬다, 설치 안 함: {err}")
-                return "rejected:preflight"
-            rc, out = run_fn([claude, "plugin", "update", PLUGIN_ID])
-            if rc != 0:
-                state["lastError"] = f"plugin update: {out[-200:]}"
-                _save_state(state); _log(f"FAILED plugin update {origin}: {out[-200:]}")
-                return "failed:plugin-update"
-            state.update({"installedAt": now, "updatedFrom": st.get("serving"), "updatedTo": origin, "lastError": None})
-            res = gate(origin)
-            if res.startswith("deferred"):
-                _save_state(keep_due()); _log(f"INSTALLED {origin} — 재시작은 미룸({res})")
-                return f"installed:{res}"
-            _save_state(state)
-            _log(f"UPDATED {st.get('serving')} → {origin} ({res})")
-            return "updated" if res == "restarted" else f"installed:{res}"
+            lock = _update_lock()
+            if lock is None:
+                _save_state(keep_due())
+                return "deferred:lock"                              # discord 업데이트가 마켓플레이스를 만지는 중(리뷰 M3)
+            try:
+                return _install_new(state, st, origin, now, run_fn, preflight_fn, gate, keep_due)
+            finally:
+                lock.close()
 
         if kind == "stale":
             inst = st.get("installed")

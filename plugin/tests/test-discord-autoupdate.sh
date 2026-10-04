@@ -80,6 +80,19 @@ ms.daemon_pid_path().write_text(f"{os.getpid()}\n")
 ms._daemon_handoff()
 ms.subprocess.Popen = real_popen
 check(argvs and argvs[-1][0] == str(shim) and argvs[-1][-1] == "daemon", f"고정 입구로 띄움: {argvs}")
+# (리뷰 M3) runtime 업데이트가 잠금을 쥐고 있으면 이번엔 건너뛰고(주기 소모 없이) 다음 분에 다시
+import fcntl
+(ms.marina_home() / "discord-update.json").unlink(missing_ok=True); runs.clear()
+lk = open(ms.marina_home() / "plugin-update.lock", "w"); fcntl.flock(lk, fcntl.LOCK_EX)
+check(ms.self_update_tick(90000.0, installed=True, run=run, preflight=ok, new_sha=lambda: "s7") == "skip:busy" and not runs, f"잠금 중엔 안 함: {runs}")
+fcntl.flock(lk, fcntl.LOCK_UN); lk.close()
+check(ms.self_update_tick(90060.0, installed=True, run=run, preflight=ok, new_sha=lambda: "s7") == "updated", "풀리면 바로(주기 소모 안 함)")
+# (리뷰 M2) 받기 실패는 실패로 적고 설치 안 함, 기록 파일에 남김
+(ms.marina_home() / "discord-update.json").unlink(missing_ok=True); runs.clear()
+fail_mk = lambda argv: (runs.append(argv[1:]) or (1, "network")) if argv[2] == "marketplace" else (runs.append(argv[1:]) or (0, ""))
+check(ms.self_update_tick(95000.0, installed=True, run=fail_mk, preflight=ok, new_sha=lambda: "s8") == "failed:marketplace"
+      and ["plugin", "update", "marina-discord@marina-dev"] not in runs, f"받기 실패: {runs}")
+check("failed:marketplace" in (ms.marina_home() / "discord-update.log").read_text(), "기록 남김")
 # 실제 사전 검사: 지금 코드는 통과, 깨진 코드는 거절
 import tempfile, shutil
 okk, why = ms._preflight(Path(ms.__file__).resolve().parent)
