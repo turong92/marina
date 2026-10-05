@@ -57,6 +57,17 @@ def _file_lock():
             os.close(fd)
 
 E2E_LABEL = "marina.e2e"          # 테스트 하네스가 e2e 산출물에 붙이는 라벨(값 "1")
+LIVE_LABEL = "marina.live"        # 값 "1" — 상시 운영(marina live) 스택의 산출물. 회수 대상에서 **항상** 제외한다.
+                                  # 왜 특례인가: live 는 워크트리가 없는 것이 정상이라 ⑤ 고아 판정에 정확히 걸린다
+                                  # (`<id>-live` 는 등록 프로젝트 접두사로 시작하는데 발견되는 워크트리 어디에도 없다).
+                                  # 실행 중이면 busy 로 살지만, 재부팅 실패·일시 중단으로 정지한 live 는 컨테이너와
+                                  # 이미지가 회수돼 "되살릴 수 있다"가 거짓이 된다 — 운영 중인 서비스의 재빌드 비용은
+                                  # 워크트리 재빌드와 다르다(그 사이 서비스가 내려가 있다).
+                                  # **익명 볼륨(③)에는 쓰지 않는다**: 실측으로 익명 볼륨은 라벨을 받지 않는다
+                                  # (com.docker.volume.anonymous 하나뿐). 대신 ③ 은 컨테이너가 붙어 있으면
+                                  # dangling 으로 보지 않으므로(정지 컨테이너도 사용자로 센다) 돌고 있거나 정지만 한
+                                  # live 의 익명 볼륨에는 닿지 않는다. compose down 으로 컨테이너까지 지운 뒤의
+                                  # 익명 볼륨은 다음 up 이 새로 만들어 쓰지 않으므로 진짜 쓰레기다.
 
 DEFAULT_POLICY: dict[str, Any] = {
     "enabled": True,
@@ -282,7 +293,15 @@ def _labels_of(value: Any) -> dict[str, str]:
     return out
 
 
+def _is_live(labels: dict[str, str]) -> bool:
+    """상시 운영 스택의 산출물인가. 이름 글롭은 보지 않는다 — 라벨은 marina 가 붙이는 것이고
+    이름은 사용자가 정하는 것이라, 운영 면제를 이름으로 얻게 하면 안 된다."""
+    return (labels or {}).get(LIVE_LABEL) == "1"
+
+
 def _is_e2e(name: str, labels: dict[str, str], globs: list[str]) -> bool:
+    if _is_live(labels):
+        return False                  # 운영이 테스트 표식을 이긴다(둘 다 붙은 경우)
     if labels.get(E2E_LABEL) == "1":
         return True
     name = name.lstrip("/")
@@ -545,6 +564,9 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
                     if orphan(proj):
                         by_project.setdefault(proj, []).append(c)
                 busy = {p for p, cs in by_project.items() if any(c["status"] in ("running", "paused", "restarting") for c in cs)}
+                # live 라벨이 붙은 컨테이너가 하나라도 있으면 그 프로젝트는 운영 스택이다 —
+                # 레지스트리에서 프로젝트를 지운 뒤에도(이름 판정이 못 지켜 주는 구간) 라벨이 지킨다.
+                busy |= {p for p, cs in by_project.items() if any(_is_live(c["labels"]) for c in cs)}
                 projects: set[str] = set()
                 for proj, cs in sorted(by_project.items()):
                     if proj in busy:
@@ -590,6 +612,15 @@ def _compose_project_prefix(project_id: str) -> str:
     return re.sub(r"[^a-z0-9_-]+", "-", str(project_id).lower()).strip("-_") + "-"
 
 
+def _live_session_project_names(projects) -> set:
+    """등록 프로젝트마다 `<id>-live` — 상시 운영 세션의 compose 프로젝트명.
+    live 는 워크트리가 없는 것이 정상이라 발견 목록에 안 잡힌다. 그래서 여기서 넣어 준다.
+    실행 경로와 같은 함수(compose_project_name)로 만든다 — 규칙이 갈라지지 않게."""
+    from marina_state import _mc
+    mc = _mc()
+    return {mc.compose_project_name(str(p.get("id", "")), "live") for p in (projects or []) if p.get("id")}
+
+
 def _live_compose_projects():
     """(지금 발견되는 모든 워크트리의 compose 프로젝트명, 믿을 수 있는 등록 프로젝트 접두사들). 못 읽으면 None.
     루트가 없는 프로젝트는 접두사에서 뺀다 — 발견이 비어 그 프로젝트 전부가 고아로 보이는 것을 막는다. 테스트가 바꾸는 이음매."""
@@ -605,6 +636,7 @@ def _live_compose_projects():
     for root in discover_all_roots(refresh=True):
         proj = project_for(root) or {}
         live.add(mc.compose_project_name(str(proj.get("id", "")), session_id(root)))   # 실행 경로와 같은 함수 — 규칙이 갈라지지 않게
+    live |= _live_session_project_names(projects)      # 상시 운영 세션 — 워크트리가 없는 것이 정상이다
     return live, prefixes
 
 
