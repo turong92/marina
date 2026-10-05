@@ -196,6 +196,9 @@ def cmd_up(project_id: str, cfg) -> int:
 
 
 def _up_locked(project_id: str, cfg) -> int:
+    # 유닛이 `marina live up` 을 재실행하므로 **여기가** 로그가 자라는 지점이다.
+    # 매 시도 시작에 회전시킨다 — launchd 는 회전을 해 주지 않는다.
+    L.rotate_unit_log(project_id)
     remote = _remote_target()
     _check_remote(remote)                      # 체크아웃·기동 **전에** — 반쯤 한 상태를 안 남긴다
     services = list(cfg.get("services") or [])

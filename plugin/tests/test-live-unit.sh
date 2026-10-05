@@ -133,6 +133,10 @@ assert log.read_bytes() == b"small"
 print("ok")
 PY
 
+# 13b) 회전이 실제로 **호출된다** — 정의만 있으면 죽은 코드다. 유닛이 marina live up 을
+#      재실행하므로 그 경로에 걸려 있어야 한다.
+grep -q 'L.rotate_unit_log(' "$SCRIPTS/marina_live_cli.py" || { echo "FAIL: rotate_unit_log 가 호출되지 않는다"; exit 1; }
+
 # 14) 알 수 없는 동작은 거부
 bash "$SCRIPTS/marina-live-unit.sh" bogus ovation >/dev/null 2>&1 && { echo "FAIL: bogus 통과"; exit 1; } || true
 echo "PASS test-live-unit"
