@@ -260,7 +260,7 @@ def render_html(page: Path, root: Path, outdir: Path, timeout: float = 45) -> tu
         srv.stop()
 
 
-# ── md 미리보기: md → (가상) HTML → 크롬. runtime 의 md-view 와 같은 라이브러리·버전·SRI(복사본 — discord 는 runtime 을 import 하지 않는다)
+# ── md 미리보기: md → (가상) HTML → 크롬. marina_view 의 md-view(marina-view/md-view.html)와 같은 라이브러리·버전·SRI(CDN 값이 두 곳이라 test-discord-view 가 CSP 와의 일치를 본다)
 MAX_MD_BYTES = 2 * 1024 * 1024   # 이보다 큰 md 는 미리보기를 생략(크롬에 거대한 페이지를 먹이지 않는다)
 SLICE = 1600          # 한 장의 높이(CSS px) — 폰 폭(500)에서 배율 2 면 3200px
 _MD_LIBS = (

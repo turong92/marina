@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # 결과물 보기(2026-10-05) discord 쪽 — share_file 이 열어보기 주소를 돌려주고, md 도 미리보기 이미지(최대 4장)를 만든다.
-#  - 주소는 `marina view-link <path>`(cwd=세션 root)로만 받는다(runtime 코드 import 없음). 실패해도 첨부는 그대로
+#  - v2: 주소는 discord 가 혼자 만든다(marina_view.create + discord.json view.publicBase) — runtime(marina CLI)이 없어도 나온다.
+#    publicBase 가 없으면 주소 없이 첨부만(+이유). 개발·채팅 세션 둘 다
 #  - md 미리보기: marina_share.render_md — 가상 페이지 + 세로 조각(?o=오프셋), 높이가 길어도 4장까지, 크롬 없으면 md 만
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"
@@ -10,9 +11,6 @@ fail() { echo "FAIL: $*"; exit 1; }
 printf '{"projects":{}}\n' > "$MARINA_CLAUDE_JSON"
 msess new proj feat/v --no-start >/dev/null 2>&1 || fail "new"
 msess new chat room --title "방" >/dev/null 2>&1 || fail "new chat"
-printf '#!/bin/sh\nprintf "state=funnel\\nurl=https://box.example.ts.net\\ndashboardPort=3900\\n"\n' > "$TMPROOT/bin/fake-status"
-chmod +x "$TMPROOT/bin/fake-status"
-export MARINA_TERM_REQUEST_REMOTE_STATUS="$TMPROOT/bin/fake-status"
 # 가짜 크롬 — --screenshot= 경로에 PNG 를 쓰고 받은 URL 을 남긴다
 cat > "$TMPROOT/bin/fake-chrome" <<SH
 #!/bin/sh
@@ -43,19 +41,26 @@ root = Path(os.path.realpath(rec["root"]))
 (root / "out" / "img.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
 os.environ["DISCORD_STATE_DIR"] = rec["stateDir"]
 
+# ── publicBase 가 없으면 주소 없이 첨부만(+이유)
+out = ms.chat_tool("share_file", {"path": "out/r.html"})
+check("열어보기:" not in out and "설정 전" in out and str(root / "out" / "r.html") in out, f"publicBase 없음: {out}")
+check(not (Path(os.environ["MARINA_HOME"]) / "discord-view").exists(), "설정 전엔 토큰도 안 만든다")
+cfg = ms.load_config(); cfg["view"] = {"port": 3905, "publicBase": "https://box.example.ts.net:10000"}; ms.save_config(cfg)
+
 # ── share_file: 열어보기 주소
 out = ms.chat_tool("share_file", {"path": "out/r.html"})
-check("열어보기: https://box.example.ts.net/view/" in out and "reply 본문" in out, f"html 열어보기: {out}")
+check("열어보기: https://box.example.ts.net:10000/v/" in out and "reply 본문" in out, f"html 열어보기: {out}")
 url = [l for l in out.splitlines() if l.startswith("열어보기:")][0].split()[1]
 check(url.endswith("/"), f"주소 끝 슬래시: {url}")
 tok = url.rstrip("/").rsplit("/", 1)[1]
-vl = json.loads((Path(os.environ["MARINA_HOME"]) / "view-links" / f"{tok}.json").read_text())
-check(vl["root"] == str(root) and vl["rel"] == "out/r.html", f"토큰이 이 세션 root·파일로: {vl}")
+vl = json.loads((Path(os.environ["MARINA_HOME"]) / "discord-view" / f"{tok}.json").read_text())
+check(vl["root"] == str(root) and vl["rel"] == "out/r.html" and vl["channel"] == rec["channelId"], f"토큰이 이 세션 root·파일·채널로: {vl}")
 check(ms.chat_tool("share_file", {"path": "out/r.html"}).count("열어보기:") == 1, "한 번만")
+check(url in ms.chat_tool("share_file", {"path": "out/r.html"}), "다시 공유해도 같은 주소")
 out = ms.chat_tool("share_file", {"path": "out/p.png"})
 check("열어보기: " in out, f"png 도 열어보기: {out}")
 out = ms.chat_tool("share_file", {"path": "out/z.zip"})
-check("열어보기:" not in out and str(root / "out" / "z.zip") in out, f"zip 은 주소 없음: {out}")
+check("열어보기:" not in out and "설정 전" not in out and str(root / "out" / "z.zip") in out, f"zip 은 주소 없음: {out}")
 
 # ── md: 열어보기 + 미리보기 이미지(크롬이 가짜라 1장)
 out = ms.chat_tool("share_file", {"path": "out/n.md"})
@@ -67,12 +72,16 @@ page = (tmp / "chrome-page").read_text()
 check("marked" in page and "integrity=" in page and "제목" in page and "</script> &" not in page, f"크롬이 받은 가상 페이지: {page[:200]}")
 check("<base href=\"/out/\">" in page, "md 폴더 기준 base(상대 이미지)")
 
-# ── 링크 실패해도 첨부는 그대로
+# ── runtime(marina CLI)이 없어도 링크는 나온다 — discord 혼자
 os.environ["MARINA_RUNTIME_BIN"] = "none"
 out = ms.chat_tool("share_file", {"path": "out/r.html"})
-check("열어보기:" not in out and "열어보기 링크를 만들지 못했어" in out and str(root / "out" / "r.html") in out, f"링크 실패: {out}")
-del os.environ["MARINA_RUNTIME_BIN"]
+check(f"열어보기: {url}" in out and str(root / "out" / "r.html") in out, f"runtime 없이도 링크: {out}")
 os.environ["MARINA_RUNTIME_BIN"] = str(tmp / "bin" / "marina")
+
+# ── 비밀 이름은 링크를 안 만든다(첨부 자체는 기존 규칙)
+(root / "out" / ".env.png").write_bytes(b"x")
+out = ms.chat_tool("share_file", {"path": "out/.env.png"})
+check("열어보기:" not in out and "만들지 못했어" in out, f"비밀 이름: {out}")
 
 # ── 크롬이 없으면 md 만(+이유)
 os.environ["MARINA_CHROME"] = "/nonexistent/chrome"
@@ -80,13 +89,16 @@ out = ms.chat_tool("share_file", {"path": "out/n.md"})
 check(str(root / "out" / "n.md") in out and "미리보기를 만들지 못했어" in out and not [l for l in out.splitlines() if l.endswith(".png")], f"크롬 없음: {out}")
 os.environ["MARINA_CHROME"] = str(tmp / "bin" / "fake-chrome")
 
-# ── 채팅 세션: 등록된 워크트리가 아니라 주소는 없지만(조용히 생략) 미리보기는 만든다
+# ── 채팅 세션도 링크(채팅 폴더 안 파일, 그 채널 기록) + 미리보기
 crec = ms.find_session("chat/room")
 croot = Path(os.path.realpath(crec["root"]))
 (croot / "m.md").write_text("# c")
 os.environ["DISCORD_STATE_DIR"] = crec["stateDir"]
 out = ms.chat_tool("share_file", {"path": "m.md"})
-check("열어보기:" not in out and "만들지 못했어" not in out and any(l.endswith(".png") for l in out.splitlines()), f"채팅 세션: {out}")
+check("열어보기: https://box.example.ts.net:10000/v/" in out and any(l.endswith(".png") for l in out.splitlines()), f"채팅 세션: {out}")
+ctok = [l for l in out.splitlines() if l.startswith("열어보기:")][0].split()[1].rstrip("/").rsplit("/", 1)[1]
+cvl = json.loads((Path(os.environ["MARINA_HOME"]) / "discord-view" / f"{ctok}.json").read_text())
+check(cvl["root"] == str(croot) and cvl["rel"] == "m.md" and cvl["channel"] == crec["channelId"], f"채팅 토큰: {cvl}")
 
 # ── render_md 단위: 장수 제한·조각 오프셋(가짜 _shot 이 페이지를 받아 높이를 알린다)
 calls = []
@@ -149,6 +161,15 @@ try:
 except urllib.error.HTTPError as e:
     check(e.code == 404, f"없는 경로 404: {e.code}")
 srv.stop()
+# ── I3: 세션 정리(teardown)는 그 세션의 링크를 끊는다 — 개발=root 전체, 채팅=그 방(channel) 것만
+import marina_view as mv
+(croot / "n2.md").write_text("# n2"); other = mv.create(str(croot), "n2.md", "OTHER-ROOM")        # 같은 폴더의 다른 방 기록(채팅 폴더는 방끼리 공유)
+check(mv.resolve(ctok) is not None, "teardown 전엔 열림")
+ms.teardown(crec)
+check(mv.resolve(ctok) is None, "채팅방 삭제 → 그 방 링크 끊김")
+check(mv.resolve(other) is not None, "같은 폴더의 다른 방 링크는 그대로")
+ms.teardown(rec)
+check(mv.resolve(tok) is None, "개발 세션 삭제 → 그 워크트리 링크 끊김")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 print("ok")

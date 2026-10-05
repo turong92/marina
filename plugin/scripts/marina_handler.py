@@ -53,7 +53,6 @@ from marina_update import _serving_sha, update_claude, update_codex, update_stat
 from marina_compose_svc import compose_resolved_view, compose_validate, merge_xmarina_into_yaml, unified_compose_yaml, weave_map
 from marina_memory import memory_snapshot
 from marina_term_requests import claim as term_request_claim, peek as term_request_peek
-import marina_view_links
 from marina_mobile import disable_mobile_token, ensure_mobile_token, mobile_access_status, mobile_answer, mobile_catalog, mobile_escape, mobile_harness, mobile_interrupt, mobile_launch, mobile_clear_uploads, mobile_close_chat, mobile_restart_chat, mobile_forget_chat, mobile_relogin, mobile_remove_room, mobile_rename_room, mobile_request_ok, mobile_set_archived, mobile_set_hidden, mobile_set_pin, mobile_send, mobile_state, mobile_update_session_settings, mobile_upload, mobile_upload_file, render_mobile_html, rotate_mobile_token
 from marina_sessions import _live_agent_cwds, agent_activity, agent_belongs_to_root, agent_session_file_bytes, agent_session_files, agent_transcript, agent_transcript_image, agent_transcript_images, agent_usage, agents_payload, append_console_log, claude_session_titles, codex_session_titles, host_allowed, origin_allowed, provider_account_usage, safe_root, safe_service, session_payload, system_memory, worktree_info, worktree_status
 from marina_term import term_input, term_kill, term_list, term_open, term_resize, term_stream
@@ -509,133 +508,6 @@ class Handler(BaseHTTPRequestHandler):
             routes[str(route.get("service") or "")] = str(route.get("domain") or "")
         return routes
 
-    _VIEW_MAX_BYTES = 20 * 1024 * 1024
-    _VIEW_TYPES = {
-        ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8", ".xhtml": "application/xhtml+xml; charset=utf-8",
-        ".svg": "image/svg+xml", ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
-        ".webp": "image/webp", ".ico": "image/x-icon", ".avif": "image/avif", ".pdf": "application/pdf",
-        ".css": "text/css; charset=utf-8", ".js": "application/javascript; charset=utf-8", ".mjs": "application/javascript; charset=utf-8",
-        ".json": "application/json; charset=utf-8", ".map": "application/json; charset=utf-8",
-        ".txt": "text/plain; charset=utf-8", ".log": "text/plain; charset=utf-8", ".csv": "text/plain; charset=utf-8",
-        ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf", ".otf": "font/otf",
-        ".mp4": "video/mp4", ".webm": "video/webm", ".mp3": "audio/mpeg", ".wav": "audio/wav",
-    }
-    _VIEW_SANDBOX = "sandbox allow-scripts allow-popups allow-forms"     # 불투명 origin — 대시보드 쿠키·API 에 못 닿는다
-    _VIEW_FRAME = "frame-ancestors 'none'"
-    _VIEW_MD_CSP = ("sandbox allow-scripts allow-popups; default-src 'none'; script-src 'self' " + " ".join(marina_view_links.CDN_SCRIPTS)
-                    + "; style-src 'unsafe-inline'; img-src 'self' data:; font-src data:; base-uri 'self'; frame-ancestors 'none'")
-
-    def _view_send(self, status: int, ctype: str, data: bytes, csp: str = "", attachment: bool = False, cors: bool = False) -> None:
-        self.send_response(status)
-        self.send_header("content-type", ctype)
-        self.send_header("cache-control", "no-store")
-        self.send_header("x-content-type-options", "nosniff")
-        self.send_header("referrer-policy", "no-referrer")
-        self.send_header("content-security-policy", f"{csp}; {self._VIEW_FRAME}" if csp and "frame-ancestors" not in csp else (csp or self._VIEW_FRAME))
-        if attachment:
-            self.send_header("content-disposition", "attachment")
-        if cors and self.headers.get("origin") == "null":      # 샌드박스 문서의 fetch 만(불투명 origin = "null") — 다른 사이트는 못 읽는다
-            self.send_header("access-control-allow-origin", "null")
-            self.send_header("vary", "origin")
-        self.send_header("content-length", str(len(data)))
-        self.end_headers()
-        self.wfile.write(data)
-
-    def _serve_view(self, parsed: urllib.parse.ParseResult, principal: Any) -> None:
-        """GET /view/<token>/<상대경로> — 결과물 보기. 설계: docs/superpowers/specs/2026-10-05-file-view-design.md
-        /view/<token>/~/<ticket>/<상대경로> 는 샌드박스 문서의 상대 자산용(쿠키가 안 가서 티켓이 인증을 대신한다)."""
-        vl = marina_view_links
-        controller = auth_controller()
-        token, _, tail = parsed.path[len("/view/"):].partition("/")
-        ticket, cors = "", False
-        sub = urllib.parse.unquote(tail)
-        auth_on = controller.store.auth_enabled()
-        if not auth_on and (self.headers.get("x-forwarded-for") or self.headers.get("x-forwarded-host")):
-            self.send_json({"error": "인증 없이는 로컬 대시보드에서만 열 수 있어요"}, 403)     # 터미널 가드와 같다(티켓 경로 포함)
-            return
-        if tail.startswith("~/"):
-            ticket, _, tail = tail[2:].partition("/")
-            sub = urllib.parse.unquote(tail)
-            looked = vl.ticket_lookup(ticket)
-            if not looked or looked[0] != token or not tail or not vl.ticket_ext_ok(sub):
-                self.send_json({"error": "없거나 만료됐어"}, 404)
-                return
-            _, root_text, dirrel, ticket_principal = looked
-            if self.headers.get("sec-fetch-dest") == "document":     # 주소창·히스토리에 티켓이 남지 않게 쿠키 경로로
-                self.send_response(302)
-                self.send_header("location", f"/view/{token}/{urllib.parse.quote(sub)}" + (f"?{parsed.query}" if parsed.query else ""))
-                self.send_header("cache-control", "no-store")
-                self.send_header("content-length", "0")
-                self.end_headers()
-                return
-            if auth_on and ticket_principal is None:
-                self.send_json({"error": "없거나 만료됐어"}, 404)
-                return
-            resolved = vl.resolve(token)                              # 토큰이 만료·삭제됐으면 티켓도 죽는다
-            if resolved is None or resolved[0] != root_text:
-                self.send_json({"error": "없거나 만료된 링크야"}, 404)
-                return
-            token_rel, cors = os.path.join(dirrel, "_"), True
-        else:
-            resolved = vl.resolve(token)
-            if resolved is None:
-                self.send_json({"error": "없거나 만료된 링크야"}, 404)
-                return
-            root_text, token_rel = resolved
-        try:
-            root = safe_root(root_text)
-        except ValueError:
-            self.send_json({"error": "그 워크트리는 더 이상 없어"}, 404)
-            return
-        if cors:
-            if not self._policy().can_root(ticket_principal, root):    # 발급받은 사용자의 접근권한이 지금도 있는가
-                self._forbidden()
-                return
-        else:
-            if not self._require_root_access(root):
-                return
-            ticket = vl.issue_ticket(token, root_text, os.path.dirname(token_rel), principal)
-        target = vl.locate(str(root), token_rel, sub, confine=cors)
-        if target is None:
-            self.send_json({"error": "파일이 없어"}, 404)
-            return
-        try:
-            size = target.stat().st_size
-        except OSError:
-            self.send_json({"error": "파일이 없어"}, 404)
-            return
-        if size > self._VIEW_MAX_BYTES:
-            self.send_json({"error": "20MB 가 넘는 파일은 열 수 없어"}, 413)
-            return
-        data = target.read_bytes()
-        suffix = target.suffix.lower()
-        raw = urllib.parse.parse_qs(parsed.query).get("raw", [""])[0] == "1"
-        # 상대 자산의 기준 주소 — 이 파일이 있는 폴더(토큰 파일 폴더 안일 때)의 티켓 경로
-        base = f"/view/{token}/~/{ticket}/"
-        try:
-            sub = os.path.relpath(str(target), os.path.join(os.path.realpath(str(root)), os.path.dirname(token_rel)))
-        except ValueError:
-            sub = ".."
-        if not sub.startswith(".."):
-            d = os.path.dirname(sub)
-            base += (urllib.parse.quote(d) + "/") if d else ""
-        if suffix in (".md", ".markdown"):
-            if raw:
-                self._view_send(200, "text/plain; charset=utf-8", data, cors=cors)
-                return
-            template = (_WEB_DIR / "md-view.html").read_text(encoding="utf-8")
-            page = vl.md_page(template, data.decode("utf-8", "replace"), target.name, base)
-            self._view_send(200, "text/html; charset=utf-8", page.encode("utf-8"), csp=self._VIEW_MD_CSP, cors=cors)
-            return
-        ctype = self._VIEW_TYPES.get(suffix)
-        if ctype is None:
-            self._view_send(200, "application/octet-stream", data, attachment=True, cors=cors)
-            return
-        sandboxed = suffix in (".html", ".htm", ".xhtml", ".svg")
-        if suffix in (".html", ".htm", ".xhtml"):
-            data = vl.inject_base(data, base)
-        self._view_send(200, ctype, data, csp=self._VIEW_SANDBOX if sandboxed else "", cors=cors)
-
     def _require_root_access(self, root: Path) -> bool:
         if self._policy().can_root(getattr(self, "auth_principal", None), root):
             return True
@@ -928,9 +800,6 @@ class Handler(BaseHTTPRequestHandler):
         self.auth_principal = principal
         # 인증 통과 **뒤에** 둔다 — /preview 는 PUBLIC_PREFIXES 가 아니므로 로그인 없이는 여기 못 온다.
         if parsed.path.startswith("/preview/") and self._serve_preview(parsed, "GET"):
-            return
-        if parsed.path.startswith("/view/"):    # 결과물 보기 — 로그인 필요(authorize 가 비로그인은 /login 으로 보냈다), 자산 티켓 경로만 예외
-            self._serve_view(parsed, principal)
             return
         if parsed.path == "/api/mobile/access":
             if not self._require_mobile_admin():
@@ -3315,7 +3184,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        print("[marina]", marina_view_links.redact_view_log(fmt % args))     # /view 토큰·티켓은 로그에 남기지 않는다
+        print("[marina]", fmt % args)
 
 class PreviewHandler(BaseHTTPRequestHandler):
     """미리보기 전용 리스너 — **앱이 URL 루트를 소유한다**.

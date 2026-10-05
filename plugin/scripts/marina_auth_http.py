@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import ipaddress
 import os
-import re
 import ssl
 import urllib.parse
 from http.cookies import SimpleCookie
@@ -41,14 +40,11 @@ PUBLIC_PATHS = {
     "/api/chain",          # marina chain CLI — 루프백 + 호출자 확인(marina_handler)
 }
 PUBLIC_PREFIXES = ("/web/",)
-# /view 의 자산 티켓 경로 — 샌드박스(불투명 origin) 문서의 상대 자산 요청은 SameSite 쿠키를 못 보낸다. 로그인한 열람이 발급한
-# 티켓(marina_view_links.issue_ticket)이 인증을 대신하고, 티켓 검사는 핸들러가 한다.
-VIEW_TICKET_RE = re.compile(r"^/view/[A-Za-z0-9_-]{20,64}/~/[A-Za-z0-9_-]{10,64}/")
 LOGIN_REDIRECT_PATHS = ("/", "/mobile", "/term-run")      # 이 페이지들은 비로그인이면 401 대신 로그인 화면으로
 
 
 def is_login_redirect_path(path: str) -> bool:
-    return path in LOGIN_REDIRECT_PATHS or path.startswith("/view/")
+    return path in LOGIN_REDIRECT_PATHS
 AUTH_API_PREFIX = "/api/auth/"
 
 
@@ -432,7 +428,7 @@ class AuthHTTPController:
         parsed: urllib.parse.ParseResult,
     ) -> SessionPrincipal | None | object:
         try:
-            if parsed.path in PUBLIC_PATHS or parsed.path.startswith(PUBLIC_PREFIXES) or VIEW_TICKET_RE.match(parsed.path):
+            if parsed.path in PUBLIC_PATHS or parsed.path.startswith(PUBLIC_PREFIXES):
                 return None
             if not self.store.auth_enabled():
                 return None

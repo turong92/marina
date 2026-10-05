@@ -2326,19 +2326,27 @@ def _ask_terminal(rec: dict[str, Any], args: dict[str, Any]) -> str:
         raise SessionError("command 가 필요해")
     # 개행·보이지 않는 문자·1500자 초과 검증은 runtime(`marina term-request`)이 한다 — 거부되면 아래에서 SessionError.
     argv = ["term-request"] + (["--why", why] if why else []) + ["--", command]
-    r = _run_marina(argv, cwd=Path(str(rec["root"])), timeout=30)
+    # 선택 기능 — marina CLI 가 없거나 실패하면 버튼 없이 "맥 앞에서 직접 실행해 달라고 부탁해" 로 안내한다(discord 는 runtime 없이도 돈다)
+    ask_human = "이 명령은 맥 앞에서 직접 실행해 달라고 형에게 reply 로 부탁해(명령 원문을 같이 적어)"
+    try:
+        r = _run_marina(argv, cwd=Path(str(rec["root"])), timeout=30)
+    except (SessionError, OSError, subprocess.SubprocessError) as exc:
+        raise SessionError(f"터미널 링크를 만들지 못했어({str(exc)[:200]}) — {ask_human}")
     url = (r.stdout or "").strip().splitlines()[-1] if (r.stdout or "").strip() else ""
     if r.returncode != 0 or not url.startswith(("http://", "https://")):
-        raise SessionError(f"터미널 링크를 만들지 못했어: {(r.stderr or r.stdout or '').strip()[:200]}")
+        raise SessionError(f"터미널 링크를 만들지 못했어({(r.stderr or r.stdout or '').strip()[:200]}) — {ask_human}")
     # 보이는 명령 = 실제 명령: 자르지 않고, 명령 안의 백틱보다 긴 울타리로 감싼다
     fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", command)), default=0) + 1)
     why = "".join(c for c in re.sub(r"\s+", " ", why) if unicodedata.category(c) not in ("Cc", "Cf"))   # 한 줄·보이지 않는 문자 제거
     esc_why = re.sub(r"([\\`*_~|>#\[\]()])", r"\\\1", why.replace("@", ""))[:300]   # 마크다운 링크·서식이 렌더되지 않게
     head = ("🖥 " + esc_why + "\n") if why else "🖥 터미널에서 직접 실행해 줘\n"
-    cfg = load_config()
-    Discord(read_token(cfg))._req("POST", f"/channels/{rec['channelId']}/messages", {
-        "content": f"{head}{fence}\n{command}\n{fence}", "allowed_mentions": {"parse": []},
-        "components": [{"type": 1, "components": [{"type": 2, "style": 5, "label": "터미널에서 열기", "url": url}]}]})
+    try:
+        cfg = load_config()
+        Discord(read_token(cfg))._req("POST", f"/channels/{rec['channelId']}/messages", {
+            "content": f"{head}{fence}\n{command}\n{fence}", "allowed_mentions": {"parse": []},
+            "components": [{"type": 1, "components": [{"type": 2, "style": 5, "label": "터미널에서 열기", "url": url}]}]})
+    except Exception as exc:        # 버튼을 못 보내도 세션이 막히지 않게 — 같은 안내로
+        raise SessionError(f"터미널 버튼을 못 보냈어({str(exc)[:200]}) — {ask_human}")
     return "버튼 보냈어 — 형이 실행하고 알려 주면 이어서"
 
 
@@ -2393,19 +2401,19 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
             files = imgs + files
             if why:
                 notes.append(why)
-    if path.suffix.lower() in _VIEW_SUFFIXES and rec.get("kind") not in CHAT_KINDS:
-        # 폰에서 여는 보기 주소 — runtime 은 `marina view-link` CLI 로만 부른다(채팅 폴더는 등록된 워크트리가 아니라 개발 세션만)
-        try:
-            r = _run_marina(["view-link", str(path)], cwd=root, timeout=30)
-            lines = (r.stdout or "").strip().splitlines()
-            url = lines[-1] if lines else ""
-            if r.returncode != 0 or not url.startswith(("http://", "https://")):
-                raise SessionError((r.stderr or r.stdout or "").strip()[:200] or "주소가 비었어")
-            notes.append(f"열어보기: {url} — reply 본문에 이 주소를 넣어")
-        except (SessionError, OSError, subprocess.SubprocessError) as exc:
-            notes.append(f"열어보기 링크를 만들지 못했어({exc}) — 첨부만 보내")
-    title = str(args.get("title") or path.stem).replace("@", "").replace("\n", " ")[:80]
     cfg = load_config()
+    if path.suffix.lower() in _VIEW_SUFFIXES:
+        # 폰·다른 사람이 여는 보기 주소 — discord 가 혼자 한다(링크가 열쇠, 기한 없음). 개발·채팅 세션 둘 다
+        import marina_view
+        if not marina_view.public_url(cfg, "x"):
+            notes.append("(열어보기 주소는 아직 설정 전이라 생략 — 첨부만 보내. 설정은 형이 `marina-session view-setup`)")
+        else:
+            try:
+                url = marina_view.public_url(cfg, marina_view.create(str(root), str(path), str(rec.get("channelId") or "")))
+                notes.append(f"열어보기: {url} — reply 본문에 이 주소를 넣어")
+            except (ValueError, OSError) as exc:
+                notes.append(f"열어보기 링크를 만들지 못했어({exc}) — 첨부만 보내")
+    title = str(args.get("title") or path.stem).replace("@", "").replace("\n", " ")[:80]
     arch = str((cfg["projects"].get(str(rec.get("project"))) or {}).get("archiveChannelId") or "")
     if arch:
         room = str(rec.get("title") or rec.get("task")).replace("@", "")
@@ -2738,6 +2746,14 @@ def teardown(s: dict[str, Any]) -> list[str]:
                 warnings.append(f"채널 삭제 실패: {exc}")
         except Exception as exc:          # 무슨 실패든 나머지 정리는 끝까지 한다
             warnings.append(f"채널 삭제 실패: {exc}")
+    try:       # 결과물 보기 링크 — 그 방에서 만든 것(채팅 폴더는 방끼리 공유라 channel 로), 개발 세션은 워크트리 전체
+        import marina_view
+        if s.get("channelId"):
+            marina_view.revoke(channel=str(s["channelId"]))
+        if s.get("root") and s.get("kind") not in CHAT_KINDS:
+            marina_view.revoke(all_in=str(s["root"]))
+    except Exception as exc:
+        warnings.append(f"보기 링크 정리 실패: {exc}")
     if s.get("stateDir"):
         remove_state_dir(Path(str(s["stateDir"])))
     save_sessions([x for x in load_sessions()
@@ -2771,6 +2787,103 @@ def has_live_session(root: Path) -> bool:
         return False
 
 
+def _tailscale_bin() -> "str | None":
+    """MARINA_TAILSCALE(테스트·고정 경로, 'none' = 없음) → PATH(데몬 PATH 포함) → macOS 앱 번들."""
+    forced = os.environ.get("MARINA_TAILSCALE")
+    if forced is not None:
+        return forced if forced not in ("", "none") and os.access(forced, os.X_OK) else None
+    found = shutil.which("tailscale", path=os.environ.get("PATH", "") + ":" + daemon_path())
+    if found:
+        return found
+    app = "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+    return app if os.access(app, os.X_OK) else None
+
+
+def _tailscale_argv(ts: str) -> "list[str]":
+    """맥에 오픈소스 tailscaled 와 Tailscale 앱이 같이 떠 있으면 --socket 없는 CLI 는 **앱**을 본다(2026-09-28 사고) —
+    형 Funnel 은 tailscaled 쪽. MARINA_TAILSCALE_SOCKET 이 있으면 그것, 없으면 맥 기본 소켓이 있을 때 그것(runtime marina_remote 와 같은 규칙)."""
+    sock = os.environ.get("MARINA_TAILSCALE_SOCKET") or ""
+    if (not sock and not os.environ.get("MARINA_TAILSCALE") and sys.platform == "darwin"   # 고정 경로(테스트 등)면 자동 소켓 안 붙임
+            and os.path.exists("/var/run/tailscaled.socket")):
+        sock = "/var/run/tailscaled.socket"
+    return [ts, "--socket", sock] if sock else [ts]
+
+
+def cmd_view_setup(force: bool = False) -> int:
+    """결과물 보기 서버(127.0.0.1:<port>)를 Tailscale Funnel(https 10000)로 공개하고 discord.json view.publicBase 를 저장한다.
+    형이 허락한 뒤 한 번 실행한다 — 외부 공개 설정을 바꾸는 명령이라 자동으로 돌리지 않는다."""
+    import marina_view
+    ts = _tailscale_bin()
+    if not ts:
+        print("marina session: tailscale 을 찾지 못했어 — 설치한 뒤 다시 하거나, discord.json 의 view.publicBase 를 직접 적어 "
+              f"(예: \"view\": {{\"port\": {marina_view.DEFAULT_PORT}, \"publicBase\": \"https://<맥>.ts.net:10000\"}})", file=sys.stderr)
+        return 1
+    cfg = load_config()
+    raw_port = (cfg.get("view") or {}).get("port") if isinstance(cfg.get("view"), dict) else None
+    try:
+        port = int(raw_port or marina_view.DEFAULT_PORT)
+        if not 1 <= port <= 65535:
+            raise ValueError(port)
+    except (TypeError, ValueError):
+        print(f"marina session: discord.json 의 view.port 가 올바른 포트 번호가 아니야: {raw_port!r}", file=sys.stderr)
+        return 1
+    target = f"http://127.0.0.1:{port}"
+    if not force:      # 10000 에 이미 다른 매핑이 있으면 덮지 않는다(다른 서비스를 끊을 수 있다)
+        try:
+            fs = subprocess.run([*_tailscale_argv(ts), "funnel", "status", "--json"], capture_output=True, text=True, timeout=20)
+            info = json.loads(fs.stdout or "{}")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            info = {}
+        web = info.get("Web") if isinstance(info, dict) and isinstance(info.get("Web"), dict) else {}
+        tcp = info.get("TCP") if isinstance(info, dict) and isinstance(info.get("TCP"), dict) else {}
+        proxies = [str(h.get("Proxy") or h.get("Path") or h.get("Text") or "?")
+                   for k, v in web.items() if str(k).endswith(":10000") and isinstance(v, dict)
+                   for h in (v.get("Handlers") or {}).values() if isinstance(h, dict)]
+        if proxies and any(x.rstrip("/") != target for x in proxies):
+            print(f"marina session: https 10000 에 이미 다른 Funnel 매핑이 있어: {', '.join(proxies)}\n"
+                  "  덮으면 그 서비스가 끊겨 — 확인한 뒤 덮으려면 `marina-session view-setup --force`", file=sys.stderr)
+            return 1
+        if "10000" in tcp and not proxies:
+            print("marina session: https 10000 이 이미 쓰이고 있는데 내용을 못 읽었어 — 확인한 뒤 덮으려면 `marina-session view-setup --force`", file=sys.stderr)
+            return 1
+    try:
+        st = subprocess.run([*_tailscale_argv(ts), "status", "--json"], capture_output=True, text=True, timeout=20)
+        dns = str((json.loads(st.stdout or "{}").get("Self") or {}).get("DNSName") or "").rstrip(".")
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        print(f"marina session: tailscale 상태를 읽지 못했어: {exc}", file=sys.stderr)
+        return 1
+    if not dns:
+        print("marina session: tailscale 이 로그인돼 있지 않아(DNSName 없음)", file=sys.stderr)
+        return 1
+    try:
+        fr = subprocess.run([*_tailscale_argv(ts), "funnel", "--bg", "--https=10000", f"http://127.0.0.1:{port}"], capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"marina session: funnel 설정 실패: {exc}", file=sys.stderr)
+        return 1
+    if fr.returncode != 0:
+        print(f"marina session: funnel 설정 실패: {(fr.stderr or fr.stdout or '').strip()[:300]}", file=sys.stderr)
+        return 1
+    base = f"https://{dns}:10000"
+    cfg["view"] = dict(cfg["view"], port=port, publicBase=base) if isinstance(cfg.get("view"), dict) else {"port": port, "publicBase": base}
+    save_config(cfg)
+    print(f"✓ 결과물 보기: {base}  (데몬이 127.0.0.1:{port} 를 열어 줘 — 데몬은 다음 한 바퀴 안에 반영)")
+    _ensure_daemon_quiet()
+    return 0
+
+
+def cmd_view_revoke(target: str, all_in: str) -> int:
+    import marina_view
+    if not target and not all_in:
+        print("marina session: view-revoke <토큰|파일 경로> 또는 --all-in <폴더>", file=sys.stderr)
+        return 2
+    n = marina_view.revoke(target or None, all_in or None)
+    if not n:
+        print("marina session: 끊을 링크가 없어", file=sys.stderr)
+        return 1
+    print(f"✓ 링크 {n}개 끊음")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="marina session",
                                  description="워크트리 하나 = Discord 채널 하나 = tmux 안의 claude 하나")
@@ -2793,6 +2906,11 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("lock-all")
     sub.add_parser("daemon")
     sub.add_parser("daemon-ensure")
+    p = sub.add_parser("view-setup", help="결과물 보기 서버를 Tailscale Funnel 로 공개하고 publicBase 를 저장")
+    p.add_argument("--force", action="store_true", help="https 10000 에 이미 다른 매핑이 있어도 덮는다")
+    p = sub.add_parser("view-revoke", help="결과물 보기 링크 끊기(토큰·파일 경로·--all-in 폴더)")
+    p.add_argument("target", nargs="?", default="")
+    p.add_argument("--all-in", dest="all_in", default="")
     p = sub.add_parser("start")
     p.add_argument("ref", nargs="?", default="")
     p.add_argument("--all", action="store_true")
@@ -2963,6 +3081,10 @@ def main(argv: list[str] | None = None) -> int:
             _daemon_handoff()
         elif a.cmd == "daemon-ensure":
             print(ensure_daemon())
+        elif a.cmd == "view-setup":
+            return cmd_view_setup(a.force)
+        elif a.cmd == "view-revoke":
+            return cmd_view_revoke(a.target, a.all_in)
         elif a.cmd == "lock-all":
             for x in load_sessions():
                 why = lock_root(x)

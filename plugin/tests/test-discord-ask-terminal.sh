@@ -76,6 +76,27 @@ for bad in ({"command": "a\nb", "why": "x"}, {"command": "x" * 1501, "why": "x"}
 posts_after = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{rec['channelId']}/messages"]
 check(len(posts_after) == 4, f"거부된 건 메시지를 안 보낸다(+ls 1개): {len(posts_after)}")
 
+# 선택 기능: marina CLI 가 없거나 실패하면 세션에 "맥 앞에서 실행해 달라고 부탁해" 로 안내(버튼은 안 보낸다)
+n_posts = len([x for x in log() if x["m"] == "POST"])
+saved = os.environ["MARINA_RUNTIME_BIN"]
+failbin = os.path.join(os.path.dirname(saved), "fail-marina")
+open(failbin, "w").write("#!/bin/sh\nexit 7\n"); os.chmod(failbin, 0o755)
+for label, binpath in (("CLI 없음", "none"), ("CLI 실패", failbin)):
+    os.environ["MARINA_RUNTIME_BIN"] = binpath
+    try:
+        ms.chat_tool("ask_terminal", {"command": "ls", "why": "x"}); check(False, f"{label}: 통과")
+    except ms.SessionError as e:
+        check("reply" in str(e) and "직접 실행" in str(e), f"{label}: 안내 문구: {e}")
+os.environ["MARINA_RUNTIME_BIN"] = saved
+# M5: 링크는 만들었는데 Discord 버튼 POST 가 실패해도 같은 안내
+api = os.environ["MARINA_DISCORD_API"]; os.environ["MARINA_DISCORD_API"] = "http://127.0.0.1:1"
+try:
+    ms.chat_tool("ask_terminal", {"command": "ls", "why": "x"}); check(False, "POST 실패인데 통과")
+except ms.SessionError as e:
+    check("reply" in str(e) and "직접 실행" in str(e), f"POST 실패 안내: {e}")
+os.environ["MARINA_DISCORD_API"] = api
+check(len([x for x in log() if x["m"] == "POST"]) == n_posts, "CLI 가 없을 땐 버튼 메시지를 안 보낸다")
+
 # 채팅 세션은 거부
 os.environ["DISCORD_STATE_DIR"] = crec["stateDir"]
 try:

@@ -1554,6 +1554,9 @@ class Loop:
         self.next_start, self.backoff, self.started = 0.0, 5.0, 0.0
         self.lockf: Any = None
         self.last_err = ""
+        self.vsrv: Any = None            # 결과물 보기 서버(marina_view.ViewServer) — discord.json 의 view 가 있을 때만
+        self.last_vsweep = -3600.0       # 보기 기록 정리(원본이 7일 넘게 없는 것) — 한 시간마다
+        self.vnext = 0.0                 # 포트를 못 열었으면 이 시각 전엔 다시 안 시도
 
     def own(self) -> bool:
         """같은 마리나 홈에선 한 인스턴스만(프리뷰 데몬이 실 ~/.marina 를 공유해도 봇이 둘 뜨지 않게, 리뷰 I1)."""
@@ -1605,16 +1608,55 @@ class Loop:
                                          stdin=subprocess.DEVNULL)
         self.started = now
 
+    def view_server(self, cfg: dict[str, Any], now: float) -> None:
+        """결과물 보기 서버(스레드). 설정 view 가 있어야 띄우고(없거나 사라지면 내림), 포트가 바뀌면 다시 띄운다.
+        포트 충돌은 데몬을 죽이지 않고 60초 뒤 다시 시도한다."""
+        import marina_view as mv
+        view = cfg.get("view")
+        if not isinstance(view, dict):
+            self.stop_view()
+            return
+        try:
+            port = int(view.get("port") or mv.DEFAULT_PORT)
+        except (TypeError, ValueError):
+            port = mv.DEFAULT_PORT
+        if self.vsrv is not None and self.vsrv.want == port:
+            return
+        self.stop_view()
+        if now < self.vnext:
+            return
+        srv = mv.ViewServer(port)
+        if srv.start():
+            self.vsrv = srv
+            _log(f"view server: 127.0.0.1:{srv.port}")
+        else:
+            self.vnext = now + 60.0
+            _log(srv.error)
+
+    def sweep_view(self, now: float) -> None:
+        if now - self.last_vsweep < 3600.0:
+            return
+        self.last_vsweep = now
+        import marina_view as mv
+        mv.sweep()
+
+    def stop_view(self) -> None:
+        srv, self.vsrv = self.vsrv, None
+        if srv is not None:
+            srv.stop()
+
     def step(self, now: float) -> bool:
         """설정이 있으면 True."""
         try:
             cfg = ms.load_config()
         except ms.SessionError:
             self.stop_bot()
+            self.stop_view()
             return False
         if not self.own():
             return False
-        for name, fn in (("bot", lambda: self.supervise(cfg, now)), ("view", lambda: self.view(now))):
+        for name, fn in (("bot", lambda: self.supervise(cfg, now)), ("viewsrv", lambda: self.view_server(cfg, now)), ("viewsweep", lambda: self.sweep_view(now)),
+                         ("view", lambda: self.view(now))):
             try:
                 fn()
             except Exception as exc:     # 데몬 스레드는 죽으면 안 된다 — 남기되 같은 오류는 한 번만(리뷰 M3)
@@ -1663,6 +1705,7 @@ def run_forever(stop: "Callable[[], bool] | None" = None) -> None:
             last_check = time.time()
             if stop():
                 loop.stop_bot()      # bun 봇도 기다려 끝낸다 — 새 데몬의 봇과 겹치지 않게(리뷰 M2)
+                loop.stop_view()     # 보기 서버 포트도 놓는다 — 새 데몬이 같은 포트를 잡게
                 return
 
 

@@ -1,4 +1,4 @@
-/* md-view.js — /view/<token>/ 의 md 렌더 페이지(marina-web/md-view.html). 원문은 #md-data JSON 으로 심겨 온다.
+/* md-view.js — /v/<token>/ 의 md 렌더 페이지(marina-view/md-view.html). 원문은 #md-data JSON 으로 심겨 온다.
    marked 로 HTML 을 만들고 DOMPurify 로 정화한 뒤 넣는다. mermaid 블록이 있을 때만 mermaid 를 불러온다(SRI 고정). */
 (function () {
   'use strict';
