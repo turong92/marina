@@ -69,6 +69,27 @@ assert b2 == ["/proj/conf:/etc/conf"], b2
 # 9) live=False 가 기본값이다 — 기존 호출자가 영향받지 않는다
 assert mc.build_overlay(config) == dev
 
+# 9b) build_context_base 는 **build 가 선언된 서비스에만** 붙는다 — image-only 서비스에
+#     build: 가 생기면 compose 가 빌드를 시도한다(비침투성 원칙 위반).
+livectx = mc.build_overlay(config, live=True, build_context_base="/src",
+                           extra_labels={"marina.live": "1"})
+assert "context: \"/src\"" in livectx, livectx
+# db 는 image-only 다 — 그 블록에 build 가 없어야 한다
+import re as _re
+def _block(text, svc):
+    """overlay 의 한 서비스 블록. 다음 서비스 헤더(들여쓰기 2칸 + 이름 + ':')까지."""
+    i = text.index(f"  {svc}:")
+    m = _re.search(r"\n  [A-Za-z0-9]", text[i + len(svc) + 3:])
+    return text[i:i + len(svc) + 3 + (m.start() if m else len(text))]
+db_block, web_block = _block(livectx, "db"), _block(livectx, "web")
+assert "image" not in db_block and "build" not in db_block, db_block
+assert "restart: unless-stopped" in db_block, db_block     # 블록을 제대로 잘랐는지
+assert "build" in web_block and "/src" in web_block, web_block
+# 절대경로로 선언된 context 는 그대로 둔다
+abscfg = {"services": {"x": {"build": {"context": "/already/abs"}}}}
+assert '"/already/abs"' in mc.build_overlay(abscfg, live=True, build_context_base="/src"), \
+    mc.build_overlay(abscfg, live=True, build_context_base="/src")
+
 # 10) 바인드가 **어디로 풀리는지** 구분한다. live 는 --project-directory 를
 #     ~/.marina/<id>/live 로 주므로 './src' 는 체크아웃(live/src) 자신을 가리키고
 #     './data/x' 는 live/data/x 를 가리킨다. 전자는 다음 기동의 하드 리셋에 날아가지만
@@ -84,6 +105,15 @@ assert str(L.live_data("p")) in by["./data/uploads:/uploads"]["resolved"], rows
 # 바깥을 가리키는 것은 체크아웃도 데이터도 아니다 — 그것도 알려준다
 assert by["../outside:/x"]["in_checkout"] is False, rows
 assert by["../outside:/x"]["in_data"] is False, rows
+assert by["../outside:/x"]["in_live"] is False, rows
+
+# 10b) live/ 안이지만 live/data 밖인 바인드는 "live 디렉터리 밖" 이 **아니다**.
+#      `--project-directory` 가 live/ 라 `./mysql` 은 live/mysql 로 간다 — 예전엔 이것도
+#      "밖" 이라고 거짓으로 경고했다(리뷰 지적 I6 의 세 번째 증상).
+rows2 = L.classify_binds(["./mysql:/var/lib/mysql"], "p")
+assert rows2[0]["in_live"] is True, rows2
+assert rows2[0]["in_data"] is False, rows2
+assert str(L.live_root("p")) in rows2[0]["resolved"], rows2
 print("ok")
 PY
 echo "PASS test-live-overlay"

@@ -795,8 +795,12 @@ marina live status myapp          # 컨테이너 상태 · 재시작 횟수 · �
 
 - **체크아웃**: `~/.marina/<프로젝트>/live/src` 에 `git worktree` 로 **ref 고정**. marina 소유라
   매 기동에 하드 리셋한다 — 운영 코드를 손으로 고치는 길을 열어 두지 않는다.
-- **데이터**: `~/.marina/<프로젝트>/live/data`. compose 의 상대 바인드(`./data/x`)가 **여기** 로 풀린다
-  (`--project-directory`). 워크트리별로 갈리지 않는다.
+- **데이터**: 상대 바인드의 **기준은 `~/.marina/<프로젝트>/live/`** 다(`--project-directory`).
+  `./data/x` 는 `live/data/x`, `./mysql` 은 `live/mysql` 로 간다 — 권장 배치는 `live/data/`
+  아래지만 그 밖도 **백업 목록과 용량 집계에 들어간다**(`live/src`·overlay·유닛은 다시 만들 수
+  있는 생성물이라 제외). 워크트리별로 갈리지 않는다.
+- **빌드**: 빌드 컨텍스트는 `live/src`(체크아웃)로 고정된다. `--project-directory` 는 바인드뿐
+  아니라 `build.context` 까지 옮기므로, 데이터 기준점과 빌드 기준점을 따로 둔다.
 - **포트**: compose 선언 그대로 둔다(개발의 자동 할당을 끈다). 공개가 가리킬 수 있어야 하므로.
 - **안 죽는 보장 네 군데**: `restart: unless-stopped` · launchd/systemd 유닛(재부팅·로그아웃 생존) ·
   도커 GC 면제(`marina.live` 라벨) · 원격이 설정됐는데 안 닿으면 **큰 소리로 실패**(개발의 조용한

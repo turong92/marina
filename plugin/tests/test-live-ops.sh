@@ -64,6 +64,27 @@ u = O.data_usage("ovation")
 assert u["bytes"] >= 2048, u
 assert "KB" in u["human"] or "MB" in u["human"], u
 
+# 3b) 체크아웃(live/src)은 데이터가 **아니다** — ref 로 다시 뽑을 수 있는 생성물이고,
+#     거기까지 os.walk 하면 15초 폴링 비용이 레포 크기만큼 커진다.
+(L.live_src("ovation")).mkdir(parents=True, exist_ok=True)
+(L.live_src("ovation") / "big").write_bytes(b"y" * 100000)
+L.live_overlay_path("ovation").write_text("services: {}\n")
+assert "src" in O.REGENERABLE and "overlay.yml" in O.REGENERABLE, O.REGENERABLE
+flat2 = [p["path"] for p in O.backup_paths("ovation")]
+assert not any(p.endswith("/src") for p in flat2), flat2
+assert not any(p.endswith("/overlay.yml") for p in flat2), flat2
+u2 = O.data_usage("ovation")
+assert u2["bytes"] < 100000, f"체크아웃을 데이터로 셌다: {u2}"
+assert not any(p.endswith("/src") for p in u2["paths"]), u2
+# live/ 안 다른 경로는 데이터로 센다
+(L.live_root("ovation") / "mysql").mkdir(parents=True, exist_ok=True)
+(L.live_root("ovation") / "mysql" / "f").write_bytes(b"z" * 7000)
+u3 = O.data_usage("ovation")
+assert u3["bytes"] >= 7000, u3
+assert any(p.endswith("/mysql") for p in u3["paths"]), u3
+assert any(p.endswith("/mysql") for p in [x["path"] for x in O.backup_paths("ovation")]), \
+    O.backup_paths("ovation")
+
 # ── 4) 헬스 신호는 코드를 그대로 보여준다 ───────────────────────────────────
 # 홈서버 실측: 앱이 모든 경로를 인증 뒤에 두면 헬스체크가 401 을 받는다. 그걸 '살아 있음'
 # 으로 처리하면 **DB 가 죽어도 healthy** 로 남는다. 단일 초록불을 만들지 않는다.

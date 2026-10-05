@@ -1147,6 +1147,10 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
        체크아웃(live/src)에서 해야 한다. 하나의 --project-directory 로는 둘을 못 하므로
        빌드 쪽만 overlay 에서 절대경로로 고정한다. 안 하면 `build: .` 이 live/ 를 가리켜
        "open Dockerfile: no such file or directory" 로 소스 빌드 스택이 전부 깨진다.
+       **덮는 것은 `build.context` 뿐이다**(build 가 선언된 서비스만 — image-only 서비스에
+       build 키를 만들면 compose 가 빌드를 시도한다). `dockerfile` 은 context 상대라 따라오지만
+       `additional_contexts`·`secrets`·`ssh` 의 경로는 여전히 project directory 기준이므로,
+       그것들을 쓰는 compose 는 같은 증상이 남는다 — 알려진 한계다.
     ⑩ extra_services: overlay 의 **services 영역에** 그대로 끼워 넣을 줄들(2칸 들여쓰기 블록).
        live 공개용 cloudflared 처럼 marina 가 주입하는 서비스를 위한 것이다. 문자열을 뒤에
        이어 붙이면 안 된다 — ⑧ 이 끝에 top-level `networks:` 를 붙이므로 주입 서비스가
