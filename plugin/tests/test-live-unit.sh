@@ -69,6 +69,14 @@ bash "$SCRIPTS/marina-live-unit.sh" uninstall ovation >/dev/null
 out="$(bash "$SCRIPTS/marina-live-unit.sh" status ovation 2>&1 || true)"
 case "$out" in *"안 됨"*) ;; *) echo "FAIL: 유닛 없음을 알리지 않는다: $out"; exit 1 ;; esac
 
-# 11) 알 수 없는 동작은 거부
+# 11) MARINA_HOME 경로에 공백이 있어도 된다 — eval 로 값을 받으므로 인용이 필요하다
+SPACED="$MARINA_HOME/with space"
+mkdir -p "$SPACED"
+out="$(MARINA_HOME="$SPACED" bash "$SCRIPTS/marina-live-unit.sh" install ovation 2>&1)"
+[ -f "$SPACED/ovation/live/unit.plist" ] || [ -f "$SPACED/ovation/live/unit.service" ]   || { echo "FAIL: 공백 경로에서 유닛을 못 만들었다: $out"; exit 1; }
+out="$(MARINA_HOME="$SPACED" bash "$SCRIPTS/marina-live-unit.sh" status ovation 2>&1)"
+case "$out" in *"등록됨"*) ;; *) echo "FAIL: 공백 경로 status 실패: $out"; exit 1 ;; esac
+
+# 12) 알 수 없는 동작은 거부
 bash "$SCRIPTS/marina-live-unit.sh" bogus ovation >/dev/null 2>&1 && { echo "FAIL: bogus 통과"; exit 1; } || true
 echo "PASS test-live-unit"

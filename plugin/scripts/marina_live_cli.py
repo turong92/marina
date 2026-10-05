@@ -164,11 +164,21 @@ def cmd_up(project_id: str, cfg) -> int:
         compose_file = _compose_file(project_id, cfg)
         config = _load_config(compose_file)
         L.validate_services(config, services)
-        for b in mc().project_dir_binds(config, str(L.live_src(project_id))):
-            print(f"경고: 프로젝트 디렉토리 안을 가리키는 바인드 마운트 — {b}\n"
-                  f"  소스 마운트면 운영에 적합하지 않다(다음 기동의 하드 리셋에 날아간다). "
-                  f"live.composeFile 로 분리해라. 데이터 마운트면 그대로 둬도 된다 — "
-                  f"{L.live_data(project_id)} 아래로 풀린다.", file=sys.stderr)
+        # 벗기지 않고 알려만 준다(marina 는 소스와 데이터를 구분할 수 없다). 다만 **어디로
+        # 풀리는지**는 계산할 수 있으므로, 정말 위험한 것(체크아웃 안)만 경고로 올린다 —
+        # 데이터 마운트까지 같은 문구로 겁주면 경고를 무시하게 된다.
+        for row in L.classify_binds(mc().project_dir_binds(config, str(L.live_src(project_id))),
+                                    project_id):
+            if row["in_checkout"]:
+                print(f"경고: 바인드 마운트가 **체크아웃 안**을 가리킨다 — {row['bind']}\n"
+                      f"  → {row['resolved']} 는 다음 기동에 ref 로 하드 리셋되어 **날아간다.** "
+                      f"소스 마운트라면 운영에 쓰지 말고, 데이터라면 체크아웃 밖(예: ./data/...)으로 "
+                      f"옮기거나 live.composeFile 로 분리해라.", file=sys.stderr)
+            elif not row["in_data"]:
+                print(f"알림: 바인드 마운트가 live 디렉터리 밖을 가리킨다 — {row['bind']}"
+                      f" → {row['resolved']} (백업·이관 대상에 직접 넣어야 한다)", file=sys.stderr)
+            else:
+                print(f"알림: 데이터 바인드 — {row['bind']} → {row['resolved']}")
         overlay = _write_overlay(project_id, config)
         up_services = list(services)
         if (X.expose_config(project_id).get("cloudflare") or {}).get("domain"):

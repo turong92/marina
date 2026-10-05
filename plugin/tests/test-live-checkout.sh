@@ -65,7 +65,28 @@ shutil.rmtree(L.live_src("p"))
 src = L.sync_src(repo, "p", "v1")
 assert (src / "f.txt").read_text().strip() == "one", "stale 등록 때문에 되살리지 못했다"
 
-# 8) 잠금 — 같은 프로젝트를 두 번 동시에 잡을 수 없다
+# 8) 프로젝트 id 는 경로·인자로 쓰이므로 모양을 검사한다 — '../' 가 들어가면 ~/.marina 밖을 가리킨다
+for bad in ["../escape", "a/b", "with space", "semi;colon", "", "."]:
+    try:
+        L.live_root(bad)
+        raise AssertionError(f"위험한 id 인데 통과했다: {bad!r}")
+    except L.LiveConfigError:
+        pass
+L.live_root("ok_id-1.2")        # 정상 id 는 통과
+
+# 9) 비정상 종료가 남긴 잠금은 **스스로 풀린다** — 안 그러면 재부팅 후 launchd 가
+#    매번 잠금에 걸려 서비스가 영구히 안 뜬다(유닛이 marina live up 을 재실행한다)
+lock = L.live_root("p") / ".lock"
+lock.parent.mkdir(parents=True, exist_ok=True)
+lock.write_text("999999")        # 죽은 PID
+with L.src_lock("p"):
+    pass
+assert not lock.exists(), "잠금이 남았다"
+lock.write_text("not-a-pid")     # 내용이 깨진 잠금도 막히지 않는다
+with L.src_lock("p"):
+    pass
+
+# 10) 잠금 — 같은 프로젝트를 두 번 동시에 잡을 수 없다
 with L.src_lock("p"):
     try:
         with L.src_lock("p"):

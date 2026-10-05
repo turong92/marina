@@ -68,6 +68,22 @@ assert b2 == ["/proj/conf:/etc/conf"], b2
 
 # 9) live=False 가 기본값이다 — 기존 호출자가 영향받지 않는다
 assert mc.build_overlay(config) == dev
+
+# 10) 바인드가 **어디로 풀리는지** 구분한다. live 는 --project-directory 를
+#     ~/.marina/<id>/live 로 주므로 './src' 는 체크아웃(live/src) 자신을 가리키고
+#     './data/x' 는 live/data/x 를 가리킨다. 전자는 다음 기동의 하드 리셋에 날아가지만
+#     후자는 안전하다 — 둘을 같은 문구로 경고하면 사용자가 경고를 무시하게 된다.
+import sys as _sys
+_sys.path.insert(0, ".")
+import marina_live as L
+rows = L.classify_binds(["./src:/app/src", "./data/uploads:/uploads", "../outside:/x"], "p")
+by = {r["bind"]: r for r in rows}
+assert by["./src:/app/src"]["in_checkout"] is True, rows
+assert by["./data/uploads:/uploads"]["in_checkout"] is False, rows
+assert str(L.live_data("p")) in by["./data/uploads:/uploads"]["resolved"], rows
+# 바깥을 가리키는 것은 체크아웃도 데이터도 아니다 — 그것도 알려준다
+assert by["../outside:/x"]["in_checkout"] is False, rows
+assert by["../outside:/x"]["in_data"] is False, rows
 print("ok")
 PY
 echo "PASS test-live-overlay"

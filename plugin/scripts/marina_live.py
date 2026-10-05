@@ -17,6 +17,8 @@ import json
 import os
 import pathlib
 import platform
+import re
+import shlex
 import subprocess
 import tempfile
 
@@ -34,8 +36,24 @@ def marina_home() -> pathlib.Path:
     return pathlib.Path(os.environ.get("MARINA_HOME") or (pathlib.Path.home() / ".marina"))
 
 
+# 프로젝트 id 는 경로 조각(~/.marina/<id>/live)이자 docker·git·launchd 인자로 들어간다.
+# 모양을 여기서 한 번 막는다 — '../' 하나로 ~/.marina 밖을 가리키고, 공백·따옴표는 유닛
+# 파일(systemd ini 는 인용이 없다)과 셸 eval 에서 인자를 쪼갠다.
+_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+
+
+def check_project_id(project_id: str) -> str:
+    pid = str(project_id or "")
+    if not _ID_RE.match(pid) or pid in (".", "..") or ".." in pid:
+        raise LiveConfigError(
+            f"프로젝트 id 로 쓸 수 없는 값이다: {pid!r}. 영문·숫자로 시작하고 "
+            f"영문·숫자·'.'·'_'·'-' 만 쓴다(64자 이내) — id 는 경로와 실행 인자로 들어간다."
+        )
+    return pid
+
+
 def live_root(project_id: str) -> pathlib.Path:
-    return marina_home() / project_id / LIVE_SESSION
+    return marina_home() / check_project_id(project_id) / LIVE_SESSION
 
 
 def live_src(project_id: str) -> pathlib.Path:
@@ -137,6 +155,26 @@ def _git(run, cwd, *args, **kw):
     return (r.stdout or "").strip()
 
 
+def _lock_is_stale(lock: pathlib.Path) -> bool:
+    """잠금 파일의 pid 가 살아 있지 않으면 낡은 잠금이다. 내용이 깨졌으면(쓰기 도중 죽음)
+    역시 낡은 것으로 본다 — 읽을 수 없는 잠금을 영원히 믿으면 아무도 풀 수 없다."""
+    try:
+        raw = lock.read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        return True
+    if not raw.isdigit():
+        return True
+    try:
+        os.kill(int(raw), 0)
+    except ProcessLookupError:
+        return True
+    except PermissionError:
+        return False            # 남의 프로세스지만 살아 있다
+    except OSError:
+        return True
+    return False
+
+
 @contextlib.contextmanager
 def src_lock(project_id: str):
     """같은 프로젝트의 live 조작을 직렬화한다. `git worktree add` 와 유닛 설치가 겹치면
@@ -148,10 +186,23 @@ def src_lock(project_id: str):
     try:
         fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     except FileExistsError:
-        raise LiveConfigError(
-            f"'{project_id}' 의 live 작업이 이미 돌고 있다. 끝나기를 기다리거나, "
-            f"비정상 종료였다면 {lock} 를 지워라."
-        )
+        # 비정상 종료(SIGKILL·전원)가 남긴 잠금은 **스스로 푼다.** 안 그러면 재부팅 뒤
+        # launchd 유닛이 `marina live up` 을 재실행할 때마다 잠금에 걸려 서비스가 영구히
+        # 안 뜬다 — "재부팅했는데 서비스가 없다" 의 가장 조용한 경로다.
+        if _lock_is_stale(lock):
+            lock.unlink(missing_ok=True)
+            try:
+                fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            except FileExistsError:
+                raise LiveConfigError(
+                    f"'{project_id}' 의 live 잠금을 거둘 수 없다({lock}). 손으로 지워라."
+                )
+        else:
+            raise LiveConfigError(
+                f"'{project_id}' 의 live 작업이 이미 돌고 있다(pid "
+                f"{(lock.read_text(errors='replace').strip() or '?')}). 끝나기를 기다리거나, "
+                f"비정상 종료였다면 {lock} 를 지워라."
+            )
     try:
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
@@ -368,6 +419,31 @@ def live_service_ports(project_id: str, run=subprocess.run) -> dict:
             if host.isdigit():
                 out.setdefault(svc, int(host))
                 break
+    return out
+
+
+def classify_binds(binds, project_id: str) -> list:
+    """compose 의 바인드 마운트가 **어디로 풀리는지** 구분한다.
+
+    live 는 `--project-directory` 를 `~/.marina/<id>/live` 로 주므로 상대 경로의 기준이
+    워크트리가 아니라 그곳이다. 그래서 `./src` 는 **체크아웃(live/src) 자신**을 가리키고
+    `./data/x` 는 `live/data/x` 를 가리킨다. 전자는 다음 기동의 하드 리셋에 날아가지만
+    후자는 사용자의 데이터다 — 둘을 같은 문구로 경고하면 사용자가 경고를 무시하게 된다.
+    """
+    root, src, data = live_root(project_id), live_src(project_id), live_data(project_id)
+    out = []
+    for b in (binds or []):
+        raw = str(b).split(":", 1)[0]
+        resolved = pathlib.Path(raw) if os.path.isabs(raw) else (root / raw)
+        resolved = pathlib.Path(os.path.normpath(str(resolved)))
+        def _under(parent):
+            try:
+                resolved.relative_to(parent)
+                return True
+            except ValueError:
+                return False
+        out.append({"bind": str(b), "resolved": str(resolved),
+                    "in_checkout": _under(src), "in_data": _under(data)})
     return out
 
 

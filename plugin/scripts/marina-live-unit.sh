@@ -22,13 +22,18 @@ export MARINA_HOME
 MARINA_BIN="${MARINA_BIN:-$(command -v marina || echo "$SCRIPT_DIR/marina-entrypoint.sh")}"
 
 # 경로·라벨·내용은 marina_live.py 가 한 곳에서 정한다
+# shlex.quote 로 인용해서 내보낸다 — MARINA_HOME 경로에 공백이 있으면 인용 없는 eval 이
+# 값을 쪼개 엉뚱한 경로에 유닛을 쓰려 한다(실측: "줄 25: space/ovation/live/unit.plist").
 eval "$(PYTHONPATH="$SCRIPT_DIR" python3 - "$PROJECT" <<'PY'
-import os, sys
+import shlex, sys
 import marina_live as L
 pid = sys.argv[1]
-print("UNIT=%s" % L.unit_path(pid))
-print("LABEL=%s" % L.unit_label(pid))
-print("ROOT=%s" % L.live_root(pid))
+try:
+    print("UNIT=%s" % shlex.quote(str(L.unit_path(pid))))
+    print("LABEL=%s" % shlex.quote(L.unit_label(pid)))
+    print("ROOT=%s" % shlex.quote(str(L.live_root(pid))))
+except L.LiveConfigError as exc:
+    print("echo %s >&2; exit 2" % shlex.quote(str(exc)))
 PY
 )"
 
