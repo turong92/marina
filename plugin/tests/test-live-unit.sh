@@ -31,10 +31,18 @@ assert "<key>MARINA_HOME</key>" in plist, "MARINA_HOME 이 안 넘어가면 다�
 # 5) 로그 경로가 ~/.marina 안이다 (워크트리가 아니라 — 워크트리는 지워진다)
 assert str(L.live_root("ovation")) in plist, plist
 
+# systemd ini 는 인용이 없으면 공백에서 값을 쪼갠다 — PATH 에 공백이 있는 기계에서
+# 유닛이 **로드되지 않아** 자동 기동이 조용히 사라진다(설치 시점 PATH 를 그대로 굽는다)
+import os as _os
+_os.environ["PATH"] = "/usr/local/bin:/Users/x/My Tools/bin:/usr/bin"
+svc_spaced = L.systemd_body("ovation", "/usr/local/bin/marina")
+assert 'Environment="PATH=' in svc_spaced, svc_spaced
+assert 'Environment="MARINA_HOME=' in svc_spaced, svc_spaced
+
 svc = L.systemd_body("ovation", "/usr/local/bin/marina")
 assert "Restart=" in svc and "WantedBy=default.target" in svc, svc
 assert "ovation" in svc, svc
-assert "Environment=PATH=" in svc, svc
+assert 'Environment="PATH=' in svc, svc
 assert "After=docker.service" in svc, svc
 print("ok")
 PY
@@ -105,6 +113,26 @@ out="$(MARINA_HOME="$SPACED" bash "$SCRIPTS/marina-live-unit.sh" install ovation
 out="$(MARINA_HOME="$SPACED" bash "$SCRIPTS/marina-live-unit.sh" status ovation 2>&1)"
 case "$out" in *"자동 기동"*) ;; *) echo "FAIL: 공백 경로 status 실패: $out"; exit 1 ;; esac
 
-# 13) 알 수 없는 동작은 거부
+# 13) unit.log 가 무한히 자라지 않는다 — 영구 실패 상태에서 10초마다 재시도하므로
+#     회전이 없으면 한 달에 수십만 줄이 쌓인다(KeepAlive 는 의도적으로 무한이다)
+python3 - "$SCRIPTS" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import marina_live as L
+log = L.live_root("ovation") / "unit.log"
+log.parent.mkdir(parents=True, exist_ok=True)
+log.write_bytes(b"x" * (L.UNIT_LOG_MAX_BYTES + 5000))
+L.rotate_unit_log("ovation")
+assert log.stat().st_size <= L.UNIT_LOG_MAX_BYTES, log.stat().st_size
+old = L.live_root("ovation") / "unit.log.1"
+assert old.exists(), "회전본이 없다 — 원인을 보려면 직전 로그가 남아야 한다"
+# 작은 로그는 건드리지 않는다
+log.write_bytes(b"small")
+L.rotate_unit_log("ovation")
+assert log.read_bytes() == b"small"
+print("ok")
+PY
+
+# 14) 알 수 없는 동작은 거부
 bash "$SCRIPTS/marina-live-unit.sh" bogus ovation >/dev/null 2>&1 && { echo "FAIL: bogus 통과"; exit 1; } || true
 echo "PASS test-live-unit"

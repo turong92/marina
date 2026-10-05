@@ -230,7 +230,31 @@ def health_probe(url: str, timeout: float = 3.0) -> dict:
 
 
 # ── 대시보드용 종합 보고 ──────────────────────────────────────────────────────
-def live_report(project_id: str) -> dict:
+_REPORT_CACHE: dict = {}
+REPORT_CACHE_SECONDS = 30      # 대시보드 폴링 주기(15초)보다 길게
+
+
+def live_report(project_id: str, now=None) -> dict:
+    """대시보드용 보고. **느린 부분만 캐시한다** — 호출마다 데이터 디렉터리 전체 os.walk 와
+    최대 3초 HTTP 프로브가 들어가서, 데이터가 큰 운영 스택에서 15초 폴링이 대시보드를
+    누른다(리뷰 지적). 컨테이너 상태는 **캐시하지 않는다**: 가장 빨리 변하고 가장 중요한
+    신호라 묵은 값을 보여주면 안 된다."""
+    key = str(project_id)
+    stamp = time.time() if now is None else now
+    hit = _REPORT_CACHE.get(key)
+    if hit and stamp - hit[0] < REPORT_CACHE_SECONDS:
+        fresh = dict(hit[1])
+        fresh["containers"] = L.live_containers(project_id)
+        fresh["restartsTotal"] = sum(c["restarts"] for c in fresh["containers"])
+        fresh["cached"] = True
+        return fresh
+    out = _live_report_uncached(project_id)
+    out["cached"] = False
+    _REPORT_CACHE[key] = (stamp, out)
+    return out
+
+
+def _live_report_uncached(project_id: str) -> dict:
     """대시보드 live 영역이 그릴 것 전부. CLI status 와 **같은 신호**를 쓴다.
 
     `healthy` 같은 단일 불린을 **내보내지 않는다** — UI 가 그걸로 초록불을 만들면 401 이

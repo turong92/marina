@@ -486,6 +486,10 @@ def cmd_expose(project_id: str, cfg, rest) -> int:
             "account": opts.get("account") or os.environ.get("MARINA_CF_ACCOUNT") or "",
             "tunnel": opts.get("tunnel") or os.environ.get("MARINA_CF_TUNNEL") or "",
         }
+        if isinstance(opts.get("token"), str):
+            # ps 출력과 셸 히스토리에 남는다 — 환경변수 경로가 이미 있으니 그쪽을 권한다.
+            print("경고: --token 으로 준 값은 `ps` 출력과 셸 히스토리에 남는다. "
+                  "다음엔 MARINA_CF_TOKEN 환경변수를 써라.", file=sys.stderr)
         res = X.expose_cloudflare(project_id, opts.get("domain") or "", creds,
                                   svc_name, container_port)
     else:

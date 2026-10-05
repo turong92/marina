@@ -138,6 +138,9 @@ def pin_ref(project_id: str, ref: str) -> dict:
     """
     if not ref:
         raise LiveConfigError("ref 가 비었다. 태그·브랜치·커밋 중 하나를 줘라.")
+    # id 가드를 **쓰기 전에** 돌린다 — 뒤에 두면 registry 는 이미 고쳐졌는데 이력 기록이
+    # 경로 계산에서 던져서 "ref 는 바뀌었고 이력은 없고 에러만 보이는" 상태가 된다.
+    check_project_id(project_id)
     data = load_registry()
     for p in data.get("projects") or []:
         if p.get("id") != project_id:
@@ -276,6 +279,7 @@ def ensure_data_dir(project_id: str) -> pathlib.Path:
 # ── 부팅 지속성 유닛 ──────────────────────────────────────────────────────────
 DEFAULT_UNIT_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 UNIT_RETRY_SECONDS = 10     # 도커 데몬이 뜰 때까지 재시도하는 간격
+UNIT_LOG_MAX_BYTES = 2 * 1024 * 1024   # 이보다 크면 한 세대 회전 (아래 rotate_unit_log)
 # 재시도는 **무한**이다(launchd KeepAlive·systemd Restart=on-failure). 설계는 "유한 횟수
 # 재시도하고 한도를 넘으면 실패를 로그에 남긴다" 였는데, 유한으로 두면 도커 데몬이 늦게
 # 뜨는 기계에서 서비스가 영구히 안 뜬다 — 운영에서는 '계속 시도' 가 '포기' 보다 낫다.
@@ -350,7 +354,12 @@ def plist_body(project_id: str, marina_bin: str) -> str:
 
 def systemd_body(project_id: str, marina_bin: str) -> str:
     """systemd user unit. `loginctl enable-linger` 가 없으면 로그아웃과 함께 죽는다 —
-    marina-dashboard.sh:273 이 이미 그 호출을 하고, 설치 스크립트가 같이 호출한다."""
+    marina-dashboard.sh:273 이 이미 그 호출을 하고, 설치 스크립트가 같이 호출한다.
+
+    `Environment=` 값은 **인용한다**: systemd ini 는 인용 없는 값을 공백에서 쪼개
+    두 번째 토큰을 별 할당으로 읽는다. 설치 시점 PATH 를 그대로 굽기 때문에
+    `/Users/x/My Tools/bin` 같은 항목 하나로 유닛이 로드되지 않고, 그러면 자동 기동이
+    조용히 사라진다 — 우리가 방금 거짓말 못 하게 만든 그 신호가 또 틀리게 된다."""
     return f"""[Unit]
 Description=marina live stack for {project_id}
 After=docker.service
@@ -362,9 +371,9 @@ ExecStart={marina_bin} live up {project_id}
 ExecStop={marina_bin} live down {project_id}
 Restart=on-failure
 RestartSec={UNIT_RETRY_SECONDS}
-Environment=PATH={unit_env_path()}
-Environment=MARINA_HOME={marina_home()}
-Environment=PYTHONUNBUFFERED=1
+Environment="PATH={unit_env_path()}"
+Environment="MARINA_HOME={marina_home()}"
+Environment="PYTHONUNBUFFERED=1"
 StandardOutput=append:{live_root(project_id) / "unit.log"}
 StandardError=append:{live_root(project_id) / "unit.log"}
 
@@ -419,6 +428,27 @@ def autostart_state(project_id: str, run=subprocess.run) -> dict:
     out["registered"] = True
     out["detail"] = f"{label}.service"
     return out
+
+
+def rotate_unit_log(project_id: str) -> None:
+    """유닛 로그가 커지면 한 세대만 남기고 회전한다.
+
+    재시도는 일부러 무한인데(위 UNIT_RETRY_SECONDS 주석), 영구 실패 상태 — ref 가 사라진
+    레포, 고칠 수 없는 compose — 에서는 10초마다 같은 실패가 append 되어 한 달이면 수십만
+    줄이다. launchd 는 로그 회전을 해 주지 않는다. 직전 세대를 남기는 이유: 원인을 보려면
+    가장 최근 실패가 아니라 **처음 실패**가 필요할 때가 있다.
+    """
+    log = live_root(project_id) / "unit.log"
+    try:
+        if log.exists() and log.stat().st_size > UNIT_LOG_MAX_BYTES:
+            prev = live_root(project_id) / "unit.log.1"
+            prev.unlink(missing_ok=True)
+            log.replace(prev)
+            log.write_text(
+                f"(이전 로그는 {prev.name} 로 옮겼다 — {UNIT_LOG_MAX_BYTES} 바이트를 넘겼다)\n",
+                encoding="utf-8")
+    except OSError:
+        pass
 
 
 def write_unit(project_id: str, marina_bin: str) -> pathlib.Path:
@@ -507,23 +537,37 @@ def live_containers(project_id: str, remote=None, run=subprocess.run) -> list:
                    "--filter", f"label={PROJECT_LABEL}={project_id}",
                    "--format", '{{.Names}}	{{.Label "com.docker.compose.service"}}'],
             capture_output=True, text=True)
-    rows = []
     if getattr(r, "returncode", 1) != 0:
-        return rows
+        return []
+    names, svc_of = [], {}
     for line in (getattr(r, "stdout", "") or "").splitlines():
         if not line.strip():
             continue
-        parts = line.split("	")
+        parts = line.split("\t")
         name = parts[0].strip()
         if not name:
             continue
-        svc = parts[1].strip() if len(parts) > 1 else ""
-        ins = run(pre + ["inspect", name, "--format", "{{.State.Status}}	{{.RestartCount}}"],
-                  capture_output=True, text=True)
-        got = (getattr(ins, "stdout", "") or "").strip().split("	")
-        rows.append({"name": name, "service": svc,
-                     "state": got[0] if got and got[0] else "?",
-                     "restarts": int(got[1]) if len(got) > 1 and got[1].isdigit() else 0})
+        names.append(name)
+        svc_of[name] = parts[1].strip() if len(parts) > 1 else ""
+    if not names:
+        return []
+    # inspect 는 **한 번에** 묻는다 — 컨테이너마다 한 번씩 부르면 대시보드가 15초마다
+    # N+1 번 docker 를 호출한다(리뷰 지적).
+    ins = run(pre + ["inspect",
+                     "--format", "{{.Name}}\t{{.State.Status}}\t{{.RestartCount}}",
+                     *names], capture_output=True, text=True)
+    rows = []
+    for line in (getattr(ins, "stdout", "") or "").splitlines():
+        parts = line.strip().split("\t")
+        if len(parts) < 3:
+            continue
+        name = parts[0].lstrip("/")
+        rows.append({"name": name, "service": svc_of.get(name, ""),
+                     "state": parts[1] or "?",
+                     "restarts": int(parts[2]) if parts[2].isdigit() else 0})
+    if not rows:        # inspect 가 전부 실패하면(그 사이 사라짐) 이름만이라도 돌려준다
+        rows = [{"name": n, "service": svc_of.get(n, ""), "state": "?", "restarts": 0}
+                for n in names]
     return sorted(rows, key=lambda x: x["name"])
 
 

@@ -19,7 +19,7 @@
     const cls = (h.code >= 200 && h.code < 300) ? 'live-sig-ok' : 'live-sig-warn';
     // 코드를 그대로 쓴다. 2xx 가 아니면 "모른다" 고 말한다 — 거짓 초록불을 만들지 않는다.
     const note = (h.code >= 200 && h.code < 300) ? '' : ' (안쪽이 살아 있는지는 모른다)';
-    return `<span class="live-sig ${cls}">헬스: HTTP ${esc(h.code)}${esc(note)}</span>`;
+    return `<span class="live-sig ${cls}">헬스: HTTP ${esc(h.code)}${note}</span>`;   // note 는 코드 안 리터럴
   }
 
   function card(p) {
@@ -52,7 +52,7 @@
       <div class="live-head"><b>${esc(p.project)}</b> <span class="live-ref">${esc(p.ref)}</span></div>
       <div class="live-sigs">${states}${restarts}${healthLine(p.health)}${auto}</div>
       <div class="live-meta">배포: ${deploy}</div>
-      <div class="live-meta">공개: ${pub.length ? esc(pub.join(' · ')) : '안 함 — 로컬·테일넷에서만'}</div>
+      <div class="live-meta">공개: ${pub.length ? pub.join(' · ') : '안 함 — 로컬·테일넷에서만'}</div>
       <div class="live-meta">데이터: ${esc((p.data || {}).path || '')} ${data}</div>
     </div>`;
   }

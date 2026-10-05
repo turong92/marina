@@ -326,5 +326,11 @@ def unexpose(project_id: str, controller=None) -> dict:
         cfg.pop("cloudflare", None)
         secrets_file(project_id).unlink(missing_ok=True)
     save_expose_config(project_id, cfg)
+    if removed:
+        # 디스크의 overlay 는 지운 secrets.env 를 계속 참조한다. `up` 은 overlay 를 다시
+        # 써서 자기 치유하지만 `restart`·`logs` 는 **낡은 overlay** 를 읽어
+        # `env file ... not found` 로 깨진다(실측). 생성물이므로 지우는 것이 맞다.
+        L.live_overlay_path(project_id).unlink(missing_ok=True)
     return {"removed": removed,
-            "note": "로컬 접근은 그대로다 — 선언 포트와 게이트웨이는 공개와 무관하다."}
+            "note": "로컬 접근은 그대로다 — 선언 포트와 게이트웨이는 공개와 무관하다. "
+                    "overlay 는 다음 `marina live up` 이 다시 만든다."}
