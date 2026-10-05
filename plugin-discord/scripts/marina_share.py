@@ -174,7 +174,11 @@ WIDTH = 500         # 크롬 창 최소 폭이 500 — 더 좁히면 레이아�
 _FIT_SCRIPT = (b"\n<script>(function(){function fit(){var d=document.documentElement;d.style.zoom='';"
                b"var w=Math.max(d.scrollWidth,document.body?document.body.scrollWidth:0),v=window.innerWidth;"
                b"if(w>v+2)d.style.zoom=(v/w).toFixed(3);"
-               b"var z=parseFloat(d.style.zoom)||1,h=Math.ceil(Math.max(d.scrollHeight,document.body?document.body.scrollHeight:0)*z);"
+               # scrollHeight 는 창 높이(1차 1400)보다 작아지지 않아 짧은 페이지에 빈 공간이 붙었다 → 내용 끝(요소들의 아래 끝 + body 아래 여백)
+               b"var b=document.body,e=0;if(b){var a=b.getElementsByTagName('*');for(var i=0;i<a.length;i++){var r=a[i].getBoundingClientRect();"
+               b"if(r.height>0&&r.bottom>e)e=r.bottom;}e+=window.scrollY+(parseFloat(getComputedStyle(b).marginBottom)||0)+"
+               b"(parseFloat(getComputedStyle(b).paddingBottom)||0);}"
+               b"var z=parseFloat(d.style.zoom)||1,h=Math.ceil(e>0?e:Math.max(d.scrollHeight,b?b.scrollHeight:0)*z);"   # 요소 좌표는 이미 축소된 값
                b"new Image().src='/__marina/h?v='+h;}"
                b"window.addEventListener('load',fit);setTimeout(fit,1500);setTimeout(fit,3500);})();</script>\n")
 
