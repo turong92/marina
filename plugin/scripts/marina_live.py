@@ -201,3 +201,29 @@ def sync_src(project_root: str, project_id: str, ref: str, run=subprocess.run) -
         _git(run, root, "worktree", "add", "--detach", "--force", str(src), sha,
              what=f"live 체크아웃 생성({ref})")
     return src
+
+
+# ── 기동 전 검사 ──────────────────────────────────────────────────────────────
+def validate_services(compose_config: dict, wanted) -> None:
+    """live.services 가 compose 에 실재하는지. compose 는 모르는 서비스 이름을 조용히
+    무시하므로 여기서 막지 않으면 '떴다는데 아무것도 없다' 가 된다."""
+    if not wanted:
+        raise LiveConfigError(
+            "live.services 가 비어 있다. 운영에 띄울 서비스를 명시해라 — 비워 두면 "
+            "개발용 보조 서비스(mailpit 등)까지 운영에 끌려온다."
+        )
+    have = set((compose_config or {}).get("services") or {})
+    missing = [s for s in wanted if s not in have]
+    if missing:
+        raise LiveConfigError(
+            f"compose 에 없는 서비스다: {', '.join(missing)}. "
+            f"있는 것: {', '.join(sorted(have)) or '(없음)'}"
+        )
+
+
+def ensure_data_dir(project_id: str) -> pathlib.Path:
+    """도커는 바인드 마운트 소스를 자동 생성하지 않는다(Docker Desktop 은 거부한다).
+    없으면 첫 기동이 'bind source path does not exist' 로 깨진다 — 홈서버 구현에서 실측."""
+    d = live_data(project_id)
+    d.mkdir(parents=True, exist_ok=True)
+    return d

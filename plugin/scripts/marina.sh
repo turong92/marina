@@ -55,6 +55,13 @@ case "${1:-}" in
       *) project_usage >&2; exit 2 ;;
     esac
     ;;
+  live)
+    # 상시 운영(live). project 와 같은 자리 — 워크트리 컨텍스트 해석 **전에** 처리한다.
+    # live 는 워크트리가 아니라 프로젝트 id 로만 동작하므로 어디서 불러도 같아야 한다.
+    shift
+    MARINA_HOME="$MARINA_HOME" PYTHONPATH="$SCRIPT_DIR" \
+      exec python3 "$SCRIPT_DIR/marina_live_cli.py" "$@"
+    ;;
 esac
 
 ROOT="$(resolve_root)"
@@ -101,6 +108,9 @@ usage (marina.sh = 내부 launcher; 평소엔 `marina <명령>` 래퍼로 — �
     marina.sh worktree create <branch> [base] [--project <id>]  # git worktree(-b) + 서브레포 같은 브랜치 미러. --project=아무데서나(cwd 무관)
     marina.sh session new <project> <task> [--base B] [--no-start] | ls | attach | start | stop | rm   # Discord 채널 = 워크트리 세션(tmux + claude --channels)
     marina.sh worktree gc [--dry-run] [--days K] [--json]      # 유휴(세션·프로세스 0 + 커밋·파일 K일↑) 워크트리 판정 + 삭제 전 백업 가드. 삭제는 대시보드에서
+  live (상시 운영 — 워크트리와 별개로 프로젝트를 서비스로 띄워 둔다, 위치 무관):
+    marina.sh live pin <프로젝트> <ref>   # 무엇을 운영할지 정한다 (배포·롤백 = 이걸 바꾸는 일)
+    marina.sh live up|down|status|logs|restart <프로젝트>
   project (~/.marina/projects.json, 위치 무관):
     marina.sh project add <path> --compose <file> [--env-var NAME --env-default VAL]   # compose 등록(파일을 marina 로 복사. 또는 대시보드 위저드)
     marina.sh project add <path> --external name=path # 외부 git 레포를 서비스로(워크트리마다 격리 attach)

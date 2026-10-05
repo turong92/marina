@@ -4,6 +4,7 @@
 #   marina start|stop|restart|rebuild|clean-rebuild <svc..> # 현재 worktree(cwd) 의 서비스 (전체는 --all)
 #   marina status | ports | logs [svc]       # 현재 worktree 상태/포트/로그
 #   marina project {add|rm|ls|default|infer} # 프로젝트 레지스트리 (~/.marina/projects.json)
+#   marina live {pin|up|down|status|logs|restart} <프로젝트>  # 상시 운영 (워크트리와 별개)
 #   marina dashboard [start|stop|restart|status|open]# 전역 대시보드(:3900). 무인자 marina = dashboard start
 #
 # 스크립트는 모두 이 파일의 형제(scripts/) — 어디서 실행하든 위치독립.
@@ -54,6 +55,9 @@ usage (marina = 전역 CLI):
     marina project add <path> --compose <file>      # 기존 docker-compose 로 등록 (또는 대시보드 위저드)
     marina project add <path> --external name=path  # 외부 git 레포를 서비스로 (워크트리마다 격리)
     marina project ls | rm <id> | default <id> a,b,c | infer <path>
+  상시 운영 (live — 워크트리와 별개로 프로젝트를 서비스로 띄워 둔다):
+    marina live pin <프로젝트> <ref>     # 무엇을 운영할지 정한다 (배포·롤백 = 이걸 바꾸는 일)
+    marina live up|down|status|logs|restart <프로젝트>
   워크트리 (작업 시작 — 브랜치명 지정 생성 + 서브레포 미러):
     marina worktree create <branch> [base] [--project <id>]
   Discord 세션 — 선택 기능, ~/.marina/discord.json 설정 시 (워크트리 = 채널 = tmux claude · 채팅방·로비):
@@ -228,7 +232,7 @@ case "$command" in
   auth|user)
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$AUTH_CLI" "$command" "$@"
     ;;
-  project|worktree|gateway|link|reap|session|forward|term-request)
+  project|live|worktree|gateway|link|reap|session|forward|term-request)
     # 그룹 → marina.sh dispatch 로 위임 (project {add|rm|ls|...} · worktree create · gateway {start|...} · link)
     # worktree/gateway 누락이 "설치 shim 은 이 명령 없음" 증상의 원인이었음(도그푸드에서 발견)
     "$SESSION" "$command" "$@"
