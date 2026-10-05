@@ -13,12 +13,12 @@
 from __future__ import annotations
 
 import contextlib
+import fcntl
 import json
 import os
 import pathlib
 import platform
 import re
-import shlex
 import subprocess
 import tempfile
 
@@ -47,7 +47,11 @@ def check_project_id(project_id: str) -> str:
     if not _ID_RE.match(pid) or pid in (".", "..") or ".." in pid:
         raise LiveConfigError(
             f"프로젝트 id 로 쓸 수 없는 값이다: {pid!r}. 영문·숫자로 시작하고 "
-            f"영문·숫자·'.'·'_'·'-' 만 쓴다(64자 이내) — id 는 경로와 실행 인자로 들어간다."
+            f"영문·숫자·'.'·'_'·'-' 만 쓴다(64자 이내) — id 는 경로 조각이자 docker·git·"
+            f"systemd 실행 인자로 들어간다.\n"
+            f"  id 는 `marina project add` 가 디렉터리 이름에서 그대로 따 오므로, 한글·공백이 "
+            f"들어간 디렉터리면 이렇게 된다. {projects_file()} 의 그 프로젝트 \"id\" 를 "
+            f"쓸 수 있는 값으로 고치거나 다른 id 로 다시 등록해라(워크트리·서비스는 그대로다)."
         )
     return pid
 
@@ -155,60 +159,43 @@ def _git(run, cwd, *args, **kw):
     return (r.stdout or "").strip()
 
 
-def _lock_is_stale(lock: pathlib.Path) -> bool:
-    """잠금 파일의 pid 가 살아 있지 않으면 낡은 잠금이다. 내용이 깨졌으면(쓰기 도중 죽음)
-    역시 낡은 것으로 본다 — 읽을 수 없는 잠금을 영원히 믿으면 아무도 풀 수 없다."""
-    try:
-        raw = lock.read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        return True
-    if not raw.isdigit():
-        return True
-    try:
-        os.kill(int(raw), 0)
-    except ProcessLookupError:
-        return True
-    except PermissionError:
-        return False            # 남의 프로세스지만 살아 있다
-    except OSError:
-        return True
-    return False
-
-
 @contextlib.contextmanager
 def src_lock(project_id: str):
-    """같은 프로젝트의 live 조작을 직렬화한다. `git worktree add` 와 유닛 설치가 겹치면
-    반쯤 설치된 상태가 남기 때문이다(두 번째 add 는 '이미 등록됨' 으로 실패하고, 그 시점에
-    첫 번째는 아직 유닛을 안 썼다). O_EXCL 로 만든 파일이 잠금이다."""
+    """같은 프로젝트의 live 조작을 직렬화한다 — `git worktree add`·하드 리셋·compose
+    up/down·유닛 설치가 겹치면 반쯤 적용된 상태가 남는다.
+
+    **pid 파일이 아니라 flock 이다.** pid 파일 방식은 두 가지로 틀렸다:
+    ① 비정상 종료가 남긴 파일이 영구히 막아 재부팅 후 launchd 가 매번 잠금에 걸린다,
+    ② 파일을 만든 뒤 pid 를 쓰기까지의 창에 다른 프로세스가 빈 내용을 '낡음' 으로 보고
+    **살아 있는 잠금을 탈취**한다(그 창이 바로 잠금이 막으려던 동시 시작이다).
+    flock 은 프로세스가 죽으면 커널이 풀어 주므로 두 문제가 함께 사라진다.
+    같은 레포의 `RemoteController._mutation_lock` 이 쓰는 방식과 같다.
+    """
     root = live_root(project_id)
     root.mkdir(parents=True, exist_ok=True)
     lock = root / ".lock"
+    fd = os.open(str(lock), os.O_CREAT | os.O_RDWR, 0o600)
     try:
-        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        # 비정상 종료(SIGKILL·전원)가 남긴 잠금은 **스스로 푼다.** 안 그러면 재부팅 뒤
-        # launchd 유닛이 `marina live up` 을 재실행할 때마다 잠금에 걸려 서비스가 영구히
-        # 안 뜬다 — "재부팅했는데 서비스가 없다" 의 가장 조용한 경로다.
-        if _lock_is_stale(lock):
-            lock.unlink(missing_ok=True)
-            try:
-                fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-            except FileExistsError:
-                raise LiveConfigError(
-                    f"'{project_id}' 의 live 잠금을 거둘 수 없다({lock}). 손으로 지워라."
-                )
-        else:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
             raise LiveConfigError(
-                f"'{project_id}' 의 live 작업이 이미 돌고 있다(pid "
-                f"{(lock.read_text(errors='replace').strip() or '?')}). 끝나기를 기다리거나, "
-                f"비정상 종료였다면 {lock} 를 지워라."
+                f"'{project_id}' 의 live 작업이 이미 돌고 있다(잠금 {lock}). 끝나기를 "
+                f"기다려라 — 자동 기동 유닛이 돌고 있을 수도 있다."
             )
-    try:
-        os.write(fd, str(os.getpid()).encode())
-        os.close(fd)
-        yield
+        try:
+            os.truncate(fd, 0)
+            os.write(fd, str(os.getpid()).encode())   # 누가 쥐고 있는지 보기 위한 기록일 뿐
+        except OSError:
+            pass
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
     finally:
-        lock.unlink(missing_ok=True)
+        os.close(fd)
+        # 파일은 **지우지 않는다** — 지우면 다른 프로세스가 이미 열어 둔 잠금과 다른
+        # inode 를 쥐게 되어 둘이 동시에 들어온다.
 
 
 def sync_src(project_root: str, project_id: str, ref: str, run=subprocess.run) -> pathlib.Path:
@@ -228,8 +215,14 @@ def sync_src(project_root: str, project_id: str, ref: str, run=subprocess.run) -
 
     if (src / ".git").exists():
         # 기존 워크트리는 원격을 먼저 당긴다 — 브랜치 ref 가 움직였으면 그 뒤에 풀어야 한다.
-        # 원격이 없으면 fetch 는 no-op 이다(로컬 전용 프로젝트도 이 경로를 탄다).
-        _git(run, src, "fetch", "--all", "--tags", "--quiet", what="fetch")
+        # **실패는 치명적이지 않다**: 재부팅 직후 유닛이 Wi-Fi 보다 먼저 돌거나 원격이
+        # 사라진 레포에서, 로컬에 이미 있는 ref 로도 기동은 돼야 한다. 막으면 서비스 복귀가
+        # 네트워크에 묶이고 최악에는 영구히 안 뜨면서 unit.log 만 커진다.
+        try:
+            _git(run, src, "fetch", "--all", "--tags", "--quiet", what="fetch")
+        except LiveConfigError as exc:
+            print(f"경고: {exc} — 로컬에 있는 ref 로 계속한다(원격이 움직였으면 반영되지 않는다).",
+                  file=__import__("sys").stderr)
 
     # ref 가 실재하는지 **먼저** 확인하고 커밋 SHA 로 바꾼다. 두 이유가 있다.
     # ① 확인을 먼저 해야 아래에서 트리를 망친 뒤 실패하지 않는다(force-push 경로).
@@ -283,6 +276,11 @@ def ensure_data_dir(project_id: str) -> pathlib.Path:
 # ── 부팅 지속성 유닛 ──────────────────────────────────────────────────────────
 DEFAULT_UNIT_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 UNIT_RETRY_SECONDS = 10     # 도커 데몬이 뜰 때까지 재시도하는 간격
+# 재시도는 **무한**이다(launchd KeepAlive·systemd Restart=on-failure). 설계는 "유한 횟수
+# 재시도하고 한도를 넘으면 실패를 로그에 남긴다" 였는데, 유한으로 두면 도커 데몬이 늦게
+# 뜨는 기계에서 서비스가 영구히 안 뜬다 — 운영에서는 '계속 시도' 가 '포기' 보다 낫다.
+# 대신 매 시도의 실패가 unit.log 에 쌓이므로 원인은 남는다(`marina live status` 가 그
+# 경로를 알려준다). 설계와 다른 선택이라 여기 적어 둔다.
 
 
 def unit_path(project_id: str) -> pathlib.Path:
@@ -491,7 +489,8 @@ def classify_binds(binds, project_id: str) -> list:
             except ValueError:
                 return False
         out.append({"bind": str(b), "resolved": str(resolved),
-                    "in_checkout": _under(src), "in_data": _under(data)})
+                    "in_checkout": _under(src), "in_data": _under(data),
+                    "in_live": _under(root)})
     return out
 
 

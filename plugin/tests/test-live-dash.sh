@@ -35,6 +35,24 @@ grep -qE '\.healthy|healthy\s*:|isHealthy|healthy\s*=' "$JS" && fail "healthy �
 # 5) 데이터 '없음' 과 0 을 구분한다
 grep -q '없음 (아직 기동하지 않았거나' "$JS" || fail "데이터 없음/0 구분 표시 없음"
 
+# 5b) 오류를 **보여준다** — 영역을 조용히 숨기면 "자동 기동: 안 됨" 신호까지 같이 사라진다
+grep -q 'data.error' "$JS" || fail "API 오류를 무시한다"
+grep -q 'res.ok' "$JS" || fail "HTTP 실패를 무시한다"
+python3 - "$JS" <<'PY'
+import sys
+js = open(sys.argv[1], encoding="utf-8").read()
+# 오류 표시는 영역을 **숨기지 않고** 그 자리에 보여야 한다
+i = js.index("function showError")
+seg = js[i:js.index("async function refresh")]
+assert "hidden = false" in seg, seg
+assert "live-error" in seg, seg
+# 세 실패 경로가 모두 showError 를 탄다: HTTP 실패 · 예외 · API 가 돌려준 error
+assert js.count("showError(") >= 4, js.count("showError(")
+assert "if (data && data.error) { showError" in js, "API error 를 무시한다"
+assert "if (!res.ok) { showError" in js, "HTTP 실패를 무시한다"
+print("ok")
+PY
+
 # 6) 스타일이 live 영역을 분리한다
 grep -q '\.live-area' "$WEB/styles.css" || fail "live-area 스타일 없음"
 

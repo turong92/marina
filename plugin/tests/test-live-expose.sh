@@ -54,9 +54,13 @@ assert "secrets.env" in ov, "비밀 파일을 참조하지 않는다"
 # 토큰 **값**은 생성 파일에 안 들어간다 — overlay 는 평문으로 ~/.marina 에 남는다
 assert "TUNNEL_TOKEN=" not in ov, ov
 assert str(L.LIVE_LABEL) in ov, ov          # GC 면제 라벨이 cloudflared 에도 붙는다
-# 백엔드는 **컨테이너 DNS** 다. 127.0.0.1 은 cloudflared 컨테이너 자신이라 아무것도 없다.
-assert "http://server:8080" in ov, ov
+# 읽히지 않는 설정은 넣지 않는다 — 토큰 터널은 ingress 를 Cloudflare 가 관리하므로
+# cloudflared 는 도메인·백엔드 환경변수를 읽지 않는다. 그런 변수를 넣으면 "설정했으니
+# 됐겠지" 라는 거짓 확신만 준다. 사용자가 입력할 주소는 expose 출력이 알려준다.
+assert "MARINA_LIVE_BACKEND" not in ov, ov
 assert "127.0.0.1" not in ov, ov
+# 그 주소는 **컨테이너 DNS** 다. 127.0.0.1 은 cloudflared 컨테이너 자신이라 아무것도 없다.
+assert X.tunnel_target("server", 8080) == "http://server:8080"
 assert X.cloudflared_service_lines("ovation", "", "", 0) == [], "도메인 없으면 아무것도 넣지 않는다"
 
 # 6) 비밀은 0600 파일에 쓴다 (백업 목록에 들어가야 한다 — L3)
@@ -231,6 +235,29 @@ assert X.expose_status("second", controller=ctl)["mode"] == "funnel"
 # 해제가 포트를 돌려준다 — 다시 공개할 수 있다
 res3 = X.expose_funnel("ovation", 8080, controller=ctl)
 assert res3["httpsPort"] == 8443, res3
+
+# 7b) **손으로 바꾼 설정(conflict)이 있으면 unexpose 도 거부한다.**
+#     거부하지 않으면 unexpose 가 사용자 설정의 지문을 marina 것으로 흡수해
+#     "남의 설정은 건드리지 않는다" 안전장치가 꺼지고, 그 뒤 대시보드의 원격 켜기가
+#     사용자가 손으로 만든 443 설정을 덮어쓴다.
+import subprocess as _sp
+_sp.run([sys.argv[2], "serve", "--bg", "--https=443", "http://127.0.0.1:9999"],
+        capture_output=True)
+ctl._cache = {}
+st = ctl.status(refresh=True)
+assert st["conflict"] is True, st          # 밖에서 바뀐 설정이 감지됐다
+try:
+    X.unexpose("ovation", controller=ctl)
+    raise AssertionError("conflict 인데 unexpose 가 통과했다")
+except (L.LiveConfigError, Exception) as e:
+    assert "fingerprint" in str(e).lower() or "지문" in str(e), e
+# 지문이 흡수되지 않았다 — 여전히 conflict 다
+ctl._cache = {}
+assert ctl.status(refresh=True)["conflict"] is True, "unexpose 가 지문을 흡수했다"
+# 사용자 설정을 되돌리면 다시 정상
+_sp.run([sys.argv[2], "serve", "--https=443", "off"], capture_output=True)
+ctl._cache = {}
+assert ctl.status(refresh=True)["conflict"] is False, ctl.status(refresh=True)
 
 # 8) 대시보드가 원격을 켜도 live 라우트가 살아 있다 (443 과 8443 은 다른 authority)
 ctl.activate("serve", 3900)

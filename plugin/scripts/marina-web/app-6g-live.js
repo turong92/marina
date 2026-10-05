@@ -57,13 +57,23 @@
     </div>`;
   }
 
+  function showError(msg) {
+    // **영역을 숨기지 않는다.** 숨기면 "재부팅 후 자동 기동: 안 됨" 신호까지 같이
+    // 사라지는데, 설계는 그 줄이 유일한 신호라고 못 박았다 — 실패가 '아무 말 없이
+    // 없어지는' 방향이면 안 된다.
+    area.hidden = false;
+    area.innerHTML = '<div class="live-title">상시 운영 (live)</div>'
+      + `<div class="live-error">상태를 읽지 못했다 — ${esc(msg)}</div>`;
+  }
+
   async function refresh() {
     let data;
     try {
       const res = await fetch('/api/live');
-      if (!res.ok) return;
+      if (!res.ok) { showError(`/api/live → HTTP ${res.status}`); return; }
       data = await res.json();
-    } catch (_) { return; }
+    } catch (err) { showError(String(err && err.message || err)); return; }
+    if (data && data.error) { showError(data.error); return; }
     const list = (data && data.projects) || [];
     if (!list.length) { area.hidden = true; area.innerHTML = ''; return; }
     area.hidden = false;

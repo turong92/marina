@@ -31,6 +31,30 @@ MIGRATION_WARNING = (
 
 
 # ── 백업 대상 ────────────────────────────────────────────────────────────────
+# live/ 안에서 **다시 만들 수 있는** 것들. 나머지는 전부 데이터로 본다.
+#
+# 왜 열거하지 않고 '제외' 로 가는가: compose 의 상대 바인드는 `--project-directory` 인
+# `live/` 기준으로 풀린다. `./data/x` 만 쓰는 스택은 live/data 에 모이지만 `./mysql` 같은
+# 평범한 선언은 **live/mysql** 로 간다. live/data 만 백업 목록에 넣으면 그런 스택의
+# 운영 DB 가 조용히 빠진다 — "비밀·데이터가 백업에서 빠져 데이터가 잠기는 사고" 를 막으려고
+# 만든 기능이 같은 사고를 다시 만든다(리뷰 지적).
+REGENERABLE = {"src", "overlay.yml", "unit.plist", "unit.service", "unit.log", ".lock",
+               "expose.json", "secrets.env", "history.jsonl"}
+
+
+def data_dirs(project_id: str) -> list:
+    """live/ 안에서 데이터로 보이는 경로들. live/data 는 없어도 항상 포함한다
+    (첫 기동 전과 유실을 구분하려면 '기대되는 경로' 가 목록에 있어야 한다)."""
+    root = L.live_root(project_id)
+    found = [L.live_data(project_id)]
+    if root.is_dir():
+        for child in sorted(root.iterdir()):
+            if child.name in REGENERABLE or child == L.live_data(project_id):
+                continue
+            found.append(child)
+    return found
+
+
 def backup_paths(project_id: str) -> list:
     """백업해야 할 경로와 **왜** 그것이 필요한지. 실행은 사용자 백업 도구가 한다."""
     root = L.live_root(project_id)
@@ -42,9 +66,14 @@ def backup_paths(project_id: str) -> list:
             cfg["root"] = p.get("root")
             break
     cfg = cfg or {}
-    items = [
-        {"path": str(L.live_data(project_id)), "secret": False,
-         "why": "서비스 데이터 — 이게 전부다. 없으면 복원이 아니라 새 설치다."},
+    items = []
+    for d in data_dirs(project_id):
+        why = ("서비스 데이터 — 이게 전부다. 없으면 복원이 아니라 새 설치다."
+               if d == L.live_data(project_id) else
+               f"compose 의 상대 바인드가 여기로 풀렸다(--project-directory = {root}). "
+               f"live/data 밖이라도 사용자 데이터다.")
+        items.append({"path": str(d), "secret": False, "why": why})
+    items += [
         {"path": str(L.projects_file()), "secret": True,
          "why": "live.ref·live.services 가 여기 있다. 없으면 데이터를 복원해도 "
                 "무엇을 어떻게 띄웠는지 모른다."},
@@ -137,18 +166,30 @@ def _human(n: int) -> str:
 
 def data_usage(project_id: str) -> dict:
     """'없음' 과 '0 B' 를 구분한다 — 첫 기동 전과 데이터 유실은 다른 사건이고,
-    둘을 똑같이 0 으로 보여주면 유실을 못 알아본다."""
-    d = L.live_data(project_id)
-    if not d.is_dir():
-        return {"exists": False, "bytes": 0, "human": "없음", "path": str(d)}
+    둘을 똑같이 0 으로 보여주면 유실을 못 알아본다.
+
+    backup_paths 와 **같은 집합**을 센다 — live/data 만 세면 `./mysql` 처럼 live/ 안
+    다른 곳으로 풀린 데이터가 대시보드에 "0 B" 로 보인다(리뷰 지적)."""
+    dirs = [d for d in data_dirs(project_id) if d.is_dir() or d.is_file()]
+    if not dirs:
+        return {"exists": False, "bytes": 0, "human": "없음",
+                "path": str(L.live_data(project_id)), "paths": []}
     total = 0
-    for base, _dirs, files in os.walk(str(d)):
-        for f in files:
+    for d in dirs:
+        if d.is_file():
             try:
-                total += os.lstat(os.path.join(base, f)).st_size
+                total += d.lstat().st_size
             except OSError:
-                continue
-    return {"exists": True, "bytes": total, "human": _human(total), "path": str(d)}
+                pass
+            continue
+        for base, _sub, files in os.walk(str(d)):
+            for f in files:
+                try:
+                    total += os.lstat(os.path.join(base, f)).st_size
+                except OSError:
+                    continue
+    return {"exists": True, "bytes": total, "human": _human(total),
+            "path": str(L.live_data(project_id)), "paths": [str(d) for d in dirs]}
 
 
 # ── 헬스 신호 ────────────────────────────────────────────────────────────────

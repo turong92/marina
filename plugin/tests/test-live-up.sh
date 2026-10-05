@@ -23,14 +23,20 @@ trap cleanup EXIT
 
 # 운영 대상 레포 — compose 파일이 ref 에 들어 있어야 배포가 ref 하나로 표현된다
 REPO="$TMP/repo"; mkdir -p "$REPO"
+# 'a' 는 **소스에서 빌드**한다 — compose 의 --project-directory 가 바인드뿐 아니라
+# 빌드 컨텍스트까지 옮기므로(실측), live 가 데이터 기준점을 live/ 로 두면서도 빌드는
+# 체크아웃(live/src)에서 해야 한다. 이게 안 되면 소스 빌드 live 스택은 전부 깨진다.
+printf 'FROM alpine:3.20\nCOPY marker.txt /marker.txt\n' > "$REPO/Dockerfile"
+echo built-from-src > "$REPO/marker.txt"
 cat > "$REPO/docker-compose.yml" <<Y
 services:
   a:
-    image: alpine:3.20
-    command: ["sh", "-c", "mkdir -p /srv/data && echo live > /srv/data/marker && sleep 600"]
+    build: .
+    command: ["sh", "-c", "mkdir -p /srv/data && cp /marker.txt /srv/data/marker && sleep 600"]
     ports: ["127.0.0.1:$PORT:80"]
     volumes:
       - ./data/a:/srv/data
+      - ./mysql:/var/lib/mysql
   helper:
     image: alpine:3.20
     command: ["sleep", "600"]
@@ -106,10 +112,37 @@ docker ps --filter "label=marina.live=1" --format '{{.Ports}}' | grep -q "$PORT"
 for _ in 1 2 3 4 5 6 7 8 9 10; do [ -f "$MARINA_HOME/livetest/live/data/a/marker" ] && break; sleep 1; done
 [ -f "$MARINA_HOME/livetest/live/data/a/marker" ] \
   || { echo "FAIL: 데이터가 live/data 에 없다: $(find "$MARINA_HOME/livetest/live" -maxdepth 3 | head)"; exit 1; }
+# 빌드가 체크아웃에서 됐다 — 컨텍스트가 live/ 로 옮겨졌으면 Dockerfile 을 못 찾아 기동 자체가 실패한다
+grep -q built-from-src "$MARINA_HOME/livetest/live/data/a/marker" \
+  || { echo "FAIL: 빌드 컨텍스트가 체크아웃이 아니다: $(cat "$MARINA_HOME/livetest/live/data/a/marker")"; exit 1; }
+# live/ 안이지만 live/data 밖인 바인드도 백업 목록에 들어간다 (./mysql → live/mysql)
+out="$($MARINA live backup-paths livetest 2>&1)"
+case "$out" in *"/livetest/live/mysql"*) ;; *) echo "FAIL: live/ 안 데이터 바인드가 백업 목록에 없다: $out"; exit 1 ;; esac
 
 # restart 정책이 덮였다
 [ "$(docker inspect livetest-live-a-1 --format '{{.HostConfig.RestartPolicy.Name}}')" = "unless-stopped" ] \
   || { echo "FAIL: restart 정책이 안 덮였다"; exit 1; }
+
+echo "--- 3b) 컨테이너가 하나도 안 뜨면 up 은 성공이 아니다"
+# live_containers 는 docker ps 가 비0이면 빈 목록을 돌려준다 — 그걸 '죽은 게 없다' 로
+# 읽으면 아무것도 안 뜬 상태가 조용히 성공이 된다.
+python3 - "$SCRIPTS" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import importlib.util, pathlib
+spec = importlib.util.spec_from_file_location("cli", sys.argv[1] + "/marina_live_cli.py")
+cli = importlib.util.module_from_spec(spec); spec.loader.exec_module(cli)
+rows = []
+bad = cli._unhealthy(rows, ["a", "b"])
+assert bad, "컨테이너 0개인데 문제 없다고 했다"
+assert "0" in " ".join(bad) or "없" in " ".join(bad), bad
+# restarting 은 크래시 루프의 정상 모습이다 — 통과시키면 안 된다
+bad = cli._unhealthy([{"name": "x", "service": "a", "state": "restarting", "restarts": 3}], ["a"])
+assert bad, "restarting 을 성공으로 봤다"
+# running 이고 재시작 0 이면 문제 없다
+assert cli._unhealthy([{"name": "x", "service": "a", "state": "running", "restarts": 0}], ["a"]) == []
+print("ok")
+PY
 
 echo "--- 4) status 가 세 신호와 경로를 보여준다"
 out="$($MARINA live status livetest 2>&1)"
@@ -119,6 +152,24 @@ case "$out" in *running*) ;; *) echo "FAIL: 컨테이너 상태가 안 보인다
 
 echo "--- 5) 멱등 — 두 번 up 해도 성공한다"
 $MARINA live up livetest >/dev/null
+
+echo "--- 5b) up 과 down 이 겹치지 않는다 (둘 다 같은 잠금을 잡는다)"
+# 재부팅 직후 launchd 유닛의 up 과 사람의 down 이 겹치면, down 이 유닛을 떼고 내린 뒤
+# up 이 컨테이너를 올리고 유닛을 다시 심는다 — "내렸는데 자동 기동은 켜져 있다" 가 된다.
+python3 - "$SCRIPTS" "$MARINA_HOME" <<'PY'
+import os, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+import marina_live as L
+os.environ["MARINA_HOME"] = sys.argv[2]
+with L.src_lock("livetest"):
+    for sub in ("down", "restart"):
+        r = subprocess.run(["bash", sys.argv[1] + "/marina.sh", "live", sub, "livetest"],
+                           capture_output=True, text=True,
+                           env={**os.environ, "MARINA_HOME": sys.argv[2]})
+        assert r.returncode != 0, f"{sub} 가 잠금을 무시했다: {r.stdout}{r.stderr}"
+        assert "이미" in (r.stdout + r.stderr), f"{sub} 잠금 메시지 없음: {r.stdout}{r.stderr}"
+print("ok")
+PY
 
 echo "--- 6) down 이 내리고 자동 기동을 해제한다"
 $MARINA live down livetest >/dev/null

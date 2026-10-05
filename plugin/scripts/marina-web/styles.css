@@ -1471,3 +1471,4 @@
 .live-sig-bad { border-color: #c62828; }
 .live-sig-none { opacity: .6; }
 .live-meta { font-size: 11px; opacity: .72; }
+.live-error { font-size: 11px; color: #ff8a80; border: 1px solid #c62828; border-radius: 3px; padding: 4px 6px; }

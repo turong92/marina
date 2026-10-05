@@ -137,6 +137,9 @@ def _write_overlay(project_id: str, config: dict) -> pathlib.Path:
         extra_services=X.cloudflared_service_lines(
             project_id, cf.get("domain") or "", cf.get("service") or "",
             cf.get("containerPort") or 0),
+        # 빌드는 체크아웃에서, 데이터는 live/ 에서 — --project-directory 하나로는 둘을
+        # 못 하므로 빌드 컨텍스트만 절대경로로 고정한다(위 ⑪ 참고).
+        build_context_base=str(L.live_src(project_id)),
     )
     path = L.live_overlay_path(project_id)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -155,61 +158,106 @@ def _unit(action: str, project_id: str):
                           capture_output=True, text=True)
 
 
+def _unhealthy(containers, wanted) -> list:
+    """기동 직후 "성공" 이라고 말해도 되는지. 말이 되는 실패를 전부 잡는다.
+
+    두 가지를 일부러 포함한다.
+    ① **컨테이너 0개**: `live_containers` 는 docker ps 가 비0이면 빈 목록을 돌려준다
+       (원격이 끊긴 경우·라벨이 안 붙은 경우). 그걸 '죽은 게 없다' 로 읽으면 아무것도
+       안 뜬 상태가 조용히 성공이 된다.
+    ② **restarting**: live 는 `restart: unless-stopped` 라 즉시 크래시하는 컨테이너의
+       정상 모습이 restarting 이다. 통과시키면 크래시 루프가 성공으로 보인다.
+    """
+    out = []
+    if not containers:
+        out.append(f"기동했다는데 live 컨테이너가 0개다(기대: {', '.join(wanted) or '?'}). "
+                   f"docker 가 안 닿거나 라벨이 붙지 않았다.")
+        return out
+    running = {c["service"] or c["name"] for c in containers if c["state"] == "running"}
+    for name in (wanted or []):
+        if name not in running:
+            out.append(f"서비스 '{name}' 가 running 이 아니다.")
+    for c in containers:
+        if c["state"] != "running":
+            out.append(f"{c['name']}: {c['state']} — 떠 있지 않다"
+                       + (" (restart 정책이 재시도 중이다 = 크래시 루프)"
+                          if c["state"] == "restarting" else ""))
+        elif c["restarts"] > 0:
+            out.append(f"{c['name']}: running 이지만 재시작 {c['restarts']}회 — 크래시 루프일 수 있다")
+    return out
+
+
 def cmd_up(project_id: str, cfg) -> int:
+    # **잠금이 기동 전체를 덮는다.** 예전엔 compose up 만 덮어서, 상태 확인과 유닛 설치가
+    # 잠금 밖에 있었다 — down 과 교차하면 down 이 유닛을 뗀 뒤 up 이 다시 심어
+    # "내렸는데 자동 기동은 켜져 있다" 가 됐다.
+    with L.src_lock(project_id):
+        return _up_locked(project_id, cfg)
+
+
+def _up_locked(project_id: str, cfg) -> int:
     remote = _remote_target()
     _check_remote(remote)                      # 체크아웃·기동 **전에** — 반쯤 한 상태를 안 남긴다
     services = list(cfg.get("services") or [])
-    with L.src_lock(project_id):
-        L.sync_src(cfg.get("root") or "", project_id, cfg["ref"])
-        L.ensure_data_dir(project_id)
-        compose_file = _compose_file(project_id, cfg)
-        config = _load_config(compose_file)
-        L.validate_services(config, services)
-        for problem in X.missing_cloudflare_secrets(project_id):
-            # 기동 전에 큰 소리로 — compose 에 맡기면 'env file not found' 로 깨진다.
-            raise L.LiveConfigError(problem)
-        # 벗기지 않고 알려만 준다(marina 는 소스와 데이터를 구분할 수 없다). 다만 **어디로
-        # 풀리는지**는 계산할 수 있으므로, 정말 위험한 것(체크아웃 안)만 경고로 올린다 —
-        # 데이터 마운트까지 같은 문구로 겁주면 경고를 무시하게 된다.
-        for row in L.classify_binds(mc().project_dir_binds(config, str(L.live_src(project_id))),
-                                    project_id):
-            if row["in_checkout"]:
-                print(f"경고: 바인드 마운트가 **체크아웃 안**을 가리킨다 — {row['bind']}\n"
-                      f"  → {row['resolved']} 는 다음 기동에 ref 로 하드 리셋되어 **날아간다.** "
-                      f"소스 마운트라면 운영에 쓰지 말고, 데이터라면 체크아웃 밖(예: ./data/...)으로 "
-                      f"옮기거나 live.composeFile 로 분리해라.", file=sys.stderr)
-            elif not row["in_data"]:
-                print(f"알림: 바인드 마운트가 live 디렉터리 밖을 가리킨다 — {row['bind']}"
-                      f" → {row['resolved']} (백업·이관 대상에 직접 넣어야 한다)", file=sys.stderr)
-            else:
-                print(f"알림: 데이터 바인드 — {row['bind']} → {row['resolved']}")
-        overlay = _write_overlay(project_id, config)
-        up_services = list(services)
-        if (X.expose_config(project_id).get("cloudflare") or {}).get("domain"):
-            up_services.append("cloudflared")   # overlay 가 주입한 서비스 — live 세션에만 있다
-        argv = mc().up_argv(str(compose_file), str(overlay), str(L.live_root(project_id)),
-                            _project_name(project_id), up_services, build=True)
-        rc = _compose(argv, remote=remote).returncode
-        if rc != 0:
-            print(f"기동 실패(docker compose up → {rc}). 위 출력을 봐라.", file=sys.stderr)
-            return rc
+    L.sync_src(cfg.get("root") or "", project_id, cfg["ref"])
+    L.ensure_data_dir(project_id)
+    compose_file = _compose_file(project_id, cfg)
+    config = _load_config(compose_file)
+    L.validate_services(config, services)
+    for problem in X.missing_cloudflare_secrets(project_id):
+        # 기동 전에 큰 소리로 — compose 에 맡기면 'env file not found' 로 깨진다.
+        raise L.LiveConfigError(problem)
+    # 벗기지 않고 알려만 준다(marina 는 소스와 데이터를 구분할 수 없다). 다만 **어디로
+    # 풀리는지**는 계산할 수 있으므로, 정말 위험한 것(체크아웃 안)만 경고로 올린다 —
+    # 데이터 마운트까지 같은 문구로 겁주면 경고를 무시하게 된다.
+    for row in L.classify_binds(mc().project_dir_binds(config, str(L.live_src(project_id))),
+                                project_id):
+        if row["in_checkout"]:
+            print(f"경고: 바인드 마운트가 **체크아웃 안**을 가리킨다 — {row['bind']}\n"
+                  f"  → {row['resolved']} 는 다음 기동에 ref 로 하드 리셋되어 **날아간다.** "
+                  f"소스 마운트라면 운영에 쓰지 말고, 데이터라면 체크아웃 밖(예: ./data/...)으로 "
+                  f"옮기거나 live.composeFile 로 분리해라.", file=sys.stderr)
+        elif row["in_data"]:
+            print(f"알림: 데이터 바인드 — {row['bind']} → {row['resolved']}")
+        elif row["in_live"]:
+            # live/ 안이지만 live/data 밖 — `./mysql` 같은 평범한 선언이 여기로 온다.
+            # 예전엔 이것도 "live 디렉터리 밖" 이라고 거짓으로 말했다(리뷰 지적).
+            print(f"알림: 데이터 바인드(live/data 밖) — {row['bind']} → {row['resolved']}"
+                  f"  백업 목록에 들어 있다: marina live backup-paths {project_id}")
+        else:
+            print(f"알림: 바인드 마운트가 live 디렉터리 **밖**을 가리킨다 — {row['bind']}"
+                  f" → {row['resolved']} (marina 의 백업 목록에 안 들어간다 — 직접 챙겨라)",
+                  file=sys.stderr)
+    overlay = _write_overlay(project_id, config)
+    up_services = list(services)
+    if (X.expose_config(project_id).get("cloudflare") or {}).get("domain"):
+        up_services.append("cloudflared")   # overlay 가 주입한 서비스 — live 세션에만 있다
+    argv = mc().up_argv(str(compose_file), str(overlay), str(L.live_root(project_id)),
+                        _project_name(project_id), up_services, build=True)
+    rc = _compose(argv, remote=remote).returncode
+    if rc != 0:
+        print(f"기동 실패(docker compose up → {rc}). 위 출력을 봐라.", file=sys.stderr)
+        return rc
 
     # 기동 직후 죽는 경우를 잡는다 — "떴다" 는 출력만 보고 운영을 믿으면 안 된다.
-    rows = _ps_rows(project_id, remote)
-    dead = [r for r in rows if r[1] not in ("running", "restarting")]
-    for name, status, restarts in rows:
-        print(f"  {name}: {status} (재시작 {restarts}회)")
-    if dead:
-        print("기동 직후 떠 있지 않은 컨테이너가 있다. 마지막 로그:", file=sys.stderr)
-        for name, _s, _r in dead:
-            logs = _docker(["logs", "--tail", "20", name], remote=remote,
+    containers = L.live_containers(project_id, remote=remote)
+    for c in containers:
+        print(f"  {c['name']}: {c['state']} (재시작 {c['restarts']}회)")
+    problems = _unhealthy(containers, services)
+    if problems:
+        for line in problems:
+            print(line, file=sys.stderr)
+        for c in containers:
+            if c["state"] == "running" and c["restarts"] == 0:
+                continue
+            logs = _docker(["logs", "--tail", "20", c["name"]], remote=remote,
                            capture_output=True, text=True)
-            sys.stderr.write(f"--- {name}\n{(logs.stdout or '') + (logs.stderr or '')}\n")
+            sys.stderr.write(f"--- {c['name']}\n{(logs.stdout or '') + (logs.stderr or '')}\n")
         return 1
 
     # 유닛 설치 실패는 기동을 되돌리지 않는다 — 지금 돌고 있는 것이 더 중요하다.
     # 그 대신 status 가 "자동 기동: 안 됨" 을 계속 보여준다.
-    u = _unit("install", project_id)
+    u = _unit("install", project_id)   # 잠금 안에서 돈다(cmd_up 참고)
     sys.stdout.write(u.stdout or "")
     sys.stderr.write(u.stderr or "")        # returncode 무관 — 경고를 삼키지 않는다
     if u.returncode != 0:
@@ -242,6 +290,11 @@ def _print_addresses(project_id: str, cfg, config: dict) -> None:
 
 
 def cmd_down(project_id: str, cfg) -> int:
+    with L.src_lock(project_id):        # up 과 겹치면 '내렸는데 자동 기동은 켜져 있다' 가 된다
+        return _down_locked(project_id, cfg)
+
+
+def _down_locked(project_id: str, cfg) -> int:
     remote = _remote_target()
     _check_remote(remote)
     # 유닛을 먼저 뗀다 — 내린 직후 자동 기동이 다시 올리는 경쟁을 없앤다.
@@ -258,8 +311,40 @@ def cmd_down(project_id: str, cfg) -> int:
                                   _project_name(project_id)) + ["down", "--remove-orphans"]
     rc = _compose(argv, remote=remote).returncode
     if rc == 0:
-        print(f"내렸다: {_project_name(project_id)} (데이터는 {L.live_data(project_id)} 에 남는다)")
+        print(f"내렸다: {_project_name(project_id)}")
+        usage = O.data_usage(project_id)
+        print(f"  바인드 데이터는 남는다: {usage['path']} ({usage['human']})")
+        # 익명 볼륨은 compose down 으로 컨테이너가 사라지면 dangling 이 되고, 도커 GC 의
+        # 익명 볼륨 유예(기본 3일)가 지나면 **지워진다.** "데이터는 남는다" 만 말하면
+        # 볼륨 기반 스택에서 거짓이 된다(리뷰 지적).
+        anon = _anonymous_volume_services(project_id, cfg)
+        if anon:
+            print(f"  주의: {', '.join(anon)} 는 바인드가 아닌 볼륨을 쓴다. 익명 볼륨이면 "
+                  f"컨테이너가 사라진 뒤 유예(기본 3일)가 지나면 도커 GC 가 지운다 — "
+                  f"오래 내려 둘 거면 명명 볼륨으로 바꾸거나 먼저 백업해라.", file=sys.stderr)
     return rc
+
+
+def _anonymous_volume_services(project_id: str, cfg) -> list:
+    """바인드가 아닌 볼륨을 쓰는 live 서비스 이름들. 판정은 compose 선언으로만 한다."""
+    try:
+        config = _load_config(_compose_file(project_id, cfg))
+    except L.LiveConfigError:
+        return []
+    out = []
+    for name in sorted(config.get("services") or {}):
+        if name not in (cfg.get("services") or []):
+            continue
+        for v in (((config["services"][name] or {}).get("volumes")) or []):
+            if isinstance(v, dict) and str(v.get("type") or "") != "bind":
+                out.append(name)
+                break
+            if isinstance(v, str):
+                src = v.split(":", 1)[0]
+                if not (src.startswith("./") or src.startswith("../") or src.startswith("/")):
+                    out.append(name)
+                    break
+    return out
 
 
 def cmd_status(project_id: str, cfg) -> int:
@@ -318,6 +403,11 @@ def cmd_logs(project_id: str, cfg, rest) -> int:
 
 
 def cmd_restart(project_id: str, cfg, rest) -> int:
+    with L.src_lock(project_id):        # up 의 compose up 과 교차하면 일부만 적용된다
+        return _restart_locked(project_id, cfg, rest)
+
+
+def _restart_locked(project_id: str, cfg, rest) -> int:
     remote = _remote_target()
     _check_remote(remote)
     compose_file = _compose_file(project_id, cfg)
@@ -461,17 +551,27 @@ def main(argv) -> int:
     sub, rest = argv[0], argv[1:]
     if sub in ("status", "backup-paths") and not rest:
         rest = [""]                       # 프로젝트 생략 = 등록된 live 전체
-    if sub == "backup-paths":
+    if sub in ("status", "backup-paths"):
+        # 프로젝트를 생략하면 **등록된 live 전체**다 — USAGE·README 가 `status [<프로젝트>]`
+        # 를 약속한다. 예전엔 status 만 이 분기가 없어 빈 프로젝트명으로 들어가
+        # "등록된 프로젝트가 아니다: ''" 로 깨졌다(오타를 가리키는 메시지라 원인도 안 보였다).
         reg = L.load_registry()
         ids = [rest[0]] if rest[0] else [str(p.get("id")) for p in (reg.get("projects") or [])
                                          if (p.get("live") or {}).get("ref")]
         if not ids:
-            print("live 설정이 있는 프로젝트가 없다.", file=sys.stderr)
+            print("live 설정이 있는 프로젝트가 없다. "
+                  "`marina live pin <프로젝트> <ref>` 로 시작해라.", file=sys.stderr)
             return 1
         try:
-            for pid in ids:
-                _need_cfg(pid, sub)
-            return cmd_backup_paths(ids)
+            cfgs = [(pid, _need_cfg(pid, sub)) for pid in ids]
+            if sub == "backup-paths":
+                return cmd_backup_paths(ids)
+            rc = 0
+            for i, (pid, cfg) in enumerate(cfgs):
+                if i:
+                    print("")
+                rc = cmd_status(pid, cfg) or rc
+            return rc
         except L.LiveConfigError as exc:
             print(str(exc), file=sys.stderr)
             return 1

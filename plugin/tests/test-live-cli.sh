@@ -59,6 +59,13 @@ case "$out" in *pin*) ;; *) echo "FAIL: pin 안내가 없다: $out"; exit 1 ;; e
 bash "$SCRIPTS/marina.sh" live pin plainproj v9 >/dev/null
 grep -q '"ref": "v9"' "$MARINA_HOME/projects.json" || { echo "FAIL: pin 이 ref 를 안 썼다"; cat "$MARINA_HOME/projects.json"; exit 1; }
 
+echo "--- 인자 없는 status 는 등록된 live 전체를 본다 (USAGE 가 약속한 것)"
+out="$(bash "$SCRIPTS/marina.sh" live status 2>&1 || true)"
+case "$out" in
+  *"등록된 프로젝트가 아니다: ''"*) echo "FAIL: 인자 없는 status 가 빈 프로젝트명으로 깨진다: $out"; exit 1 ;;
+esac
+case "$out" in *plainproj*|*"live 설정이 있는 프로젝트가 없다"*) ;; *) echo "FAIL: 전체 status 가 아니다: $out"; exit 1 ;; esac
+
 echo "--- live 는 예약된 세션 이름이다"
 # 워크트리 이름이 'live' 면 session_id 가 "live" 가 되어 compose 프로젝트명이 운영 스택과
 # **완전히 같아진다**(<id>-live). 그 워크트리에서 marina start 를 하면 개발 overlay 로

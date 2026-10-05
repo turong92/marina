@@ -36,6 +36,10 @@ except L.LiveConfigError as exc:
     print("echo %s >&2; exit 2" % shlex.quote(str(exc)))
 PY
 )"
+# eval 이 아무것도 못 받으면(import 실패·읽을 수 없는 MARINA_HOME 등) set -u 가
+# "$UNIT: unbound variable" 로 죽어 원인을 가리키지 못한다 — 여기서 분명히 말한다.
+: "${UNIT:?live 유닛 경로를 계산하지 못했다 — MARINA_HOME($MARINA_HOME) 과 프로젝트 id($PROJECT) 를 확인해라}"
+: "${LABEL:?live 유닛 라벨을 계산하지 못했다}"
 
 # 실제 홈이 아니면 기계에 등록하지 않는다 (테스트 격리)
 REGISTER=0

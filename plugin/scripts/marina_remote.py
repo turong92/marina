@@ -610,6 +610,17 @@ class RemoteController:
             return status
         if not status.get("installed") or not status.get("online"):
             raise RemoteControlError("tailscale_offline", "Tailscale daemon is not running.")
+        if status.get("conflict"):
+            # add_live_route·activate·off 와 **같은 가드**. 없으면 여기가 유일한 구멍이 된다:
+            # 손으로 바꾼 설정이 있는 상태에서 이 경로를 통과하면 아래 _persist_live_routes 가
+            # **사용자가 만든 설정의 지문을 marina 것으로 흡수**해 conflict 가 사라지고,
+            # 그 뒤 대시보드의 원격 켜기가 그 설정을 덮어쓴다(리뷰 지적).
+            raise RemoteControlError(
+                "config_conflict",
+                "Tailscale configuration does not match Marina's saved fingerprint; "
+                "Marina will not change a listener it does not own.",
+                {"configFingerprint": status.get("configFingerprint")},
+            )
         executable = self._executable()
         if executable is None:
             raise RemoteControlError("tailscale_not_found", "Tailscale CLI is not installed.")
@@ -647,7 +658,11 @@ class RemoteController:
 
     def _persist_live_routes(self, routes: list) -> None:
         """live 라우트 목록과 **새 설정 지문**을 함께 저장한다. 지문을 갱신하지 않으면
-        status 가 conflict 를 올려 대시보드가 원격을 끄지도 켜지도 못한다."""
+        status 가 conflict 를 올려 대시보드가 원격을 끄지도 켜지도 못한다.
+
+        **호출 전에 소유(conflict 아님)를 확인해야 한다.** 이 함수는 현재 설정의 지문을
+        무조건 marina 것으로 흡수하므로, 소유 확인을 건너뛴 경로에서 부르면 남의 설정을
+        marina 것으로 만들어 버린다 — add/remove 양쪽에 conflict 가드가 있는 이유다."""
         state = dict(self._saved_state())
         state.setdefault("version", 1)
         state["liveRoutes"] = list(routes)

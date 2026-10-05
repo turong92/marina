@@ -1127,7 +1127,7 @@ def e2e_extra_labels(env=None):
 def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict = None,
                   connectivity: dict = None, expose_env: dict = None, target=None,
                   extra_labels: dict = None, live: bool = False,
-                  extra_services: list = None) -> str:
+                  extra_services: list = None, build_context_base: str = "") -> str:
     """resolved config → overlay YAML. 워크트리 격리를 위해 *비침투적으로* 덮는다(앱·외부 레포 불변):
     ① published ports → 127.0.0.1::<target> (호스트포트 Docker 자동할당)
     ② container_name → 제거(!reset, 워크트리별 자동명명 — 다중 인스턴스 충돌 방지)
@@ -1141,6 +1141,12 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
        안정된 포트가 필요하다), 모든 서비스에 restart: unless-stopped 를 덮고, develop(watch)을
        제거한다. 소스로 보이는 바인드 마운트는 **건드리지 않는다** — marina 는 소스와 데이터를
        구분할 수 없고 추측해서 벗기면 데이터를 날린다. 경고는 project_dir_binds() 가 맡는다.
+    ⑪ build_context_base: 상대 build context 를 이 디렉터리 기준 **절대경로**로 덮는다.
+       live 가 필요하다: `--project-directory` 는 바인드 소스뿐 아니라 **빌드 컨텍스트까지**
+       옮기는데(실측), live 는 데이터 기준점을 ~/.marina/<id>/live 로 두고 빌드는
+       체크아웃(live/src)에서 해야 한다. 하나의 --project-directory 로는 둘을 못 하므로
+       빌드 쪽만 overlay 에서 절대경로로 고정한다. 안 하면 `build: .` 이 live/ 를 가리켜
+       "open Dockerfile: no such file or directory" 로 소스 빌드 스택이 전부 깨진다.
     ⑩ extra_services: overlay 의 **services 영역에** 그대로 끼워 넣을 줄들(2칸 들여쓰기 블록).
        live 공개용 cloudflared 처럼 marina 가 주입하는 서비스를 위한 것이다. 문자열을 뒤에
        이어 붙이면 안 된다 — ⑧ 이 끝에 top-level `networks:` 를 붙이므로 주입 서비스가
@@ -1213,7 +1219,15 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
         df = _dockerfile_case_fix(svc.get("build"))
         margs = build_args.get(name) or {}
         blabels = extra_labels if (extra_labels and svc.get("build")) else {}   # ⑧ 이미지 라벨 — build 서비스만
-        if (df or margs or blabels) and bcfg.get("context"):   # scalar `build: ./dir` 병합 시 context 유실 방지 — resolved context 명시
+        # ⑪ 상대 context 를 기준 디렉터리로 고정 (scalar `build: ./dir` 도 resolved 는 dict 다)
+        bctx = ""
+        if build_context_base and svc.get("build"):
+            declared = str(bcfg.get("context") or (svc["build"] if isinstance(svc["build"], str) else "") or ".")
+            bctx = declared if os.path.isabs(declared) else os.path.normpath(
+                os.path.join(build_context_base, declared))
+        if bctx:
+            build_block.append(f"      context: {json.dumps(bctx)}")
+        elif (df or margs or blabels) and bcfg.get("context"):   # scalar `build: ./dir` 병합 시 context 유실 방지 — resolved context 명시
             build_block.append(f"      context: {json.dumps(str(bcfg['context']))}")
         if df:
             build_block.append(f"      dockerfile: {df}")

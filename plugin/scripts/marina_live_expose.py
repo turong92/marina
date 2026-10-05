@@ -136,13 +136,11 @@ def cloudflared_service_lines(project_id: str, domain: str, service: str,
         "    labels:",
         f'      {json.dumps(L.LIVE_LABEL)}: "1"',
         f"      {json.dumps(L.PROJECT_LABEL)}: {json.dumps(project_id)}",
-        "    environment:",
-        f"      MARINA_LIVE_DOMAIN: {json.dumps(str(domain))}",
-        # 토큰 터널은 ingress 를 Cloudflare 쪽에서 관리한다(remote-managed). 이 값은
-        # cloudflared 가 읽는 설정이 아니라 **사용자가 Cloudflare 에 입력할 주소**다 —
-        # 그래서 expose 가 출력으로도 알려준다.
-        f"      MARINA_LIVE_BACKEND: {json.dumps(tunnel_target(service, container_port))}",
     ]
+    # 환경변수로 도메인·백엔드를 넘기지 **않는다**: 토큰 터널은 ingress 를 Cloudflare 가
+    # 관리하므로(remote-managed) cloudflared 는 그런 변수를 읽지 않고, 레포 어디에도 읽는
+    # 코드가 없다 — 읽히지 않는 설정은 "설정했으니 됐겠지" 라는 거짓 확신만 만든다.
+    # 사용자가 Cloudflare 에 입력할 주소는 expose 출력과 expose.json 이 알려준다.
 
 
 def missing_cloudflare_secrets(project_id: str) -> list:

@@ -74,17 +74,35 @@ for bad in ["../escape", "a/b", "with space", "semi;colon", "", "."]:
         pass
 L.live_root("ok_id-1.2")        # 정상 id 는 통과
 
-# 9) 비정상 종료가 남긴 잠금은 **스스로 풀린다** — 안 그러면 재부팅 후 launchd 가
-#    매번 잠금에 걸려 서비스가 영구히 안 뜬다(유닛이 marina live up 을 재실행한다)
+# 9) 비정상 종료가 남긴 잠금 **파일**이 막지 않는다 — 안 그러면 재부팅 후 launchd 가
+#    매번 잠금에 걸려 서비스가 영구히 안 뜬다(유닛이 marina live up 을 재실행한다).
+#    pid 추측이 아니라 flock 이라 커널이 죽은 프로세스의 잠금을 풀어 준다.
 lock = L.live_root("p") / ".lock"
 lock.parent.mkdir(parents=True, exist_ok=True)
-lock.write_text("999999")        # 죽은 PID
+lock.write_text("999999")        # 죽은 PID 가 남긴 파일
 with L.src_lock("p"):
     pass
-assert not lock.exists(), "잠금이 남았다"
-lock.write_text("not-a-pid")     # 내용이 깨진 잠금도 막히지 않는다
+lock.write_text("not-a-pid")     # 내용이 깨져도 막히지 않는다
 with L.src_lock("p"):
     pass
+
+# 9b) 잠금 파일이 **비어 있는 순간**(열고 pid 를 쓰기 전)에도 활성 잠금을 탈취하지 못한다.
+#     pid 파일 방식은 그 창에서 빈 내용을 '낡음' 으로 보고 살아 있는 잠금을 지웠다.
+lock.write_text("")
+with L.src_lock("p"):
+    try:
+        with L.src_lock("p"):
+            raise AssertionError("빈 잠금 파일로 활성 잠금을 탈취했다")
+    except L.LiveConfigError:
+        pass
+
+# 9c) 원격이 안 닿아 fetch 가 실패해도, ref 가 로컬에 있으면 기동을 막지 않는다.
+#     막으면 재부팅 복귀가 네트워크에 묶이고, 원격이 사라진 레포는 영구히 안 뜬다.
+import subprocess as _sp
+_sp.run(["git", "-C", repo, "remote", "add", "origin", "https://127.0.0.1:1/nope.git"],
+        capture_output=True)
+src = L.sync_src(repo, "p", "v1")
+assert (src / "f.txt").read_text().strip() == "one", "fetch 실패가 기동을 막았다"
 
 # 10) 잠금 — 같은 프로젝트를 두 번 동시에 잡을 수 없다
 with L.src_lock("p"):
