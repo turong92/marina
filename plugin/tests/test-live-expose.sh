@@ -15,24 +15,32 @@ from marina_remote import RemoteController, RemoteControlError
 HOME = pathlib.Path(os.environ["MARINA_HOME"])
 
 # ── 순수 판정 ────────────────────────────────────────────────────────────────
-# 1) Funnel 은 443 을 쓰지 않는다. AllowFunnel 이 경로가 아니라 host:port 단위라,
-#    443 의 /app 을 공개하면 같은 443 의 "/" 에 있는 대시보드까지 공개된다.
-assert 443 not in X.FUNNEL_PORTS, X.FUNNEL_PORTS
-assert X.FUNNEL_PORTS == (8443, 10000), X.FUNNEL_PORTS
+# 1) Funnel 이 허용하는 포트는 443·8443·10000 셋뿐이다 — **Tailscale 제품 제약**이고
+#    tailnet ACL 설정이 아니다(공식 문서: "Funnel can only listen on ports 443, 8443,
+#    and 10000"). 그 안에서 443 이 비어 있으면 거기 루트를 쓴다 — 주소가 깔끔하고
+#    경로 기반 공개의 위험(절대경로 asset·쿠키 path·redirect)이 아예 없다.
+assert X.FUNNEL_PORTS == (443, 8443, 10000), X.FUNNEL_PORTS
 
-# 2) 쓸 수 있는 포트가 2개뿐이라는 한도를 숨기지 않는다 — 세 번째는 거부하고 대안을 말한다
-assert X.pick_funnel_port([]) == 8443
-assert X.pick_funnel_port([8443]) == 10000
+# 2) 443 을 먼저 쓰고, 차 있으면 다음으로. 셋 다 차면 거부하고 대안을 말한다
+assert X.pick_funnel_port([]) == 443
+assert X.pick_funnel_port([443]) == 8443
+assert X.pick_funnel_port([443, 8443]) == 10000
 try:
-    X.pick_funnel_port([8443, 10000])
-    raise AssertionError("세 번째인데 통과했다")
+    X.pick_funnel_port([443, 8443, 10000])
+    raise AssertionError("네 번째인데 통과했다")
 except L.LiveConfigError as e:
     assert "Cloudflare" in str(e), e
     assert "8443" in str(e) and "10000" in str(e), e
 
-# 3) 경로 기본값은 /<프로젝트>, 경로 공개가 앱을 깨뜨릴 수 있다는 경고가 반드시 있다
-assert X.funnel_path("ovation") == "/ovation"
-assert X.funnel_path("ovation", "/x/") == "/x"
+# 3) 443 은 루트 전용, 그 밖은 경로 기반 + 경고
+assert X.funnel_path("ovation", None, 443) == "/"
+assert X.funnel_path("ovation", None, 8443) == "/ovation"
+assert X.funnel_path("ovation", "/x/", 8443) == "/x"
+try:
+    X.funnel_path("ovation", "/x", 443)
+    raise AssertionError("443 에 경로를 받았다")
+except L.LiveConfigError as e:
+    assert "443" in str(e), e
 assert "절대경로" in X.PATH_WARNING and "쿠키" in X.PATH_WARNING, X.PATH_WARNING
 
 # 4) Cloudflare 자격증명은 **넷 다** 필요하고, 하나라도 비면 아무것도 만들기 전에 거부한다
@@ -185,22 +193,23 @@ import json, os, pathlib, sys
 sys.path.insert(0, sys.argv[1])
 import marina_live as L
 import marina_live_expose as X
-from marina_remote import RemoteController
+from marina_remote import RemoteController, RemoteControlError
 
 HOME = pathlib.Path(os.environ["MARINA_HOME"])
 ctl = RemoteController(marina_home=HOME, tailscale_bin=sys.argv[2])
 
 # 1) funnel 공개 — 8443 을 받고, 경고를 반드시 낸다
 res = X.expose_funnel("ovation", 8080, controller=ctl)
-assert res["httpsPort"] == 8443, res
-assert res["path"] == "/ovation", res
-assert res["url"] == "https://fake.tailnet.ts.net:8443/ovation", res
-assert X.PATH_WARNING in res["warnings"], res
+assert res["httpsPort"] == 443, res          # 443 이 비어 있으므로 거기 루트
+assert res["path"] == "/", res
+assert res["url"] == "https://fake.tailnet.ts.net/", res
+assert X.PATH_WARNING not in res["warnings"], res   # 루트라 경로 경고가 불필요
+assert any("대시보드" in w for w in res["warnings"]), res   # 443 을 쥔 대가는 알린다
 
 # 2) status 가 공개 상태를 읽는다 (RemoteController 의 route 목록에서)
 st = X.expose_status("ovation", controller=ctl)
 assert st["mode"] == "funnel", st
-assert st["url"] == "https://fake.tailnet.ts.net:8443/ovation", st
+assert st["url"] == "https://fake.tailnet.ts.net/", st
 
 # 3) 대시보드 원격 접근(443)이 **멀쩡하다** — live 라우트가 소유 판정을 깨지 않는다
 status = ctl.status(refresh=True)
@@ -208,21 +217,26 @@ assert status["conflict"] is False, status
 assert status["ownMode"] == "off", status      # marina 자신의 리스너는 아직 없다
 assert status["liveRoutes"], status
 
-# 4) 같은 경로를 두 번 공개하면 거부한다
+# 4) 같은 프로젝트를 두 번 공개하면 거부한다 — 포트가 남아 있으면 조용히 **두 번째
+#    공개 주소**가 생겨서, 내렸다고 생각한 주소가 살아 있게 된다
 try:
     X.expose_funnel("ovation", 8080, controller=ctl)
-    raise AssertionError("같은 경로인데 통과했다")
+    raise AssertionError("두 번 공개가 통과했다")
 except L.LiveConfigError as e:
-    assert "이미" in str(e), e
+    assert "이미 공개" in str(e), e
 
-# 5) 두 번째 앱은 10000 을 받는다
+# 5) 두 번째 앱은 8443 — 거기서는 경로 기반이라 경고가 **반드시** 나온다
 res2 = X.expose_funnel("second", 9090, controller=ctl)
-assert res2["httpsPort"] == 10000, res2
+assert res2["httpsPort"] == 8443, res2
+assert res2["path"] == "/second", res2
+assert X.PATH_WARNING in res2["warnings"], res2
 
-# 6) 세 번째는 거부하고 Cloudflare 를 안내한다
+# 6) 세 번째는 10000, 네 번째는 거부하고 Cloudflare 를 안내한다
+res3 = X.expose_funnel("third", 7070, controller=ctl)
+assert res3["httpsPort"] == 10000, res3
 try:
-    X.expose_funnel("third", 7070, controller=ctl)
-    raise AssertionError("세 번째인데 통과했다")
+    X.expose_funnel("fourth", 6060, controller=ctl)
+    raise AssertionError("네 번째인데 통과했다")
 except L.LiveConfigError as e:
     assert "Cloudflare" in str(e), e
 
@@ -233,15 +247,26 @@ X.unexpose("ovation", controller=ctl)
 # 해제 후에도 다른 앱의 공개는 남는다
 assert X.expose_status("second", controller=ctl)["mode"] == "funnel"
 # 해제가 포트를 돌려준다 — 다시 공개할 수 있다
-res3 = X.expose_funnel("ovation", 8080, controller=ctl)
-assert res3["httpsPort"] == 8443, res3
+res4 = X.expose_funnel("ovation", 8080, controller=ctl)
+assert res4["httpsPort"] == 443, res4         # 443 이 다시 비었으니 거기로 돌아간다
+
+# 7b) **live 가 443 funnel 을 쥐면 대시보드 원격 접근을 거부한다.** AllowFunnel 은
+#     host:port 단위라, 같은 443 에 대시보드를 올리는 순간 관리 UI 까지 공개된다.
+try:
+    ctl.activate("serve", 3900)
+    raise AssertionError("live 가 443 을 쥐었는데 대시보드 원격이 켜졌다")
+except RemoteControlError as e:
+    assert "443" in str(e), e
+X.unexpose("ovation", controller=ctl)         # 443 을 비우면 다시 된다
+res5 = X.expose_funnel("ovation", 8080, controller=ctl)
+assert res5["httpsPort"] == 443, res5
 
 # 7b) **손으로 바꾼 설정(conflict)이 있으면 unexpose 도 거부한다.**
 #     거부하지 않으면 unexpose 가 사용자 설정의 지문을 marina 것으로 흡수해
 #     "남의 설정은 건드리지 않는다" 안전장치가 꺼지고, 그 뒤 대시보드의 원격 켜기가
 #     사용자가 손으로 만든 443 설정을 덮어쓴다.
 import subprocess as _sp
-_sp.run([sys.argv[2], "serve", "--bg", "--https=443", "http://127.0.0.1:9999"],
+_sp.run([sys.argv[2], "serve", "--bg", "--https=4443", "http://127.0.0.1:9999"],
         capture_output=True)
 ctl._cache = {}
 st = ctl.status(refresh=True)
@@ -255,11 +280,13 @@ except (L.LiveConfigError, Exception) as e:
 ctl._cache = {}
 assert ctl.status(refresh=True)["conflict"] is True, "unexpose 가 지문을 흡수했다"
 # 사용자 설정을 되돌리면 다시 정상
-_sp.run([sys.argv[2], "serve", "--https=443", "off"], capture_output=True)
+_sp.run([sys.argv[2], "serve", "--https=4443", "off"], capture_output=True)
 ctl._cache = {}
 assert ctl.status(refresh=True)["conflict"] is False, ctl.status(refresh=True)
 
-# 8) 대시보드가 원격을 켜도 live 라우트가 살아 있다 (443 과 8443 은 다른 authority)
+# 8) live 가 443 을 비우면 대시보드 원격이 켜지고, **그때도 8443·10000 의 live 라우트는
+#    살아 있다** (서로 다른 authority 라 모드 전환이 지우지 않는다)
+X.unexpose("ovation", controller=ctl)
 ctl.activate("serve", 3900)
 after = ctl.status(refresh=True)
 assert after["ownMode"] == "serve", after

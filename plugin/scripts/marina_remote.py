@@ -387,6 +387,20 @@ class RemoteController:
         if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
             raise ValueError("port must be an integer between 1 and 65535")
         backend = f"http://127.0.0.1:{port}"
+        # **live 가 443 을 쥐고 있으면 대시보드를 그 위에 올리지 않는다.** AllowFunnel 은
+        # 경로가 아니라 authority(host:port) 단위라, live 가 443 에 funnel 을 열어 둔 상태에서
+        # 대시보드를 같은 443 에 올리면 **관리 UI 까지 인터넷에 공개된다**(serve 로 올려도
+        # 공개 여부는 그 포트 전체에 걸려 있다). 둘 중 하나만 443 을 쥔다.
+        _held = [r for r in self._saved_live_routes()
+                 if int(r.get("httpsPort") or 0) == 443 and str(r.get("mode")) == "funnel"]
+        if _held:
+            raise RemoteControlError(
+                "live_holds_443",
+                "A marina live app holds funnel on 443; enabling remote access there would "
+                "publish the dashboard to the internet. Run `marina live unexpose <project>` "
+                "first, or reach the dashboard over the tailnet at <machine>:3900.",
+                {"liveRoutes": _held},
+            )
         before = self.status(refresh=True)
         if not before.get("installed"):
             raise RemoteControlError("tailscale_not_found", "Tailscale CLI is not installed.")
@@ -551,13 +565,19 @@ class RemoteController:
     def _add_live_route_unlocked(self, mode: str, https_port: int, path: str, backend: str) -> dict[str, Any]:
         if mode not in ("serve", "funnel"):
             raise ValueError("mode must be 'serve' or 'funnel'")
-        if int(https_port) == 443:
+        if int(https_port) == 443 and self._own_routes(self.status(refresh=True)):
+            # 대시보드가 이미 443 에 리스너를 두고 있으면 거기 얹을 수 없다 — AllowFunnel 은
+            # 경로가 아니라 authority(host:port) 단위라, 얹는 순간 대시보드까지 공개된다.
+            # 비어 있으면 live 가 443 을 쓴다(주소가 깔끔하고 경로 기반 위험이 없다).
             raise RemoteControlError(
-                "live_port_reserved",
-                "443 is reserved for Marina's own remote access; funnel there would publish the dashboard.",
+                "live_port_busy",
+                "Marina's own remote access already holds 443; funnel there would publish the "
+                "dashboard. Turn it off, or let live use 8443/10000.",
             )
-        if not str(path).startswith("/") or str(path) == "/":
-            raise ValueError("path must start with '/' and must not be '/'")
+        if not str(path).startswith("/"):
+            raise ValueError("path must start with '/'")
+        if str(path) == "/" and int(https_port) != 443:
+            raise ValueError("root path is only allowed on 443")
         before = self.status(refresh=True)
         if not before.get("installed"):
             raise RemoteControlError("tailscale_not_found", "Tailscale CLI is not installed.")

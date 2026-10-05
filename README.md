@@ -818,12 +818,17 @@ marina live expose status myapp
 marina live unexpose myapp                     # 멱등. 로컬 접근은 그대로다
 ```
 
-- **Funnel 은 8443·10000 만 쓴다.** Tailscale 이 허용하는 포트는 443·8443·10000 셋이고 443 은
-  marina 자신의 원격 접근(대시보드)이 쓴다. `AllowFunnel` 은 경로가 아니라 **authority(host:port)
-  단위**라서, 443 의 `/app` 을 공개하려고 funnel 을 켜면 같은 443 의 `/` 에 있는 **대시보드까지
-  인터넷에 열린다.** 그래서 443 은 쓰지 않고, 동시에 공개할 수 있는 앱은 **최대 2개**다 —
-  세 번째는 거부하고 Cloudflare 터널을 안내한다(한도를 자동 배정으로 숨기지 않는다).
-- 경로 기반 공개는 앱을 깨뜨릴 수 있다(절대경로 asset·쿠키 path·redirect). `expose` 가 매번 경고한다.
+- **Funnel 이 쓸 수 있는 포트는 443·8443·10000 셋뿐이다** — Tailscale 제품 제약이고 tailnet
+  ACL 로 늘릴 수 없다([문서](https://tailscale.com/kb/1223/funnel): "Funnel can only listen on
+  ports 443, 8443, and 10000"). **커스텀 도메인도 불가**이고 주소는 `<기계>.<테일넷>.ts.net` 뿐이다
+  — 내 도메인을 붙이려면 Cloudflare 터널을 써라.
+- **443 이 비어 있으면 거기 루트(`/`)를 쓴다.** 주소가 `https://<기계>.ts.net/` 로 깔끔하고
+  경로 기반 공개의 위험도 없다. 이미 marina 자신의 원격 접근(대시보드)이 443 에 있으면 그때만
+  8443 → 10000 으로 내려간다. `AllowFunnel` 이 경로가 아니라 **authority(host:port) 단위**라
+  둘을 같은 443 에 얹으면 **대시보드까지 인터넷에 열리기** 때문에, 둘 중 하나만 443 을 쥔다 —
+  live 가 쥐고 있으면 `marina remote` 가 443 을 거부하고 이유를 말한다.
+- 8443·10000 은 **경로 기반**이라 앱을 깨뜨릴 수 있다(절대경로 asset·쿠키 path·redirect).
+  그 포트를 쓸 때만 `expose` 가 경고한다. 셋 다 차면 거부하고 Cloudflare 터널을 안내한다.
 - Cloudflare 터널의 cloudflared 커넥터는 **live 세션에만** 뜬다. 터널 하나에 커넥터가 여럿이면
   Cloudflare 가 공개 요청을 그중 아무 데로나 보낸다(실측) — 개발 워크트리마다 커넥터가 뜨면
   공개 트래픽이 무작위 워크트리로 들어간다.

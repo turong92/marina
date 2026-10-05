@@ -1,12 +1,18 @@
 """L2 — live 스택을 인터넷에 공개한다. 두 길(Tailscale Funnel / Cloudflare 터널).
 
-**Funnel 은 443 을 쓰지 않는다.** marina 자신의 원격 접근이 443 을 쓰고(`marina_remote`
-의 activate 는 `--https=443` 고정), Tailscale 의 `AllowFunnel` 은 **경로가 아니라
-authority(host:port) 단위**다. 443 의 `/app` 을 공개하려고 funnel 을 켜면 같은 443 의
-`/` 에 있는 **대시보드까지 인터넷에 열린다** — 관리 UI 공개 금지 원칙 정면 위반이다.
-그래서 live 는 Funnel 이 허용하는 나머지 두 포트(8443·10000)만 쓴다. 동시에 공개할 수
-있는 앱이 최대 2개라는 뜻이고, **그 한도를 숨기지 않는다**: 세 번째는 거부하고 Cloudflare
-터널을 안내한다(한도를 자동 배정으로 가리면 "왜 세 번째가 안 되냐"로 돌아온다).
+**포트는 443·8443·10000 셋뿐이다 — Tailscale Funnel 제약이고 marina 와 무관하다.**
+그 안에서 live 는 **443 이 비어 있으면 443 루트를 쓴다.** 그러면 주소가
+`https://<기계>.ts.net/` 로 깔끔하고, 경로 기반 공개가 아니라서 앱이 깨질 위험(절대경로
+asset·쿠키 path·redirect)도 아예 없다.
+
+443 을 못 쓰는 경우는 하나다: marina 자신의 원격 접근(대시보드)이 거기 리스너를 올려
+둔 경우. `AllowFunnel` 은 **경로가 아니라 authority(host:port) 단위**라 같은 443 에
+둘을 얹으면 대시보드까지 인터넷에 열린다 — 관리 UI 공개 금지 위반이다. 그래서
+**둘 중 하나만** 443 을 쥔다: live 가 쥐고 있으면 `RemoteController.activate` 가
+거부하고, 대시보드가 쥐고 있으면 live 가 8443 → 10000 으로 내려간다.
+
+셋이 다 차면 거부하고 Cloudflare 터널을 안내한다 — **한도를 자동 배정으로 가리지 않는다**
+(가리면 "왜 네 번째가 안 되냐"로 돌아온다).
 
 tailscale 을 직접 부르지 않고 항상 `RemoteController` 를 쓴다 — 맥에서 tailscaled 와
 Tailscale 앱이 같이 떠 있으면 `--socket` 없는 CLI 는 앱 쪽에 붙어 status 와 funnel 이
@@ -20,7 +26,7 @@ import pathlib
 
 import marina_live as L
 
-FUNNEL_PORTS = (8443, 10000)      # 443 은 marina 자신의 원격 접근 — 위 docstring 참고
+FUNNEL_PORTS = (443, 8443, 10000)   # Tailscale Funnel 이 허용하는 전부. 443 을 먼저 쓴다.
 CLOUDFLARE_REQUIRED = ("token", "zone", "account", "tunnel")
 
 PATH_WARNING = (
@@ -70,26 +76,38 @@ def write_secrets(project_id: str, values: dict) -> pathlib.Path:
     return p
 
 
-def funnel_path(project_id: str, path=None) -> str:
+def funnel_path(project_id: str, path=None, https_port: int = 443) -> str:
+    """공개 경로. **443 은 루트 전용**이다 — 거기 경로를 붙일 이유가 없고(앱 하나를 루트에
+    올리는 자리다), 붙이면 경로 기반 공개의 위험만 떠안는다. 8443·10000 은 두세 번째 앱
+    자리라 경로로 가른다."""
+    if int(https_port) == 443:
+        if path and str(path).strip().strip("/"):
+            raise L.LiveConfigError(
+                f"443 에는 경로를 지정하지 않는다 — 443 은 앱 하나를 **루트**에 올리는 자리다. "
+                f"경로로 가르고 싶으면 443 을 비워 두고 8443·10000 을 써라(그쪽은 경로 기반이라 "
+                f"앱이 깨질 수 있고, {PATH_WARNING.split('—')[0].strip()})"
+            )
+        return "/"
     raw = str(path or f"/{project_id}").strip()
     raw = "/" + raw.strip("/")
     if raw == "/":
-        raise L.LiveConfigError("경로가 '/' 면 안 된다 — 443 의 루트는 marina 자신의 원격 접근 자리다.")
+        raise L.LiveConfigError(
+            f"{https_port} 에서 루트(/)는 쓸 수 없다 — 같은 포트에 앱이 하나뿐이면 443 을 써라."
+        )
     return raw
 
 
 def pick_funnel_port(taken) -> int:
-    """비어 있는 Funnel 포트. 없으면 거부하고 **왜 2개뿐인지** 말한다."""
+    """비어 있는 Funnel 포트. 443 을 먼저 쓴다. 셋 다 차면 거부하고 **왜 셋뿐인지** 말한다."""
     used = {int(t) for t in (taken or [])}
     for p in FUNNEL_PORTS:
         if p not in used:
             return p
     raise L.LiveConfigError(
-        f"Funnel 로 공개할 포트가 없다. Tailscale Funnel 은 443·8443·10000 만 허용하고, "
-        f"443 은 marina 자신의 원격 접근(대시보드)이 쓴다 — 443 에 경로를 붙이면 그 대시보드까지 "
-        f"인터넷에 열린다. 남은 {FUNNEL_PORTS[0]}·{FUNNEL_PORTS[1]} 가 이미 차 있다. "
-        f"앱을 더 공개하려면 도메인을 사서 Cloudflare 터널을 쓰거나, 쓰지 않는 공개를 "
-        f"`marina live unexpose <프로젝트>` 로 내려라."
+        "Funnel 로 공개할 포트가 없다. **Tailscale Funnel 이 허용하는 포트는 443·8443·10000 "
+        "셋뿐이고**(marina 의 제약이 아니다) 셋 다 차 있다. 앱을 더 공개하려면 도메인을 사서 "
+        "Cloudflare 터널을 쓰거나(`marina live expose <앱> --cloudflare --domain ...`), "
+        "쓰지 않는 공개를 `marina live unexpose <앱>` 으로 내려라."
     )
 
 
@@ -174,8 +192,17 @@ def _controller(controller=None):
     return RemoteController(marina_home=L.marina_home())
 
 
-def _live_route_ports(status) -> list:
-    return [int(r.get("httpsPort") or 0) for r in (status.get("liveRoutes") or [])]
+def _taken_funnel_ports(status) -> list:
+    """이미 쓰이는 Funnel 포트 — live 가 쥔 것 **과** marina 자신의 리스너가 쥔 것.
+
+    후자를 빼먹으면 대시보드가 443 에 있는데 live 가 거기 얹어 **대시보드를 공개해 버린다.**
+    """
+    live = [int(r.get("httpsPort") or 0) for r in (status.get("liveRoutes") or [])]
+    live_keys = {(int(r.get("httpsPort") or 0), str(r.get("path") or ""))
+                 for r in (status.get("liveRoutes") or [])}
+    own = [int(r.get("httpsPort") or 0) for r in (status.get("routes") or [])
+           if (int(r.get("httpsPort") or 0), str(r.get("path") or "")) not in live_keys]
+    return live + own
 
 
 def _require_tailscale(status) -> None:
@@ -225,8 +252,9 @@ def expose_status(project_id: str, controller=None) -> dict:
         if cfg.get("httpsPort") and int(r.get("httpsPort") or 0) == int(cfg["httpsPort"]) \
                 and str(r.get("path") or "") == str(cfg.get("path") or ""):
             out["mode"] = str(r.get("mode") or "off")
-            out["url"] = f"https://{host}:{r['httpsPort']}{r['path']}"
-            if out["mode"] == "funnel":
+            out["url"] = (f"https://{host}{r['path']}" if int(r["httpsPort"]) == 443
+                          else f"https://{host}:{r['httpsPort']}{r['path']}")
+            if out["mode"] == "funnel" and int(r["httpsPort"]) != 443:
                 out["warnings"].append(PATH_WARNING)
             break
     if out["cloudflare"]:
@@ -242,14 +270,26 @@ def expose_funnel(project_id: str, backend_port: int, path=None, controller=None
     ctl = _controller(controller)
     status = ctl.status(refresh=True)
     _require_tailscale(status)
-    want = funnel_path(project_id, path)
+    # 같은 프로젝트를 두 번 공개하지 않는다 — 포트가 비어 있으면 조용히 **두 번째 공개
+    # 주소**가 생겨서, 내렸다고 생각한 주소가 살아 있는 상태가 된다.
+    mine = expose_config(project_id)
+    if mine.get("httpsPort") and mine.get("path"):
+        for r in (status.get("routes") or []):
+            if int(r.get("httpsPort") or 0) == int(mine["httpsPort"]) \
+                    and str(r.get("path") or "") == str(mine["path"]):
+                raise L.LiveConfigError(
+                    f"'{project_id}' 는 이미 공개돼 있다 "
+                    f"({mine['httpsPort']}{mine['path']}). 바꾸려면 "
+                    f"`marina live unexpose {project_id}` 로 먼저 내려라."
+                )
+    port = pick_funnel_port(_taken_funnel_ports(status))
+    want = funnel_path(project_id, path, port)
     for r in (status.get("routes") or []):
-        if str(r.get("path") or "") == want:
+        if int(r.get("httpsPort") or 0) == port and str(r.get("path") or "") == want:
             raise L.LiveConfigError(
-                f"경로 {want} 는 이미 {r.get('httpsPort')} 에 공개돼 있다. 다른 --path 를 쓰거나 "
+                f"{port} 의 경로 {want} 는 이미 공개돼 있다. 다른 --path 를 쓰거나 "
                 f"`marina live unexpose` 로 먼저 내려라."
             )
-    port = pick_funnel_port(_live_route_ports(status))
     backend = f"http://127.0.0.1:{int(backend_port)}"
     after = ctl.add_live_route("funnel", port, want, backend)
     if after.get("state") == "action_required":
@@ -260,10 +300,20 @@ def expose_funnel(project_id: str, backend_port: int, path=None, controller=None
     cfg.update({"mode": "funnel", "httpsPort": port, "path": want, "backendPort": int(backend_port)})
     save_expose_config(project_id, cfg)
     host = after.get("dnsName") or (status.get("dnsName") or "")
+    url = f"https://{host}{want}" if port == 443 else f"https://{host}:{port}{want}"
+    warnings = []
+    if port == 443:
+        warnings.append(
+            "443 을 이 앱이 쥐었다. 그 동안 대시보드 원격 접근(`marina remote serve|funnel`)은 "
+            "443 에 올릴 수 없다 — AllowFunnel 이 host:port 단위라 올리는 순간 대시보드까지 "
+            "인터넷에 열린다. 대시보드는 Tailscale 사설망에서 <기계>:3900 으로 그냥 닿는다."
+        )
+    else:
+        warnings.append(PATH_WARNING)
     return {
         "mode": "funnel", "httpsPort": port, "path": want,
-        "url": f"https://{host}:{port}{want}",
-        "warnings": [PATH_WARNING],
+        "url": url,
+        "warnings": warnings,
     }
 
 
