@@ -27,6 +27,10 @@ echo "$out" | grep -q "unknown command" && { echo "FAIL: forward 가 unknown com
 out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" term-request 2>&1 || true)
 echo "$out" | grep -q "unknown command" && { echo "FAIL: term-request 가 unknown command"; exit 1; }
 echo "$out" | grep -q "usage: marina term-request" || { echo "FAIL: term-request 미라우팅 — $out"; exit 1; }
+# view-link: 결과물 보기(2026-10-05) — 입구에 안 걸면 unknown command
+out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" view-link 2>&1 || true)
+echo "$out" | grep -q "unknown command" && { echo "FAIL: view-link 가 unknown command"; exit 1; }
+echo "$out" | grep -q "usage: marina view-link" || { echo "FAIL: view-link 미라우팅 — $out"; exit 1; }
 # link: 등록 안 된 tmp cwd 에서도 전역 usage 가 아닌 marina.sh 응답(성공/무출력/자체 에러)이어야 함
 out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" link 2>&1 || true)
 echo "$out" | grep -q "전역 CLI" && { echo "FAIL: link 가 전역 usage 로 떨어짐"; exit 1; }

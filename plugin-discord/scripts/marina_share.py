@@ -62,10 +62,12 @@ def _public_addr(host: str, port: int) -> tuple[str, int] | None:
 class RenderServer:
     """공유 폴더만 내보내는 HTTP 서버 겸 크롬 전용 프록시."""
 
-    def __init__(self, root: Path, fit: str = ""):
+    def __init__(self, root: Path, fit: str = "", virtual: "dict[str, bytes] | None" = None):
         self.root = os.path.realpath(str(root))
+        self.virtual = virtual or {}     # 파일 없이 내주는 가상 페이지(경로 → HTML) — md 미리보기용
         self.fit = os.path.realpath(os.path.join(self.root, fit)) if fit else ""
         self.height = 0
+        self.failed = False              # 미리보기 페이지가 "라이브러리를 못 불러왔다"고 알렸는가
         outer = self
 
         class H(http.server.BaseHTTPRequestHandler):
@@ -85,6 +87,19 @@ class RenderServer:
                 if u.path == "/__marina/h":                    # 페이지가 알려 주는 전체 높이
                     v = urllib.parse.parse_qs(u.query).get("v", ["0"])[0]
                     outer.height = max(outer.height, int(v)) if v.isdigit() else outer.height
+                    self.send_response(204)
+                    self.end_headers()
+                    return
+                if u.path in outer.virtual:
+                    data = outer.virtual[u.path]
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+                if u.path == "/__marina/fail":
+                    outer.failed = True
                     self.send_response(204)
                     self.end_headers()
                     return
@@ -241,6 +256,93 @@ def render_html(page: Path, root: Path, outdir: Path, timeout: float = 45) -> tu
         if not out.is_file() or out.stat().st_size == 0:
             return None, "렌더링 결과가 없어"
         return out, ("페이지가 너무 길어 앞부분만 미리보기로 보내 — 전체는 HTML 파일로 봐 줘" if cut else "")
+    finally:
+        srv.stop()
+
+
+# ── md 미리보기: md → (가상) HTML → 크롬. runtime 의 md-view 와 같은 라이브러리·버전·SRI(복사본 — discord 는 runtime 을 import 하지 않는다)
+MAX_MD_BYTES = 2 * 1024 * 1024   # 이보다 큰 md 는 미리보기를 생략(크롬에 거대한 페이지를 먹이지 않는다)
+SLICE = 1600          # 한 장의 높이(CSS px) — 폰 폭(500)에서 배율 2 면 3200px
+_MD_LIBS = (
+    ("https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js", "sha384-/TQbtLCAerC3jgaim+N78RZSDYV7ryeoBCVqTuzRrFec2akfBkHS7ACQ3PQhvMVi"),
+    ("https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.1.6/purify.min.js", "sha384-+VfUPEb0PdtChMwmBcBmykRMDd+v6D/oFmB3rZM/puCMDYcIvF968OimRh4KQY9a"),
+)
+_MERMAID = ("https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.9.1/mermaid.min.js", "sha384-WmdflGW9aGfoBdHc4rRyWzYuAjEmDwMdGdiPNacbwfGKxBW/SO6guzuQ76qjnSlr")
+_MD_JS = """(function(){
+var off=parseInt((location.search.match(/[?&]o=(\\d+)/)||[])[1]||'0',10),w=document.getElementById('w');
+function report(){new Image().src='/__marina/h?v='+Math.ceil(w.offsetHeight);}
+function done(){w.style.transform='translateY(-'+off+'px)';report();setTimeout(report,800);}
+function fail(){new Image().src='/__marina/fail';}
+if(typeof marked==='undefined'||typeof DOMPurify==='undefined'){fail();return;}
+try{var d=JSON.parse(document.getElementById('md-data').textContent);
+w.innerHTML=DOMPurify.sanitize(marked.parse(d.text,{gfm:true}));}catch(e){fail();return;}
+var bl=w.querySelectorAll('pre > code.language-mermaid');
+if(!bl.length){done();return;}
+var nodes=[];Array.prototype.forEach.call(bl,function(c){var x=document.createElement('div');x.className='mermaid';x.textContent=c.textContent;c.parentNode.parentNode.replaceChild(x,c.parentNode);nodes.push(x);});
+var s=document.createElement('script');s.src=%s;s.integrity=%s;s.crossOrigin='anonymous';
+s.onload=function(){mermaid.initialize({startOnLoad:false,securityLevel:'strict',theme:'default'});mermaid.run({nodes:nodes}).then(done,done);};
+s.onerror=done;document.head.appendChild(s);})();"""
+_MD_CSS = ("html,body{margin:0;overflow:hidden;background:#fff}body{font:16px/1.65 -apple-system,'Apple SD Gothic Neo',sans-serif;color:#1f2328}"
+           "#w{padding:16px;overflow-wrap:anywhere}h1,h2{border-bottom:1px solid #d1d9e0;padding-bottom:.25em}h1,h2,h3{line-height:1.3}"
+           "code{font:.88em ui-monospace,Menlo,monospace;background:#f6f8fa;padding:.15em .35em;border-radius:5px}"
+           "pre{background:#f6f8fa;border:1px solid #d1d9e0;border-radius:8px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere}pre code{background:none;padding:0}"
+           "table{border-collapse:collapse;width:100%}th,td{border:1px solid #d1d9e0;padding:6px 10px;text-align:left}th{background:#f6f8fa}"
+           "blockquote{margin-left:0;padding:0 1em;color:#59636e;border-left:4px solid #d1d9e0}img,svg{max-width:100%;height:auto}.mermaid{text-align:center}")
+
+
+def md_preview_page(text: str, base_href: str) -> bytes:
+    """md 미리보기용 한 장짜리 HTML. 원문은 JSON 으로 심는다(`</script>` 가 있어도 안 빠져나오게 <>& 이스케이프)."""
+    import html as _html
+    payload = (json.dumps({"text": text}, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
+               .replace("&", "\\u0026").replace("\u2028", "\\u2028").replace("\u2029", "\\u2029"))
+    libs = "".join(f'<script src="{u}" integrity="{i}" crossorigin="anonymous"></script>' for u, i in _MD_LIBS)
+    js = _MD_JS % (json.dumps(_MERMAID[0]), json.dumps(_MERMAID[1]))
+    return (f'<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+            f'<base href="{_html.escape(base_href, quote=True)}"><style>{_MD_CSS}</style></head><body><div id="w"></div>'
+            f'<script type="application/json" id="md-data">{payload}</script>{libs}<script>{js}</script></body></html>').encode("utf-8")
+
+
+def render_md(page: Path, root: Path, outdir: Path, max_images: int = 4, timeout: float = 45) -> "tuple[list[Path], str]":
+    """md(root 안)를 폰 폭 미리보기 PNG 로 — 길면 세로로 잘라 최대 max_images 장(앞쪽부터). (파일들, 안내) — 실패면 ([], 이유)."""
+    chrome = find_chrome()
+    if not chrome:
+        return [], "크롬을 찾지 못했어"
+    real_root = os.path.realpath(str(root))
+    real = os.path.realpath(str(page))
+    try:
+        if os.path.getsize(real) > MAX_MD_BYTES:
+            return [], "문서가 너무 커서(2MB 초과) 미리보기를 생략했어"
+    except OSError:
+        return [], "파일을 읽지 못했어"
+    reldir = os.path.relpath(os.path.dirname(real), real_root)
+    base = "/" if reldir == "." else "/" + urllib.parse.quote(reldir.replace(os.sep, "/")) + "/"
+    html = md_preview_page(Path(real).read_text(encoding="utf-8", errors="replace"), base)
+    outdir.mkdir(parents=True, exist_ok=True)
+    stem = Path(real).stem
+    srv = RenderServer(root, virtual={"/__marina/md.html": html})
+    srv.start()
+    try:
+        url = f"http://127.0.0.1:{srv.port}/__marina/md.html"
+        first = outdir / f"{stem}-1.png"
+        if not _shot(chrome, srv.port, SLICE, first, f"{url}?o=0", timeout):       # 1차: 높이 재기 겸 첫 조각
+            return [], "렌더링 결과가 없어"
+        if srv.failed:                                                             # marked·DOMPurify 를 못 불러왔다 — 빈 이미지를 보내지 않는다
+            first.unlink(missing_ok=True)
+            return [], "렌더 라이브러리(marked·DOMPurify)를 불러오지 못했어"
+        h = srv.height
+        if not h:
+            return [first], ""
+        if h < SLICE:                                                              # 짧은 문서는 실제 높이로 다시 찍어 빈 공백을 없앤다
+            _shot(chrome, srv.port, max(h, 200), first, f"{url}?o=0", timeout)
+            return ([first] if first.is_file() and first.stat().st_size > 0 else []), ""
+        n = min(max_images, -(-h // SLICE))
+        out = [first]
+        for i in range(1, n):
+            f = outdir / f"{stem}-{i + 1}.png"
+            if not _shot(chrome, srv.port, max(min(SLICE, h - i * SLICE), 200), f, f"{url}?o={i * SLICE}", timeout):
+                break
+            out.append(f)
+        return out, (f"문서가 길어 앞쪽 {len(out)}장만 미리보기로 보내 — 전체는 열어보기 주소로 봐 줘" if h > len(out) * SLICE else "")
     finally:
         srv.stop()
 

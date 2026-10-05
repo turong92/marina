@@ -1104,6 +1104,7 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
 
 
 _CHAT_CONFIG_NAMES = (".mcp.json", "claude.md", "claude.local.md")
+_VIEW_SUFFIXES = (".html", ".htm", ".md", ".markdown", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".pdf")   # 폰 브라우저가 여는 결과물
 
 
 def _deny(reason: str) -> dict[str, Any]:
@@ -2255,8 +2256,8 @@ def lobby_tool(name: str, args: dict[str, Any]) -> str:
 
 _CHAT_TOOLS_MCP = [
     {"name": "share_file",
-     "description": "만든 결과물을 Discord 로 보낼 준비를 한다. HTML 이면 미리보기 이미지를 만들고, #자료실 에도 모아 올린다. "
-                    "돌려받은 파일 경로들을 reply 의 files 로 첨부해라.",
+     "description": "만든 결과물을 Discord 로 보낼 준비를 한다. HTML·md 이면 미리보기 이미지를 만들고, #자료실 에도 모아 올린다. "
+                    "돌려받은 파일 경로들을 reply 의 files 로 첨부하고, 열어보기 주소가 있으면 reply 본문에 넣어라.",
      "inputSchema": {"type": "object",
                      "properties": {"path": {"type": "string", "description": "이 폴더 안 파일 경로(상대·절대)"},
                                     "title": {"type": "string", "description": "결과물 제목(자료실 표시용)"}},
@@ -2383,6 +2384,26 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
             files = [prev] + files
             if why:
                 notes.append(why)
+    if path.suffix.lower() in (".md", ".markdown"):
+        outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else Path(str(rec["stateDir"])) / "미리보기"
+        imgs, why = marina_share.render_md(path, root, outdir)
+        if not imgs:
+            notes.append(f"미리보기를 만들지 못했어({why}) — md 파일만 보내")
+        else:
+            files = imgs + files
+            if why:
+                notes.append(why)
+    if path.suffix.lower() in _VIEW_SUFFIXES and rec.get("kind") not in CHAT_KINDS:
+        # 폰에서 여는 보기 주소 — runtime 은 `marina view-link` CLI 로만 부른다(채팅 폴더는 등록된 워크트리가 아니라 개발 세션만)
+        try:
+            r = _run_marina(["view-link", str(path)], cwd=root, timeout=30)
+            lines = (r.stdout or "").strip().splitlines()
+            url = lines[-1] if lines else ""
+            if r.returncode != 0 or not url.startswith(("http://", "https://")):
+                raise SessionError((r.stderr or r.stdout or "").strip()[:200] or "주소가 비었어")
+            notes.append(f"열어보기: {url} — reply 본문에 이 주소를 넣어")
+        except (SessionError, OSError, subprocess.SubprocessError) as exc:
+            notes.append(f"열어보기 링크를 만들지 못했어({exc}) — 첨부만 보내")
     title = str(args.get("title") or path.stem).replace("@", "").replace("\n", " ")[:80]
     cfg = load_config()
     arch = str((cfg["projects"].get(str(rec.get("project"))) or {}).get("archiveChannelId") or "")

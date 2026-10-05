@@ -120,7 +120,10 @@ check(up and up[-1]["b"]["payload"].get("allowed_mentions") == {"parse": []}, "�
 
 (root / "목록.md").write_text("# 목록")
 r, e = call({"path": str(root / "목록.md")})
-check(not r.get("isError") and "미리보기" not in r["content"][0]["text"], f"html 아닌 파일은 원본만: {r}")
+check(not r.get("isError") and str(root / "미리보기" / "목록-1.png") in r["content"][0]["text"], f"md 도 미리보기 이미지(2026-10-05): {r}")
+(root / "메모.txt").write_text("x")
+r, e = call({"path": "메모.txt"})
+check(not r.get("isError") and "미리보기" not in r["content"][0]["text"], f"html·md 아닌 파일은 원본만: {r}")
 for bad in ("/etc/hosts", "../discord.json", "없는파일.html", str(mh / "discord.json")):
     r, e = call({"path": bad})
     check(r.get("isError") is True, f"공유 거절: {bad} → {r}")

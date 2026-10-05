@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import re
 import ssl
 import urllib.parse
 from http.cookies import SimpleCookie
@@ -40,6 +41,14 @@ PUBLIC_PATHS = {
     "/api/chain",          # marina chain CLI — 루프백 + 호출자 확인(marina_handler)
 }
 PUBLIC_PREFIXES = ("/web/",)
+# /view 의 자산 티켓 경로 — 샌드박스(불투명 origin) 문서의 상대 자산 요청은 SameSite 쿠키를 못 보낸다. 로그인한 열람이 발급한
+# 티켓(marina_view_links.issue_ticket)이 인증을 대신하고, 티켓 검사는 핸들러가 한다.
+VIEW_TICKET_RE = re.compile(r"^/view/[A-Za-z0-9_-]{20,64}/~/[A-Za-z0-9_-]{10,64}/")
+LOGIN_REDIRECT_PATHS = ("/", "/mobile", "/term-run")      # 이 페이지들은 비로그인이면 401 대신 로그인 화면으로
+
+
+def is_login_redirect_path(path: str) -> bool:
+    return path in LOGIN_REDIRECT_PATHS or path.startswith("/view/")
 AUTH_API_PREFIX = "/api/auth/"
 
 
@@ -423,13 +432,13 @@ class AuthHTTPController:
         parsed: urllib.parse.ParseResult,
     ) -> SessionPrincipal | None | object:
         try:
-            if parsed.path in PUBLIC_PATHS or parsed.path.startswith(PUBLIC_PREFIXES):
+            if parsed.path in PUBLIC_PATHS or parsed.path.startswith(PUBLIC_PREFIXES) or VIEW_TICKET_RE.match(parsed.path):
                 return None
             if not self.store.auth_enabled():
                 return None
             principal = self._principal(handler)
             if principal is None:
-                if method == "GET" and parsed.path in ("/", "/mobile", "/term-run"):
+                if method == "GET" and is_login_redirect_path(parsed.path):
                     self._redirect_login(handler, parsed)
                 else:
                     handler.send_json({"error": "authentication_required", "message": "Sign in to continue."}, 401)
@@ -449,7 +458,7 @@ class AuthHTTPController:
             return principal
         except Exception as exc:
             print(f"[marina] auth unavailable: {exc!r}")
-            if method == "GET" and parsed.path in ("/", "/mobile", "/term-run"):
+            if method == "GET" and is_login_redirect_path(parsed.path):
                 self._redirect_login(handler, parsed)
             else:
                 handler.send_json({

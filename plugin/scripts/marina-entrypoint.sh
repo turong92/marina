@@ -67,6 +67,8 @@ usage (marina = 전역 CLI):
     marina forward [<포트> <host|서비스명|호스트:포트> | <포트> --reset]
   터미널 넘기기 (사람이 직접 실행해야 하는 명령 — 링크를 열면 이 워크트리 셸에 입력만 해 두고 Enter 는 사람이):
     marina term-request <명령> [--why <이유>]        # 1회용 15분 링크 주소 한 줄 출력
+  결과물 보기 (HTML·md·이미지·pdf 를 폰에서 열기 — 대시보드 로그인 필요, 링크 7일):
+    marina view-link <파일>                         # 보기 주소 한 줄 출력
   docker GC (워크트리에 안 묶인 산출물 — 빌드캐시·dangling 이미지·익명 볼륨·e2e 잔재, 데몬이 정책 주기로 자동 실행):
     marina docker gc [--dry-run] [--now] [--json]   # 인자 없으면 주기가 됐을 때만 실행
     marina docker gc status | policy [<key> <value>] # 정책: ~/.marina/docker-gc.json
@@ -228,7 +230,7 @@ case "$command" in
   auth|user)
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$AUTH_CLI" "$command" "$@"
     ;;
-  project|worktree|gateway|link|reap|session|forward|term-request)
+  project|worktree|gateway|link|reap|session|forward|term-request|view-link)
     # 그룹 → marina.sh dispatch 로 위임 (project {add|rm|ls|...} · worktree create · gateway {start|...} · link)
     # worktree/gateway 누락이 "설치 shim 은 이 명령 없음" 증상의 원인이었음(도그푸드에서 발견)
     "$SESSION" "$command" "$@"
