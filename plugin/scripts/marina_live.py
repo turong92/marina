@@ -126,3 +126,78 @@ def pin_ref(project_id: str, ref: str) -> dict:
         _write_registry(data)
         return block
     raise LiveConfigError(f"등록된 프로젝트가 아니다: '{project_id}'. `marina project ls` 로 확인해라.")
+
+
+# ── ref 고정 체크아웃 ─────────────────────────────────────────────────────────
+def _git(run, cwd, *args, **kw):
+    what = kw.pop("what")
+    r = run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
+    if r.returncode != 0:
+        raise LiveConfigError(f"{what} 실패: {(r.stderr or r.stdout or '').strip()}")
+    return (r.stdout or "").strip()
+
+
+@contextlib.contextmanager
+def src_lock(project_id: str):
+    """같은 프로젝트의 live 조작을 직렬화한다. `git worktree add` 와 유닛 설치가 겹치면
+    반쯤 설치된 상태가 남기 때문이다(두 번째 add 는 '이미 등록됨' 으로 실패하고, 그 시점에
+    첫 번째는 아직 유닛을 안 썼다). O_EXCL 로 만든 파일이 잠금이다."""
+    root = live_root(project_id)
+    root.mkdir(parents=True, exist_ok=True)
+    lock = root / ".lock"
+    try:
+        fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        raise LiveConfigError(
+            f"'{project_id}' 의 live 작업이 이미 돌고 있다. 끝나기를 기다리거나, "
+            f"비정상 종료였다면 {lock} 를 지워라."
+        )
+    try:
+        os.write(fd, str(os.getpid()).encode())
+        os.close(fd)
+        yield
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+def sync_src(project_root: str, project_id: str, ref: str, run=subprocess.run) -> pathlib.Path:
+    """live/src 를 ref 에 맞춘다. clone 이 아니라 `git worktree` 를 쓴다 —
+    attach-detached-subrepos.sh 가 외부 레포에 쓰는 것과 같은 관례이고, 네트워크 없이
+    되고 원격이 없는 로컬 전용 프로젝트에서도 된다.
+
+    실패하면 기존 체크아웃을 **건드리지 않는다** — 돌고 있는 서비스의 소스를 날리지 않기
+    위해서다(브랜치 force-push·태그 삭제로 ref 가 사라진 경우가 이 경로다).
+    """
+    src = live_src(project_id)
+    if not ref:
+        raise LiveConfigError(f"'{project_id}' 의 live.ref 가 비었다.")
+    root = pathlib.Path(project_root or "")
+    if not (root / ".git").exists():
+        raise LiveConfigError(f"git 레포가 아니다: {project_root}. live 체크아웃은 git ref 로만 고정한다.")
+
+    if (src / ".git").exists():
+        # 기존 워크트리는 원격을 먼저 당긴다 — 브랜치 ref 가 움직였으면 그 뒤에 풀어야 한다.
+        # 원격이 없으면 fetch 는 no-op 이다(로컬 전용 프로젝트도 이 경로를 탄다).
+        _git(run, src, "fetch", "--all", "--tags", "--quiet", what="fetch")
+
+    # ref 가 실재하는지 **먼저** 확인하고 커밋 SHA 로 바꾼다. 두 이유가 있다.
+    # ① 확인을 먼저 해야 아래에서 트리를 망친 뒤 실패하지 않는다(force-push 경로).
+    # ② live/src 는 detached 라 거기서 'HEAD'·'main' 을 풀면 **이전 기동 시점**을 가리킨다.
+    #    ref 는 항상 프로젝트 레포에서 풀고, 워크트리에는 풀린 SHA 를 준다.
+    sha = _git(run, root, "rev-parse", "--verify", f"{ref}^{{commit}}",
+               what=f"ref '{ref}' 확인")
+    if not sha:
+        raise LiveConfigError(f"ref '{ref}' 를 커밋으로 풀지 못했다.")
+
+    if (src / ".git").exists():
+        # 사람이 편집하는 곳이 아니라 하드 리셋이 안전하다.
+        _git(run, src, "checkout", "--detach", "--force", sha, what=f"'{ref}' 체크아웃")
+        _git(run, src, "reset", "--hard", "--quiet", sha, what="하드 리셋")
+        _git(run, src, "clean", "-fdq", what="clean")
+    else:
+        src.parent.mkdir(parents=True, exist_ok=True)
+        # src 를 손으로 지웠으면 레포에는 등록만 남아 add 가 '이미 등록됨' 으로 거부한다.
+        _git(run, root, "worktree", "prune", what="stale worktree 정리")
+        _git(run, root, "worktree", "add", "--detach", "--force", str(src), sha,
+             what=f"live 체크아웃 생성({ref})")
+    return src
