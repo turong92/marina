@@ -185,6 +185,29 @@ def missing_cloudflare_secrets(project_id: str) -> list:
     return []
 
 
+def _project_using_tunnel(tunnel_id: str, exclude: str = ""):
+    """그 터널을 이미 쓰고 있는 다른 프로젝트 id. 없으면 None.
+
+    ~/.marina/*/live/expose.json 을 훑는다 — 레지스트리가 아니라 공개 설정이 진실이다
+    (프로젝트를 레지스트리에서 지웠는데 공개가 남아 있는 경우도 잡아야 한다)."""
+    home = L.marina_home()
+    if not home.is_dir():
+        return None
+    for child in sorted(home.iterdir()):
+        if not child.is_dir() or child.name == exclude:
+            continue
+        f = child / L.LIVE_SESSION / "expose.json"
+        if not f.exists():
+            continue
+        try:
+            cf = (json.loads(f.read_text(encoding="utf-8")) or {}).get("cloudflare") or {}
+        except Exception:
+            continue
+        if str(cf.get("tunnel") or "") == str(tunnel_id):
+            return child.name
+    return None
+
+
 def _controller(controller=None):
     if controller is not None:
         return controller
@@ -329,6 +352,21 @@ def expose_cloudflare(project_id: str, domain: str, creds: dict, service: str,
         )
     validate_cloudflare(creds)
     creds_full = {k: str(creds[k]).strip() for k in CLOUDFLARE_REQUIRED}
+    # **터널은 프로젝트마다 하나다.** 두 live 프로젝트가 한 터널을 공유하면 각자 자기
+    # compose 네트워크에서 cloudflared 를 띄워 **커넥터가 둘**이 된다. Cloudflare 는
+    # 요청을 그중 아무 데로나 보내는데(실측), A 의 커넥터는 B 의 서비스를 DNS 로 찾을 수
+    # 없다 — 다른 네트워크다. 그래서 절반이 502 가 된다. 홈서버 테라폼은 스택 하나에
+    # 커넥터 하나·앱 여러 개라 이 문제가 없지만, live 는 프로젝트가 격리 단위라 다르다.
+    # **아무것도 만들기 전에** 막는다(비밀 파일도 쓰기 전이다).
+    other = _project_using_tunnel(creds_full["tunnel"], exclude=project_id)
+    if other:
+        raise L.LiveConfigError(
+            f"터널 {creds_full['tunnel']} 은 이미 '{other}' 가 쓰고 있다. 한 터널을 두 "
+            f"프로젝트가 쓰면 커넥터가 둘 생기고, Cloudflare 가 요청을 아무 커넥터로나 "
+            f"보내는데 서로 다른 compose 네트워크라 상대 서비스를 못 찾아 절반이 502 가 "
+            f"된다. **프로젝트마다 터널을 따로 만들어라**(Cloudflare 에서 새 터널을 하나 "
+            f"더 만들면 된다 — 도메인·zone 은 공유해도 괜찮다)."
+        )
     write_secrets(project_id, {"TUNNEL_TOKEN": creds_full["token"]})
     cfg = dict(expose_config(project_id))
     cfg["cloudflare"] = {

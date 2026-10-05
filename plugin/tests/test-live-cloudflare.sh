@@ -167,4 +167,47 @@ assert any("502" in w for w in res["warnings"]), res["warnings"]   # 커넥터 �
 assert [c for c in calls if c[0] == "PUT"], calls
 print("ok")
 PY
-echo "PASS test-live-cloudflare (expose 배선 포함)"
+
+echo "--- 같은 터널을 두 프로젝트가 쓰면 거부한다"
+PYTHONPATH="$SCRIPTS" python3 - "$SCRIPTS" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import marina_live as L
+import marina_live_expose as X
+
+def fake(method, path, token, body=None):
+    if method == "GET" and "/dns_records" in path:
+        return {"result": []}
+    if method == "GET" and "/configurations" in path:
+        return {"result": {"config": {"ingress": [{"service": "http_status:404"}]}}}
+    return {"result": {}}
+
+A = {"token": "t0k", "zone": "ZONE1", "account": "ACC1", "tunnel": "SHARED"}
+X.expose_cloudflare("projA", "a.example.com", A, "server", 8080, call=fake)
+
+# 같은 터널을 다른 프로젝트가 쓰려 하면 거부한다. 허용하면 커넥터가 둘 생기고,
+# Cloudflare 가 요청을 아무 커넥터로나 보내는데 서로 다른 compose 네트워크라
+# 상대 서비스의 DNS 를 못 찾아 절반이 502 가 된다.
+B = {"token": "t0k2", "zone": "ZONE2", "account": "ACC1", "tunnel": "SHARED"}
+try:
+    X.expose_cloudflare("projB", "b.example.com", B, "web", 3000, call=fake)
+    raise AssertionError("같은 터널인데 통과했다")
+except L.LiveConfigError as e:
+    assert "SHARED" in str(e) and "projA" in str(e), e
+    assert "터널" in str(e), e
+# 거부했으면 **아무것도 안 만들었어야** 한다
+assert not X.expose_file("projB").exists() or not (
+    X.expose_config("projB").get("cloudflare")), X.expose_config("projB")
+assert not X.secrets_file("projB").exists(), "거부했는데 비밀 파일을 썼다"
+
+# 터널이 다르면 된다
+C = {"token": "t0k3", "zone": "ZONE2", "account": "ACC1", "tunnel": "OTHER"}
+res = X.expose_cloudflare("projB", "b.example.com", C, "web", 3000, call=fake)
+assert res["url"] == "https://b.example.com", res
+
+# 같은 프로젝트가 자기 터널을 다시 쓰는 건 된다 (도메인 변경 등)
+res = X.expose_cloudflare("projA", "a2.example.com", A, "server", 8080, call=fake)
+assert res["url"] == "https://a2.example.com", res
+print("ok")
+PY
+echo "PASS test-live-cloudflare (터널 공유 거부 포함)"
