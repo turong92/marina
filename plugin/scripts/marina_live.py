@@ -332,3 +332,53 @@ def write_unit(project_id: str, marina_bin: str) -> pathlib.Path:
         else systemd_body(project_id, marina_bin)
     p.write_text(body, encoding="utf-8")
     return p
+
+
+# ── 게이트웨이 등록 ───────────────────────────────────────────────────────────
+# live 도 로컬 게이트웨이에 `live.<프로젝트>.localhost` 로 올린다. 공개(L2)와는 다른
+# 용도다 — 공개가 꺼져 있어도 개발자는 게이트웨이로 들어가야 하고, 공개를 해제해도 이
+# 주소는 계속 살아 있어야 한다.
+def live_service_ports(project_id: str, run=subprocess.run) -> dict:
+    """{서비스명: 호스트포트} — 실행 중인 live 컨테이너가 실제로 게시한 포트.
+
+    선언 포트를 쓰지 않고 실측하는 이유: 게이트웨이는 **지금 닿는 곳**으로 보내야 한다.
+    안 뜬 서비스로 보내면 죽은 컨테이너로 프록시하게 된다(게이트웨이의 기존 running 규칙과 같다).
+    """
+    r = run(["docker", "ps",
+             "--filter", f"label={LIVE_LABEL}=1",
+             "--filter", f"label={PROJECT_LABEL}={project_id}",
+             "--format", '{{.Label "com.docker.compose.service"}}\t{{.Ports}}'],
+            capture_output=True, text=True)
+    out = {}
+    if getattr(r, "returncode", 1) != 0:
+        return out
+    for line in (getattr(r, "stdout", "") or "").splitlines():
+        if "\t" not in line:
+            continue
+        svc, ports = line.split("\t", 1)
+        svc = svc.strip()
+        if not svc:
+            continue
+        for chunk in ports.split(","):
+            chunk = chunk.strip()
+            if "->" not in chunk:
+                continue
+            left = chunk.split("->", 1)[0]
+            host = left.rsplit(":", 1)[-1]
+            if host.isdigit():
+                out.setdefault(svc, int(host))
+                break
+    return out
+
+
+def live_gateway_entry(project_id: str, ports: dict, primary: str = "") -> dict:
+    """게이트웨이 스냅샷 항목. 워크트리 id 자리에 예약어 'live' 를 넣어
+    `live.<프로젝트>.localhost` 가 되게 한다 — 워크트리와 한눈에 구분된다."""
+    return {
+        "id": LIVE_SESSION,
+        "projectId": project_id,
+        "primary": primary or "",
+        "services": [{"service": s, "port": ports[s], "running": True, "routes": [],
+                      "cors": False, "corsConsumers": []}
+                     for s in sorted(ports)],
+    }

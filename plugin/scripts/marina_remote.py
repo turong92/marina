@@ -222,10 +222,40 @@ class RemoteController:
                 fcntl.flock(descriptor, fcntl.LOCK_UN)
                 os.close(descriptor)
 
+    # ── live(상시 운영) 라우트 ────────────────────────────────────────────────
+    # marina 자신의 원격 접근은 443 의 "/" 에 리스너 **하나**만 둔다. 상시 운영(marina live)
+    # 공개는 그와 별개로 8443·10000 에 경로 라우트를 더한다. 그 둘을 섞으면:
+    #   · activate() 의 검증(_matches)이 "라우트가 1개" 를 요구해 롤백한다
+    #   · off() 의 검증이 live 라우트를 보고 "안 꺼졌다" 로 판정한다
+    #   · 설정 지문이 달라져 status 가 conflict 를 올리고 off() 가 "남의 것" 이라며 거부한다
+    # 그래서 저장 상태에 live 라우트를 기록하고, **소유 판정에서 걷어낸 뒤** marina 자신의
+    # 리스너만 보고 판단한다. 지문은 live 변경 때마다 다시 저장해 소유를 유지한다.
+    def _saved_live_routes(self) -> list[dict[str, Any]]:
+        saved = self._saved_state().get("liveRoutes")
+        return [r for r in saved if isinstance(r, dict)] if isinstance(saved, list) else []
+
     @staticmethod
-    def _matches(status: dict[str, Any], mode: str, backend: str) -> bool:
+    def _route_key(route: dict[str, Any]) -> tuple:
+        return (int(route.get("httpsPort") or 443), str(route.get("path") or "/"), str(route.get("backend") or ""))
+
+    def _own_routes(self, status: dict[str, Any]) -> list[dict[str, Any]]:
+        """marina 자신의 원격 접근 라우트만 — live 공개 라우트는 뺀다."""
         routes = status.get("routes")
-        if not isinstance(routes, list) or len(routes) != 1:
+        if not isinstance(routes, list):
+            return []
+        live_keys = {self._route_key(r) for r in self._saved_live_routes()}
+        return [r for r in routes if isinstance(r, dict) and self._route_key(r) not in live_keys]
+
+    def _own_mode(self, status: dict[str, Any]) -> str:
+        own = self._own_routes(status)
+        if not own:
+            return "off"
+        funnel = next((r for r in own if r.get("mode") == "funnel"), None)
+        return str((funnel or own[0]).get("mode") or "off")
+
+    def _matches(self, status: dict[str, Any], mode: str, backend: str) -> bool:
+        routes = self._own_routes(status)
+        if len(routes) != 1:
             return False
         route = routes[0]
         return (
@@ -340,7 +370,9 @@ class RemoteController:
             "configFingerprint": fingerprint if nonempty else None,
             "configuration": configuration,
             "routes": routes,
+            "liveRoutes": self._saved_live_routes(),
         })
+        payload["ownMode"] = self._own_mode(payload)
         if nonempty and routes:
             payload["state"] = mode
         return self._finish_status(payload)
@@ -394,10 +426,12 @@ class RemoteController:
                     or "Tailscale rollback command failed."
                 ).strip()
                 return False, self.status(refresh=True), message
+            self._refresh_fingerprint()
             restored = self.status(refresh=True)
-            valid = (
-                self._matches(restored, str(previous_mode), previous_backend)
-                and restored.get("configFingerprint") == previous_fingerprint
+            valid = self._matches(restored, str(previous_mode), previous_backend) and (
+                # live 라우트가 있으면 전체 지문은 당연히 다르다 — 그 경우 라우트 일치로 판정한다
+                bool(self._saved_live_routes())
+                or restored.get("configFingerprint") == previous_fingerprint
             )
             return valid, restored, "" if valid else "Rollback verification failed."
 
@@ -410,8 +444,9 @@ class RemoteController:
                     or "Tailscale cleanup command failed."
                 ).strip()
                 return False, self.status(refresh=True), message
+            self._refresh_fingerprint()
             removed = self.status(refresh=True)
-            valid = removed.get("mode") == "off" and not removed.get("conflict")
+            valid = self._own_mode(removed) == "off" and not removed.get("conflict")
             return valid, removed, "" if valid else "Cleanup verification failed."
 
         def rollback_requested() -> tuple[bool, dict[str, Any], str]:
@@ -426,8 +461,9 @@ class RemoteController:
             if disabled.returncode != 0:
                 message = (disabled.stderr or disabled.stdout or "Tailscale command failed.").strip()
                 raise RemoteControlError("transition_failed", message, {"rollback": "not_needed"})
+            self._refresh_fingerprint()         # live 라우트가 남아 설정이 비지 않는다 — 위 설명 참고
             after_disable = self.status(refresh=True)
-            if after_disable.get("mode") != "off" or after_disable.get("conflict"):
+            if self._own_mode(after_disable) != "off" or after_disable.get("conflict"):
                 raise RemoteControlError(
                     "transition_failed",
                     "The previous Tailscale listener was not removed; the new mode was not enabled.",
@@ -482,6 +518,7 @@ class RemoteController:
             "httpsPort": 443,
             "path": "/",
             "configFingerprint": current["configFingerprint"],
+            "liveRoutes": self._saved_live_routes(),      # live 공개는 443 과 별개 — 모드 전환이 지우지 않는다
             "updatedAt": self.clock(),
         }
         try:
@@ -500,6 +537,126 @@ class RemoteController:
         current["conflict"] = False
         return current
 
+    # Funnel 이 허용하는 포트는 443·8443·10000 셋뿐이고, marina 자신의 원격 접근이 443 을
+    # 쓴다(activate 는 --https=443 고정). **443 의 경로로 앱을 공개하면 안 된다**: AllowFunnel 은
+    # 경로가 아니라 authority(host:port) 단위라, /app 을 공개하려고 funnel 을 켜면 같은 443 의
+    # "/" 에 있는 **대시보드까지 인터넷에 열린다**(관리 UI 공개 금지). 그래서 live 는 8443·10000
+    # 만 쓰고, 그 결과 동시에 공개할 수 있는 앱은 최대 2개다 — 숨기지 않고 그대로 알린다.
+    LIVE_FUNNEL_PORTS = (8443, 10000)
+
+    def add_live_route(self, mode: str, https_port: int, path: str, backend: str) -> dict[str, Any]:
+        with self._mutation_lock():
+            return self._add_live_route_unlocked(mode, https_port, path, backend)
+
+    def _add_live_route_unlocked(self, mode: str, https_port: int, path: str, backend: str) -> dict[str, Any]:
+        if mode not in ("serve", "funnel"):
+            raise ValueError("mode must be 'serve' or 'funnel'")
+        if int(https_port) == 443:
+            raise RemoteControlError(
+                "live_port_reserved",
+                "443 is reserved for Marina's own remote access; funnel there would publish the dashboard.",
+            )
+        if not str(path).startswith("/") or str(path) == "/":
+            raise ValueError("path must start with '/' and must not be '/'")
+        before = self.status(refresh=True)
+        if not before.get("installed"):
+            raise RemoteControlError("tailscale_not_found", "Tailscale CLI is not installed.")
+        if not before.get("online"):
+            raise RemoteControlError("tailscale_offline", "Tailscale daemon is not running.")
+        if before.get("conflict"):
+            raise RemoteControlError(
+                "config_conflict",
+                "Tailscale configuration does not match Marina's saved fingerprint.",
+                {"configFingerprint": before.get("configFingerprint")},
+            )
+        executable = self._executable()
+        if executable is None:
+            raise RemoteControlError("tailscale_not_found", "Tailscale CLI is not installed.")
+        entry = {"mode": mode, "httpsPort": int(https_port), "path": str(path), "backend": str(backend)}
+        completed = self._mutate(executable, mode, "--bg", f"--https={int(https_port)}",
+                                 f"--set-path={path}", backend)
+        if completed.returncode != 0:
+            message = (completed.stderr or completed.stdout or "Tailscale command failed.").strip()
+            match = CONSENT_URL_RE.search((completed.stdout or "") + "\n" + (completed.stderr or ""))
+            if match:
+                return {**self.status(refresh=True), "state": "action_required",
+                        "actionUrl": match.group(0).rstrip(".,);]"),
+                        "error": {"code": "consent_required", "message": message}}
+            raise RemoteControlError("tailscale_command_failed", message)
+        self._persist_live_routes(self._saved_live_routes() + [entry])
+        current = self.status(refresh=True)
+        if not any(self._route_key(r) == self._route_key(entry) for r in (current.get("routes") or [])):
+            # 되돌린다 — 반쯤 켜진 상태를 남기면 "공개됐다고 하는데 안 열린다" 가 된다.
+            self._mutate(executable, mode, f"--https={int(https_port)}", f"--set-path={path}", "off")
+            self._persist_live_routes([r for r in self._saved_live_routes()
+                                       if self._route_key(r) != self._route_key(entry)])
+            raise RemoteControlError("verification_failed",
+                                     "Tailscale did not report the requested live route.")
+        return current
+
+    def remove_live_route(self, https_port: int, path: str) -> dict[str, Any]:
+        with self._mutation_lock():
+            return self._remove_live_route_unlocked(https_port, path)
+
+    def _remove_live_route_unlocked(self, https_port: int, path: str) -> dict[str, Any]:
+        """멱등 — 이미 없으면 성공으로 끝낸다. 공개 해제는 몇 번 불러도 같아야 한다."""
+        saved = self._saved_live_routes()
+        target = [r for r in saved if int(r.get("httpsPort") or 0) == int(https_port)
+                  and str(r.get("path") or "") == str(path)]
+        status = self.status(refresh=True)
+        present = any(int(r.get("httpsPort") or 0) == int(https_port) and str(r.get("path") or "") == str(path)
+                      for r in (status.get("routes") or []))
+        if not target and not present:
+            return status
+        if not status.get("installed") or not status.get("online"):
+            raise RemoteControlError("tailscale_offline", "Tailscale daemon is not running.")
+        executable = self._executable()
+        if executable is None:
+            raise RemoteControlError("tailscale_not_found", "Tailscale CLI is not installed.")
+        mode = str((target[0].get("mode") if target else "funnel") or "funnel")
+        if present:
+            completed = self._mutate(executable, mode, f"--https={int(https_port)}", f"--set-path={path}", "off")
+            if completed.returncode != 0:
+                message = (completed.stderr or completed.stdout or "Tailscale command failed.").strip()
+                raise RemoteControlError("tailscale_command_failed", message)
+        self._persist_live_routes([r for r in saved
+                                   if not (int(r.get("httpsPort") or 0) == int(https_port)
+                                           and str(r.get("path") or "") == str(path))])
+        current = self.status(refresh=True)
+        if any(int(r.get("httpsPort") or 0) == int(https_port) and str(r.get("path") or "") == str(path)
+               for r in (current.get("routes") or [])):
+            raise RemoteControlError("verification_failed", "Tailscale did not remove the live route.")
+        return current
+
+    def _refresh_fingerprint(self) -> None:
+        """**우리 자신이** 설정을 바꾼 직후, 저장된 지문을 현재 설정으로 갱신한다.
+
+        왜 필요한가: live 라우트가 남아 있으면 marina 자신의 리스너를 끄거나 바꿔도 설정이
+        비지 않는다. 그러면 저장된 지문이 낡아 `owned=False` → `conflict=True` 가 되고,
+        "남의 설정이라 건드리지 않는다" 라는 안전장치가 **우리 자신의 변경** 때문에
+        작동해 off/activate 가 영구히 실패한다(실측). 지문의 목적은 '밖에서 바뀐 것'을
+        감지하는 것이므로, 우리가 바꾼 직후에는 갱신이 맞다."""
+        if not self._saved_live_routes():
+            return
+        probe = self.status(refresh=True)
+        state = dict(self._saved_state())
+        state["configFingerprint"] = probe.get("configFingerprint")
+        state["updatedAt"] = self.clock()
+        self._write_state(state)
+        self._cache = {}
+
+    def _persist_live_routes(self, routes: list) -> None:
+        """live 라우트 목록과 **새 설정 지문**을 함께 저장한다. 지문을 갱신하지 않으면
+        status 가 conflict 를 올려 대시보드가 원격을 끄지도 켜지도 못한다."""
+        state = dict(self._saved_state())
+        state.setdefault("version", 1)
+        state["liveRoutes"] = list(routes)
+        probe = self.status(refresh=True)
+        state["configFingerprint"] = probe.get("configFingerprint")
+        state["updatedAt"] = self.clock()
+        self._write_state(state)
+        self._cache = {}        # 지문이 바뀌었으니 다음 status 는 다시 읽는다
+
     def off(self) -> dict[str, Any]:
         with self._mutation_lock():
             return self._off_unlocked()
@@ -516,7 +673,7 @@ class RemoteController:
                 "Tailscale configuration does not match Marina's saved fingerprint.",
                 {"configFingerprint": before.get("configFingerprint")},
             )
-        if before.get("mode") == "off":
+        if self._own_mode(before) == "off":
             return before
 
         saved = self._saved_state()
@@ -535,19 +692,26 @@ class RemoteController:
             raise RemoteControlError("tailscale_command_failed", message)
 
         current = self.status(refresh=True)
-        if current.get("mode") != "off" or current.get("conflict"):
+        # conflict 는 보지 않는다: live 라우트가 남아 있으면 **우리 자신의 off** 로 지문이
+        # 달라져 반드시 conflict 가 된다. 진짜 검증은 "내 리스너가 사라졌나" 다.
+        if self._own_mode(current) != "off":
             raise RemoteControlError(
                 "verification_failed",
                 "Tailscale did not remove the owned Marina listener.",
             )
+        live = self._saved_live_routes()
         state = {
             "version": 1,
             "mode": "off",
             "backend": None,
             "httpsPort": 443,
             "path": "/",
-            "configFingerprint": None,
+            # live 라우트가 남아 있으면 설정은 여전히 marina 것이다 — 지문을 버리면 다음 번에
+            # conflict 로 보여 live 를 끌 수도 없게 된다.
+            "configFingerprint": current.get("configFingerprint") if live else None,
+            "liveRoutes": live,
             "updatedAt": self.clock(),
         }
         self._write_state(state)
-        return current
+        self._cache = {}
+        return self.status(refresh=True)

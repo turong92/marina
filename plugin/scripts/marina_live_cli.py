@@ -13,6 +13,7 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import marina_live as L     # noqa: E402
+import marina_live_expose as X     # noqa: E402
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _MC = None
@@ -37,9 +38,13 @@ USAGE = """사용법:
   marina live logs <프로젝트> [서비스]
   marina live restart <프로젝트> <서비스>
   marina live pin <프로젝트> <ref>  # 무엇을 운영할지 정한다 (배포 = 이걸 바꾸는 일)
+  marina live expose <프로젝트> [--path /x] [--service <서비스>]       # Tailscale Funnel 로 공개
+  marina live expose <프로젝트> --cloudflare --domain <호스트> ...     # 도메인 + Cloudflare 터널
+  marina live expose status <프로젝트>   # 공개 상태만 읽는다
+  marina live unexpose <프로젝트>        # 공개 해제 (로컬 접근은 그대로)
 """
 
-SUBS = ("up", "down", "status", "logs", "restart", "pin")
+SUBS = ("up", "down", "status", "logs", "restart", "pin", "expose", "unexpose")
 
 
 def _need_cfg(project_id: str, sub: str):
@@ -121,6 +126,11 @@ def _write_overlay(project_id: str, config: dict) -> pathlib.Path:
         config, live=True,
         extra_labels={L.LIVE_LABEL: "1", L.PROJECT_LABEL: project_id},
     )
+    cf = (X.expose_config(project_id).get("cloudflare") or {})
+    extra = X.cloudflared_overlay(project_id, cf.get("domain") or "", cf.get("backendPort") or 0)
+    if extra:
+        # compose 는 같은 파일 안의 services 를 머지하지 않으므로 'services:' 머리를 떼고 붙인다.
+        overlay = (overlay or "services:\n") + extra.split("services:\n", 1)[1]
     path = L.live_overlay_path(project_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(overlay, encoding="utf-8")
@@ -167,8 +177,11 @@ def cmd_up(project_id: str, cfg) -> int:
                   f"live.composeFile 로 분리해라. 데이터 마운트면 그대로 둬도 된다 — "
                   f"{L.live_data(project_id)} 아래로 풀린다.", file=sys.stderr)
         overlay = _write_overlay(project_id, config)
+        up_services = list(services)
+        if (X.expose_config(project_id).get("cloudflare") or {}).get("domain"):
+            up_services.append("cloudflared")   # overlay 가 주입한 서비스 — live 세션에만 있다
         argv = mc().up_argv(str(compose_file), str(overlay), str(L.live_root(project_id)),
-                            _project_name(project_id), services, build=True)
+                            _project_name(project_id), up_services, build=True)
         rc = _compose(argv, remote=remote).returncode
         if rc != 0:
             print(f"기동 실패(docker compose up → {rc}). 위 출력을 봐라.", file=sys.stderr)
@@ -212,7 +225,12 @@ def _print_addresses(project_id: str, cfg, config: dict) -> None:
     if pub:
         print("선언 포트: " + ", ".join(pub))
     else:
-        print("선언 포트 없음 — 컨테이너 DNS 로만 닿는다. 공개는 `marina live expose` (L2).")
+        print("선언 포트 없음 — 컨테이너 DNS 로만 닿는다. 공개는 `marina live expose`.")
+    ex = X.expose_config(project_id)
+    if ex.get("path"):
+        print(f"공개(Funnel): :{ex.get('httpsPort')}{ex.get('path')} — 상태는 `marina live expose status {project_id}`")
+    if ex.get("cloudflare"):
+        print(f"공개(Cloudflare): https://{(ex['cloudflare'] or {}).get('domain')}")
 
 
 def cmd_down(project_id: str, cfg) -> int:
@@ -251,6 +269,16 @@ def cmd_status(project_id: str, cfg) -> int:
     print(f"데이터: {data}" + ("" if data.is_dir() else "  (없음 — 아직 기동하지 않았다)"))
     print(f"체크아웃: {L.live_src(project_id)}  "
           f"(marina 소유 — 다음 기동에 ref 로 하드 리셋된다. 손으로 고치지 마라)")
+    ex = X.expose_config(project_id)
+    if ex.get("path") or ex.get("cloudflare"):
+        bits = []
+        if ex.get("path"):
+            bits.append(f"Funnel :{ex.get('httpsPort')}{ex.get('path')}")
+        if ex.get("cloudflare"):
+            bits.append(f"Cloudflare {(ex['cloudflare'] or {}).get('domain')}")
+        print("공개: " + " · ".join(bits) + f"  (확인: marina live expose status {project_id})")
+    else:
+        print("공개: 안 함 — 로컬·테일넷에서만 닿는다")
     u = _unit("status", project_id)
     sys.stdout.write(u.stdout or "")
     if remote:
@@ -281,6 +309,98 @@ def cmd_restart(project_id: str, cfg, rest) -> int:
     return _compose(base + ["restart"] + targets, remote=remote).returncode
 
 
+def _published_port(config: dict, cfg, service=None) -> int:
+    """공개할 백엔드 포트 — live 서비스가 **선언한** published 포트.
+    여러 개면 고르게 한다. 추측해서 하나를 집으면 엉뚱한 서비스가 공개된다."""
+    found = []
+    for name in sorted(config.get("services") or {}):
+        if name not in (cfg.get("services") or []):
+            continue
+        if service and name != service:
+            continue
+        for pt in ((config["services"][name] or {}).get("ports") or []):
+            if isinstance(pt, dict) and pt.get("published"):
+                found.append((name, int(str(pt["published"]).split("-")[0])))
+    if not found:
+        raise L.LiveConfigError(
+            f"공개할 포트가 없다{' (서비스 ' + service + ')' if service else ''}. "
+            f"compose 의 ports: 에 호스트 포트를 선언해야 Funnel·터널이 가리킬 수 있다."
+        )
+    if len(found) > 1:
+        raise L.LiveConfigError(
+            "공개할 포트가 여러 개다: " + ", ".join(f"{n}:{p}" for n, p in found) +
+            ". --service <서비스> 로 하나를 골라라."
+        )
+    return found[0][1]
+
+
+def _flags(rest):
+    """--k v / --k=v / 플래그 를 {k: v or True} 로. 남은 위치 인자도 돌려준다."""
+    opts, pos, i = {}, [], 0
+    while i < len(rest):
+        a = rest[i]
+        if a.startswith("--"):
+            key = a[2:]
+            if "=" in key:
+                k, v = key.split("=", 1)
+                opts[k] = v
+            elif i + 1 < len(rest) and not rest[i + 1].startswith("--"):
+                opts[key] = rest[i + 1]
+                i += 1
+            else:
+                opts[key] = True
+        else:
+            pos.append(a)
+        i += 1
+    return opts, pos
+
+
+def cmd_expose(project_id: str, cfg, rest) -> int:
+    opts, _pos = _flags(rest)
+    if opts.get("status"):
+        return _print_expose_status(project_id)
+    compose_file = _compose_file(project_id, cfg)
+    config = _load_config(compose_file)
+    service = opts.get("service") if isinstance(opts.get("service"), str) else None
+    port = _published_port(config, cfg, service)
+    if opts.get("cloudflare"):
+        creds = {
+            "token": opts.get("token") or os.environ.get("MARINA_CF_TOKEN") or "",
+            "zone": opts.get("zone") or os.environ.get("MARINA_CF_ZONE") or "",
+            "account": opts.get("account") or os.environ.get("MARINA_CF_ACCOUNT") or "",
+            "tunnel": opts.get("tunnel") or os.environ.get("MARINA_CF_TUNNEL") or "",
+        }
+        res = X.expose_cloudflare(project_id, opts.get("domain") or "", creds, port)
+    else:
+        path = opts.get("path") if isinstance(opts.get("path"), str) else None
+        res = X.expose_funnel(project_id, port, path)
+    print(f"공개: {res.get('url')}")
+    for w in res.get("warnings") or []:
+        print("  " + w, file=sys.stderr)
+    return 0
+
+
+def _print_expose_status(project_id: str) -> int:
+    st = X.expose_status(project_id)
+    if st.get("reason"):
+        print(st["reason"], file=sys.stderr)
+    print(f"공개 모드: {st.get('mode')}")
+    if st.get("url"):
+        print(f"주소: {st['url']}")
+    if st.get("cloudflare"):
+        print(f"Cloudflare: https://{st['cloudflare'].get('domain')}")
+    for w in st.get("warnings") or []:
+        print("  " + w, file=sys.stderr)
+    return 0 if st.get("installed") else 1
+
+
+def cmd_unexpose(project_id: str, cfg) -> int:
+    res = X.unexpose(project_id)
+    print("공개 해제: " + (", ".join(res["removed"]) or "(이미 공개 아님)"))
+    print("  " + res["note"])
+    return 0
+
+
 def main(argv) -> int:
     if not argv or argv[0] not in SUBS:
         sys.stdout.write(USAGE)
@@ -295,6 +415,12 @@ def main(argv) -> int:
     try:
         if sub == "pin":
             return cmd_pin(rest)
+        if sub == "expose" and rest and rest[0] == "status":
+            if len(rest) < 2:
+                print("사용법: marina live expose status <프로젝트>", file=sys.stderr)
+                return 2
+            _need_cfg(rest[1], sub)
+            return _print_expose_status(rest[1])
         project_id = rest[0]
         cfg = _need_cfg(project_id, sub)
         if sub == "up":
@@ -307,6 +433,10 @@ def main(argv) -> int:
             return cmd_logs(project_id, cfg, rest[1:])
         if sub == "restart":
             return cmd_restart(project_id, cfg, rest[1:])
+        if sub == "expose":
+            return cmd_expose(project_id, cfg, rest[1:])
+        if sub == "unexpose":
+            return cmd_unexpose(project_id, cfg)
         print(f"아직 구현되지 않은 하위명령: {sub}", file=sys.stderr)
         return 2
     except L.LiveConfigError as exc:

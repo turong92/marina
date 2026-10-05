@@ -734,7 +734,31 @@ def _gateway_snapshot() -> list:
                                   "cors": s.get("service") in cors_map,
                                   "corsConsumers": cors_map.get(s.get("service")) or []}
                                  for s in (p.get("services") or [])]})
+    out += _live_gateway_entries()
     return out
+
+
+def _live_gateway_entries() -> list:
+    """상시 운영(live) 스택도 게이트웨이에 올린다 — `live.<프로젝트>.localhost`.
+    워크트리 발견으로는 안 잡힌다(live 는 워크트리가 없는 것이 정상). 공개(expose)와는
+    별개다: 공개가 꺼져 있어도 이 주소로 들어가야 하고, 공개를 내려도 살아 있어야 한다."""
+    try:
+        import marina_live as _ml
+        reg = _ml.load_registry()
+    except Exception:
+        return []
+    entries = []
+    for proj in (reg.get("projects") or []):
+        pid = str(proj.get("id") or "")
+        if not pid or not (proj.get("live") or {}).get("ref"):
+            continue
+        try:
+            ports = _ml.live_service_ports(pid)
+        except Exception:
+            continue
+        if ports:
+            entries.append(_ml.live_gateway_entry(pid, ports))
+    return entries
 
 _GW_DIR = MARINA_HOME / "gateway"
 _GW_PORT_FILE = _GW_DIR / "port"
