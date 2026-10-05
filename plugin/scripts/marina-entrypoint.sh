@@ -58,6 +58,8 @@ usage (marina = 전역 CLI):
   상시 운영 (live — 워크트리와 별개로 프로젝트를 서비스로 띄워 둔다):
     marina live pin <프로젝트> <ref>     # 무엇을 운영할지 정한다 (배포·롤백 = 이걸 바꾸는 일)
     marina live up|down|status|logs|restart <프로젝트>
+    marina live expose|unexpose <프로젝트>      # 공개 (Tailscale Funnel / Cloudflare 터널)
+    marina live backup-paths [<프로젝트>] | history <프로젝트>
   워크트리 (작업 시작 — 브랜치명 지정 생성 + 서브레포 미러):
     marina worktree create <branch> [base] [--project <id>]
   Discord 세션 — 선택 기능, ~/.marina/discord.json 설정 시 (워크트리 = 채널 = tmux claude · 채팅방·로비):

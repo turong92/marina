@@ -72,6 +72,8 @@
       </div>
       <!-- CC/CX 소스 필터 — 클로드·코덱스 워크트리가 섞여 있을 때만 노출 (app-5 renderSourceTabs) -->
       <div class="src-tabs" id="wtSourceTabs" hidden></div>
+      <!-- 상시 운영(live) — 워크트리 카드 목록 밖에 둔다. 섞으면 '지울 수 있는 것'으로 보인다. -->
+      <div class="live-area" id="liveArea" hidden></div>
       <div class="sessions" id="sessions"></div>
     </aside>
     <div class="rail"><button id="asideToggle" title="세션 패널 좌우 접기/펼치기 (로그 전체 화면)">◀</button></div>
@@ -340,6 +342,7 @@
   <script src="/web/app-6d-remote.js"></script>
   <script src="/web/app-6e-mobile.js"></script>
   <script src="/web/app-6f-docker-gc.js"></script>
+  <script src="/web/app-6g-live.js"></script>
   <script src="/web/app-8-git.js"></script>
   <script src="/web/app-8b-git-commit.js"></script>
   <script src="/web/app-9-connections.js"></script>

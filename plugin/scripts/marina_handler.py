@@ -70,7 +70,7 @@ from marina_remote_service import RemoteService
 _WEB_DIR = Path(__file__).resolve().parent / "marina-web"
 
 _ADMIN_GET_PATHS = {
-    "/api/docker-gc",
+    "/api/docker-gc", "/api/live",
     "/api/browse", "/api/repo-candidates", "/api/compose-detect", "/api/compose-config",
     "/api/compose-export", "/api/compose-scaffold",
 }
@@ -1276,6 +1276,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"error": "mobile disabled or invalid token"}, 403)
                 return
             self.send_json(update_status())
+            return
+        if parsed.path == "/api/live":
+            # 상시 운영(live) 영역 — 워크트리 카드와 **섞지 않는다**(지울 수 있는 것처럼 보이면 안 된다).
+            # 'healthy' 같은 단일 불린은 주지 않는다: 401 이 장애를 가리는 것을 실측했다.
+            if not self._require_admin_access():
+                return
+            try:
+                import marina_live_ops as _ops
+                self.send_json({"projects": _ops.live_reports()})
+            except Exception as exc:
+                self.send_json({"projects": [], "error": str(exc)})
             return
         if parsed.path == "/api/gateway-status":
             light = urllib.parse.parse_qs(parsed.query).get("light", ["0"])[0] == "1"   # light=1: enabled/port 만(routes=비싼 스냅샷 생략 — 카드 URL 계산용)

@@ -111,6 +111,8 @@ usage (marina.sh = 내부 launcher; 평소엔 `marina <명령>` 래퍼로 — �
   live (상시 운영 — 워크트리와 별개로 프로젝트를 서비스로 띄워 둔다, 위치 무관):
     marina.sh live pin <프로젝트> <ref>   # 무엇을 운영할지 정한다 (배포·롤백 = 이걸 바꾸는 일)
     marina.sh live up|down|status|logs|restart <프로젝트>
+    marina.sh live expose|unexpose <프로젝트>   # 공개 노출 (Funnel / Cloudflare 터널)
+    marina.sh live backup-paths [<프로젝트>] | history <프로젝트>
   project (~/.marina/projects.json, 위치 무관):
     marina.sh project add <path> --compose <file> [--env-var NAME --env-default VAL]   # compose 등록(파일을 marina 로 복사. 또는 대시보드 위저드)
     marina.sh project add <path> --external name=path # 외부 git 레포를 서비스로(워크트리마다 격리 attach)

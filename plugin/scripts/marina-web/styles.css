@@ -1455,3 +1455,19 @@
     .chat-turns .activityOpen { margin-left: 8px; padding: 1px 7px; border: 1px solid var(--sys-style-neutral-default); border-radius: 999px; background: transparent; color: var(--sys-cont-neutral-light); font-size: 10.5px; cursor: pointer; }
     .chat-turns .activityOpen:hover { border-color: var(--sys-cont-primary-default); color: var(--sys-cont-primary-default); }
     .chat-turns .activityImages.hoisted { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0 2px; }
+
+/* 상시 운영(live) 영역 — 워크트리 카드와 시각적으로 분리한다(지우면 안 되는 것). */
+.live-area { margin: 6px 0 10px; padding: 6px; border: 1px solid var(--line, #3a3a3a); border-radius: 6px; }
+.live-title { font-size: 11px; opacity: .75; margin-bottom: 6px; }
+.live-card { padding: 6px 4px; border-top: 1px solid var(--line, #3a3a3a); }
+.live-card:first-of-type { border-top: 0; }
+.live-head { display: flex; gap: 6px; align-items: baseline; }
+.live-ref { font-size: 11px; opacity: .7; }
+.live-sigs { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0; }
+/* 신호마다 따로 — 하나의 초록불로 합치지 않는다(401 이 장애를 가린다) */
+.live-sig { font-size: 11px; padding: 1px 5px; border-radius: 3px; border: 1px solid var(--line, #3a3a3a); }
+.live-sig-ok { border-color: #2e7d32; }
+.live-sig-warn { border-color: #e59500; }
+.live-sig-bad { border-color: #c62828; }
+.live-sig-none { opacity: .6; }
+.live-meta { font-size: 11px; opacity: .72; }

@@ -371,6 +371,39 @@ def live_service_ports(project_id: str, run=subprocess.run) -> dict:
     return out
 
 
+def live_containers(project_id: str, remote=None, run=subprocess.run) -> list:
+    """live 컨테이너들 — [{name, service, state, restarts}]. 라벨로 찾는다(프로젝트명이 아니라)
+    — 라벨은 overlay 가 붙이는 marina 의 표식이고 GC 면제도 같은 라벨을 본다.
+
+    한 곳에만 둔다: CLI status 와 대시보드 API 가 **같은 신호**를 봐야 "CLI 는 떴다는데
+    대시보드는 아니다" 가 안 생긴다.
+    """
+    pre = ["docker"] + (["-H", remote] if remote else [])
+    r = run(pre + ["ps", "-a",
+                   "--filter", f"label={LIVE_LABEL}=1",
+                   "--filter", f"label={PROJECT_LABEL}={project_id}",
+                   "--format", '{{.Names}}	{{.Label "com.docker.compose.service"}}'],
+            capture_output=True, text=True)
+    rows = []
+    if getattr(r, "returncode", 1) != 0:
+        return rows
+    for line in (getattr(r, "stdout", "") or "").splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("	")
+        name = parts[0].strip()
+        if not name:
+            continue
+        svc = parts[1].strip() if len(parts) > 1 else ""
+        ins = run(pre + ["inspect", name, "--format", "{{.State.Status}}	{{.RestartCount}}"],
+                  capture_output=True, text=True)
+        got = (getattr(ins, "stdout", "") or "").strip().split("	")
+        rows.append({"name": name, "service": svc,
+                     "state": got[0] if got and got[0] else "?",
+                     "restarts": int(got[1]) if len(got) > 1 and got[1].isdigit() else 0})
+    return sorted(rows, key=lambda x: x["name"])
+
+
 def live_gateway_entry(project_id: str, ports: dict, primary: str = "") -> dict:
     """게이트웨이 스냅샷 항목. 워크트리 id 자리에 예약어 'live' 를 넣어
     `live.<프로젝트>.localhost` 가 되게 한다 — 워크트리와 한눈에 구분된다."""

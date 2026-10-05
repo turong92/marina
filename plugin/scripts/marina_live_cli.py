@@ -14,6 +14,7 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import marina_live as L     # noqa: E402
 import marina_live_expose as X     # noqa: E402
+import marina_live_ops as O     # noqa: E402
 
 _HERE = pathlib.Path(__file__).resolve().parent
 _MC = None
@@ -42,9 +43,12 @@ USAGE = """사용법:
   marina live expose <프로젝트> --cloudflare --domain <호스트> ...     # 도메인 + Cloudflare 터널
   marina live expose status <프로젝트>   # 공개 상태만 읽는다
   marina live unexpose <프로젝트>        # 공개 해제 (로컬 접근은 그대로)
+  marina live backup-paths [<프로젝트>]  # 백업해야 할 경로와 이유 (복사는 네 백업 도구가)
+  marina live history <프로젝트>         # 배포·롤백 이력
 """
 
-SUBS = ("up", "down", "status", "logs", "restart", "pin", "expose", "unexpose")
+SUBS = ("up", "down", "status", "logs", "restart", "pin", "expose", "unexpose",
+        "backup-paths", "history")
 
 
 def _need_cfg(project_id: str, sub: str):
@@ -61,7 +65,9 @@ def cmd_pin(argv) -> int:
         print("사용법: marina live pin <프로젝트> <ref>", file=sys.stderr)
         return 2
     block = L.pin_ref(argv[0], argv[1])
+    O.append_history(argv[0], block["ref"], note=" ".join(argv[2:]))
     print(f"live ref 고정: {argv[0]} → {block['ref']}")
+    print("  " + O.MIGRATION_WARNING)
     if not block.get("services"):
         print("  주의: live.services 가 비어 있다 — `marina live up` 은 거부한다. "
               "운영에 띄울 서비스를 projects.json 의 live.services 에 적어라.", file=sys.stderr)
@@ -138,22 +144,9 @@ def _write_overlay(project_id: str, config: dict) -> pathlib.Path:
 
 
 def _ps_rows(project_id: str, remote=None):
-    """live 라벨로 찾은 컨테이너들 — (이름, 상태, 재시작횟수).
-
-    compose 프로젝트명으로 찾지 않고 라벨로 찾는 이유: 라벨은 overlay 가 붙이는 marina 의
-    표식이고, 프로젝트명은 compose 가 정하는 것이다. GC 면제도 같은 라벨을 본다."""
-    out = _docker(["ps", "-a",
-                   "--filter", f"label={L.LIVE_LABEL}=1",
-                   "--filter", f"label={L.PROJECT_LABEL}={project_id}",
-                   "--format", "{{.Names}}"], remote=remote, capture_output=True, text=True)
-    names = [n for n in (out.stdout or "").split() if n]
-    rows = []
-    for n in names:
-        ins = _docker(["inspect", n, "--format", "{{.State.Status}}\t{{.RestartCount}}"],
-                      remote=remote, capture_output=True, text=True)
-        parts = (ins.stdout or "").strip().split("\t")
-        rows.append((n, parts[0] if parts else "?", parts[1] if len(parts) > 1 else "?"))
-    return sorted(rows)
+    """live 컨테이너 — (이름, 상태, 재시작횟수). 판정은 marina_live.live_containers 한 곳에서."""
+    return [(c["name"], c["state"], str(c["restarts"]))
+            for c in L.live_containers(project_id, remote=remote)]
 
 
 def _unit(action: str, project_id: str):
@@ -259,14 +252,28 @@ def cmd_status(project_id: str, cfg) -> int:
     print(f"프로젝트: {project_id}  ref={cfg.get('ref')}  서비스={', '.join(cfg.get('services') or []) or '(없음)'}")
     rows = _ps_rows(project_id, remote)
     if rows:
-        # "healthy" 라는 단일 초록불을 만들지 않는다 — 컨테이너 상태와 재시작 횟수는 다른
-        # 것을 말해 준다(재시작이 늘고 있으면 크래시 루프다).
+        # **"healthy" 라는 단일 초록불을 만들지 않는다.** 세 신호를 따로 낸다:
+        # ① 컨테이너 상태 ② 재시작 횟수(늘고 있으면 크래시 루프) ③ 헬스 경로의 HTTP 코드.
+        # 홈서버 실측: 앱이 모든 경로를 인증 뒤에 두면 헬스체크가 401 을 받고, 그걸
+        # 살아 있음으로 처리하면 DB 가 죽어도 healthy 로 남는다.
         for name, status, restarts in rows:
             print(f"  {name}: {status} (재시작 {restarts}회)")
     else:
         print("  컨테이너 없음 — 안 떠 있다")
-    data = L.live_data(project_id)
-    print(f"데이터: {data}" + ("" if data.is_dir() else "  (없음 — 아직 기동하지 않았다)"))
+    url = O.health_url(cfg, L.live_service_ports(project_id))
+    if not url:
+        print("헬스: 선언 없음 — live.health 에 경로를 적으면 상태코드를 그대로 보여준다")
+    else:
+        probe = O.health_probe(url)
+        if probe["code"] is None:
+            print(f"헬스: {url} → 닿지 않음 ({probe['error']})")
+        else:
+            print(f"헬스: {url} → HTTP {probe['code']}"
+                  + ("" if 200 <= probe["code"] < 300 else "  (2xx 가 아니다 — 인증 뒤면 401 이 정상일 수 있지만, "
+                                                           "그 코드만으로는 안쪽이 살아 있는지 모른다)"))
+    usage = O.data_usage(project_id)
+    print(f"데이터: {usage['path']}  {usage['human']}"
+          + ("" if usage["exists"] else "  (아직 기동하지 않았거나 디렉터리가 사라졌다)"))
     print(f"체크아웃: {L.live_src(project_id)}  "
           f"(marina 소유 — 다음 기동에 ref 로 하드 리셋된다. 손으로 고치지 마라)")
     ex = X.expose_config(project_id)
@@ -401,13 +408,53 @@ def cmd_unexpose(project_id: str, cfg) -> int:
     return 0
 
 
+def cmd_backup_paths(project_ids) -> int:
+    for pid in project_ids:
+        print(f"# {pid}")
+        for item in O.backup_paths(pid):
+            mark = "!" if item["secret"] else " "
+            miss = "" if item["exists"] else "   (없음)"
+            print(f"{mark} {item['path']}{miss}")
+            print(f"    {item['why']}")
+        for w in O.backup_warnings(pid):
+            print("  " + w, file=sys.stderr)
+    print("# '!' = 비밀이 들어 있는 파일", file=sys.stderr)
+    return 0
+
+
+def cmd_history(project_id: str, cfg) -> int:
+    rows = O.read_history(project_id)
+    if not rows:
+        print(f"배포 이력 없음. `marina live pin {project_id} <ref>` 가 첫 줄을 만든다.")
+    for r in rows:
+        note = f"  {r['note']}" if r.get("note") else ""
+        print(f"{r['at']}  {r['ref']}{note}")
+    print(f"현재 ref: {cfg.get('ref')}")
+    print(O.MIGRATION_WARNING)
+    return 0
+
+
 def main(argv) -> int:
     if not argv or argv[0] not in SUBS:
         sys.stdout.write(USAGE)
         return 2
     sub, rest = argv[0], argv[1:]
-    if sub == "status" and not rest:
-        rest = [""]                       # status 는 프로젝트 생략 = 전체
+    if sub in ("status", "backup-paths") and not rest:
+        rest = [""]                       # 프로젝트 생략 = 등록된 live 전체
+    if sub == "backup-paths":
+        reg = L.load_registry()
+        ids = [rest[0]] if rest[0] else [str(p.get("id")) for p in (reg.get("projects") or [])
+                                         if (p.get("live") or {}).get("ref")]
+        if not ids:
+            print("live 설정이 있는 프로젝트가 없다.", file=sys.stderr)
+            return 1
+        try:
+            for pid in ids:
+                _need_cfg(pid, sub)
+            return cmd_backup_paths(ids)
+        except L.LiveConfigError as exc:
+            print(str(exc), file=sys.stderr)
+            return 1
     if not rest or not rest[0]:
         if sub != "status":
             print(f"프로젝트명이 필요하다.\n{USAGE}", file=sys.stderr)
@@ -437,6 +484,8 @@ def main(argv) -> int:
             return cmd_expose(project_id, cfg, rest[1:])
         if sub == "unexpose":
             return cmd_unexpose(project_id, cfg)
+        if sub == "history":
+            return cmd_history(project_id, cfg)
         print(f"아직 구현되지 않은 하위명령: {sub}", file=sys.stderr)
         return 2
     except L.LiveConfigError as exc:

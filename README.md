@@ -765,10 +765,82 @@ x-marina:
 | 실행 | `marina start\|stop\|restart\|rebuild\|clean-rebuild <svc>\|--all` · `marina status \| ports \| logs [svc]` |
 | 게이트웨이 | `marina gateway start\|stop\|status\|install\|uninstall` (보통 서비스 start 시 자동 기동이라 수동 불필요) |
 | 원격 런타임 | `marina remote use [<ssh://user@host>] \| off \| inherit \| status` + `--global` (컨테이너를 어느 기계에서 돌릴지) |
+| 상시 운영(live) | `marina live pin <프로젝트> <ref>` (배포·롤백) · `marina live up\|down\|status\|logs\|restart <프로젝트>` · `marina live expose\|unexpose <프로젝트>` · `marina live backup-paths [<프로젝트>] \| history <프로젝트>` |
 | 워크트리(작업 시작) | `marina worktree create <branch> [base] [--project <id>]` — git worktree(-b) + 서브레포를 같은 브랜치로 미러 (Claude 자동 `claude/<id>` 대신 `feature/{task}` 등으로). `--project`=cwd 무관(프로젝트 밖에서도). attach 범위는 `marina project default <id> a,b,c` 로 좁힘(예: compose 서브레포만) |
 
 내부 호출은 `marina.sh`(launcher)와 `marina-control.py`(데몬·CLI 브리지)지만, 평소엔 위 `marina` 래퍼만
 쓰면 된다. `marina.sh` 를 직접 부를 땐 서비스를 `--<svc>` 플래그로 지정한다(래퍼가 `web → --web` 변환).
+
+---
+
+## 상시 운영 (live) — 워크트리와 별개로 서비스를 띄워 둔다
+
+개발 격리와 운영은 요구가 반대다. 워크트리는 **버리는 것**이고 포트가 매번 바뀌는 게 맞지만,
+운영은 **지우면 안 되는 것**이고 포트가 안정해야 한다. 그래서 marina 는 `live` 를 **예약된
+세션 이름**으로 둔다 — 실행 단위 `(프로젝트, 세션)` 는 그대로 쓰고, 세션 자리에 워크트리가
+아니라 `live` 가 들어간다.
+
+```bash
+# 1) 무엇을 운영할지 정한다 (배포도 롤백도 이것을 바꾸는 일이다)
+marina live pin myapp v0.3.1
+
+# 2) ~/.marina/projects.json 의 그 프로젝트 live 블록에 띄울 서비스를 적는다
+#    "live": { "ref": "v0.3.1", "services": ["server", "web"], "health": "/healthz" }
+#    (services 를 비워 두면 거부한다 — 개발용 보조 서비스까지 운영에 끌려오는 것을 막는다)
+
+# 3) 띄운다 — 재부팅해도 살아나고, 워크트리를 지워도 죽지 않는다
+marina live up myapp
+marina live status myapp          # 컨테이너 상태 · 재시작 횟수 · 헬스 HTTP 코드 · 자동 기동 · 데이터 용량
+```
+
+- **체크아웃**: `~/.marina/<프로젝트>/live/src` 에 `git worktree` 로 **ref 고정**. marina 소유라
+  매 기동에 하드 리셋한다 — 운영 코드를 손으로 고치는 길을 열어 두지 않는다.
+- **데이터**: `~/.marina/<프로젝트>/live/data`. compose 의 상대 바인드(`./data/x`)가 **여기** 로 풀린다
+  (`--project-directory`). 워크트리별로 갈리지 않는다.
+- **포트**: compose 선언 그대로 둔다(개발의 자동 할당을 끈다). 공개가 가리킬 수 있어야 하므로.
+- **안 죽는 보장 네 군데**: `restart: unless-stopped` · launchd/systemd 유닛(재부팅·로그아웃 생존) ·
+  도커 GC 면제(`marina.live` 라벨) · 원격이 설정됐는데 안 닿으면 **큰 소리로 실패**(개발의 조용한
+  로컬 폴백을 운영에서는 끈다 — 두 기계에 같은 서비스가 뜨는 것이 조용히 틀린 상태다).
+- **소스로 보이는 바인드 마운트는 벗기지 않고 경고한다.** marina 는 소스와 데이터를 구분할 수
+  없고, 추측해서 벗기면 사용자의 데이터를 날린다.
+
+### 공개 노출
+
+```bash
+marina live expose myapp                       # Tailscale Funnel (도메인 불필요)
+marina live expose myapp --cloudflare --domain app.example.com \
+    --token ... --zone ... --account ... --tunnel ...
+marina live expose status myapp
+marina live unexpose myapp                     # 멱등. 로컬 접근은 그대로다
+```
+
+- **Funnel 은 8443·10000 만 쓴다.** Tailscale 이 허용하는 포트는 443·8443·10000 셋이고 443 은
+  marina 자신의 원격 접근(대시보드)이 쓴다. `AllowFunnel` 은 경로가 아니라 **authority(host:port)
+  단위**라서, 443 의 `/app` 을 공개하려고 funnel 을 켜면 같은 443 의 `/` 에 있는 **대시보드까지
+  인터넷에 열린다.** 그래서 443 은 쓰지 않고, 동시에 공개할 수 있는 앱은 **최대 2개**다 —
+  세 번째는 거부하고 Cloudflare 터널을 안내한다(한도를 자동 배정으로 숨기지 않는다).
+- 경로 기반 공개는 앱을 깨뜨릴 수 있다(절대경로 asset·쿠키 path·redirect). `expose` 가 매번 경고한다.
+- Cloudflare 터널의 cloudflared 커넥터는 **live 세션에만** 뜬다. 터널 하나에 커넥터가 여럿이면
+  Cloudflare 가 공개 요청을 그중 아무 데로나 보낸다(실측) — 개발 워크트리마다 커넥터가 뜨면
+  공개 트래픽이 무작위 워크트리로 들어간다.
+- 공개와 **로컬 게이트웨이는 별개**다. live 는 `live.<프로젝트>.localhost:3902` 로도 올라가고,
+  공개를 내려도 그 주소는 계속 살아 있다.
+
+### 운영
+
+```bash
+marina live backup-paths myapp    # 백업해야 할 경로와 '왜' (복사는 네 백업 도구가 한다)
+marina live history myapp         # 배포·롤백 이력
+```
+
+- 백업은 **경로만 알려준다.** marina 가 rsync 를 직접 돌면 미마운트 매체에 조용히 백업해 내부
+  디스크를 채우는 사고를 marina 가 떠안는다. 목록에는 데이터뿐 아니라 **`projects.json` 과 비밀
+  파일**이 들어간다 — 비밀이 백업에서 빠져 데이터가 영구히 잠기는 사고를 실측했다.
+- **롤백은 코드만 되돌린다. DB 마이그레이션은 되돌아가지 않는다.** `pin`·`history` 가 매번 경고한다.
+- 상태에 **"healthy" 라는 단일 초록불이 없다.** 앱이 모든 경로를 인증 뒤에 두면 헬스체크가 401 을
+  받고, 그걸 살아 있음으로 처리하면 DB 가 죽어도 healthy 로 남는다(실측). 그래서 컨테이너 상태 ·
+  재시작 횟수 · **HTTP 상태코드 그 자체**를 따로 보여준다.
+- 대시보드는 live 를 워크트리 카드 목록과 **분리된 영역**에 그린다 — 섞으면 유휴 정리 대상처럼 보인다.
 
 ---
 
