@@ -56,27 +56,55 @@ out="$(bash "$SCRIPTS/marina-live-unit.sh" install ovation 2>&1)"
 case "$out" in *"등록 생략"*) ;; *) echo "FAIL: 등록 생략을 알리지 않는다: $out"; exit 1 ;; esac
 [ ! -e "$HOME/Library/LaunchAgents/dev.marina.live.ovation.plist" ] || { echo "FAIL: 실제 LaunchAgents 를 건드렸다"; exit 1; }
 
-# 8) status 가 등록됨을 보여준다
+# 8) **유닛 파일이 있다는 것만으로 "등록됨" 이라고 하지 않는다.**
+#    파일은 marina 가 방금 썼다 — 그것을 신호로 쓰면 launchctl 등록이 실패해도 초록불이
+#    켜지고, 재부팅하면 서비스가 없다. 설계가 "이 줄이 유일한 신호다" 라고 못 박은 줄이다.
 out="$(bash "$SCRIPTS/marina-live-unit.sh" status ovation 2>&1)"
-case "$out" in *"등록됨"*) ;; *) echo "FAIL: status 가 등록됨을 안 보여준다: $out"; exit 1 ;; esac
+case "$out" in
+  *"안 됨"*) ;;
+  *) echo "FAIL: 기계에 등록되지 않았는데 '등록됨' 으로 보인다: $out"; exit 1 ;;
+esac
+# 왜 안 됐는지도 말한다
+case "$out" in *생략*|*등록되지*) ;; *) echo "FAIL: 이유를 말하지 않는다: $out"; exit 1 ;; esac
 
-# 9) uninstall 이 파일을 지운다
+# 9) 등록이 실패하면 **비0으로 끝낸다** — 호출부가 경고를 흘릴 수 있어야 한다
+FAKEBIN="$MARINA_HOME/fakebin"; mkdir -p "$FAKEBIN"
+printf '#!/bin/sh
+echo "Load failed: 5" >&2
+exit 1
+' > "$FAKEBIN/launchctl"
+printf '#!/bin/sh
+exit 1
+' > "$FAKEBIN/systemctl"
+chmod +x "$FAKEBIN/launchctl" "$FAKEBIN/systemctl"
+REALHOME="$MARINA_HOME/fakehome"; mkdir -p "$REALHOME/.marina"
+set +e
+out="$(HOME="$REALHOME" MARINA_HOME="$REALHOME/.marina" PATH="$FAKEBIN:$PATH"        bash "$SCRIPTS/marina-live-unit.sh" install ovation 2>&1)"
+rc=$?
+set -e
+[ "$rc" != "0" ] || { echo "FAIL: 등록 실패인데 0 으로 끝났다: $out"; exit 1; }
+case "$out" in *경고*) ;; *) echo "FAIL: 등록 실패를 경고하지 않는다: $out"; exit 1 ;; esac
+# 등록이 실패했으면 status 도 '안 됨' 이어야 한다 (유닛 파일은 쓰였는데도)
+out="$(HOME="$REALHOME" MARINA_HOME="$REALHOME/.marina" PATH="$FAKEBIN:$PATH"        bash "$SCRIPTS/marina-live-unit.sh" status ovation 2>&1)"
+case "$out" in *"안 됨"*) ;; *) echo "FAIL: 등록 실패 후에도 '등록됨': $out"; exit 1 ;; esac
+
+# 10) uninstall 이 파일을 지운다
 bash "$SCRIPTS/marina-live-unit.sh" uninstall ovation >/dev/null
 [ -e "$f1" ] && { echo "FAIL: uninstall 후에도 유닛이 남았다"; exit 1; } || true
 
-# 10) 유닛이 없으면 status 가 "안 됨" 을 보여준다 — 유닛 설치가 실패해도 기동은 유지되므로,
+# 11) 유닛이 없으면 status 가 "안 됨" 을 보여준다 — 유닛 설치가 실패해도 기동은 유지되므로,
 #     그 사실이 계속 보여야 "재부팅했는데 서비스가 없다" 를 막는다
 out="$(bash "$SCRIPTS/marina-live-unit.sh" status ovation 2>&1 || true)"
 case "$out" in *"안 됨"*) ;; *) echo "FAIL: 유닛 없음을 알리지 않는다: $out"; exit 1 ;; esac
 
-# 11) MARINA_HOME 경로에 공백이 있어도 된다 — eval 로 값을 받으므로 인용이 필요하다
+# 12) MARINA_HOME 경로에 공백이 있어도 된다 — eval 로 값을 받으므로 인용이 필요하다
 SPACED="$MARINA_HOME/with space"
 mkdir -p "$SPACED"
 out="$(MARINA_HOME="$SPACED" bash "$SCRIPTS/marina-live-unit.sh" install ovation 2>&1)"
 [ -f "$SPACED/ovation/live/unit.plist" ] || [ -f "$SPACED/ovation/live/unit.service" ]   || { echo "FAIL: 공백 경로에서 유닛을 못 만들었다: $out"; exit 1; }
 out="$(MARINA_HOME="$SPACED" bash "$SCRIPTS/marina-live-unit.sh" status ovation 2>&1)"
-case "$out" in *"등록됨"*) ;; *) echo "FAIL: 공백 경로 status 실패: $out"; exit 1 ;; esac
+case "$out" in *"자동 기동"*) ;; *) echo "FAIL: 공백 경로 status 실패: $out"; exit 1 ;; esac
 
-# 12) 알 수 없는 동작은 거부
+# 13) 알 수 없는 동작은 거부
 bash "$SCRIPTS/marina-live-unit.sh" bogus ovation >/dev/null 2>&1 && { echo "FAIL: bogus 통과"; exit 1; } || true
 echo "PASS test-live-unit"

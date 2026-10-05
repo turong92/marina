@@ -128,15 +128,16 @@ def _load_config(compose_file: pathlib.Path) -> dict:
 
 
 def _write_overlay(project_id: str, config: dict) -> pathlib.Path:
+    cf = (X.expose_config(project_id).get("cloudflare") or {})
     overlay = mc().build_overlay(
         config, live=True,
         extra_labels={L.LIVE_LABEL: "1", L.PROJECT_LABEL: project_id},
+        # 주입 서비스는 **services 영역 안에서** 끝내야 한다 — 문자열로 뒤에 붙이면
+        # build_overlay 가 마지막에 붙이는 top-level networks: 밑으로 들어간다(실측).
+        extra_services=X.cloudflared_service_lines(
+            project_id, cf.get("domain") or "", cf.get("service") or "",
+            cf.get("containerPort") or 0),
     )
-    cf = (X.expose_config(project_id).get("cloudflare") or {})
-    extra = X.cloudflared_overlay(project_id, cf.get("domain") or "", cf.get("backendPort") or 0)
-    if extra:
-        # compose 는 같은 파일 안의 services 를 머지하지 않으므로 'services:' 머리를 떼고 붙인다.
-        overlay = (overlay or "services:\n") + extra.split("services:\n", 1)[1]
     path = L.live_overlay_path(project_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(overlay, encoding="utf-8")
@@ -164,6 +165,9 @@ def cmd_up(project_id: str, cfg) -> int:
         compose_file = _compose_file(project_id, cfg)
         config = _load_config(compose_file)
         L.validate_services(config, services)
+        for problem in X.missing_cloudflare_secrets(project_id):
+            # 기동 전에 큰 소리로 — compose 에 맡기면 'env file not found' 로 깨진다.
+            raise L.LiveConfigError(problem)
         # 벗기지 않고 알려만 준다(marina 는 소스와 데이터를 구분할 수 없다). 다만 **어디로
         # 풀리는지**는 계산할 수 있으므로, 정말 위험한 것(체크아웃 안)만 경고로 올린다 —
         # 데이터 마운트까지 같은 문구로 겁주면 경고를 무시하게 된다.
@@ -207,10 +211,11 @@ def cmd_up(project_id: str, cfg) -> int:
     # 그 대신 status 가 "자동 기동: 안 됨" 을 계속 보여준다.
     u = _unit("install", project_id)
     sys.stdout.write(u.stdout or "")
+    sys.stderr.write(u.stderr or "")        # returncode 무관 — 경고를 삼키지 않는다
     if u.returncode != 0:
-        sys.stderr.write(u.stderr or "")
         print("경고: 자동 기동 등록에 실패했다. 지금 돌고 있는 것은 유지된다 — "
-              "재부팅 후에는 `marina live up` 을 다시 해야 한다.", file=sys.stderr)
+              "재부팅 후에는 `marina live up` 을 다시 해야 한다. "
+              "`marina live status` 가 '자동 기동: 안 됨' 을 계속 보여준다.", file=sys.stderr)
     _print_addresses(project_id, cfg, config)
     return 0
 
@@ -326,9 +331,12 @@ def cmd_restart(project_id: str, cfg, rest) -> int:
     return _compose(base + ["restart"] + targets, remote=remote).returncode
 
 
-def _published_port(config: dict, cfg, service=None) -> int:
-    """공개할 백엔드 포트 — live 서비스가 **선언한** published 포트.
-    여러 개면 고르게 한다. 추측해서 하나를 집으면 엉뚱한 서비스가 공개된다."""
+def _publish_target(config: dict, cfg, service=None) -> tuple:
+    """(서비스명, 호스트 published 포트, 컨테이너 target 포트).
+
+    둘 다 필요하다: Funnel 은 **호스트** 포트(127.0.0.1:<published>)로 프록시하고,
+    cloudflared 는 같은 compose 네트워크 안에서 **컨테이너** 포트(<서비스>:<target>)로
+    닿는다. 여러 개면 고르게 한다 — 추측해서 하나를 집으면 엉뚱한 서비스가 공개된다."""
     found = []
     for name in sorted(config.get("services") or {}):
         if name not in (cfg.get("services") or []):
@@ -337,7 +345,8 @@ def _published_port(config: dict, cfg, service=None) -> int:
             continue
         for pt in ((config["services"][name] or {}).get("ports") or []):
             if isinstance(pt, dict) and pt.get("published"):
-                found.append((name, int(str(pt["published"]).split("-")[0])))
+                found.append((name, int(str(pt["published"]).split("-")[0]),
+                              int(str(pt.get("target") or pt["published"]).split("-")[0])))
     if not found:
         raise L.LiveConfigError(
             f"공개할 포트가 없다{' (서비스 ' + service + ')' if service else ''}. "
@@ -345,10 +354,10 @@ def _published_port(config: dict, cfg, service=None) -> int:
         )
     if len(found) > 1:
         raise L.LiveConfigError(
-            "공개할 포트가 여러 개다: " + ", ".join(f"{n}:{p}" for n, p in found) +
+            "공개할 포트가 여러 개다: " + ", ".join(f"{n}:{p}" for n, p, _t in found) +
             ". --service <서비스> 로 하나를 골라라."
         )
-    return found[0][1]
+    return found[0]
 
 
 def _flags(rest):
@@ -379,7 +388,7 @@ def cmd_expose(project_id: str, cfg, rest) -> int:
     compose_file = _compose_file(project_id, cfg)
     config = _load_config(compose_file)
     service = opts.get("service") if isinstance(opts.get("service"), str) else None
-    port = _published_port(config, cfg, service)
+    svc_name, port, container_port = _publish_target(config, cfg, service)
     if opts.get("cloudflare"):
         creds = {
             "token": opts.get("token") or os.environ.get("MARINA_CF_TOKEN") or "",
@@ -387,7 +396,8 @@ def cmd_expose(project_id: str, cfg, rest) -> int:
             "account": opts.get("account") or os.environ.get("MARINA_CF_ACCOUNT") or "",
             "tunnel": opts.get("tunnel") or os.environ.get("MARINA_CF_TUNNEL") or "",
         }
-        res = X.expose_cloudflare(project_id, opts.get("domain") or "", creds, port)
+        res = X.expose_cloudflare(project_id, opts.get("domain") or "", creds,
+                                  svc_name, container_port)
     else:
         path = opts.get("path") if isinstance(opts.get("path"), str) else None
         res = X.expose_funnel(project_id, port, path)

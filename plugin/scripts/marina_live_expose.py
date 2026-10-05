@@ -105,28 +105,68 @@ def validate_cloudflare(creds: dict) -> None:
         )
 
 
-def cloudflared_overlay(project_id: str, domain: str, backend_port: int) -> str:
-    """live overlay 에 덧붙일 cloudflared 서비스. **live 세션에서만** 들어간다 —
-    터널 하나에 커넥터가 여럿이면 Cloudflare 가 공개 요청을 그중 아무 데로나 보낸다
-    (홈서버 구현에서 실측). 개발 워크트리마다 커넥터가 뜨면 공개 트래픽이 무작위
-    워크트리로 들어간다."""
-    if not domain or not backend_port:
-        return ""
-    return (
-        "services:\n"
-        "  cloudflared:\n"
-        "    image: cloudflare/cloudflared:latest\n"
-        '    command: ["tunnel", "--no-autoupdate", "run"]\n'
-        "    restart: unless-stopped\n"
-        "    env_file:\n"
-        f"      - {json.dumps(str(secrets_file(project_id)))}\n"
-        "    labels:\n"
-        f"      {json.dumps(L.LIVE_LABEL)}: \"1\"\n"
-        f"      {json.dumps(L.PROJECT_LABEL)}: {json.dumps(project_id)}\n"
-        "    environment:\n"
-        f"      MARINA_LIVE_DOMAIN: {json.dumps(str(domain))}\n"
-        f"      MARINA_LIVE_BACKEND: {json.dumps('http://127.0.0.1:%d' % int(backend_port))}\n"
-    )
+def tunnel_target(service: str, container_port: int) -> str:
+    """Cloudflare 터널 ingress 가 가리킬 주소. **컨테이너 DNS** 다 —
+    `127.0.0.1` 로 쓰면 그건 cloudflared **컨테이너 자신**이라 아무것도 없다.
+    cloudflared 는 같은 compose 네트워크에 있으므로 서비스명으로 닿는다."""
+    return f"http://{service}:{int(container_port)}"
+
+
+def cloudflared_service_lines(project_id: str, domain: str, service: str,
+                              container_port: int) -> list:
+    """live overlay 의 **services 영역에 끼워 넣을** cloudflared 블록(줄 목록).
+
+    문자열로 돌려주고 overlay 뒤에 붙이면 안 된다 — build_overlay 는 끝에 top-level
+    `networks:` 를 붙이므로 cloudflared 가 **네트워크 정의**로 들어가 compose 가
+    `networks.cloudflared additional properties ... not allowed` 로 거부한다(실측).
+
+    **live 세션에서만** 들어간다 — 터널 하나에 커넥터가 여럿이면 Cloudflare 가 공개
+    요청을 그중 아무 데로나 보낸다(홈서버 구현에서 실측). 개발 워크트리마다 커넥터가
+    뜨면 공개 트래픽이 무작위 워크트리로 들어간다.
+    """
+    if not domain or not service or not container_port:
+        return []
+    return [
+        "  cloudflared:",
+        "    image: cloudflare/cloudflared:latest",
+        '    command: ["tunnel", "--no-autoupdate", "run"]',
+        "    restart: unless-stopped",
+        "    env_file:",
+        f"      - {json.dumps(str(secrets_file(project_id)))}",
+        "    labels:",
+        f'      {json.dumps(L.LIVE_LABEL)}: "1"',
+        f"      {json.dumps(L.PROJECT_LABEL)}: {json.dumps(project_id)}",
+        "    environment:",
+        f"      MARINA_LIVE_DOMAIN: {json.dumps(str(domain))}",
+        # 토큰 터널은 ingress 를 Cloudflare 쪽에서 관리한다(remote-managed). 이 값은
+        # cloudflared 가 읽는 설정이 아니라 **사용자가 Cloudflare 에 입력할 주소**다 —
+        # 그래서 expose 가 출력으로도 알려준다.
+        f"      MARINA_LIVE_BACKEND: {json.dumps(tunnel_target(service, container_port))}",
+    ]
+
+
+def missing_cloudflare_secrets(project_id: str) -> list:
+    """Cloudflare 공개가 설정됐는데 비밀 파일이 없거나 토큰이 비었으면 그 이유들.
+
+    compose 에 맡기면 `env file ... not found` 라는 알아듣기 어려운 말로 기동이 깨진다.
+    이 경로는 **백업에서 secrets.env 가 빠진 복원** 에서 정확히 발생한다(L3 결정 4).
+    """
+    cf = expose_config(project_id).get("cloudflare") or {}
+    if not cf.get("domain"):
+        return []
+    p = secrets_file(project_id)
+    if not p.exists():
+        return [f"{p} 가 없다 — Cloudflare 터널 토큰이 사라졌다. "
+                f"`marina live expose {project_id} --cloudflare --domain {cf.get('domain')} "
+                f"--token ...` 로 다시 넣거나, 공개를 쓰지 않으려면 "
+                f"`marina live unexpose {project_id}`."]
+    try:
+        text = p.read_text(encoding="utf-8")
+    except OSError as exc:
+        return [f"{p} 를 읽지 못했다: {exc}"]
+    if "TUNNEL_TOKEN=" not in text or not text.split("TUNNEL_TOKEN=", 1)[1].strip():
+        return [f"{p} 에 TUNNEL_TOKEN 이 비어 있다 — cloudflared 가 터널에 붙지 못한다."]
+    return []
 
 
 def _controller(controller=None):
@@ -229,11 +269,16 @@ def expose_funnel(project_id: str, backend_port: int, path=None, controller=None
     }
 
 
-def expose_cloudflare(project_id: str, domain: str, creds: dict, backend_port: int,
-                      controller=None) -> dict:
+def expose_cloudflare(project_id: str, domain: str, creds: dict, service: str,
+                      container_port: int, controller=None) -> dict:
     """도메인 + Cloudflare 터널. 자격증명 넷이 다 있어야 **아무것도 만들기 전에** 시작한다."""
     if not str(domain or "").strip():
         raise L.LiveConfigError("--domain 이 필요하다 (예: app.example.com).")
+    if not service or not container_port:
+        raise L.LiveConfigError(
+            "터널이 가리킬 서비스와 컨테이너 포트를 알 수 없다. compose 의 ports: 에 "
+            "포트를 선언하거나 --service 로 골라라."
+        )
     validate_cloudflare(creds)
     write_secrets(project_id, {"TUNNEL_TOKEN": str(creds["token"]).strip()})
     cfg = dict(expose_config(project_id))
@@ -242,15 +287,21 @@ def expose_cloudflare(project_id: str, domain: str, creds: dict, backend_port: i
         "zone": str(creds["zone"]).strip(),
         "account": str(creds["account"]).strip(),
         "tunnel": str(creds["tunnel"]).strip(),
-        "backendPort": int(backend_port),
+        "service": str(service),
+        "containerPort": int(container_port),
     }
     save_expose_config(project_id, cfg)
+    target = tunnel_target(service, container_port)
     return {
         "mode": "cloudflare",
         "domain": cfg["cloudflare"]["domain"],
         "url": f"https://{cfg['cloudflare']['domain']}",
         "secrets": str(secrets_file(project_id)),
+        "target": target,
         "warnings": [
+            f"Cloudflare 쪽에서 이 터널의 ingress 를 **{cfg['cloudflare']['domain']} → {target}** "
+            f"로 설정해야 트래픽이 흐른다. 토큰 터널은 ingress 를 Cloudflare 가 관리하므로 "
+            f"marina 가 대신 만들 수 없다(그 설정까지 marina 가 쥐면 터널을 통째로 소유하게 된다).",
             "cloudflared 는 live 세션에만 뜬다 — 개발 워크트리에서 같은 터널의 커넥터를 띄우면 "
             "Cloudflare 가 공개 요청을 그중 아무 데로나 보낸다(실측).",
             f"{secrets_file(project_id)} 는 백업 목록에 들어 있어야 한다 — "

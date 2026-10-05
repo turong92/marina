@@ -48,13 +48,16 @@ X.validate_cloudflare({k: "v" for k in X.CLOUDFLARE_REQUIRED})
 
 # 5) cloudflared 는 live overlay 에만 들어간다 — 터널 하나에 커넥터가 여럿이면 Cloudflare 가
 #    공개 요청을 무작위 커넥터로 보낸다(홈서버 구현에서 실측).
-ov = X.cloudflared_overlay("ovation", "myapp", 8080)
-assert "cloudflared" in ov and "myapp" in ov, ov
+ov = "\n".join(X.cloudflared_service_lines("ovation", "app.example.com", "server", 8080))
+assert "cloudflared" in ov, ov
 assert "secrets.env" in ov, "비밀 파일을 참조하지 않는다"
 # 토큰 **값**은 생성 파일에 안 들어간다 — overlay 는 평문으로 ~/.marina 에 남는다
 assert "TUNNEL_TOKEN=" not in ov, ov
 assert str(L.LIVE_LABEL) in ov, ov          # GC 면제 라벨이 cloudflared 에도 붙는다
-assert X.cloudflared_overlay("ovation", "", 0) == "", "도메인 없으면 아무것도 넣지 않는다"
+# 백엔드는 **컨테이너 DNS** 다. 127.0.0.1 은 cloudflared 컨테이너 자신이라 아무것도 없다.
+assert "http://server:8080" in ov, ov
+assert "127.0.0.1" not in ov, ov
+assert X.cloudflared_service_lines("ovation", "", "", 0) == [], "도메인 없으면 아무것도 넣지 않는다"
 
 # 6) 비밀은 0600 파일에 쓴다 (백업 목록에 들어가야 한다 — L3)
 p = X.write_secrets("ovation", {"TUNNEL_TOKEN": "t0ken"})
@@ -76,6 +79,51 @@ assert st["installed"] is False, st
 assert st["reason"], "거부 이유가 없다"
 print("ok")
 PY
+
+echo "--- cloudflared 를 넣은 overlay 가 compose 검증을 통과한다"
+# 이걸 단정하지 않아서 'cloudflared 가 networks: 밑으로 들어가 live up 이 아예 안 되는' 버그를
+# 리뷰까지 못 잡았다. 생성 함수를 단독으로만 보면 머지 결과가 안 보인다.
+TMPC="$MARINA_HOME/mergecheck"; mkdir -p "$TMPC"
+cat > "$TMPC/base.yml" <<'Y'
+services:
+  server:
+    image: alpine:3.20
+    command: ["sleep","60"]
+    ports: ["127.0.0.1:38498:8080"]
+Y
+PYTHONPATH="$SCRIPTS" python3 - "$SCRIPTS" "$TMPC" <<'PY'
+import importlib.util, json, pathlib, sys
+sys.path.insert(0, sys.argv[1])
+spec = importlib.util.spec_from_file_location("mc", sys.argv[1] + "/marina-compose.py")
+mc = importlib.util.module_from_spec(spec); spec.loader.exec_module(mc)
+import marina_live as L, marina_live_expose as X
+tmp = pathlib.Path(sys.argv[2])
+X.save_expose_config("mergeproj", {"cloudflare": {"domain": "app.example.com",
+                                                  "service": "server", "containerPort": 8080}})
+X.write_secrets("mergeproj", {"TUNNEL_TOKEN": "fake"})
+# 비밀 파일이 없으면 compose 는 'env file ... not found' 로 깨진다 — marina 가 먼저,
+# 알아들을 수 있는 말로 거부해야 한다(백업에서 secrets.env 가 빠진 복원 경로다)
+assert X.missing_cloudflare_secrets("mergeproj") == []
+X.secrets_file("mergeproj").unlink()
+assert X.missing_cloudflare_secrets("mergeproj"), "비밀 파일 부재를 못 잡는다"
+X.write_secrets("mergeproj", {"TUNNEL_TOKEN": "fake"})
+cfg = mc.load_compose_file(str(tmp / "base.yml"))
+ov = mc.build_overlay(cfg, live=True,
+                      extra_labels={L.LIVE_LABEL: "1", L.PROJECT_LABEL: "mergeproj"},
+                      extra_services=X.cloudflared_service_lines(
+                          "mergeproj", "app.example.com", "server", 8080))
+(tmp / "ov.yml").write_text(ov)
+PY
+out="$(docker compose -f "$TMPC/base.yml" -f "$TMPC/ov.yml" -p livemergecheck config 2>&1)" || {
+  echo "FAIL: cloudflared 를 넣은 overlay 가 compose 검증을 통과하지 못한다:"; echo "$out"; exit 1; }
+printf '%s' "$out" | grep -q 'cloudflared' || { echo "FAIL: cloudflared 서비스가 없다"; exit 1; }
+printf '%s' "$out" | python3 -c "
+import sys
+t = sys.stdin.read()
+i = t.index('cloudflared:')
+assert 'image: cloudflare/cloudflared' in t[i:i+400], t[i:i+400]
+print('ok')
+" || { echo "FAIL: cloudflared 가 서비스로 안 들어갔다"; exit 1; }
 
 echo "--- 가짜 tailscale 로 funnel 왕복"
 FAKE="$MARINA_HOME/fake"

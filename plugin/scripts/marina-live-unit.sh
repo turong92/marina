@@ -61,8 +61,10 @@ case "$ACTION" in
       cp "$UNIT" "$HOME/Library/LaunchAgents/$LABEL.plist"
       launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
       if ! launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$LABEL.plist"; then
+        # 비0으로 끝낸다 — 호출부(cmd_up)가 이 경고를 사용자에게 흘려야 한다.
+        # exit 0 이면 경고가 캡처된 채 조용히 버려지고, status 도 거짓으로 '등록됨' 이 된다.
         echo "경고: launchd 등록 실패 — 지금 돌고 있는 것은 유지된다. 재부팅 후 자동 기동은 안 된다." >&2
-        exit 0
+        exit 1
       fi
     elif command -v systemctl >/dev/null 2>&1 && systemctl --user show-environment >/dev/null 2>&1; then
       mkdir -p "$HOME/.config/systemd/user"
@@ -71,11 +73,11 @@ case "$ACTION" in
       systemctl --user daemon-reload >/dev/null 2>&1 || true
       if ! systemctl --user enable "$LABEL.service" >/dev/null 2>&1; then
         echo "경고: systemd 등록 실패 — 재부팅 후 자동 기동은 안 된다." >&2
-        exit 0
+        exit 1
       fi
     else
       echo "경고: launchd·systemd 가 없다 — 재부팅 후 자동 기동은 안 된다." >&2
-      exit 0
+      exit 1
     fi
     echo "자동 기동 등록: $LABEL"
     ;;
@@ -93,6 +95,16 @@ case "$ACTION" in
     echo "자동 기동 해제: $LABEL"
     ;;
   status)
-    if [[ -f "$UNIT" ]]; then echo "자동 기동: 등록됨 ($UNIT)"; else echo "자동 기동: 안 됨"; fi
+    # **유닛 파일 존재로 판정하지 않는다** — 그 파일은 marina 가 방금 썼고, 그 뒤의
+    # launchctl/systemctl 등록이 실패해도 남는다. 감독자에게 직접 묻는다.
+    PYTHONPATH="$SCRIPT_DIR" python3 - "$PROJECT" <<'PY'
+import sys
+import marina_live as L
+st = L.autostart_state(sys.argv[1])
+if st["registered"]:
+    print("자동 기동: 등록됨 (%s, %s)" % (st["how"], st["detail"]))
+else:
+    print("자동 기동: 안 됨 — %s" % (st["detail"] or "등록되지 않았다"))
+PY
     ;;
 esac

@@ -1126,7 +1126,8 @@ def e2e_extra_labels(env=None):
 
 def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict = None,
                   connectivity: dict = None, expose_env: dict = None, target=None,
-                  extra_labels: dict = None, live: bool = False) -> str:
+                  extra_labels: dict = None, live: bool = False,
+                  extra_services: list = None) -> str:
     """resolved config → overlay YAML. 워크트리 격리를 위해 *비침투적으로* 덮는다(앱·외부 레포 불변):
     ① published ports → 127.0.0.1::<target> (호스트포트 Docker 자동할당)
     ② container_name → 제거(!reset, 워크트리별 자동명명 — 다중 인스턴스 충돌 방지)
@@ -1140,6 +1141,10 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
        안정된 포트가 필요하다), 모든 서비스에 restart: unless-stopped 를 덮고, develop(watch)을
        제거한다. 소스로 보이는 바인드 마운트는 **건드리지 않는다** — marina 는 소스와 데이터를
        구분할 수 없고 추측해서 벗기면 데이터를 날린다. 경고는 project_dir_binds() 가 맡는다.
+    ⑩ extra_services: overlay 의 **services 영역에** 그대로 끼워 넣을 줄들(2칸 들여쓰기 블록).
+       live 공개용 cloudflared 처럼 marina 가 주입하는 서비스를 위한 것이다. 문자열을 뒤에
+       이어 붙이면 안 된다 — ⑧ 이 끝에 top-level `networks:` 를 붙이므로 주입 서비스가
+       **네트워크 정의로 들어가** compose 검증이 거부한다(실측).
     덮을 게 하나도 없으면 빈 문자열. 포트값·비밀번호는 안 들어감."""
     services = (config or {}).get("services") or {}
     build_args, connectivity, expose_env = build_args or {}, connectivity or {}, expose_env or {}
@@ -1286,6 +1291,9 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
             if fname not in aliases:
                 aliases.append(fname)
             out += [f"      {net}:", f"        aliases: [{', '.join(json.dumps(a) for a in aliases)}]"]
+        any_ = True
+    if extra_services:                                            # ⑩ 주입 서비스 — services 영역 안에서 끝낸다
+        out += [str(line) for line in extra_services]
         any_ = True
     if new_volumes:                                               # stored 가 이미 선언한 것은 여기 안 들어온다(치환된 것만)
         out.append("volumes:")

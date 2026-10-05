@@ -58,4 +58,24 @@ case "$out" in *pin*) ;; *) echo "FAIL: pin 안내가 없다: $out"; exit 1 ;; e
 # 8) pin 은 레지스트리에 ref 를 쓴다
 bash "$SCRIPTS/marina.sh" live pin plainproj v9 >/dev/null
 grep -q '"ref": "v9"' "$MARINA_HOME/projects.json" || { echo "FAIL: pin 이 ref 를 안 썼다"; cat "$MARINA_HOME/projects.json"; exit 1; }
-echo "PASS test-live-cli"
+
+echo "--- live 는 예약된 세션 이름이다"
+# 워크트리 이름이 'live' 면 session_id 가 "live" 가 되어 compose 프로젝트명이 운영 스택과
+# **완전히 같아진다**(<id>-live). 그 워크트리에서 marina start 를 하면 개발 overlay 로
+# 운영 컨테이너를 재생성해 선언 포트가 사라지고 GC 면제 라벨도 풀린다. marina stop 은
+# 운영 스택을 내린다. 확률은 낮지만 대가가 운영 중단이라 이름 단계에서 막는다.
+cd "$SCRIPTS/../.."
+set +e
+out="$(bash "$SCRIPTS/marina.sh" worktree create live 2>&1)"
+rc=$?
+set -e
+[ "$rc" != "0" ] || { echo "FAIL: 'live' 워크트리 생성이 통과했다: $out"; exit 1; }
+case "$out" in *예약*) ;; *) echo "FAIL: 예약어라고 알려주지 않는다: $out"; exit 1 ;; esac
+[ ! -e ".claude/worktrees/live" ] || { echo "FAIL: live 워크트리가 만들어졌다"; exit 1; }
+# 슬래시가 '-' 로 치환돼 live 가 되는 경우도 막는다 (feature/live → feature-live 는 괜찮다)
+set +e
+out="$(bash "$SCRIPTS/marina.sh" worktree create LIVE 2>&1)"
+rc=$?
+set -e
+[ "$rc" != "0" ] || { echo "FAIL: 'LIVE' 가 통과했다: $out"; exit 1; }
+echo "PASS test-live-cli (예약어 포함)"

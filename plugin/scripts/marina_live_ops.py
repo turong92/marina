@@ -207,7 +207,7 @@ def live_report(project_id: str) -> dict:
     ports = L.live_service_ports(project_id)
     url = health_url({"live": cfg}, ports)
     probe = health_probe(url) if url else {"code": None, "error": None, "url": None}
-    unit = L.unit_path(project_id)
+    auto = L.autostart_state(project_id)
     ex = X.expose_config(project_id)
     return {
         "project": project_id,
@@ -217,7 +217,8 @@ def live_report(project_id: str) -> dict:
         "restartsTotal": sum(c["restarts"] for c in containers),
         "health": {"url": url, "code": probe["code"], "error": probe["error"],
                    "declared": bool(url)},
-        "autostart": {"registered": unit.exists(), "path": str(unit)},
+        "autostart": {"registered": auto["registered"], "path": auto["unit"],
+                      "how": auto["how"], "detail": auto["detail"]},
         "data": data_usage(project_id),
         "ports": ports,
         "expose": {"funnel": ({"httpsPort": ex.get("httpsPort"), "path": ex.get("path")}

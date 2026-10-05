@@ -81,6 +81,16 @@ worktree_create() {
     esac
   done
   [[ -n "$branch" ]] || die "usage: marina worktree create <branch> [base] [--project <id>]"
+  # `live` 는 **예약된 세션 이름**이다(상시 운영). 워크트리 디렉터리 이름이 session_id 가 되고,
+  # session_id 가 "live" 면 compose 프로젝트명이 운영 스택과 완전히 같아진다(<id>-live).
+  # 그 워크트리에서 marina start 를 하면 개발 overlay(자동 포트·develop watch·소스 바인드)로
+  # 운영 컨테이너를 재생성해 선언 포트가 사라지고 marina.live 라벨도 풀려 도커 GC 면제까지
+  # 깨진다. marina stop 은 운영 스택을 내린다. 이름 단계에서 막는 것이 가장 싸다.
+  local _reserved
+  _reserved="$(PYTHONPATH="$SCRIPT_DIR" python3 -c 'import marina_live; print(marina_live.LIVE_SESSION)' 2>/dev/null || echo live)"
+  if [[ "$(printf '%s' "$branch" | tr 'A-Z/:' 'a-z--')" == "$_reserved" ]]; then
+    die "'$branch' 는 쓸 수 없다 — '$_reserved' 는 상시 운영(marina live)이 쓰는 예약된 세션 이름이다. 같은 이름의 워크트리는 운영 스택을 덮어쓴다. 다른 브랜치명을 써라(예: ${branch}-wip)."
+  fi
   local src san wt
   if [[ -n "$proj_id" ]]; then
     # --project: cwd 무관하게 레지스트리에서 그 프로젝트 root 조회 (shim 으로 아무데서나)

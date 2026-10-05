@@ -375,6 +375,54 @@ WantedBy=default.target
 """
 
 
+def autostart_state(project_id: str, run=subprocess.run) -> dict:
+    """재부팅 후 자동 기동이 **정말** 등록돼 있나.
+
+    유닛 파일 존재만 보면 안 된다 — 그 파일은 marina 자신이 방금 썼고, 그 뒤의
+    `launchctl bootstrap` 이 실패해도 파일은 남는다. 그러면 "등록됨" 초록불이 켜진 채
+    재부팅하면 서비스가 없다. 설계가 "유닛 설치가 실패해도 기동은 유지되므로 이 줄이
+    유일한 신호다" 라고 못 박은 줄이라, 거짓말을 하면 기능 자체가 무의미해진다.
+
+    그래서 **감독자(launchd/systemd)에게 직접 묻는다.**
+    """
+    unit = unit_path(project_id)
+    label = unit_label(project_id)
+    out = {"registered": False, "how": "", "detail": "", "unit": str(unit),
+           "unitFile": unit.exists()}
+    home = pathlib.Path(os.path.expanduser("~"))
+    if marina_home() != home / ".marina":
+        out["detail"] = (f"MARINA_HOME 이 {home / '.marina'} 가 아니라 기계 등록을 생략했다 "
+                         f"— 이 홈에서는 재부팅 자동 기동이 없다")
+        return out
+    if not unit.exists():
+        out["detail"] = "유닛 파일이 없다"
+        return out
+    if platform.system() == "Darwin":
+        out["how"] = "launchd"
+        login_plist = home / "Library" / "LaunchAgents" / f"{label}.plist"
+        if not login_plist.exists():
+            out["detail"] = (f"{login_plist} 가 없다 — launchctl bootstrap 은 이번 로그인 "
+                             f"세션에만 등록된다. 이 파일이 없으면 재부팅을 못 넘긴다")
+            return out
+        r = run(["launchctl", "print", f"gui/{os.getuid()}/{label}"],
+                capture_output=True, text=True)
+        if getattr(r, "returncode", 1) != 0:
+            out["detail"] = f"launchd 에 등록되지 않았다 ({label})"
+            return out
+        out["registered"] = True
+        out["detail"] = str(login_plist)
+        return out
+    out["how"] = "systemd"
+    r = run(["systemctl", "--user", "is-enabled", f"{label}.service"],
+            capture_output=True, text=True)
+    if getattr(r, "returncode", 1) != 0:
+        out["detail"] = f"systemd user unit 이 enable 되지 않았다 ({label}.service)"
+        return out
+    out["registered"] = True
+    out["detail"] = f"{label}.service"
+    return out
+
+
 def write_unit(project_id: str, marina_bin: str) -> pathlib.Path:
     """유닛 파일을 쓴다. 멱등 — 같은 입력이면 같은 내용이다."""
     p = unit_path(project_id)

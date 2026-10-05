@@ -18,6 +18,9 @@ marina_docker_gc_cli
 marina_reaper
 marina_term_requests
 marina_lifecycle
+# 상시 운영(live) — 대시보드·discord 없이도 돌아야 하는 runtime 관심사다.
+# 표준 라이브러리만 import 한다(경계 유지). CLI·공개 노출·운영 보고는 runtime 밖이다.
+marina_live
 marina_cli
 marina_build
 marina_build_inputs
