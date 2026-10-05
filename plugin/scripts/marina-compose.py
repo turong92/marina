@@ -1090,6 +1090,34 @@ def host_forward_warning(connectivity, target):
 E2E_LABEL = "marina.e2e"     # marina_docker_gc.E2E_LABEL 과 동일 — 테스트 하네스(MARINA_E2E=1)가 만든 산출물 표식
 
 
+def project_dir_binds(config: dict, project_root: str) -> list:
+    """프로젝트 디렉토리 안을 가리키는 바인드 마운트 목록. **벗기기 위한 것이 아니라
+    경고하기 위한 것이다** — 소스 마운트인지 데이터 마운트인지는 marina 가 알 수 없고,
+    추측해서 벗기면 사용자의 데이터를 날린다(live 설계 결정 2).
+
+    상대경로(./x, ../x)와 project_root 로 시작하는 절대경로를 바인드로 본다.
+    named volume(슬래시 없는 이름)과 tmpfs 는 제외한다."""
+    out = []
+    for name in sorted((config or {}).get("services") or {}):
+        for v in (((config["services"][name] or {}).get("volumes")) or []):
+            if isinstance(v, dict):
+                if str(v.get("type") or "") != "bind":
+                    continue
+                src, tgt = str(v.get("source") or ""), str(v.get("target") or "")
+                rendered = f"{src}:{tgt}" if tgt else src
+            elif isinstance(v, str):
+                src, rendered = v.split(":", 1)[0], v
+            else:
+                continue
+            if not src:
+                continue
+            if src.startswith("./") or src.startswith("../") or (
+                    os.path.isabs(src) and project_root and
+                    (src == project_root or src.startswith(project_root.rstrip("/") + "/"))):
+                out.append(rendered)
+    return out
+
+
 def e2e_extra_labels(env=None):
     """테스트 하네스가 띄운 compose 면 라벨 {marina.e2e: "1"} — 도커 GC 가 3일 뒤 회수할 근거. 평소엔 None(오버레이 불변)."""
     env = os.environ if env is None else env
@@ -1098,7 +1126,7 @@ def e2e_extra_labels(env=None):
 
 def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict = None,
                   connectivity: dict = None, expose_env: dict = None, target=None,
-                  extra_labels: dict = None) -> str:
+                  extra_labels: dict = None, live: bool = False) -> str:
     """resolved config → overlay YAML. 워크트리 격리를 위해 *비침투적으로* 덮는다(앱·외부 레포 불변):
     ① published ports → 127.0.0.1::<target> (호스트포트 Docker 자동할당)
     ② container_name → 제거(!reset, 워크트리별 자동명명 — 다중 인스턴스 충돌 방지)
@@ -1108,6 +1136,10 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
        localhost:<port> 를 타겟(host=host.docker.internal / 서비스명=컨테이너 DNS)으로 중계. 자기 서빙 포트 제외.
     ⑧ extra_labels: 모든 서비스(+사이드카)의 컨테이너 labels, build 서비스의 이미지 labels, external 아닌 네트워크 labels 에
        덧붙인다 — 테스트 하네스 표식(marina.e2e=1) 용. 없으면 아무 것도 안 바뀐다.
+    ⑨ live=True(상시 운영): published 포트 덮어쓰기를 **건너뛴다**(L2 의 Funnel·터널이 가리킬
+       안정된 포트가 필요하다), 모든 서비스에 restart: unless-stopped 를 덮고, develop(watch)을
+       제거한다. 소스로 보이는 바인드 마운트는 **건드리지 않는다** — marina 는 소스와 데이터를
+       구분할 수 없고 추측해서 벗기면 데이터를 날린다. 경고는 project_dir_binds() 가 맡는다.
     덮을 게 하나도 없으면 빈 문자열. 포트값·비밀번호는 안 들어감."""
     services = (config or {}).get("services") or {}
     build_args, connectivity, expose_env = build_args or {}, connectivity or {}, expose_env or {}
@@ -1125,7 +1157,7 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
     for name in sorted(services):
         svc = services[name] or {}
         body = []
-        specs = _port_targets(svc)
+        specs = [] if live else _port_targets(svc)       # ⑨ live: compose 선언 그대로 둔다
         if name in bind_pairs:
             # 네임스페이스 주인이 사이드카로 넘어간다(아래 ⑤ 참고) — compose 는 network_mode 와
             # ports/networks 동시 선언을 거부하므로 앱 쪽을 비우고, 그 둘은 사이드카가 물려받는다.
@@ -1204,6 +1236,12 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
             body.append("    environment:")
             for k in sorted(env_pairs):
                 body.append(f"      {k}: {json.dumps(str(env_pairs[k]))}")
+        if live:
+            # ⑨ 컨테이너가 죽어도 다시 뜬다. develop 은 운영에서 의미가 없고, 제거해도
+            # 데이터 위험이 없는 유일한 항목이다(바인드 마운트와 다르다).
+            body.append("    restart: unless-stopped")
+            if svc.get("develop"):
+                body.append("    develop: !reset null")
         if body:
             any_ = True
             out += [f"  {name}:", *body]
@@ -1222,7 +1260,7 @@ def build_overlay(config: dict, bind_host: str = "127.0.0.1", build_args: dict =
                 # netstat 은 alpine(busybox) 에 항상 있고, 연결을 열지 않아 타겟에 부담이 없다.
                 f"    healthcheck: {{test: [\"CMD-SHELL\", {json.dumps(_bind_healthcheck(bind_pairs[fname]))}],"
                 " interval: 1s, timeout: 3s, retries: 60}"]
-        specs = _port_targets(svc)
+        specs = [] if live else _port_targets(svc)                # ⑨ live 는 선언 포트 유지
         if specs:                                                # 앱이 게시하던 포트를 그대로 물려받는다
             entries = ", ".join(
                 f'"{bind_host}::{t}"' if proto == "tcp" else f'"{bind_host}::{t}/{proto}"'
