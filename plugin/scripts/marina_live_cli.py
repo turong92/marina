@@ -499,6 +499,13 @@ def cmd_expose(project_id: str, cfg, rest) -> int:
         path = opts.get("path") if isinstance(opts.get("path"), str) else None
         res = X.expose_funnel(project_id, port, path)
     print(f"공개: {res.get('url')}")
+    if res.get("dns"):
+        d = res["dns"]
+        print(f"  DNS: {d['name']} → {d['content']} ({d['action']})")
+    if res.get("ingress"):
+        g = res["ingress"]
+        kept = f", 기존 호스트 {len(g['kept'])}개 유지" if g.get("kept") else ""
+        print(f"  터널 ingress: {g['hostname']} → {g['service']}{kept}")
     for w in res.get("warnings") or []:
         print("  " + w, file=sys.stderr)
     return 0

@@ -318,7 +318,7 @@ def expose_funnel(project_id: str, backend_port: int, path=None, controller=None
 
 
 def expose_cloudflare(project_id: str, domain: str, creds: dict, service: str,
-                      container_port: int, controller=None) -> dict:
+                      container_port: int, controller=None, call=None) -> dict:
     """도메인 + Cloudflare 터널. 자격증명 넷이 다 있어야 **아무것도 만들기 전에** 시작한다."""
     if not str(domain or "").strip():
         raise L.LiveConfigError("--domain 이 필요하다 (예: app.example.com).")
@@ -328,7 +328,8 @@ def expose_cloudflare(project_id: str, domain: str, creds: dict, service: str,
             "포트를 선언하거나 --service 로 골라라."
         )
     validate_cloudflare(creds)
-    write_secrets(project_id, {"TUNNEL_TOKEN": str(creds["token"]).strip()})
+    creds_full = {k: str(creds[k]).strip() for k in CLOUDFLARE_REQUIRED}
+    write_secrets(project_id, {"TUNNEL_TOKEN": creds_full["token"]})
     cfg = dict(expose_config(project_id))
     cfg["cloudflare"] = {
         "domain": str(domain).strip(),
@@ -340,21 +341,28 @@ def expose_cloudflare(project_id: str, domain: str, creds: dict, service: str,
     }
     save_expose_config(project_id, cfg)
     target = tunnel_target(service, container_port)
+    # DNS 레코드와 터널 ingress 를 **직접 만든다.** 커넥터만 띄우고 "공개됐다" 고 말하면
+    # 거짓이다 — 토큰 터널은 ingress 가 Cloudflare 쪽에 있어서, 그게 없으면 트래픽이 흐르지
+    # 않는다. 홈서버 테라폼이 이미 둘을 만드는데 여기서 안 만들 이유가 없다.
+    # 실패하면 그대로 올린다: "만들었다" 와 "만들지 못했다" 를 섞으면 안 된다.
+    import marina_live_cloudflare as CF
+    dns = CF.ensure_dns(creds_full, domain, call=call)
+    ingress = CF.ensure_ingress(creds_full, domain, target, call=call)
     return {
         "mode": "cloudflare",
         "domain": cfg["cloudflare"]["domain"],
         "url": f"https://{cfg['cloudflare']['domain']}",
         "secrets": str(secrets_file(project_id)),
         "target": target,
+        "dns": dns,
+        "ingress": ingress,
         "warnings": [
-            f"Cloudflare 쪽에서 이 터널의 ingress 를 **{cfg['cloudflare']['domain']} → {target}** "
-            f"로 설정해야 트래픽이 흐른다. 토큰 터널은 ingress 를 Cloudflare 가 관리하므로 "
-            f"marina 가 대신 만들 수 없다(그 설정까지 marina 가 쥐면 터널을 통째로 소유하게 된다).",
             "cloudflared 는 live 세션에만 뜬다 — 개발 워크트리에서 같은 터널의 커넥터를 띄우면 "
             "Cloudflare 가 공개 요청을 그중 아무 데로나 보낸다(실측).",
             f"{secrets_file(project_id)} 는 백업 목록에 들어 있어야 한다 — "
             f"`marina live backup-paths {project_id}` 로 확인해라.",
-            f"다음 기동에 적용된다: marina live up {project_id}",
+            f"커넥터는 다음 기동에 뜬다: marina live up {project_id} "
+            f"(그때까지 도메인은 502 를 돌려준다)",
         ],
     }
 

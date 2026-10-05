@@ -829,6 +829,12 @@ marina live unexpose myapp                     # 멱등. 로컬 접근은 그대
   live 가 쥐고 있으면 `marina remote` 가 443 을 거부하고 이유를 말한다.
 - 8443·10000 은 **경로 기반**이라 앱을 깨뜨릴 수 있다(절대경로 asset·쿠키 path·redirect).
   그 포트를 쓸 때만 `expose` 가 경고한다. 셋 다 차면 거부하고 Cloudflare 터널을 안내한다.
+- **도메인을 붙이는 길은 Cloudflare 터널뿐이다**(Funnel 은 ts.net 이름만 쓴다). `expose
+  --cloudflare` 는 자격증명 넷(`--token --zone --account --tunnel`, 또는 `MARINA_CF_*`
+  환경변수)을 받아 **DNS CNAME 과 터널 ingress 를 직접 만든다** — 커넥터만 띄우고
+  "공개됐다" 고 말하지 않는다. ingress 는 항상 **읽고 병합해서** 쓰고, 읽기에 실패하면
+  아무것도 쓰지 않는다(읽지 않고 쓰면 다른 호스트명의 공개가 사라진다).
+  같은 이름에 CNAME 이 아닌 레코드가 있으면 거부한다.
 - Cloudflare 터널의 cloudflared 커넥터는 **live 세션에만** 뜬다. 터널 하나에 커넥터가 여럿이면
   Cloudflare 가 공개 요청을 그중 아무 데로나 보낸다(실측) — 개발 워크트리마다 커넥터가 뜨면
   공개 트래픽이 무작위 워크트리로 들어간다.
