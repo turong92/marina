@@ -83,7 +83,9 @@ check(not r.get("isError") and "자료실" in r["content"][0]["text"], f"개발 
 arch = cfg["projects"]["proj"]["archiveChannelId"]
 up = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{arch}/messages"]
 check(up and "[로그인 버그] 로그인 화면" in up[-1]["b"]["payload"]["content"], f"프로젝트 자료실 글: {up[-1] if up else None}")
-check(not (wt / "미리보기").exists() and (sd2 / "미리보기" / "shot.png").is_file(), "개발 세션 미리보기는 레포가 아닌 상태 폴더에")
+prev = Path(os.environ["MARINA_HOME"]) / "share-previews" / "proj-login-fix" / "shot.png"
+check(not (wt / "미리보기").exists() and not (sd2 / "미리보기").exists() and prev.is_file(),
+      "개발 세션 미리보기는 레포·상태 폴더 밖(공식 플러그인이 상태 폴더 첨부를 거부)")
 # 로비가 있어도 main 체크아웃에서 하던 대화는 옮길 수 있다
 import re as _re
 SID = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"

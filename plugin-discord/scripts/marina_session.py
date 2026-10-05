@@ -2350,6 +2350,12 @@ def _ask_terminal(rec: dict[str, Any], args: dict[str, Any]) -> str:
     return "버튼 보냈어 — 형이 실행하고 알려 주면 이어서"
 
 
+def _dev_preview_dir(rec: dict[str, Any]) -> Path:
+    """개발 세션 미리보기 폴더 — 워크트리 밖(git add 로 딸려 가지 않게) + 상태 폴더 밖(공식 Discord 플러그인이 자기 상태 폴더 안
+    파일 첨부를 'refusing to send channel state' 로 거부한다, 2026-10-05 실측)."""
+    return marina_home() / "share-previews" / f"{rec.get('project')}-{rec.get('task')}"
+
+
 def chat_tool(name: str, args: dict[str, Any]) -> str:
     """채팅·개발 세션 MCP 도구. 실패는 SessionError."""
     if name == "ask_terminal":
@@ -2384,7 +2390,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
     files, notes = [path], []
     if path.suffix.lower() in (".html", ".htm"):
         # 개발 세션은 레포 밖(상태 폴더)에 — 워크트리에 두면 git add 로 커밋에 딸려 간다(리뷰)
-        outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else Path(str(rec["stateDir"])) / "미리보기"
+        outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else _dev_preview_dir(rec)
         prev, why = marina_share.render_html(path, root, outdir)
         if not prev:
             notes.append(f"미리보기를 만들지 못했어({why}) — HTML 파일만 보내")
@@ -2393,7 +2399,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
             if why:
                 notes.append(why)
     if path.suffix.lower() in (".md", ".markdown"):
-        outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else Path(str(rec["stateDir"])) / "미리보기"
+        outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else _dev_preview_dir(rec)
         imgs, why = marina_share.render_md(path, root, outdir)
         if not imgs:
             notes.append(f"미리보기를 만들지 못했어({why}) — md 파일만 보내")
@@ -2402,6 +2408,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
             if why:
                 notes.append(why)
     cfg = load_config()
+    view_url = ""
     if path.suffix.lower() in _VIEW_SUFFIXES:
         # 폰·다른 사람이 여는 보기 주소 — discord 가 혼자 한다(링크가 열쇠, 기한 없음). 개발·채팅 세션 둘 다
         import marina_view
@@ -2410,6 +2417,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         else:
             try:
                 url = marina_view.public_url(cfg, marina_view.create(str(root), str(path), str(rec.get("channelId") or "")))
+                view_url = url
                 notes.append(f"열어보기: {url} — reply 본문에 이 주소를 넣어")
             except (ValueError, OSError) as exc:
                 notes.append(f"열어보기 링크를 만들지 못했어({exc}) — 첨부만 보내")
@@ -2420,7 +2428,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         big = [f for f in files if f.stat().st_size > 10 * 1024 * 1024]
         try:
             marina_share.upload_message(Discord(read_token(cfg)).base, read_token(cfg), arch,
-                                        f"📎 [{room}] {title}\n원래 방: <#{rec.get('channelId')}>",
+                                        f"📎 [{room}] {title}\n원래 방: <#{rec.get('channelId')}>" + (f"\n열어보기: <{view_url}>" if view_url else ""),
                                         [f for f in files if f not in big])
             notes.append("#자료실 에도 올렸어")
         except Exception as exc:

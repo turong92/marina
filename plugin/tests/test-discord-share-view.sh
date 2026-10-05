@@ -40,6 +40,9 @@ root = Path(os.path.realpath(rec["root"]))
 (root / "out" / "p.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
 (root / "out" / "img.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
 os.environ["DISCORD_STATE_DIR"] = rec["stateDir"]
+uploads = []
+sh.upload_message = lambda base, token, ch, content, files: uploads.append(content)
+_c = ms.load_config(); _c["projects"]["proj"]["archiveChannelId"] = "999"; ms.save_config(_c)
 
 # ── publicBase 가 없으면 주소 없이 첨부만(+이유)
 out = ms.chat_tool("share_file", {"path": "out/r.html"})
@@ -68,6 +71,12 @@ lines = out.splitlines()
 files = [l for l in lines if l.startswith("/")]
 check(files and files[-1] == str(root / "out" / "n.md") and any(f.endswith(".png") for f in files[:-1]), f"md: 미리보기 png + 원본: {files}")
 check("열어보기: " in out, "md 도 열어보기")
+check(uploads and "/v/" in uploads[-1], f"#자료실 글에도 열어보기 주소: {uploads[-1:]}")
+# 공식 Discord 플러그인은 자기 상태 폴더(DISCORD_STATE_DIR) 안 파일 첨부를 거부한다("refusing to send channel state", 2026-10-05 실측)
+# — 미리보기는 상태 폴더 밖·워크트리 밖에 둔다
+sdir = os.path.realpath(rec["stateDir"])
+check(not any(os.path.realpath(f).startswith(sdir + os.sep) for f in files) and not any(os.path.realpath(f).startswith(str(root) + os.sep) and f.endswith(".png") for f in files),
+      f"미리보기는 상태 폴더·워크트리 밖: {files}")
 page = (tmp / "chrome-page").read_text()
 check("marked" in page and "integrity=" in page and "제목" in page and "</script> &" not in page, f"크롬이 받은 가상 페이지: {page[:200]}")
 check("<base href=\"/out/\">" in page, "md 폴더 기준 base(상대 이미지)")
