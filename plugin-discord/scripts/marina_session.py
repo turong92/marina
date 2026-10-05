@@ -700,6 +700,103 @@ def _session_from_env() -> "dict[str, Any] | None":
     return s if s and s.get("channelId") else None
 
 
+_RM_WORD = re.compile(r"(?<![\w.\-])rm(?=\s)")       # rm · \rm · /bin/rm — --rm · rm-cache 는 아님
+_SAFE_VAR = re.compile(r"\$\{\w+(?:\[[@*\w]+\])?:\?[^}]*\}")   # ${VAR:?} · ${ARR[@]:?} 만 안전 — 빈 값이면 셸이 멈춘다
+_HEREDOC = re.compile(r"<<-?\s*(['\"]?)(\w+)\1[^\n]*\n.*?\n[ \t]*\2[ \t]*(?=\n|\)|$)", re.S)
+_RM_LEAD = {"sudo", "command", "exec", "time", "nohup", "env", "xargs"}          # 이걸로 시작하면 뒤의 rm 은 실행
+_RM_PREV = {"then", "do", "else", "!", "{", "-exec", "-execdir", "-ok"} | _RM_LEAD   # 바로 앞 단어가 이거면 실행
+_RM_FIX = ('rm 인자에 맨 변수·명령 치환이 있어 막았다 — 빈 값이면 엉뚱한 곳을 지우고, 사람에게 확인 창이 떠서 작업이 선다. '
+           '사람에게 묻지 말고 고쳐서 다시 실행해: ① 변수는 전부 `${VAR:?}` 로(`rm -rf "${VAR:?}/하위"`), 아니면 경로를 글자 그대로 '
+           '② `$@`·배열은 `for f in …; do rm "${f:?}"; done` ③ `$(…)` 는 먼저 변수에 담고 `${VAR:?}` 로 '
+           '④ rm 을 실행하는 게 아니라 메시지·스크립트 본문에 글자로 담긴 거면 Write 로 파일에 써서 넘겨(`git commit -F 파일`, `bash 파일`).')
+
+
+def _quote_map(s: str) -> "list[tuple[str, int]]":
+    """글자마다 (그 자리를 감싼 따옴표, 그 따옴표가 열린 위치). 밖이면 ('', -1)."""
+    out, quote, at, i = [], "", -1, 0
+    while i < len(s):
+        c = s[i]
+        if c == "\\" and quote != "'" and i + 1 < len(s):
+            out += [(quote, at), (quote, at)]
+            i += 2
+            continue
+        if quote:
+            out.append((quote, at))
+            if c == quote:
+                quote, at = "", -1
+        else:
+            if c in "'\"":
+                quote, at = c, i
+            out.append(("", -1) if not quote else (quote, at))
+        i += 1
+    return out
+
+
+def _rm_args(s: str, i: int, end: int) -> str:
+    """rm 뒤부터 그 명령이 끝나는 곳까지 — 따옴표·괄호 밖의 ; | & 줄바꿈 ) # 에서 끊는다(2>&1 의 & 는 아님)."""
+    start, quote, depth = i, "", 0
+    while i < end:
+        c = s[i]
+        if c == "\\" and quote != "'":
+            i += 2
+            continue
+        if quote:
+            quote = "" if c == quote else quote
+        elif c in "'\"":
+            quote = c
+        elif c == "(":
+            depth += 1
+        elif c == ")":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and (c in ";|\n" or (c == "#" and s[i - 1] in " \t")
+                             or (c == "&" and s[i - 1] != ">" and s[i + 1:i + 2] != ">")):
+            break
+        i += 1
+    return s[start:min(i, end)]
+
+
+def _rm_unsafe(command: str) -> bool:
+    """실행되는 rm 의 인자에 ${VAR:?} 아닌 확장이 있나. 글자로 담긴 rm(커밋 메시지·검색어·heredoc 본문)과
+    다른 도구의 하위명령(git rm · docker rm)은 안 본다 — 놓치면 Claude Code 확인 창이 전처럼 뜰 뿐이라 정밀도 쪽으로."""
+    s = _HEREDOC.sub("\n", command.replace("\\\n", " "))
+    qm = _quote_map(s)
+    for m in _RM_WORD.finditer(s):
+        quote, at = qm[m.start()]
+        if quote:                                     # 따옴표 안(bash -c '…' · trap '…') — 그 문자열 안에서만 본다
+            lo = at + 1
+            j = next((k for k in range(m.end(), len(s)) if qm[k] != (quote, at)), len(s))
+            hi = j - 1 if s[j - 1] == quote else j
+            before = re.split(r"[;|&()\n]", s[lo:m.start()])[-1]
+        else:
+            lo, hi = 0, len(s)
+            cut = max((j for j in range(m.start()) if qm[j][0] == "" and s[j] in ";|&()\n"), default=-1)
+            before = s[cut + 1:m.start()]
+        words = before.split()
+        path = re.search(r"(\S*/|\\)$", before)        # /bin/rm · \rm — 붙은 앞부분은 단어가 아니다
+        if path:
+            words = before[:path.start()].split()
+        runs = (not words or words[-1] in _RM_PREV or words[0] in _RM_LEAD
+                or all(re.match(r"^\w+=", w) for w in words))
+        if not runs:
+            continue
+        rest = _SAFE_VAR.sub("", _rm_args(s, m.end(), hi)).replace("\\$", "")
+        if "$" in rest or "`" in rest:
+            return True
+    return False
+
+
+def hook_rm_guard(payload: dict[str, Any]) -> "dict[str, Any] | None":
+    """변수 경로 rm 은 우회 모드에서도 Claude Code 가 사람에게 확인 창을 띄운다 — 서브에이전트 것은 아무도 못 봐 작업이 선다
+    (2026-10-04 ovation, 형 2026-10-06 "자꾸 권한 묻는데"). 실행 전에 거부하고 고치는 법을 돌려줘 스스로 다시 쓰게 한다.
+    창을 미리 없애는 장치지 삭제 안전망이 아니다 — 아무것도 자동 허용하지 않고, 못 잡은 건 전처럼 확인 창이 뜬다."""
+    inp = payload.get("tool_input")
+    if payload.get("tool_name") != "Bash" or not isinstance(inp, dict) or not _rm_unsafe(str(inp.get("command") or "")):
+        return None
+    return _deny(_RM_FIX)
+
+
 def hook_reply_to(payload: dict[str, Any]) -> "dict[str, Any] | None":
     """답장 도구에 reply_to 가 빠졌으면 그 턴에 받은 마지막 지시 메시지로 채운다 — 답장이 곧 끝 표시(✅ 없음).
     규칙 문구만으론 Claude 가 잊는다(실사용) — 훅이 기계적으로."""
@@ -1085,6 +1182,10 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
         p_hook = shlex.join(_hook_entry() + ["hook-permission"]) + " || true"
         settings["hooks"]["PermissionRequest"] = [{"hooks": [{"type": "command", "command": p_hook,
                                                               "timeout": int(PERM_WAIT) + 30}]}]
+    # 변수 경로 rm 은 실행 전에 돌려보낸다 — 우회 모드에서도 뜨는 확인 창을 미리 없앤다(서브에이전트 포함)
+    rm_hook = shlex.join(_hook_entry() + ["hook-rm-guard"]) + " || true"
+    settings["hooks"]["PreToolUse"].append({"matcher": "Bash",
+                                            "hooks": [{"type": "command", "command": rm_hook, "timeout": 10}]})
     # 답장 = 끝 표시: reply_to 가 빠지면 훅이 채운다(규칙만으론 잊는다, 실사용)
     reply_hook = shlex.join(_hook_entry() + ["hook-reply-to"]) + " || true"
     settings["hooks"]["PreToolUse"].append({"matcher": _REPLY_TOOL,
@@ -2930,6 +3031,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("hook-stop")
     sub.add_parser("hook-typing")
     sub.add_parser("hook-reply-to")
+    sub.add_parser("hook-rm-guard")
     sub.add_parser("hook-prompt")
     sub.add_parser("hook-question")
     sub.add_parser("hook-permission")
@@ -2968,10 +3070,10 @@ def main(argv: list[str] | None = None) -> int:
         except Exception:
             pass
         return 0
-    if a.cmd in ("hook-reply-to", "hook-prompt"):
+    if a.cmd in ("hook-reply-to", "hook-prompt", "hook-rm-guard"):
         # 실패해도 도구 호출·입력은 그대로 지나가게 — 출력이 없으면 하네스는 아무것도 바꾸지 않는다
         try:
-            fn = hook_reply_to if a.cmd == "hook-reply-to" else hook_prompt
+            fn = {"hook-reply-to": hook_reply_to, "hook-rm-guard": hook_rm_guard}.get(a.cmd, hook_prompt)
             out = fn(json.loads(sys.stdin.read() or "{}"))
             if out:
                 print(json.dumps(out, ensure_ascii=False))
