@@ -34,3 +34,44 @@ L2: Ruling: `RemoteController` 에 live 라우트 개념을 넣었다(`liveRoute
 L2: Ruling: 우리 자신이 설정을 바꾼 직후 지문을 다시 저장한다(`_refresh_fingerprint`). live 라우트가 남아 설정이 비지 않으면 저장 지문이 낡아 `conflict=True` 가 되고, "남의 설정은 건드리지 않는다" 안전장치가 **우리 변경** 때문에 작동해 off/activate 가 영구 실패한다(실측). 비용: 밖에서 바뀐 변경을 감지하는 창이 그 한 순간 좁아진다.
 L2: Ruling: cloudflared 토큰 **값**은 overlay 에 넣지 않고 `live/secrets.env`(0600)를 `env_file` 로 참조한다 — overlay 는 평문으로 ~/.marina 에 남는 생성물이다. 비용: 그 파일이 백업에서 빠지면 공개가 복구되지 않는다(L3 backup-paths 가 목록에 넣는다).
 L2: Ruling: 백엔드 포트는 **선언된 published 포트**에서 찾고, 둘 이상이면 `--service` 를 요구한다 — 추측하면 엉뚱한 서비스가 인터넷에 열린다. 비용: 포트를 안 게시한 앱은 공개하려면 compose 를 고쳐야 한다.
+L3: complete (tests: test-live-ops.sh·test-live-dash.sh PASS; live 11개·py39·dash·host-guard·access-http PASS)
+L3: Ruling: `pin` 이 이력을 쓰고 마이그레이션 경고를 **매번** 낸다 — 배포·롤백이 전부 pin 이므로 유일한 기록·경고 지점이다. 비용: pin 출력이 한 줄 길어진다.
+L3: Ruling: `live_report` 는 `healthy` 같은 단일 불린을 **내보내지 않는다**. UI 가 그 값으로 초록불을 만들면 401 이 장애를 가린다(홈서버 실측). 테스트가 JSON 전체에 'healthy' 가 없음을 단정한다. 비용: UI 가 세 신호를 각각 그려야 한다.
+L3: Ruling: 대시보드 live 영역은 `#sessions`(워크트리 카드) **밖**에 둔다 — 섞이면 유휴 정리 대상처럼 보인다. 테스트가 DOM 순서·중첩을 단정한다. 비용: 없음.
+L3: Ruling: 컨테이너 상태 조회를 `marina_live.live_containers` 한 곳으로 모았다(CLI status 와 /api/live 가 같은 신호를 본다). 안 모으면 "CLI 는 떴다는데 대시보드는 아니다" 가 생긴다. 비용: 없음.
+Note(플레이크, 내 변경 아님): test-docker-gc-ui.sh 의 "실 도커 dry-run" 단정이 test-live-up.sh 직후에 한 번 실패했고 단독·main 에서 모두 통과한다. 그 테스트는 전후 컨테이너/이미지 **개수**를 비교하므로 바로 앞 테스트의 compose down 정리가 겹치면 흔들린다.
+자체 발견 수정 4건 (리뷰 전, 각각 RED→GREEN):
+- 낡은 잠금: 비정상 종료가 남긴 `.lock` 때문에 **재부팅 후 launchd 가 매번 잠금에 걸려 서비스가 영구히 안 뜨는** 경로가 있었다. pid 생존 확인으로 자동 해제(깨진 내용도 낡은 것으로 본다). 테스트: 죽은 pid·깨진 내용 둘 다.
+- 프로젝트 id 가드: id 가 경로 조각(~/.marina/<id>/live)이자 docker·git·systemd 인자로 들어가는데 검사가 없었다. `../escape` 하나로 ~/.marina 밖을 가리키고, 공백은 systemd ini(인용 없음)에서 인자를 쪼갠다. `check_project_id` 추가.
+- 유닛 스크립트 인용: `eval "$(python3 ...)"` 가 인용 없이 값을 내보내 MARINA_HOME 에 공백이 있으면 깨졌다(실측: "줄 25: space/ovation/live/unit.plist"). shlex.quote.
+- 바인드 경고 정밀화: `--project-directory` 가 live_root 라서 `./src` 는 체크아웃을, `./data/x` 는 데이터를 가리킨다. 둘을 같은 "하드 리셋에 날아간다" 문구로 경고해 **데이터 마운트에 거짓 경고**가 나왔다(test-live-up 출력에서 실측). `classify_binds` 로 체크아웃 안만 경고, 나머지는 알림.
+
+## 최종 리뷰 (새 컨텍스트 opus `code-reviewer`)
+
+집계: **Critical 3 · Important 11 · Minor 12.** 리뷰어는 코드를 고치지 않았고, 확인에
+읽기 전용 `docker compose config` 와 격리된 MARINA_HOME 만 썼다.
+
+재등급(효과 기준) 후 처리:
+- Critical 3 전부 수정 (C1 cloudflared overlay 머지 / C2 live 예약어 미강제 / C3 자동 기동 거짓 신호)
+- Important 11 전부 수정
+- Minor 12 중 7건 수정(M4·M10 은 효과가 커서 Important 로 올렸다), 2건은 "확인 완료"
+  보고라 조치 불요(M11 GC 면제 범위·M12 Funnel 443 금지 강제), 1건은 리뷰어 범위 밖
+  플레이크 노트, 1건(M7)은 구조상 못 고쳐 근거를 남기고 보류, 1건은 다른 항목과 함께 처리.
+
+리뷰 확인 과정에서 **리뷰어도 놓친 Critical 1건**을 추가 발견: `--project-directory` 는
+바인드 소스뿐 아니라 `build.context` 까지 옮긴다(실측) — 소스에서 빌드하는 live 스택이
+전부 `open Dockerfile: no such file or directory` 로 깨지고 있었다. `build_overlay(
+build_context_base=live/src)` 로 빌드만 절대경로 고정. 리뷰어가 동의하고 "좋은 발견" 으로 확인.
+
+### 보류한 것 (근거 포함)
+- **M7**: `validate_services` 가 `sync_src`(하드 리셋) 뒤에 돈다. compose 파일이 그 ref
+  안에 있어 순서가 구조적으로 강제된다. 컨테이너는 그대로라 무해하고, 고치려면 ref 에서
+  compose 만 꺼내 검증하는 경로를 새로 만들어야 해서 이익보다 비용이 크다.
+- **알려진 한계**: `build.additional_contexts`·`secrets`·`ssh` 의 경로는 여전히
+  project directory 기준이라 그것들을 쓰는 compose 는 같은 증상이 남는다. 코드 주석에 기록.
+- **플레이크(내 변경 아님)**: `test-docker-gc-ui.sh` 가 전후 컨테이너/이미지 **개수**를
+  비교하므로 실제 compose 를 띄우는 `test-live-up.sh` 바로 뒤에 돌면 흔들린다. 단독·main
+  에서 통과. 러너가 둘을 같은 배치로 고르는지는 확인하지 않았다.
+- **`marina.sh:63 → marina_live_cli`** 가 `test-runtime-boundary` 의 WARN 목록에 있다 —
+  `marina.sh` 가 이미 PENDING 이고 `marina_auth_cli`·`marina_chain_cli` 와 같은 모양이라
+  새 위반 분류는 아니다. 그 파일 전체를 푸는 일은 이 작업 범위 밖.
