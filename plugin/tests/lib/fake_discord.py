@@ -50,6 +50,11 @@ class H(BaseHTTPRequestHandler):
             with lock:
                 self._send(200, list(channels.values()))
             return
+        if len(p) == 4 and p[0] == "channels" and p[2] == "messages":
+            gone = (state / "gone").read_text().split() if (state / "gone").exists() else []
+            if p[3] in gone:
+                self._send(404, {"message": "Unknown Message"}); return
+            self._send(200, {"id": p[3]}); return
         if p == ["users", "@me"]:
             self._send(200, {"id": "BOT1", "bot": True}); return
         if len(p) == 3 and p[0] == "guilds" and p[2] == "roles":

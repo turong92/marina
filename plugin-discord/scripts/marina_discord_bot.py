@@ -1478,6 +1478,64 @@ def _log(msg: str) -> None:
         pass
 
 
+def _plain(text: str) -> str:
+    """Discord 에 그대로 보일 글 — 백틱(코드 블록 깨기)·멘션을 무력화."""
+    return text.replace("`", "ʼ").replace("@", "@\u200b")
+
+
+def new_from_text(project: str, user: str, text: str, channel: str, name: str = "형") -> str:
+    """[🛠 새 작업 열기] 모달 제출: 글 한 덩이로 워크트리·채널·세션을 연다. 결과는 누른 사람에게 보일 한 줄.
+    channel = 버튼이 눌린 채널(그 프로젝트 로비여야 한다)."""
+    text = (text or "").strip()
+    if not 1 <= len(text) <= 500:
+        return "글은 1~500자로 적어 줘"
+    try:
+        lobby = next((s for s in ms.load_sessions() if s.get("project") == project and s.get("kind") == "dev-lobby"), None)
+        if not lobby:
+            return "이 프로젝트엔 로비가 없어"
+        if str(lobby.get("channelId")) != str(channel):
+            return "이 채널의 새 작업 패널이 아니야"
+        cfg = ms.load_config()
+        dc = _dc(cfg)
+        if not _allowed(lobby, str(lobby.get("channelId")), user, dc):
+            return "새 작업을 열 권한이 없어"
+        who = (name or "형").strip() or "형"
+
+        def first(ch: str) -> str:
+            """채널이 생긴 뒤·세션이 뜨기 전에 📝 를 올려 그 메시지 ID 를 첫 지시에 넣는다(세션이 자기 채널을 알게)."""
+            mid = ""
+            try:
+                mid = dc.post_message(ch, f"📝 {_plain(who)[:40]}: " + _plain(text)[:1800])
+            except ms.SessionError:
+                pass
+            return ms.new_task_first_prompt(text, who, ch, mid)
+
+        slug = ms.unique_slug(project, ms.suggest_slug(text))
+        r = ms.cmd_new(project, slug, ms.extract_base(project, text), start=False, title=ms.task_title(text), first=first)
+        return f"열었어: <#{r['channelId']}>"
+    except ms.SessionError as exc:
+        return str(exc)[:1500]
+    except Exception as exc:        # 예상 밖 오류의 원문은 Discord 에 안 보인다 — 로그에만
+        _log(f"new-from-text {project} 실패: {exc!r}")
+        return "못 열었어 — 마리나 로그를 확인해 줘"
+
+
+PANEL_EVERY = 600.0
+
+
+def panel_tick(last: float, now: float) -> float:
+    """로비마다 새 작업 패널을 보장(10분마다 + 봇이 뜰 때). 새로 확인한 시각을 돌려준다."""
+    if now - last < PANEL_EVERY:
+        return last
+    for s in ms.load_sessions():
+        if s.get("kind") == "dev-lobby":
+            try:
+                ms.ensure_new_panel(str(s.get("project")))
+            except Exception as exc:
+                _log(f"new panel {s.get('project')} 실패: {exc!r}")
+    return now
+
+
 _spawn = subprocess.Popen
 
 
@@ -1490,6 +1548,7 @@ class Loop:
         self.ty: dict[str, float] = {}
         self.last_render = -1.0          # 데몬이 막 떴으면 한 번은 그린다
         self.last_weekly = -WEEKLY_EVERY
+        self.last_panel = -PANEL_EVERY
         self.last_reconcile = -RECONCILE_EVERY
         self.proc: subprocess.Popen | None = None
         self.next_start, self.backoff, self.started = 0.0, 5.0, 0.0
@@ -1575,6 +1634,7 @@ class Loop:
                     _log(f"reconcile: 워크트리가 사라진 세션 정리 {gone}")
             except Exception as exc:
                 _log(f"reconcile 실패: {exc!r}")
+        self.last_panel = panel_tick(self.last_panel, now)
         light = snapshot(full=False)
         typing_tick(light, self.ty, now)
         try:
@@ -1630,6 +1690,9 @@ def main(argv: list[str]) -> int:
     ty = sub.add_parser("type")
     ty.add_argument("tmux"); ty.add_argument("text"); ty.add_argument("channel"); ty.add_argument("mid")
     ty.add_argument("button", nargs="?", default="")
+    nt = sub.add_parser("new-from-text")
+    nt.add_argument("--project", required=True); nt.add_argument("--user", required=True); nt.add_argument("--text", required=True)
+    nt.add_argument("--channel", required=True); nt.add_argument("--name", default="형")
     vw = sub.add_parser("view")
     vw.add_argument("--channel", required=True)
     vw.add_argument("--user", required=True)
@@ -1673,6 +1736,11 @@ def main(argv: list[str]) -> int:
                               timeout=float(os.environ.get("MARINA_TYPE_TIMEOUT") or type_timeout(a.text)))
             if not typed and a.button:
                 _restore_suggest(a.channel, a.button, a.text[len(SUGGEST_MARK):] if a.text.startswith(SUGGEST_MARK) else a.text)
+        return 0
+    if a.cmd == "new-from-text":
+        # 봇이 띄운 python 의 PATH 는 짧다(<bun>:/usr/bin:/bin) — claude·tmux·git 을 찾게 데몬과 같은 경로로 보강
+        os.environ["PATH"] = ms.daemon_path() + ":" + os.environ.get("PATH", "")
+        print(new_from_text(a.project, a.user, a.text, a.channel, a.name))
         return 0
     if a.cmd == "view":
         try:

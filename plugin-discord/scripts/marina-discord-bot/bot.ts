@@ -1,6 +1,6 @@
 // 마리나 Discord 봇 — 공식 Discord 플러그인이 못 받는 이벤트만 받는다(지금은 🛑 반응).
 // 판단은 전부 파이썬(marina_discord_bot.py interrupt)에 맡긴다. 마리나 데몬이 띄우고, 데몬이 죽으면 따라 끝난다.
-import { ActionRowBuilder, Client, Events, GatewayIntentBits, ModalBuilder, Partials, TextInputBuilder, TextInputStyle } from "discord.js";
+import { ActionRowBuilder, Client, Events, GatewayIntentBits, MessageFlags, ModalBuilder, Partials, TextInputBuilder, TextInputStyle } from "discord.js";
 import { execFile } from "node:child_process";
 
 const guild = process.env.MARINA_GUILD ?? "";
@@ -104,6 +104,34 @@ client.on(Events.InteractionCreate, async (it) => {
     const [, ch, q] = it.customId.split(":");
     if (it.isFromMessage()) await it.deferUpdate().catch(() => {}); else await it.deferReply().catch(() => {});
     answer(it, ch, q, [`--text=${it.fields.getTextInputValue("text")}`]); // = 로 붙여 '-' 로 시작하는 글도 값으로
+  }
+});
+
+// 로비 고정 패널 [🛠 새 작업 열기](marina-new:<프로젝트>) → 칸 하나 모달(marina-newt) → 제출하면 파이썬이 워크트리·채널·세션을 연다
+client.on(Events.InteractionCreate, async (it) => {
+  if (it.isButton() && it.customId.startsWith("marina-new:")) {
+    const project = it.customId.slice("marina-new:".length);
+    const modal = new ModalBuilder().setCustomId(`marina-newt:${project}`).setTitle("새 작업 열기");
+    const input = new TextInputBuilder().setCustomId("text").setLabel("뭐 할 거야?").setStyle(TextInputStyle.Paragraph)
+      .setPlaceholder("예) 결제 페이지 환불 버그 고치기 (dev 에서 시작하려면 'dev에서')")
+      .setMinLength(1).setMaxLength(500).setRequired(true);
+    modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+    await it.showModal(modal).catch(() => {});
+    return;
+  }
+  if (it.isModalSubmit() && it.customId.startsWith("marina-newt:")) {
+    const project = it.customId.slice("marina-newt:".length);
+    await it.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});   // 열리는 데 시간이 걸린다 — 먼저 받아 두고 결과는 누른 사람에게만
+    const text = it.fields.getTextInputValue("text");
+    const who = it.user.globalName || it.user.username;
+    execFile(py, [script, "new-from-text", "--project", project, "--user", it.user.id, "--channel", it.channelId ?? "", `--name=${who}`,
+                  `--text=${text}`],   // = 로 붙여 '-' 로 시작하는 글도 값으로
+      { timeout: 600000, env: childEnv }, (err, out, errOut) => {
+        // 사용자에겐 파이썬이 다듬은 한 줄(성공·알려줄 실패)만 — 비정상 종료·시간 초과는 고정 문구, 자세한 건 로그에
+        const msg = err ? "" : (out || "").trim();
+        console.log(new Date().toISOString(), "new-task", project, err ? `error ${String(err)} ${(errOut || "").slice(0, 300)}` : msg.slice(0, 200));
+        it.editReply({ content: (msg || "못 열었어 — 마리나 로그를 확인해 줘").slice(0, 2000), allowedMentions: { parse: [] } }).catch(() => {});
+      });
   }
 });
 

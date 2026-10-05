@@ -15,6 +15,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import tempfile
 import unicodedata
 import sys
 import threading
@@ -339,6 +340,29 @@ class Discord:
         # 본문의 @everyone·역할 멘션이 서버 알림이 되지 않게(로비 리뷰 L1)
         self._req("POST", f"/channels/{cid}/messages", {"content": content, "allowed_mentions": {"parse": []}})
 
+    def post_panel(self, cid: str, content: str, components: list[dict[str, Any]]) -> str:
+        """버튼이 달린 메시지를 올리고 ID 를 돌려준다(고정 패널용)."""
+        r = self._req("POST", f"/channels/{cid}/messages",
+                      {"content": content, "components": components, "allowed_mentions": {"parse": []}})
+        return str((r or {}).get("id") or "")
+
+    def post_message(self, cid: str, content: str) -> str:
+        """send_message 와 같되 메시지 ID 를 돌려준다."""
+        r = self._req("POST", f"/channels/{cid}/messages", {"content": content, "allowed_mentions": {"parse": []}})
+        return str((r or {}).get("id") or "")
+
+    def pin(self, cid: str, mid: str) -> None:
+        self._req("PUT", f"/channels/{cid}/pins/{mid}")
+
+    def message_exists(self, cid: str, mid: str) -> bool:
+        try:
+            self._req("GET", f"/channels/{cid}/messages/{mid}")
+            return True
+        except DiscordError as exc:
+            if exc.code == 404:
+                return False
+            raise
+
 
 def ensure_category(dc: Discord, cfg: dict[str, Any], project: str) -> str:
     """프로젝트 카테고리 ID. 저장된 ID 가 Discord 에 없으면(직접 지움) 새로 만들고 discord.json 을 고친다."""
@@ -457,8 +481,10 @@ def clean_env_prefix(extra: dict[str, str]) -> list[str]:
     return out
 
 
-def claude_argv(project: str, task: str, resume: bool = False, session_id: str = "", from_id: str = "") -> list[str]:
-    """session_id 가 있으면(옮겨 온 대화) 자기 ID 로 잇는다 — 같은 워크트리의 다른 대화(--continue)를 집지 않게.
+def claude_argv(project: str, task: str, resume: bool = False, session_id: str = "", from_id: str = "",
+                first: str = "") -> list[str]:
+    """first = 첫 지시(argv 초기 프롬프트 — 부팅 중 TUI 는 타이핑을 삼킨다, 2026-09-10). 마지막 원소 하나로만 넘긴다.
+    session_id 가 있으면(옮겨 온 대화) 자기 ID 로 잇는다 — 같은 워크트리의 다른 대화(--continue)를 집지 않게.
     from_id = 그 대화의 복사본으로 시작(--fork-session)."""
     argv = ["claude"]
     if session_id:
@@ -476,6 +502,8 @@ def claude_argv(project: str, task: str, resume: bool = False, session_id: str =
              "--mcp-config", str(state_dir(project, task) / "mcp.json"),   # share_file(결과물 → #자료실)
              # AskUserQuestion 은 켠다 — 질문이 채널에 버튼으로 뜬다(봇 3단계, marina_discord_ask)
              "--settings", str(state_dir(project, task) / "settings.json")]
+    if first:
+        argv.append(first)
     return argv
 
 
@@ -1217,11 +1245,16 @@ def daemon_pid_path() -> Path:
 _DAEMON_ENV_KEEP = ("HOME", "USER", "LOGNAME", "LANG", "TMPDIR", "SHELL", "SSH_AUTH_SOCK")
 
 
+def daemon_path() -> str:
+    """데몬(과 그가 띄우는 것)이 쓰는 PATH — claude(~/.local/bin)·tmux·git(homebrew)을 찾게."""
+    return ":".join([str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin",
+                     "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+
+
 def _daemon_env() -> dict[str, str]:
     """데몬 환경 — 처음 깨운 세션의 것을 물려받지 않는다(DISCORD_STATE_DIR·CLAUDECODE·세션 PATH, 리뷰 I2)."""
     env = {k: v for k, v in os.environ.items() if k in _DAEMON_ENV_KEEP or k.startswith(("LC_", "MARINA_"))}
-    env["PATH"] = ":".join([str(Path.home() / ".local" / "bin"), "/opt/homebrew/bin", "/usr/local/bin",
-                            "/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+    env["PATH"] = daemon_path()
     env["MARINA_HOME"] = str(marina_home())
     env["PYTHONUNBUFFERED"] = "1"
     return env
@@ -2035,7 +2068,137 @@ def cmd_dev_lobby(project: str) -> dict[str, Any]:
         dc.send_message(channel_id, DEV_LOBBY_GUIDE)
     except SessionError:
         pass
+    try:
+        ensure_new_panel(project)
+    except SessionError:
+        pass                                  # 패널은 봇 틱이 다시 보장한다
     return dict(record, url=f"https://discord.com/channels/{cfg['guildId']}/{channel_id}", warning="")
+
+
+# ── 새 작업 버튼(스펙 2026-10-05-new-task-button-design) ─────────────────────
+
+NEW_PANEL_TEXT = "🛠 **새 작업이 필요해?** 버튼을 누르고 뭘 할지 한 줄로 적어 줘 — 워크트리·채널·세션을 열어 줄게."
+
+
+def ensure_new_panel(project: str) -> bool:
+    """dev 로비에 '새 작업 열기' 버튼 패널을 고정으로 하나만. 있으면 그대로(False), 새로 올렸으면 True."""
+    lobby = next((s for s in load_sessions() if s.get("project") == project and s.get("kind") == "dev-lobby"), None)
+    if not lobby or not lobby.get("channelId"):
+        return False
+    cfg = load_config()
+    pc = project_config(cfg, project)
+    dc = Discord(read_token(cfg))
+    ch = str(lobby["channelId"])
+    cur = pc.get("newPanel")
+    if isinstance(cur, dict) and cur.get("channelId") == ch and cur.get("messageId") and \
+            dc.message_exists(ch, str(cur["messageId"])):
+        return False
+    button = {"type": 1, "components": [{"type": 2, "style": 1, "label": "🛠 새 작업 열기",
+                                          "custom_id": f"marina-new:{project}"}]}
+    mid = dc.post_panel(ch, NEW_PANEL_TEXT, [button])
+    if not mid:
+        raise SessionError("패널 메시지 ID 를 못 받았어")
+    try:
+        dc.pin(ch, mid)
+    except SessionError:
+        pass                                  # pin 실패(권한·50개 제한)해도 패널은 쓸 수 있다
+    cfg = load_config()                       # 올리는 사이 바뀐 설정을 덮지 않게 다시 읽어 그 키만 고친다
+    project_config(cfg, project)["newPanel"] = {"channelId": ch, "messageId": mid}
+    save_config(cfg)
+    return True
+
+
+RESERVED_SLUGS = frozenset(("dev", "develop", "main", "master", "prod", "production", "staging", "release", "head"))
+
+
+def _branches(project: str) -> "set[str]":
+    r = subprocess.run(["git", "-C", str(project_root(project)), "for-each-ref", "--format=%(refname)",
+                        "refs/heads", "refs/remotes/origin"], capture_output=True, text=True)
+    out = set()
+    for ref in r.stdout.split() if r.returncode == 0 else []:
+        out.add(ref[len("refs/heads/"):] if ref.startswith("refs/heads/") else ref[len("refs/remotes/origin/"):])
+    return out
+
+
+def suggest_slug(text: str) -> str:
+    """haiku 로 영문 slug 한 번(깨끗한 env, 20초). 실패·형식 불일치면 task-MMDD-HHMM."""
+    fallback = time.strftime("task-%m%d-%H%M")
+    env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
+    env["ENABLE_CLAUDEAI_MCP_SERVERS"] = "false"      # 형의 claude.ai 커넥터를 끈다(chat_env 와 같게)
+    prompt = ("아래 작업을 나타내는 짧은 영어 이름을 하나만 답해. 영문 소문자·숫자·하이픈만, 40자 이내, 다른 말은 쓰지 마.\n"
+              "예: refund-bug-fix\n\n작업: " + text)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            r = subprocess.run(["claude", "-p", "--model", "haiku", "--tools", "", "--strict-mcp-config", "--setting-sources", "",
+                                "--no-session-persistence", prompt],
+                               capture_output=True, text=True, timeout=20, env=env, cwd=tmp)
+    except (OSError, subprocess.SubprocessError):
+        return fallback
+    lines = (r.stdout or "").strip().splitlines()
+    cand = lines[0].strip().strip("`'\"").lower() if r.returncode == 0 and lines else ""
+    return cand if _SLUG.fullmatch(cand) and cand not in RESERVED_SLUGS else fallback
+
+
+def unique_slug(project: str, slug: str) -> str:
+    """같은 slug 의 워크트리·세션 기록·상태 폴더·git 브랜치가 이미 있거나 dev·main 같은 예약어면 -2, -3 …"""
+    root = project_root(project)
+    items = load_sessions()
+    branches = _branches(project)
+    n = 1
+    while True:
+        cand = slug if n == 1 else f"{slug}-{n}"
+        if not (cand in RESERVED_SLUGS or cand in branches or (root / ".claude" / "worktrees" / worktree_dirname(cand)).exists()
+                or any(s.get("project") == project and s.get("task") == cand for s in items)
+                or state_dir(project, cand).exists()):
+            return cand
+        n += 1
+
+
+def extract_base(project: str, text: str) -> str:
+    """'<브랜치>에서' 꼴(여러 개면 '…에서 시작' 우선, 그다음 마지막)이고 실제로 있는 브랜치만. origin 에 있으면 origin/<b>
+    (먼저 fetch), 로컬뿐이면 로컬. 없으면 빈 값(기본 = main)."""
+    pat = r"(?<![A-Za-z0-9._/-])([A-Za-z0-9][A-Za-z0-9._/-]*)에서"
+    cands = re.findall(pat, text)
+    if not cands:
+        return ""
+    cands = [c for c in re.findall(pat + r"\s*시작", text)][::-1] + cands[::-1]      # 우선순위 순
+    root = str(project_root(project))
+    try:
+        subprocess.run(["git", "-C", root, "fetch", "--quiet", "origin"], capture_output=True, timeout=30,
+                       env=dict(os.environ, GIT_TERMINAL_PROMPT="0"))
+    except (OSError, subprocess.SubprocessError):
+        pass
+    r = subprocess.run(["git", "-C", root, "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes/origin"],
+                       capture_output=True, text=True)
+    refs = set(r.stdout.split()) if r.returncode == 0 else set()
+    for c in cands:
+        if f"refs/remotes/origin/{c}" in refs:
+            return f"origin/{c}"
+        if f"refs/heads/{c}" in refs:
+            return c
+    return ""
+
+
+def task_title(text: str) -> str:
+    """채널 주제·제목. open_chat 과 같은 문자(@ < > 줄바꿈 백틱)는 거른다."""
+    line = re.sub(r"[@<>`]+", " ", (text.strip().splitlines() or [""])[0])
+    line = re.sub(r"\s+", " ", line).strip()
+    if not line:
+        return "새 작업"
+    return line if len(line) <= 40 else line[:40] + "…"
+
+
+def new_task_first_prompt(text: str, who: str = "형", channel: str = "", mid: str = "") -> str:
+    """첫 지시. 메시지 ID 가 있으면 다른 들어오는 메시지와 같은 <channel …> 태그로 감싸 reply_to·progress 가 자연스럽게."""
+    note = ("[Discord 새 작업 버튼] 위 메시지는 형이 이 작업으로 채널을 열며 남긴 첫 지시야. 이걸 받아 시작해. "
+            "진행·결과·질문은 이 채널 reply 로.")
+    if not (channel and mid):
+        return f"[Discord 새 작업 버튼] 형이 이 작업으로 채널을 열었어: {text}\n" + note.split("야. ", 1)[1]
+    who = re.sub(r"[\s\"<>`@\\]+", " ", who).strip()[:40] or "형"
+    body = text.replace("</channel", "<\u200b/channel")
+    ts = time.strftime("%Y-%m-%dT%H:%M:%S.000Z", time.gmtime())
+    return (f'<channel source="plugin:discord:discord" chat_id="{channel}" message_id="{mid}" user="{who}" ts="{ts}">\n'
+            f'{body}\n</channel>\n{note}')
 
 
 def chat_env(sdir: Path) -> dict[str, str]:
@@ -2389,7 +2552,8 @@ def reconcile_gone(now: float | None = None) -> list[str]:
 
 
 def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id: str = "",
-            title: str = "") -> dict[str, Any]:
+            title: str = "", first: Any = "") -> dict[str, Any]:
+    """first = 첫 지시 글, 또는 채널 ID 를 받아 글을 돌려주는 함수(채널을 만든 뒤 조립 — 세션이 자기 채널·메시지를 알게)."""
     if project == CHAT_PROJECT:
         return cmd_new_chat(task, from_id, title=title)
     if from_id:
@@ -2407,7 +2571,13 @@ def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id
         channel_id = dc.create_text_channel(cfg["guildId"], plan["channel"], cat, title)
         write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg))
         write_settings(sdir)
-        tmux_start(plan["tmux"], wt, claude_argv(project, task), session_env(sdir), notify_ref=f"{project}/{task}")
+        if callable(first):
+            try:
+                first = first(channel_id)
+            except Exception:
+                first = ""
+        tmux_start(plan["tmux"], wt, claude_argv(project, task, first=first), session_env(sdir),
+                   notify_ref=f"{project}/{task}")
     except Exception as exc:
         remove_state_dir(sdir)
         if channel_id:
