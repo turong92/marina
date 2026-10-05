@@ -227,3 +227,108 @@ def ensure_data_dir(project_id: str) -> pathlib.Path:
     d = live_data(project_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+# ── 부팅 지속성 유닛 ──────────────────────────────────────────────────────────
+DEFAULT_UNIT_PATH = "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+UNIT_RETRY_SECONDS = 10     # 도커 데몬이 뜰 때까지 재시도하는 간격
+
+
+def unit_path(project_id: str) -> pathlib.Path:
+    ext = "plist" if platform.system() == "Darwin" else "service"
+    return live_root(project_id) / f"unit.{ext}"
+
+
+def unit_label(project_id: str) -> str:
+    return f"dev.marina.live.{project_id}"
+
+
+def unit_env_path() -> str:
+    """유닛에 넣을 PATH. launchd 는 최소 PATH(/usr/bin:/bin:/usr/sbin:/sbin) 만 주므로
+    docker 를 못 찾아 "재부팅했는데 서비스가 없다" 가 된다 — marina-dashboard.sh 가
+    DAEMON_PATH 로 같은 문제를 다룬다."""
+    return os.environ.get("PATH") or DEFAULT_UNIT_PATH
+
+
+def _xml(value) -> str:
+    return (str(value).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def plist_body(project_id: str, marina_bin: str) -> str:
+    """launchd 유닛. RunAtLoad 로 로그인 시 기동하고, KeepAlive(SuccessfulExit=false)로
+    도커 데몬이 아직 안 떴을 때 재시도한다. 유닛은 로직을 복제하지 않고 `marina live up`
+    을 그대로 재실행한다 — 복제하면 두 경로가 갈라진다."""
+    root = live_root(project_id)
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>{_xml(unit_label(project_id))}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>{_xml(marina_bin)}</string>
+    <string>live</string>
+    <string>up</string>
+    <string>{_xml(project_id)}</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>{_xml(unit_env_path())}</string>
+    <key>MARINA_HOME</key>
+    <string>{_xml(marina_home())}</string>
+    <key>PYTHONUNBUFFERED</key>
+    <string>1</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>{_xml(root / "unit.log")}</string>
+  <key>StandardErrorPath</key>
+  <string>{_xml(root / "unit.log")}</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+  </dict>
+  <key>ThrottleInterval</key>
+  <integer>{UNIT_RETRY_SECONDS}</integer>
+</dict>
+</plist>
+"""
+
+
+def systemd_body(project_id: str, marina_bin: str) -> str:
+    """systemd user unit. `loginctl enable-linger` 가 없으면 로그아웃과 함께 죽는다 —
+    marina-dashboard.sh:273 이 이미 그 호출을 하고, 설치 스크립트가 같이 호출한다."""
+    return f"""[Unit]
+Description=marina live stack for {project_id}
+After=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart={marina_bin} live up {project_id}
+ExecStop={marina_bin} live down {project_id}
+Restart=on-failure
+RestartSec={UNIT_RETRY_SECONDS}
+Environment=PATH={unit_env_path()}
+Environment=MARINA_HOME={marina_home()}
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=append:{live_root(project_id) / "unit.log"}
+StandardError=append:{live_root(project_id) / "unit.log"}
+
+[Install]
+WantedBy=default.target
+"""
+
+
+def write_unit(project_id: str, marina_bin: str) -> pathlib.Path:
+    """유닛 파일을 쓴다. 멱등 — 같은 입력이면 같은 내용이다."""
+    p = unit_path(project_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    body = plist_body(project_id, marina_bin) if platform.system() == "Darwin" \
+        else systemd_body(project_id, marina_bin)
+    p.write_text(body, encoding="utf-8")
+    return p
