@@ -314,7 +314,9 @@ def _recent_agents(tr: Path, born: float = 0.0) -> list[dict[str, Any]]:
             meta = {}
         if not isinstance(meta, dict):
             meta = {}
-        out.append({"id": f.stem[len("agent-"):], "kind": "agent", "desc": str(meta.get("description") or meta.get("name") or "")[:80]})
+        out.append({"id": f.stem[len("agent-"):], "kind": "agent", "desc": str(meta.get("description") or meta.get("name") or "")[:80],
+                    # 팀 에이전트의 agentType 은 붙인 이름이다 — 역할은 customAgentType 에(실측 2026-10-06)
+                    "role": str(meta.get("customAgentType") or meta.get("agentType") or ""), "model": str(meta.get("model") or "")})
     return out
 
 
@@ -427,6 +429,26 @@ def _agent_roles() -> dict[str, str]:
             continue
         if isinstance(ev, dict) and ev.get("ev") == "start" and ev.get("agent") and ev.get("role") not in (None, "-"):
             out[str(ev["agent"])] = f"{ev['role']}({ev.get('model')})"
+    return out
+
+
+def _agent_efforts() -> dict[str, str]:
+    """agent_id → effort — role-hook 시작 이벤트(끝 500KB). 에이전트 기록·meta 에는 effort 가 없다."""
+    try:
+        with open(_role_events_path(), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 500_000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return {}
+    out: dict[str, str] = {}
+    for raw in lines:
+        try:
+            ev = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(ev, dict) and ev.get("ev") == "start" and ev.get("agent") and ev.get("effort"):
+            out[str(ev["agent"])] = str(ev["effort"])
     return out
 
 
@@ -1256,6 +1278,18 @@ def _agent_finished(tail: bytes) -> bool:
     return False
 
 
+_MODEL_USED = re.compile(r'"model"\s*:\s*"(claude-[\w.-]+)"')
+
+
+def _short_model(model: str) -> str:
+    """claude-sonnet-5-5 → 'sonnet 5.5' · claude-haiku-4-5-20251001 → 'haiku 4.5'. 이미 짧은 이름(sonnet · inherit)은 그대로."""
+    m = re.match(r"claude-([a-z]+)(?:-(\d+)(?:-(\d{1,2}))?(?!\d))?", model)
+    if not m:
+        return model
+    ver = ".".join(x for x in (m.group(2), m.group(3)) if x)
+    return m.group(1) + (f" {ver}" if ver else "")
+
+
 def _agents_running(rec: dict[str, Any]) -> list[dict[str, Any]]:
     """지금 도는 서브에이전트 + 그 기록 파일. 끝남 알림이 왔거나 기록이 end_turn 으로 끝난 것은 뺀다.
     채팅방 세션은 Agent 도구가 없다 — 보지 않는다(혼잣말이 방 사람들에게 나가지 않게, 리뷰 M3)."""
@@ -1272,11 +1306,13 @@ def _agents_running(rec: dict[str, Any]) -> list[dict[str, Any]]:
     for a in recent:
         p = d / f"agent-{a['id']}.jsonl"
         try:
-            if a["id"] in done or _agent_finished(_agent_ends(p)[1]):
-                continue
+            tail = _agent_ends(p)[1]
         except OSError:
             continue
-        out.append(dict(a, path=p))
+        if a["id"] in done or _agent_finished(tail):
+            continue
+        used = _MODEL_USED.findall(tail.decode("utf-8", "replace"))      # meta 는 지정값(sonnet) — 실제 쓴 모델·버전은 기록에
+        out.append(dict(a, path=p, model=_short_model(used[-1] if used else str(a.get("model") or ""))))
     return out
 
 
@@ -1331,6 +1367,7 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
     seen: set[str] = set()
     live: set[str] = set()
     failed = False
+    efforts: "dict[str, str] | None" = None           # 올릴 줄이 있을 때만 읽는다
     for rec in ms.load_sessions():
         if not rec.get("channelId") or not rec.get("stateDir"):
             continue
@@ -1357,7 +1394,11 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
                 break
             st[aid] = (words, now)
             age = f" · {_fmt_secs(max(0.0, now - born))}" if born else ""
-            lines.append(f"🤖 {_clean(str(a.get('desc') or aid))}{age} — {words}")
+            if efforts is None:
+                efforts = _agent_efforts()
+            model = "/".join(x for x in (str(a.get("model") or ""), efforts.get(aid, "")) if x)
+            who = " · ".join(x for x in (str(a.get("role") or ""), model) if x)
+            lines.append(f"🤖 {f'`{_clean(who)}` ' if who else ''}{_clean(str(a.get('desc') or aid))}{age} — {words}")
         if lines:
             try:
                 ms._progress(rec, {"message_id": mid, "text": "\n".join(lines)})

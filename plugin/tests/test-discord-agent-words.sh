@@ -9,6 +9,7 @@ set -euo pipefail
 start_fake_discord
 fail() { echo "FAIL: $*"; exit 1; }
 msess new proj feat/a --no-start >/dev/null 2>&1 || fail "new"
+export ROLE_EVENTS="$TMPROOT/role-events.jsonl"
 
 PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" "$TMPROOT" <<'PY'
 import calendar, json, os, sys, time
@@ -40,9 +41,13 @@ cve.write_text("\n".join([
     row("assistant", [{"type": "text", "text": "의존성 목록을 읽는다"},
                       {"type": "tool_use", "name": "Bash", "input": {"command": "cat secret --token=abc", "description": "의존성 목록 뽑기"}}]),
 ]) + "\n")
-agents = [{"id": "qa1", "desc": "한 바퀴 눌러 보기", "path": qa}, {"id": "cve1", "desc": "취약점 점검", "path": cve}]
+agents = [{"id": "qa1", "desc": "한 바퀴 눌러 보기", "path": qa, "role": "qa", "model": "sonnet 5.5"},
+          {"id": "cve1", "desc": "취약점 점검", "path": cve}]
 real_running = mb._agents_running
 mb._agents_running = lambda r: agents if r.get("stateDir") == str(sd) else []
+# effort 는 기록에 없다 — role-hook 시작 이벤트에서(역할 에이전트만 남는다)
+Path(os.environ["ROLE_EVENTS"]).write_text(json.dumps({"ev": "start", "agent": "qa1", "role": "qa", "model": "sonnet", "effort": "medium"}) + "\n"
+                                           + "{깨진 줄\n" + json.dumps({"ev": "start", "agent": "cve1", "role": "-", "model": "inherit", "effort": ""}) + "\n")
 base = calendar.timegm(time.strptime("2026-10-06 06:27:00", "%Y-%m-%d %H:%M:%S"))   # T0 의 epoch
 
 # 지시 메시지 없음 → 안 올린다
@@ -58,7 +63,8 @@ got = thread_posts(n)
 check(len(got) == 1, f"한 판은 메시지 하나로: {got}")
 body = got[0]["content"] if got else ""
 lines = body.split("\n")
-check(lines == ["🤖 한 바퀴 눌러 보기 · 10분 — 만들기 화면부터 본다.", "🤖 취약점 점검 · 10분 — 의존성 목록 뽑기"], f"줄 모양: {lines}")
+check(lines == ["🤖 `qa · sonnet 5.5/medium` 한 바퀴 눌러 보기 · 10분 — 만들기 화면부터 본다.", "🤖 취약점 점검 · 10분 — 의존성 목록 뽑기"],
+      f"줄 모양 — 역할·모델/effort 를 알면 앞에: {lines}")
 check("abc" not in body and "cat secret" not in body, "명령 원문은 안 보낸다")
 check(got and got[0].get("flags") == 4096, "알림 없이")
 
@@ -74,7 +80,7 @@ n = len(log()); mb.agent_words_tick(st2, now=base + 960)
 check(thread_posts(n) == [], "2분 안엔 다시 안 올린다")
 n = len(log()); mb.agent_words_tick(st2, now=base + 1080)
 got = thread_posts(n)
-check(len(got) == 1 and got[0]["content"] == "🤖 한 바퀴 눌러 보기 · 18분 — 만들기 화면부터 본다. (파일 읽는 중 approve.tsx)"
+check(len(got) == 1 and got[0]["content"] == "🤖 `qa · sonnet 5.5/medium` 한 바퀴 눌러 보기 · 18분 — 만들기 화면부터 본다. (파일 읽는 중 approve.tsx)"
       and "취약점" not in got[0]["content"], f"바뀐 에이전트만, 쌓아서: {got}")
 
 # 긴 말은 자른다 · 기록을 못 읽는 에이전트는 건너뛴다 · 사라진 에이전트의 상태는 치운다
@@ -114,16 +120,27 @@ check(len(st3) == 9, "읽기 실패한 판은 상태 유지")
 mb._agents_running = real_running
 proj = tmp / "projects" / "p"; sub = proj / "S1" / "subagents"; sub.mkdir(parents=True)
 tr = proj / "S1.jsonl"; tr.write_text(row("user", "hi") + "\n")
-(sub / "agent-run1.jsonl").write_text(row("assistant", [{"type": "tool_use", "name": "Bash", "input": {"description": "도는 중"}}]) + "\n")
-(sub / "agent-run1.meta.json").write_text(json.dumps({"description": "도는 일"}))
+(sub / "agent-run1.jsonl").write_text(json.dumps({"type": "assistant", "timestamp": T0, "message": {"role": "assistant",
+    "model": "claude-haiku-4-5-20251001", "content": [{"type": "tool_use", "name": "Bash", "input": {"description": "도는 중"}}]}}) + "\n")
+(sub / "agent-run1.meta.json").write_text(json.dumps({"description": "도는 일", "agentType": "flaky-public", "name": "flaky-public",
+                                                      "customAgentType": "developer", "model": "claude-sonnet-5-5"}))
+(sub / "agent-gp1.jsonl").write_text(json.dumps({"type": "assistant", "timestamp": T0,
+    "message": {"role": "assistant", "model": "claude-opus-5-5", "content": [{"type": "text", "text": "찾는 중"}]}}) + "\n")
+(sub / "agent-gp1.meta.json").write_text(json.dumps({"description": "코드 찾기", "agentType": "general-purpose"}))
 (sub / "agent-w12-qa-abc.jsonl").write_text(json.dumps({"type": "assistant", "timestamp": T0,
     "message": {"role": "assistant", "stop_reason": "end_turn", "content": [{"type": "text", "text": "최종 보고"}]}}) + "\n")
 ms.tmux_alive = lambda name: True
 mb._session_transcript = lambda r: tr
 mb._session_born = lambda name: 0.0
 got = mb._agents_running(dict(rec, tmux="t"))
-check([a["id"] for a in got] == ["run1"] and got[0]["desc"] == "도는 일" and got[0]["path"] == sub / "agent-run1.jsonl",
+got = sorted(got, key=lambda a: a["id"])
+check([a["id"] for a in got] == ["gp1", "run1"] and got[1]["desc"] == "도는 일" and got[1]["path"] == sub / "agent-run1.jsonl",
       f"끝난(end_turn) 팀 에이전트는 빼고 도는 것만: {got}")
+check((got[1].get("role"), got[1].get("model")) == ("developer", "haiku 4.5"),
+      f"팀 에이전트는 이름이 아니라 역할 · 모델은 meta 의 지정값이 아니라 기록에 찍힌 실제 모델(버전까지): {got[1]}")
+check((got[0].get("role"), got[0].get("model")) == ("general-purpose", "opus 5.5"), f"모델 버전: {got[0]}")
+check([mb._short_model(x) for x in ("claude-sonnet-5-5", "claude-fable-5-1", "sonnet", "inherit", "")] ==
+      ["sonnet 5.5", "fable 5.1", "sonnet", "inherit", ""], "모델 이름 줄이기")
 check(mb._agents_running(dict(rec, tmux="t", kind=sorted(ms.CHAT_KINDS)[0])) == [], "채팅방 세션은 안 본다")
 ms.tmux_alive = lambda name: False
 check(mb._agents_running(dict(rec, tmux="t")) == [], "꺼진 세션은 안 본다")
