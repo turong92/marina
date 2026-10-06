@@ -6,6 +6,7 @@ discord.json 이 있을 때만 마리나 데몬이 run_forever 를 돌린다(선
 """
 from __future__ import annotations
 
+import datetime
 import hashlib
 import json
 import os
@@ -355,7 +356,7 @@ def snapshot(full: bool = True) -> dict[str, Any]:
                      "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists(),
                      "permission": alive and full and _pane_permission(str(rec.get("tmux") or ""))})
     if not full:
-        # 뒤에서 도는 일(셸·팀 에이전트)도 '바쁨'으로 쳐서 #상태를 30초마다 — 끝나면 바로 보이게(입력 중 표시는 busy 만)
+        # 뒤에서 도는 일(셸·팀 에이전트)도 '바쁨'으로 쳐서 #상태를 30초마다 — 끝나면 바로 보이게(입력 중 표시는 busy·도는 에이전트만)
         return {"sessions": rows, "anyBusy": any(r["busy"] or r["bg"] for r in rows)}
     try:
         free = shutil.disk_usage(str(Path.home())).free
@@ -609,8 +610,10 @@ def meter_tick(meters: dict[str, dict[str, Any]]) -> None:
         _save_section(key, dict(st))
 
 
-def typing_tick(snap: dict[str, Any], ty: dict[str, float], now: float) -> None:
-    busy = [r["channelId"] for r in snap["sessions"] if r["busy"]]
+def typing_tick(snap: dict[str, Any], ty: dict[str, float], now: float, agents: "set[str] | None" = None) -> None:
+    # 뒤에서 서브에이전트가 도는 채널(agents)에도 켠다 — 채널만 봐선 멈춘 건지 도는 건지 몰랐다(형 2026-10-06).
+    # snap 의 bg 는 안 쓴다: 끝난 에이전트가 5분 남고, 오래 떠 있는 셸·쉬는 팀원 목록에도 켜진다(리뷰 I1)
+    busy = sorted({r["channelId"] for r in snap["sessions"] if r["busy"]} | (agents or set()))
     if not busy:
         return
     dc = _dc(ms.load_config())
@@ -1226,6 +1229,146 @@ def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_
                 _log(f"role event: {exc!r}")
 
 
+AGENT_WORDS_EVERY = 120.0    # 에이전트마다 — 하는 일이 바뀌어도 이보다 자주는 안 올린다(도배 방지)
+AGENT_WORDS_MAX = 6          # 한 판에 올리는 줄 수 — 메시지 길이 제한(1900자) 안쪽
+
+
+def _agent_ends(path: Path) -> tuple[bytes, bytes]:
+    """기록의 앞 20KB · 끝 300KB 만 — 수십 MB 기록을 30초마다 통째로 읽지 않게(리뷰 M2)."""
+    with open(path, "rb") as fh:
+        head = fh.read(20_000)
+        size = fh.seek(0, 2)
+        fh.seek(max(0, size - 300_000))
+        return head, fh.read()
+
+
+def _agent_finished(tail: bytes) -> bool:
+    """마지막 줄이 end_turn 인 assistant = 끝난 에이전트. 동기·중첩·팀 에이전트는 끝남 알림이 본 기록에 안 찍힌다(리뷰 I2)."""
+    for raw in reversed(tail.decode("utf-8", "replace").splitlines()):
+        if not raw.strip():
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            return False
+        return (isinstance(row, dict) and row.get("type") == "assistant"
+                and (row.get("message") or {}).get("stop_reason") == "end_turn")
+    return False
+
+
+def _agents_running(rec: dict[str, Any]) -> list[dict[str, Any]]:
+    """지금 도는 서브에이전트 + 그 기록 파일. 끝남 알림이 왔거나 기록이 end_turn 으로 끝난 것은 뺀다.
+    채팅방 세션은 Agent 도구가 없다 — 보지 않는다(혼잣말이 방 사람들에게 나가지 않게, 리뷰 M3)."""
+    name = str(rec.get("tmux") or "")
+    if rec.get("kind") in ms.CHAT_KINDS or not name or not ms.tmux_alive(name):
+        return []
+    tr = _session_transcript(rec)
+    recent = _recent_agents(tr, _session_born(name)) if tr else []
+    if not tr or not recent:
+        return []
+    done = _scan_tasks(tr)[1]
+    d = tr.parent / tr.stem / "subagents"
+    out = []
+    for a in recent:
+        p = d / f"agent-{a['id']}.jsonl"
+        try:
+            if a["id"] in done or _agent_finished(_agent_ends(p)[1]):
+                continue
+        except OSError:
+            continue
+        out.append(dict(a, path=p))
+    return out
+
+
+def _one_line(text: Any) -> str:
+    """첫 줄만 · 코드 펜스가 묶음 메시지를 깨지 않게(리뷰 M8)."""
+    lines = str(text).strip().splitlines()
+    return _clean(lines[0] if lines else "").replace("`" * 3, "'")
+
+
+def _agent_now(path: Path) -> tuple[str, float]:
+    """(지금 하는 일 한 줄, 시작 시각). 마지막 assistant 줄의 마지막 조각 — 글이면 첫 줄, 도구면 설명(명령 원문은 안 쓴다)."""
+    try:
+        head, tail = _agent_ends(path)
+    except OSError:
+        return "", 0.0
+    born = 0.0
+    try:
+        first = json.loads(head.split(b"\n", 1)[0].decode("utf-8", "replace"))
+        born = datetime.datetime.fromisoformat(str(first.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
+    except (ValueError, AttributeError):
+        pass
+    doing = ""                                        # 설명 없는 도구 호출(예: '명령 실행 중') — 직전에 한 말을 찾아 붙인다
+    for raw in reversed(tail.decode("utf-8", "replace").splitlines()):
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("type") != "assistant":
+            continue
+        content = (row.get("message") or {}).get("content")
+        for b in reversed(content if isinstance(content, list) else []):
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use" and not doing:
+                inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                # 설명은 '하는 일'을 적는 도구 것만 — 다른 도구의 description 은 본문일 수 있다(리뷰 M3)
+                desc = str(inp.get("description") or "").strip() if b.get("name") in ("Bash", "Agent", "Task") else ""
+                if desc:
+                    return _one_line(desc)[:140], born
+                _, label, what = ms.tool_activity(str(b.get("name") or ""), inp)
+                doing = _clean(label + (f" {what}" if what else ""))[:60]
+            elif b.get("type") == "text" and str(b.get("text") or "").strip():
+                said = _one_line(b["text"])[:140]
+                return (f"{said} ({doing})" if doing else said), born
+    return doing, born
+
+
+def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
+    """뒤에서 도는 서브에이전트가 지금 뭘 하는지 지시 스레드에 한 줄씩 쌓는다 — 시작·끝 줄만으론 그 사이가 비었다
+    (형 2026-10-06 "작업중인거 안 보이니까 답답"). 하는 일이 바뀐 에이전트만, 에이전트마다 AGENT_WORDS_EVERY 에 한 번.
+    돌려주는 것 = 에이전트가 도는 채널들('입력 중…' 을 켤 곳)."""
+    seen: set[str] = set()
+    live: set[str] = set()
+    failed = False
+    for rec in ms.load_sessions():
+        if not rec.get("channelId") or not rec.get("stateDir"):
+            continue
+        try:
+            agents = _agents_running(rec)
+        except Exception as exc:
+            failed = True
+            _log(f"agent_words {rec.get('tmux')}: {exc!r}")
+            continue
+        if agents:
+            live.add(str(rec["channelId"]))
+        seen.update(str(a["id"]) for a in agents)
+        mid = str(ms._activity_state(Path(str(rec["stateDir"]))).get("mid") or "")
+        if not mid:
+            continue
+        lines: list[str] = []
+        for a in agents:
+            aid = str(a["id"])
+            words, born = _agent_now(Path(str(a["path"])))
+            old = st.get(aid)
+            if not words or (old and (old[0] == words or now - old[1] < AGENT_WORDS_EVERY)):
+                continue
+            if len(lines) >= AGENT_WORDS_MAX:         # 넘치는 건 기록하지 않고 다음 판에(리뷰 M5)
+                break
+            st[aid] = (words, now)
+            age = f" · {_fmt_secs(max(0.0, now - born))}" if born else ""
+            lines.append(f"🤖 {_clean(str(a.get('desc') or aid))}{age} — {words}")
+        if lines:
+            try:
+                ms._progress(rec, {"message_id": mid, "text": "\n".join(lines)})
+            except Exception as exc:
+                _log(f"agent_words: {exc!r}")
+    if not failed:                                    # 한 번 못 읽었다고 지우면 다음 판에 같은 줄을 또 올린다(리뷰 M4)
+        for aid in [k for k in st if k not in seen]:
+            del st[aid]
+    return live
+
+
 def perm(channel: str, user: str, token: str, allow: bool) -> str:
     """권한 요청 [허용]/[거부] — 기다리는 훅이 읽어 결정한다. 먼저 누른 것만(O_EXCL, 리뷰 I1).
     허용 목록이 빈 채널(역할로 보이는 누구나)은 승인 못 한다 — 메시지와 달리 실행 권한이다(리뷰 I6)."""
@@ -1546,6 +1689,9 @@ class Loop:
         self.dash: dict[str, Any] = {}
         self.meters: dict[str, dict[str, Any]] = {}
         self.ty: dict[str, float] = {}
+        self.words: dict[str, tuple[str, float]] = {}
+        self.last_words = 0.0
+        self.live: set[str] = set()
         self.last_render = -1.0          # 데몬이 막 떴으면 한 번은 그린다
         self.last_weekly = -WEEKLY_EVERY
         self.last_panel = -PANEL_EVERY
@@ -1678,7 +1824,7 @@ class Loop:
                 _log(f"reconcile 실패: {exc!r}")
         self.last_panel = panel_tick(self.last_panel, now)
         light = snapshot(full=False)
-        typing_tick(light, self.ty, now)
+        typing_tick(light, self.ty, now, self.live)
         try:
             pane_perm_tick()
         except Exception as exc:
@@ -1687,6 +1833,12 @@ class Loop:
             role_events_tick()
         except Exception as exc:
             _log(f"role_events failed: {exc!r}")
+        if now - self.last_words >= 30.0:
+            self.last_words = now
+            try:
+                self.live = agent_words_tick(self.words, now)
+            except Exception as exc:
+                _log(f"agent_words failed: {exc!r}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
