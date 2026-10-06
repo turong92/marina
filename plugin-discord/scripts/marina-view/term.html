@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>터미널</title>
+<style>
+  :root { color-scheme: light dark; --bg: #fff; --fg: #1a1a1a; --mut: #666; --scr: #111; --scrfg: #e6e6e6; --bd: #ccc; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #151515; --fg: #eee; --mut: #999; --scr: #000; --bd: #444; } }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 15px/1.5 -apple-system, system-ui, sans-serif; }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  #why { margin: 0 0 4px; }
+  #cmd { margin: 0 0 12px; color: var(--mut); font: 13px ui-monospace, Menlo, monospace; overflow-wrap: anywhere; }
+  #status { font-size: 13px; color: var(--mut); margin: 0 0 8px; }
+  #screen { margin: 0 0 12px; padding: 10px; background: var(--scr); color: var(--scrfg); border-radius: 8px; overflow-x: auto;
+            font: 13px/1.35 ui-monospace, Menlo, monospace; height: 50vh; overflow-y: auto; white-space: pre; }
+  form { display: flex; gap: 8px; margin: 0 0 12px; }
+  input { flex: 1; min-width: 0; font: 16px ui-monospace, Menlo, monospace; padding: 10px; border: 1px solid var(--bd); border-radius: 8px; background: var(--bg); color: var(--fg); }
+  button { font: inherit; padding: 10px 14px; border: 1px solid var(--bd); border-radius: 8px; background: var(--bg); color: var(--fg); min-height: 44px; }
+  .keys { display: flex; flex-wrap: wrap; gap: 8px; }
+</style>
+</head>
+<body>
+<h1>터미널</h1>
+<p id="why"></p>
+<p id="cmd"></p>
+<p id="status">연결 중…</p>
+<pre id="screen" aria-live="polite"></pre>
+<form id="f" autocomplete="off">
+  <input id="t" type="text" autocapitalize="off" autocorrect="off" spellcheck="false" aria-label="입력">
+  <button type="submit">보내기</button>
+</form>
+<div class="keys">
+  <button data-key="Enter">Enter</button>
+  <button data-key="C-c">Ctrl-C</button>
+  <button data-key="Tab">Tab</button>
+  <button data-key="Up">↑</button>
+  <button data-key="Down">↓</button>
+  <button data-key="Left">←</button>
+  <button data-key="Right">→</button>
+  <button data-key="Escape">Esc</button>
+</div>
+<script src="term.js"></script>
+</body>
+</html>

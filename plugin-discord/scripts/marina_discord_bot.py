@@ -1846,6 +1846,7 @@ class Loop:
         self.vsrv: Any = None            # 결과물 보기 서버(marina_view.ViewServer) — discord.json 의 view 가 있을 때만
         self.last_vsweep = -3600.0       # 보기 기록 정리(원본이 7일 넘게 없는 것) — 한 시간마다
         self.vnext = 0.0                 # 포트를 못 열었으면 이 시각 전엔 다시 안 시도
+        self.last_tsweep = -60.0         # 터미널 넘기기 정리(미개봉 10분·무활동 30분) — 1분마다
 
     def own(self) -> bool:
         """같은 마리나 홈에선 한 인스턴스만(프리뷰 데몬이 실 ~/.marina 를 공유해도 봇이 둘 뜨지 않게, 리뷰 I1)."""
@@ -1909,12 +1910,13 @@ class Loop:
             port = int(view.get("port") or mv.DEFAULT_PORT)
         except (TypeError, ValueError):
             port = mv.DEFAULT_PORT
-        if self.vsrv is not None and self.vsrv.want == port:
+        base = str(view.get("publicBase") or "").strip().rstrip("/")
+        if self.vsrv is not None and self.vsrv.want == port and self.vsrv.public_base == base:
             return
         self.stop_view()
         if now < self.vnext:
             return
-        srv = mv.ViewServer(port)
+        srv = mv.ViewServer(port, base)
         if srv.start():
             self.vsrv = srv
             _log(f"view server: 127.0.0.1:{srv.port}")
@@ -1928,6 +1930,16 @@ class Loop:
         self.last_vsweep = now
         import marina_view as mv
         mv.sweep()
+
+    def sweep_term(self, now: float) -> None:
+        if now - self.last_tsweep < 60.0:
+            return
+        self.last_tsweep = now
+        import marina_termbridge as tb
+        try:
+            tb.sweep()
+        except Exception as exc:         # 정리가 실패해도 데몬은 계속(토큰은 로그에 안 남는다)
+            _log(f"term sweep failed: {exc!r}")
 
     def stop_view(self) -> None:
         srv, self.vsrv = self.vsrv, None
@@ -1944,7 +1956,7 @@ class Loop:
             return False
         if not self.own():
             return False
-        for name, fn in (("bot", lambda: self.supervise(cfg, now)), ("viewsrv", lambda: self.view_server(cfg, now)), ("viewsweep", lambda: self.sweep_view(now)),
+        for name, fn in (("bot", lambda: self.supervise(cfg, now)), ("viewsrv", lambda: self.view_server(cfg, now)), ("viewsweep", lambda: self.sweep_view(now)), ("termsweep", lambda: self.sweep_term(now)),
                          ("view", lambda: self.view(now))):
             try:
                 fn()

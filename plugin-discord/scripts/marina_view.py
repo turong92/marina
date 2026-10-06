@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import html as _html
+import http.cookies
 import posixpath
 import json
 import os
@@ -23,6 +24,8 @@ from html.parser import HTMLParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Optional
+
+import marina_termbridge as tb
 
 DEFAULT_PORT = 3905
 MAX_BYTES = 20 * 1024 * 1024
@@ -49,6 +52,10 @@ CDN_SCRIPTS = (
 MD_CSP = ("sandbox allow-scripts allow-popups; default-src 'none'; script-src 'self' " + " ".join(CDN_SCRIPTS)
           + "; style-src 'unsafe-inline'; img-src 'self' data:; font-src data:; base-uri 'self'; frame-ancestors 'none'")
 
+TERM_CSP = ("default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+TERM_COOKIE = "mterm"
+MAX_KEYS_BODY = 8192         # 글자 한도 2000자가 한글(3바이트)로 JSON 에 들어갈 만큼
+_TERM_TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,64}")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,64}")
 _CONFIG_NAMES = (".mcp.json", "claude.md", "claude.local.md")
 _SECRET_SUFFIXES = (".key", ".pem", ".p12", ".pfx", ".jks", ".keystore", ".tfstate", ".tfvars")
@@ -201,15 +208,25 @@ def revoke(target: Optional[str] = None, all_in: Optional[str] = None, channel: 
     return n
 
 
-def public_url(cfg: "dict[str, Any]", token: str) -> Optional[str]:
+def public_base(cfg: "dict[str, Any]") -> str:
     view = cfg.get("view") if isinstance(cfg, dict) else None
-    base = str((view or {}).get("publicBase") or "").strip().rstrip("/") if isinstance(view, dict) else ""
+    return str((view or {}).get("publicBase") or "").strip().rstrip("/") if isinstance(view, dict) else ""
+
+
+def public_url(cfg: "dict[str, Any]", token: str) -> Optional[str]:
+    base = public_base(cfg)
     return f"{base}/v/{token}/" if base else None
 
 
+def term_url(cfg: "dict[str, Any]", token: str) -> Optional[str]:
+    """터미널 넘기기 링크 — 결과물 보기와 같은 서버·같은 공개 주소(/t/)."""
+    base = public_base(cfg)
+    return f"{base}/t/{token}/" if base else None
+
+
 def redact_log(text: str) -> str:
-    """접근 로그에서 /v/ 의 토큰을 가린다(로그를 읽는 쪽이 링크를 가로채지 못하게)."""
-    return re.sub(r"/v/[A-Za-z0-9_-]{20,}", "/v/…", text)
+    """접근 로그에서 /v/·/t/ 의 토큰을 가린다(로그를 읽는 쪽이 링크를 가로채지 못하게)."""
+    return re.sub(r"/(v|t)/[A-Za-z0-9_-]{20,}", r"/\1/…", text)
 
 
 def locate(root: str, token_rel: str, sub: str) -> Optional[Path]:
@@ -366,7 +383,8 @@ class _Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:
         sys.stderr.write("[view] " + redact_log(fmt % args) + "\n")
 
-    def _send(self, status: int, ctype: str, data: bytes, csp: str = "", cors: bool = False, location: str = "") -> None:
+    def _send(self, status: int, ctype: str, data: bytes, csp: str = "", cors: bool = False, location: str = "",
+              extra: "Optional[list[tuple[str, str]]]" = None) -> None:
         self.send_response(status)
         self.send_header("content-type", ctype)
         self.send_header("cache-control", "no-store")
@@ -375,6 +393,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("content-security-policy", f"{csp}; {FRAME}" if csp and "frame-ancestors" not in csp else (csp or FRAME))
         if location:
             self.send_header("location", location)
+        for k, v in (extra or []):
+            self.send_header(k, v)
         if cors and self.headers.get("origin") == "null":      # 샌드박스 문서의 폰트·모듈 fetch(불투명 origin 은 "null"). 다른 사이트의 sandbox iframe 도 null 이라
             # 출처 구분이 아니다 — 토큰(링크)을 모르면 이 응답을 읽을 수 없다는 것이 방어선
             self.send_header("access-control-allow-origin", "null")
@@ -390,6 +410,9 @@ class _Handler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlparse(self.path)
         if parsed.path == "/v-md/md-view.js":
             self._send(200, "application/javascript; charset=utf-8", (ASSET_DIR / "md-view.js").read_bytes())
+            return
+        if parsed.path.startswith("/t/"):
+            self._term_get(parsed.path[len("/t/"):])
             return
         if not parsed.path.startswith("/v/"):
             self._text(404)
@@ -434,12 +457,106 @@ class _Handler(BaseHTTPRequestHandler):
         sandboxed = suffix in (".html", ".htm", ".svg")
         self._send(200, TYPES[suffix], data, csp=SANDBOX if sandboxed else "", cors=True)
 
+    # ── 터미널 넘기기(/t/<토큰>/) — marina_termbridge 가 tmux 를 다룬다. 설계 1절
+    def _cookie(self) -> str:
+        try:
+            jar = http.cookies.SimpleCookie(self.headers.get("cookie") or "")
+        except http.cookies.CookieError:
+            return ""
+        m = jar.get(TERM_COOKIE)
+        return m.value if m else ""
+
+    def _json(self, status: int, obj: Any) -> None:
+        self._send(status, "application/json; charset=utf-8", json.dumps(obj, ensure_ascii=False).encode("utf-8"))
+
+    def _term_get(self, rest: str) -> None:
+        token, slash, tail = rest.partition("/")
+        if not _TERM_TOKEN_RE.fullmatch(token):
+            self._text(404)
+            return
+        if not slash:
+            self._send(301, "text/plain; charset=utf-8", b"", location=f"/t/{token}/")
+            return
+        if tail == "term.js":
+            self._send(200, "application/javascript; charset=utf-8", (ASSET_DIR / "term.js").read_bytes(), csp=TERM_CSP)
+        elif tail == "":
+            self._term_page(token)
+        elif tail == "screen":
+            cookie = self._cookie()
+            auth = tb.authorize(token, cookie)
+            if auth is None:
+                self._text(404)
+            elif not auth:
+                self._send(403, "text/plain; charset=utf-8", b"forbidden")
+            else:
+                info = tb.meta(token, cookie) or {}
+                self._json(200, {"screen": tb.screen(token, cookie) or "", "alive": bool(info.get("alive")),
+                                 "command": info.get("command", ""), "why": info.get("why", "")})
+        else:
+            self._text(404)
+
+    def _term_page(self, token: str) -> None:
+        cookie, extra = self._cookie(), []
+        if tb.authorize(token, "") is None:
+            self._text(404)
+            return
+        if not cookie:
+            cookie = secrets.token_urlsafe(24)
+            attrs = f"{TERM_COOKIE}={cookie}; Path=/t/{token}/; HttpOnly; SameSite=Lax"
+            if getattr(self.server, "public_base", "").startswith("https://"):
+                attrs += "; Secure"
+            extra = [("set-cookie", attrs)]
+        if not tb.claim(token, cookie):
+            body = "<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><p style='margin:16px'>이미 열렸거나 만료된 링크야</p>"
+            self._send(410, "text/html; charset=utf-8", body.encode("utf-8"), csp=TERM_CSP)
+            return
+        self._send(200, "text/html; charset=utf-8", (ASSET_DIR / "term.html").read_bytes(), csp=TERM_CSP, extra=extra)
+
+    def do_POST(self) -> None:
+        path = urllib.parse.urlparse(self.path).path
+        m = re.fullmatch(r"/t/([A-Za-z0-9_-]{20,64})/keys", path)
+        if not m:
+            self._send(405, "text/plain; charset=utf-8", b"method not allowed")      # 기존 /v/ 는 GET 만
+            return
+        token = m.group(1)
+        origin = self.headers.get("origin")      # SameSite=Lax 라 CSRF 방어선은 이 검사다 — fetch POST 는 늘 Origin 을 싣는다
+        if not origin or urllib.parse.urlparse(origin).netloc != (self.headers.get("host") or ""):
+            self._send(403, "text/plain; charset=utf-8", b"forbidden")
+            return
+        try:
+            length = int(self.headers.get("content-length") or "")
+        except ValueError:
+            self._send(411, "text/plain; charset=utf-8", b"length required")
+            return
+        if length < 0 or length > MAX_KEYS_BODY:
+            self._send(413, "text/plain; charset=utf-8", b"too large")
+            return
+        cookie = self._cookie()
+        auth = tb.authorize(token, cookie)
+        if auth is None:
+            self._text(404)
+            return
+        if not auth:
+            self._send(403, "text/plain; charset=utf-8", b"forbidden")
+            return
+        try:
+            body = json.loads(self.rfile.read(length).decode("utf-8"))
+            text, key = body.get("text"), body.get("key")
+        except (ValueError, AttributeError):
+            self._send(400, "text/plain; charset=utf-8", b"bad request")
+            return
+        if tb.send(token, cookie, text=text, key=key):
+            self._send(204, "text/plain; charset=utf-8", b"")
+        else:
+            self._send(400, "text/plain; charset=utf-8", b"bad request")
+
 
 class ViewServer:
     """127.0.0.1:<port> 보기 서버(스레드). start() 는 예외를 안 던지고 성공 여부를 돌려준다 — 실패 이유는 .error."""
 
-    def __init__(self, port: int = DEFAULT_PORT) -> None:
+    def __init__(self, port: int = DEFAULT_PORT, public_base: str = "") -> None:
         self.want = int(port)
+        self.public_base = str(public_base or "").strip().rstrip("/")     # https 면 터미널 쿠키에 Secure
         self.port = 0
         self.error = ""
         self._srv: Optional[ThreadingHTTPServer] = None
@@ -454,6 +571,7 @@ class ViewServer:
             self.error = f"포트 {self.want} 를 못 열었어: {exc}"
             return False
         srv.daemon_threads = True
+        srv.public_base = self.public_base          # type: ignore[attr-defined]  # _Handler 가 쿠키 Secure 판단에 쓴다
         self._srv, self.port, self.error = srv, srv.server_address[1], ""
         self._thread = threading.Thread(target=srv.serve_forever, name="marina-view", daemon=True)
         self._thread.start()

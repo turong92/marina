@@ -2431,34 +2431,34 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
 
 
 def _ask_terminal(rec: dict[str, Any], args: dict[str, Any]) -> str:
-    """사람이 직접 실행할 명령을 [터미널에서 열기] 링크 버튼으로 채널에 보낸다. runtime 은 `marina term-request` 로만 부른다."""
+    """사람이 직접 실행할 명령을 [터미널에서 열기] 링크 버튼으로 채널에 보낸다. 대시보드·runtime 없이 discord 플러그인(marina_termbridge)이 혼자 한다."""
     if rec.get("kind") in CHAT_KINDS:
         raise SessionError("ask_terminal 은 개발 세션 전용이야")
     command, why = str(args.get("command") or ""), str(args.get("why") or "").strip()
     if not command.strip():
         raise SessionError("command 가 필요해")
-    # 개행·보이지 않는 문자·1500자 초과 검증은 runtime(`marina term-request`)이 한다 — 거부되면 아래에서 SessionError.
-    argv = ["term-request"] + (["--why", why] if why else []) + ["--", command]
-    # 선택 기능 — marina CLI 가 없거나 실패하면 버튼 없이 "맥 앞에서 직접 실행해 달라고 부탁해" 로 안내한다(discord 는 runtime 없이도 돈다)
+    import marina_termbridge as tb
+    import marina_view as mv
     ask_human = "이 명령은 맥 앞에서 직접 실행해 달라고 형에게 reply 로 부탁해(명령 원문을 같이 적어)"
+    cfg = load_config()
+    if mv.term_url(cfg, "x") is None:      # 공개 주소(view.publicBase)가 없으면 폰에서 열 링크를 못 만든다 — 터미널도 안 띄운다
+        raise SessionError(f"터미널 링크를 만들지 못했어(view.publicBase 가 설정돼 있지 않아) — {ask_human}")
     try:
-        r = _run_marina(argv, cwd=Path(str(rec["root"])), timeout=30)
-    except (SessionError, OSError, subprocess.SubprocessError) as exc:
-        raise SessionError(f"터미널 링크를 만들지 못했어({str(exc)[:200]}) — {ask_human}")
-    url = (r.stdout or "").strip().splitlines()[-1] if (r.stdout or "").strip() else ""
-    if r.returncode != 0 or not url.startswith(("http://", "https://")):
-        raise SessionError(f"터미널 링크를 만들지 못했어({(r.stderr or r.stdout or '').strip()[:200]}) — {ask_human}")
+        token = tb.create(str(rec["root"]), command, why, str(rec.get("channelId") or ""))   # 개행·제어 문자·1500자 초과는 여기서 거부
+    except ValueError as exc:
+        raise SessionError(f"터미널을 만들지 못했어({str(exc)[:200]}) — {ask_human}")
+    url = str(mv.term_url(cfg, token))
     # 보이는 명령 = 실제 명령: 자르지 않고, 명령 안의 백틱보다 긴 울타리로 감싼다
     fence = "`" * max(3, max((len(m) for m in re.findall(r"`+", command)), default=0) + 1)
     why = "".join(c for c in re.sub(r"\s+", " ", why) if unicodedata.category(c) not in ("Cc", "Cf"))   # 한 줄·보이지 않는 문자 제거
     esc_why = re.sub(r"([\\`*_~|>#\[\]()])", r"\\\1", why.replace("@", ""))[:300]   # 마크다운 링크·서식이 렌더되지 않게
     head = ("🖥 " + esc_why + "\n") if why else "🖥 터미널에서 직접 실행해 줘\n"
     try:
-        cfg = load_config()
         Discord(read_token(cfg))._req("POST", f"/channels/{rec['channelId']}/messages", {
             "content": f"{head}{fence}\n{command}\n{fence}", "allowed_mentions": {"parse": []},
             "components": [{"type": 1, "components": [{"type": 2, "style": 5, "label": "터미널에서 열기", "url": url}]}]})
-    except Exception as exc:        # 버튼을 못 보내도 세션이 막히지 않게 — 같은 안내로
+    except Exception as exc:        # 버튼을 못 보내도 세션이 막히지 않게 — 같은 안내로(떠 있던 터미널은 치운다)
+        tb.revoke(token)
         raise SessionError(f"터미널 버튼을 못 보냈어({str(exc)[:200]}) — {ask_human}")
     return "버튼 보냈어 — 형이 실행하고 알려 주면 이어서"
 
@@ -2879,6 +2879,12 @@ def teardown(s: dict[str, Any]) -> list[str]:
             marina_view.revoke(all_in=str(s["root"]))
     except Exception as exc:
         warnings.append(f"보기 링크 정리 실패: {exc}")
+    try:       # 그 방에서 넘긴 터미널(tmux 세션째)도 끊는다
+        import marina_termbridge
+        if s.get("channelId"):
+            marina_termbridge.revoke_channel(str(s["channelId"]))
+    except Exception as exc:
+        warnings.append(f"터미널 정리 실패: {exc}")
     if s.get("stateDir"):
         remove_state_dir(Path(str(s["stateDir"])))
     save_sessions([x for x in load_sessions()
