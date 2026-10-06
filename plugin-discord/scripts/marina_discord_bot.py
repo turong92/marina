@@ -526,9 +526,37 @@ def _cmd_out(argv: list[str]) -> str:
         return ""
 
 
+def heavy_counts() -> "tuple[int, int] | None":
+    """무거운 명령 줄(heavy — 맥 전체에서 빌드·테스트를 동시에 몇 개만)의 (실행, 대기) 수. 줄 장치가 없으면 None.
+    상태 폴더의 파일만 읽는다(잠금은 건드리지 않는다): slot-N.json 은 자리를 쥔 동안만, waiting-<pid>.json 은 기다리는 동안만 있다.
+    죽은 프로세스가 남긴 파일은 세지 않는다."""
+    d = Path(os.environ.get("HEAVY_HOME") or Path.home() / ".local/state/heavy")
+    if not d.is_dir():
+        return None
+
+    def alive(pid: Any) -> bool:
+        try:
+            os.kill(int(pid), 0)
+            return True
+        except PermissionError:
+            return True
+        except (OSError, ValueError, TypeError, OverflowError):
+            return False
+    running = waiting = 0
+    for f in d.glob("slot-*.json"):
+        try:
+            running += alive(json.loads(f.read_text(encoding="utf-8")).get("pid"))
+        except (OSError, ValueError, AttributeError):
+            pass
+    for f in d.glob("waiting-*.json"):
+        waiting += alive(f.stem[len("waiting-"):])
+    return running, waiting
+
+
 def sys_stats() -> dict[str, Any]:
     """CPU·메모리 — 못 읽은 값은 None(그 항목은 안 그린다). 맥 기준이고 리눅스에서는 CPU 만 나온다."""
-    out: dict[str, Any] = {"cpu": None, "ncpu": os.cpu_count() or None, "memUsed": None, "memLevel": None, "swapUsed": None}
+    out: dict[str, Any] = {"cpu": None, "ncpu": os.cpu_count() or None, "memUsed": None, "memLevel": None, "swapUsed": None,
+                           "heavy": heavy_counts()}
     try:                                   # 모든 프로세스의 %CPU 합 ÷ 코어 수 = 전체 중 몇 %
         out["cpu"] = sum(float(x) for x in _cmd_out(["ps", "-A", "-o", "%cpu="]).split()) / (out["ncpu"] or 1)
     except ValueError:
@@ -570,10 +598,17 @@ def mem_text(used: "float | None", level: "int | None", swap: "float | None") ->
     return f"메모리 {light} {round(used)}%" + (f" · 스왑 {_gb(swap)}" if swap and swap >= (1 << 30) else "")
 
 
+def heavy_text(counts: "tuple[int, int] | None") -> str:
+    if not counts or not (counts[0] or counts[1]):
+        return ""
+    return f"🧪 실행 {counts[0]}" + (f" · 대기 {counts[1]}" if counts[1] else "")
+
+
 def footer(snap: dict[str, Any]) -> str:
     parts = [f"디스크 {snap.get('diskFree', 0) // (1 << 30)}GB 남음",
              cpu_text(snap.get("cpu"), snap.get("load"), snap.get("ncpu")),
              mem_text(snap.get("memUsed"), snap.get("memLevel"), snap.get("swapUsed")),
+             heavy_text(snap.get("heavy")),
              f"<t:{int(time.time())}:R> 갱신"]
     return "-# " + " · ".join(p for p in parts if p)
 
