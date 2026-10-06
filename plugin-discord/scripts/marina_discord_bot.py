@@ -374,7 +374,11 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         ru = role_usage(_week_start(use))
     except Exception:
         ru = []
-    return {"usage": use, "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
+    try:
+        stats = sys_stats()
+    except Exception:
+        stats = {}
+    return {**stats, "usage": use, "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
             "anyBusy": any(r["busy"] for r in rows)}
 
 
@@ -515,9 +519,63 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _cmd_out(argv: list[str]) -> str:
+    try:
+        return subprocess.run(argv, capture_output=True, text=True, timeout=3).stdout or ""
+    except Exception:
+        return ""
+
+
+def sys_stats() -> dict[str, Any]:
+    """CPU·메모리 — 못 읽은 값은 None(그 항목은 안 그린다). 맥 기준이고 리눅스에서는 CPU 만 나온다."""
+    out: dict[str, Any] = {"cpu": None, "ncpu": os.cpu_count() or None, "memUsed": None, "memLevel": None, "swapUsed": None}
+    try:                                   # 모든 프로세스의 %CPU 합 ÷ 코어 수 = 전체 중 몇 %
+        out["cpu"] = sum(float(x) for x in _cmd_out(["ps", "-A", "-o", "%cpu="]).split()) / (out["ncpu"] or 1)
+    except ValueError:
+        pass
+    m = re.search(r"free percentage:\s*(\d+)%", _cmd_out(["memory_pressure"]))
+    if m:
+        out["memUsed"] = 100.0 - float(m.group(1))
+    lv = _cmd_out(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).strip()
+    if lv.isdigit():
+        out["memLevel"] = int(lv)          # 1 정상 · 2 경고 · 4 위험(macOS 가 스스로 매긴다)
+    m = re.search(r"used = ([\d.]+)([MG])", _cmd_out(["sysctl", "-n", "vm.swapusage"]))
+    if m:
+        out["swapUsed"] = float(m.group(1)) * (1 << 30 if m.group(2) == "G" else 1 << 20)
+    return out
+
+
+def _gb(n: float) -> str:
+    g = n / (1 << 30)
+    return f"{g:.0f}GB" if g >= 20 else f"{g:.1f}GB"
+
+
+def cpu_text(cpu: "float | None", load: "float | None", ncpu: "int | None") -> str:
+    """부하 숫자(load) 대신: 전체 코어 중 몇 % 를 쓰나 + 코어 수보다 일이 많으면 '밀림 N배'(형 2026-10-06)."""
+    if cpu is None or not ncpu:
+        return ""
+    pct = min(100, round(cpu))
+    wait = (load or 0.0) / ncpu
+    light = "🔴" if pct >= 90 or wait >= 2 else "🟡" if pct >= 70 or wait >= 1 else "🟢"
+    return f"CPU {light} {pct}%" + (f" · 밀림 {wait:.1f}배" if wait >= 1 else "")
+
+
+def mem_text(used: "float | None", level: "int | None", swap: "float | None") -> str:
+    if used is None:
+        return ""
+    if level is None:
+        light = "🔴" if used >= 90 else "🟡" if used >= 80 else "🟢"
+    else:
+        light = "🔴" if level >= 4 else "🟡" if level >= 2 else "🟢"
+    return f"메모리 {light} {round(used)}%" + (f" · 스왑 {_gb(swap)}" if swap and swap >= (1 << 30) else "")
+
+
 def footer(snap: dict[str, Any]) -> str:
-    return (f"-# 디스크 {snap.get('diskFree', 0) // (1 << 30)}GB 남음 · 부하 {snap.get('load', 0.0):.1f}"
-            f" · <t:{int(time.time())}:R> 갱신")
+    parts = [f"디스크 {snap.get('diskFree', 0) // (1 << 30)}GB 남음",
+             cpu_text(snap.get("cpu"), snap.get("load"), snap.get("ncpu")),
+             mem_text(snap.get("memUsed"), snap.get("memLevel"), snap.get("swapUsed")),
+             f"<t:{int(time.time())}:R> 갱신"]
+    return "-# " + " · ".join(p for p in parts if p)
 
 
 # ── Discord ─────────────────────────────────────────────────────────────────
