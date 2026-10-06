@@ -58,6 +58,21 @@ check(f"/channels/{tids['9001']}" in arch and f"/channels/{tids['9002']}" in arc
 check(sorted(json.loads((Path(rec["stateDir"]) / "threads-archived.json").read_text())) == ["9001", "9002"], "접은 스레드 기록")
 n = len(arch); ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
 check(len([x for x in log() if x["m"] == "PATCH"]) == n, "다음 턴에 다시 접지 않는다")
+# 뒤에서 서브에이전트가 도는 동안엔 접지 않는다 — 진행 줄이 계속 쌓이는데 턴이 끝날 때마다 닫혔다(형 2026-10-06).
+# 에이전트가 다 끝난 뒤의 턴 끝(알림으로 이어진 턴이라 새 지시 메시지가 없어도)에 밀린 스레드를 접는다
+ms._progress(rec, {"message_id": "9777", "text": "뒤에서 도는 일"})
+tids = json.loads((Path(rec["stateDir"]) / "threads.json").read_text())
+tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": tag("9777")}}) + "\n")
+ms._agents_running_now = lambda s: True
+n = len([x for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True])
+ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
+arch = [x["p"] for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True]
+check(len(arch) == n, f"에이전트가 도는 동안엔 안 접는다: {arch[n:]}")
+ms._agents_running_now = lambda s: False
+tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "<task-notification>끝</task-notification>"}}) + "\n")
+ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
+arch = [x["p"] for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True]
+check(arch[n:] == [f"/channels/{tids['9777']}"], f"다 끝난 뒤 턴 끝에 밀린 스레드를 접는다(새 지시 없어도): {arch[n:]}")
 # 작업 중 표시: 도구를 쓸 때마다 '입력 중…'(8초에 한 번만) — 개발·채팅 세션 모두
 for ref in ("proj/feat/p", "chat/room"):
     r2 = ms.find_session(ref)
