@@ -316,7 +316,8 @@ def _recent_agents(tr: Path, born: float = 0.0) -> list[dict[str, Any]]:
             meta = {}
         out.append({"id": f.stem[len("agent-"):], "kind": "agent", "desc": str(meta.get("description") or meta.get("name") or "")[:80],
                     # 팀 에이전트의 agentType 은 붙인 이름이다 — 역할은 customAgentType 에(실측 2026-10-06)
-                    "role": str(meta.get("customAgentType") or meta.get("agentType") or ""), "model": str(meta.get("model") or "")})
+                    "role": str(meta.get("customAgentType") or meta.get("agentType") or ""), "model": str(meta.get("model") or ""),
+                    "name": str(meta.get("name") or "")})
     return out
 
 
@@ -1100,10 +1101,17 @@ def _fmt_tokens(n: int) -> str:
     return f"{round(n / 1000)}k" if n >= 1000 else str(n)
 
 
+def _agent_tag(agent_id: str, name: str = "") -> str:
+    """에이전트 꼬리표 — 줄들이 같은 에이전트 것인지 새로 뜬 것인지 구분(형 2026-10-06). 붙인 이름이 있으면 그것, 없으면 id 끝 4자."""
+    return _clean(name)[:24] if name else agent_id[-4:]
+
+
 def _fmt_role_event(ev: dict[str, Any]) -> str:
-    """역할 이벤트 한 줄(role-hook 형식). 비역할 서브에이전트는 '서브에이전트'."""
+    """역할 이벤트 한 줄(role-hook 형식). 비역할 서브에이전트는 '서브에이전트'. 진행 줄(agent_words_tick)과 같은 꼬리표를 붙인다."""
     role = str(ev.get("role") or "-")
     who = role if role != "-" else "서브에이전트"
+    if ev.get("agent"):
+        who += "#" + _agent_tag(str(ev["agent"]))
     desc = _clean(str(ev.get("desc") or ""))[:80]
     kind = ev.get("ev")
     if kind == "override_blocked":
@@ -1397,7 +1405,8 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
             if efforts is None:
                 efforts = _agent_efforts()
             model = "/".join(x for x in (str(a.get("model") or ""), efforts.get(aid, "")) if x)
-            who = " · ".join(x for x in (str(a.get("role") or ""), model) if x)
+            who = " · ".join(x for x in ((str(a.get("role") or "") + "#" + _agent_tag(aid, str(a.get("name") or ""))) if a.get("role") else "",
+                                         model) if x)
             lines.append(f"🤖 {f'`{_clean(who)}` ' if who else ''}{_clean(str(a.get('desc') or aid))}{age} — {words}")
         if lines:
             try:

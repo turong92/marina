@@ -58,9 +58,9 @@ got = thread_posts()
 check(len(got) == 1, f"(리뷰 M3) 한 판의 줄들은 메시지 하나로 — 서브에이전트가 몰려도 도배 안 함: {got}")
 got = got[0].split("\n") if got else []
 want = ["⚠️ developer 모델 지정(opus) 무시 — 역할표대로 sonnet",
-        "🤖 developer 시작 · sonnet/medium · test-driven-development · 결제 버그 Task 3",
-        "✅ developer 끝 · 4분 · 52k",
-        "🤖 서브에이전트 시작 · 코드 찾기"]
+        "🤖 developer#a1 시작 · sonnet/medium · test-driven-development · 결제 버그 Task 3",
+        "✅ developer#a1 끝 · 4분 · 52k",
+        "🤖 서브에이전트#a2 시작 · 코드 찾기"]
 check(got == want, f"줄 형식: {got}")
 mb.role_events_tick()
 check(len(thread_posts()) == 1, "오프셋 — 같은 줄 두 번 안 올림")
@@ -93,13 +93,13 @@ new_posts = thread_posts()[n1:]
 check(all(len(p) <= 1900 and not p.endswith("가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가가")
           or p.endswith("가" * 78) for p in new_posts), f"줄 중간에서 안 잘림: {[len(p) for p in new_posts]}")
 check(all(l.startswith("🤖") for p in new_posts for l in p.split("\n")), f"모든 줄이 온전: {[p[-20:] for p in new_posts]}")
-check(sum(p.count("🤖 서브에이전트 시작") for p in new_posts) == 20, "20줄 다 감")
+check(sum(len(__import__("re").findall(r"🤖 서브에이전트#m\d+ 시작", p)) for p in new_posts) == 20, "20줄 다 감")
 # 회전(파일이 줄어듦) → 처음부터
 ev.write_text(json.dumps({"ev": "stop", "ts": 5, "session": "S1", "agent": "a2", "role": "-", "model": "inherit", "effort": "",
                           "skills": [], "desc": "코드 찾기", "secs": 12.0, "tokens": {"in": 1, "out": 2, "cache_read": 0, "cache_write": 0},
                           "models": []}) + "\n")
 mb.role_events_tick()
-check(thread_posts()[-1] == "✅ 서브에이전트 끝 · 12초 · 3", f"회전 후 · 짧은 시간·작은 토큰: {thread_posts()[-1:]}")
+check(thread_posts()[-1] == "✅ 서브에이전트#a2 끝 · 12초 · 3", f"회전 후 · 짧은 시간·작은 토큰: {thread_posts()[-1:]}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

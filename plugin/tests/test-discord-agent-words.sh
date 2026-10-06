@@ -41,13 +41,13 @@ cve.write_text("\n".join([
     row("assistant", [{"type": "text", "text": "의존성 목록을 읽는다"},
                       {"type": "tool_use", "name": "Bash", "input": {"command": "cat secret --token=abc", "description": "의존성 목록 뽑기"}}]),
 ]) + "\n")
-agents = [{"id": "qa1", "desc": "한 바퀴 눌러 보기", "path": qa, "role": "qa", "model": "sonnet 5.5"},
-          {"id": "cve1", "desc": "취약점 점검", "path": cve}]
+agents = [{"id": "qa1", "desc": "한 바퀴 눌러 보기", "path": qa, "role": "qa", "model": "sonnet 5.5", "name": "w12-qa"},
+          {"id": "a84559d9f6eba0085", "desc": "취약점 점검", "path": cve, "role": "researcher"}]
 real_running = mb._agents_running
 mb._agents_running = lambda r: agents if r.get("stateDir") == str(sd) else []
 # effort 는 기록에 없다 — role-hook 시작 이벤트에서(역할 에이전트만 남는다)
 Path(os.environ["ROLE_EVENTS"]).write_text(json.dumps({"ev": "start", "agent": "qa1", "role": "qa", "model": "sonnet", "effort": "medium"}) + "\n"
-                                           + "{깨진 줄\n" + json.dumps({"ev": "start", "agent": "cve1", "role": "-", "model": "inherit", "effort": ""}) + "\n")
+                                           + "{깨진 줄\n" + json.dumps({"ev": "start", "agent": "a84559d9f6eba0085", "role": "-", "model": "inherit", "effort": ""}) + "\n")
 base = calendar.timegm(time.strptime("2026-10-06 06:27:00", "%Y-%m-%d %H:%M:%S"))   # T0 의 epoch
 
 # 지시 메시지 없음 → 안 올린다
@@ -63,7 +63,7 @@ got = thread_posts(n)
 check(len(got) == 1, f"한 판은 메시지 하나로: {got}")
 body = got[0]["content"] if got else ""
 lines = body.split("\n")
-check(lines == ["🤖 `qa · sonnet 5.5/medium` 한 바퀴 눌러 보기 · 10분 — 만들기 화면부터 본다.", "🤖 취약점 점검 · 10분 — 의존성 목록 뽑기"],
+check(lines == ["🤖 `qa#w12-qa · sonnet 5.5/medium` 한 바퀴 눌러 보기 · 10분 — 만들기 화면부터 본다.", "🤖 `researcher#0085` 취약점 점검 · 10분 — 의존성 목록 뽑기"],
       f"줄 모양 — 역할·모델/effort 를 알면 앞에: {lines}")
 check("abc" not in body and "cat secret" not in body, "명령 원문은 안 보낸다")
 check(got and got[0].get("flags") == 4096, "알림 없이")
@@ -80,7 +80,7 @@ n = len(log()); mb.agent_words_tick(st2, now=base + 960)
 check(thread_posts(n) == [], "2분 안엔 다시 안 올린다")
 n = len(log()); mb.agent_words_tick(st2, now=base + 1080)
 got = thread_posts(n)
-check(len(got) == 1 and got[0]["content"] == "🤖 `qa · sonnet 5.5/medium` 한 바퀴 눌러 보기 · 18분 — 만들기 화면부터 본다. (파일 읽는 중 approve.tsx)"
+check(len(got) == 1 and got[0]["content"] == "🤖 `qa#w12-qa · sonnet 5.5/medium` 한 바퀴 눌러 보기 · 18분 — 만들기 화면부터 본다. (파일 읽는 중 approve.tsx)"
       and "취약점" not in got[0]["content"], f"바뀐 에이전트만, 쌓아서: {got}")
 
 # 긴 말은 자른다 · 기록을 못 읽는 에이전트는 건너뛴다 · 사라진 에이전트의 상태는 치운다
@@ -136,6 +136,8 @@ got = mb._agents_running(dict(rec, tmux="t"))
 got = sorted(got, key=lambda a: a["id"])
 check([a["id"] for a in got] == ["gp1", "run1"] and got[1]["desc"] == "도는 일" and got[1]["path"] == sub / "agent-run1.jsonl",
       f"끝난(end_turn) 팀 에이전트는 빼고 도는 것만: {got}")
+check(got[1].get("name") == "flaky-public" and mb._agent_tag("a84559d9f6eba0085") == "0085" and mb._agent_tag("x", "w12-qa") == "w12-qa",
+      f"꼬리표 — 붙인 이름, 없으면 id 끝 4자: {got[1]}")
 check((got[1].get("role"), got[1].get("model")) == ("developer", "haiku 4.5"),
       f"팀 에이전트는 이름이 아니라 역할 · 모델은 meta 의 지정값이 아니라 기록에 찍힌 실제 모델(버전까지): {got[1]}")
 check((got[0].get("role"), got[0].get("model")) == ("general-purpose", "opus 5.5"), f"모델 버전: {got[0]}")
