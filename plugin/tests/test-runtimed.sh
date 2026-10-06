@@ -15,13 +15,15 @@ def check(c, m):
     if not c: fails.append(m)
 calls = []
 lp = rd.Loop(gateway=lambda: calls.append("gw"), docker_gc=lambda primary: calls.append(("dgc", primary)),
-             worktree_gc=lambda primary: calls.append(("wgc", primary)), primary=False, gateway_on=True)
+             worktree_gc=lambda primary: calls.append(("wgc", primary)), primary=False, gateway_on=True,
+             update=lambda primary: calls.append(("upd", primary)))
 t0 = 1000.0
 check(lp.step(t0) is True and calls == ["gw"], f"첫 바퀴는 게이트웨이만(GC 는 부팅 60초 뒤): {calls}")
 calls.clear(); lp.step(t0 + 3)
 check(calls == [], f"5초 안엔 아무것도: {calls}")
 calls.clear(); lp.step(t0 + 61)
-check(calls == ["gw", ("dgc", False), ("wgc", False)], f"60초 뒤 GC — 격리 홈이면 primary=False 로 넘겨 지우지 않게: {calls}")
+check(calls == ["gw", ("upd", False), ("dgc", False), ("wgc", False)],
+      f"60초 뒤 GC·업데이트 확인 — 격리 홈이면 primary=False 로 넘겨 지우지도 받지도 않게: {calls}")
 calls.clear(); lp.step(t0 + 120)
 check(("dgc", False) not in calls, f"GC 는 600초마다: {calls}")
 calls.clear(); lp.step(t0 + 662)
@@ -70,5 +72,34 @@ t = threading.Thread(target=lambda: got.append(b.own(wait=True)), daemon=True); 
 time.sleep(0.5); assert not got, "쥔 동안엔 기다린다"
 a.lockf.close(); a.lockf = None
 t.join(5); assert got == [True], "풀리면 이어받는다"
+
+# 새 버전 받기는 따로 스레드에서(루프를 안 막는다) · 겹쳐 돌지 않는다 · 개발 실행은 받지 않는다
+import marina_selfupdate as su
+gate, ran = threading.Event(), []
+def slow_tick(primary):
+    ran.append(primary); gate.wait(5); return "installed"
+su.tick = slow_tick
+assert rd._is_dev(), "이 테스트는 레포에서 돈다"
+rd._update(True); time.sleep(0.2)
+assert ran == [] and not rd._updating.locked(), "개발 실행은 설치본을 받아 오지 않는다"
+rd._is_dev = lambda: False
+t0 = time.time(); rd._update(True); took = time.time() - t0
+time.sleep(0.2)
+assert took < 1 and ran == [True] and rd._updating.locked(), f"바로 돌아오고 뒤에서 돈다: {took} {ran}"
+rd._update(True); time.sleep(0.2)
+assert ran == [True], "받는 중엔 또 띄우지 않는다"
+gate.set(); time.sleep(0.3)
+assert not rd._updating.locked(), "끝나면 풀린다"
+def boom(primary): raise RuntimeError("x")
+su.tick = boom; rd._update(True); time.sleep(0.3)
+assert not rd._updating.locked(), "tick 이 터져도 풀린다"
+# 갈아타기 전 검증 — 안 뜨는 설치본은 한 시간, 검증을 못 돌린 건 10분 뒤 다시
+from pathlib import Path
+su.preflight = lambda d: (True, "")
+assert rd._new_code_ok(Path("/x")) [0] is True
+su.preflight = lambda d: (False, "SyntaxError")
+assert rd._new_code_ok(Path("/x")) == (False, rd.RECHECK_BAD_S)
+su.preflight = lambda d: (False, su.UNAVAILABLE + "timeout")
+assert rd._new_code_ok(Path("/x")) == (False, rd.RECHECK_UNAVAILABLE_S)
 PY2
 echo "PASS test-runtimed"

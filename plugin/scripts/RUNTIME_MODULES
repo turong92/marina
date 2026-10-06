@@ -13,6 +13,7 @@ marina_ssh_mux
 marina_worktrees
 marina_liveness
 marina_worktree_gc
+marina_selfupdate
 marina_docker_gc
 marina_docker_gc_cli
 marina_reaper

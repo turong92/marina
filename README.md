@@ -749,6 +749,7 @@ x-marina:
   서비스 기동 중이면 미루고, 대시보드·폰만 붙어 있으면 최대 6시간 미룬다(브라우저는 재연결된다). 기록: `~/.marina/auto-update.log`.
   **주의:** main 에 push 한 코드가 한 시간 안에 이 데몬을 쓰는 모든 맥에서 실행된다. 끄려면 `MARINA_AUTO_UPDATE=0`
   (데몬 환경변수), 주기는 `MARINA_AUTO_UPDATE_HOURS`.
+  받는 일은 runtimed 도 한다 — 대시보드를 안 띄워도 최신으로 유지된다(runtimed 는 받은 뒤 스스로 다시 뜬다).
 
 ---
 

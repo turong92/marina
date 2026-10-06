@@ -4,6 +4,7 @@
   · 게이트웨이 동적 반영: 서비스 포트가 바뀌면 Caddy 라우트를 다시 쓴다(5초, MARINA_GATEWAY_POLL)
   · 도커 GC·유휴 워크트리 자동 정리: 부팅 60초 뒤부터 600초마다(실제 주기는 정책 파일이 정한다)
   · 고아 프로세스 리퍼(스레드)
+  · marina 새 버전 받기(600초마다 확인, 실제 주기는 AUTO_UPDATE_HOURS) — 대시보드를 내려도 최신으로(2026-10-06)
 
 **자동 삭제는 실제 홈에서만.** 실행 표식 MARINA_RUNTIMED_PRIMARY=1 은 marina-runtimed.sh 가 기본 홈(~/.marina)일 때만
 단다. 격리 홈 프리뷰가 실 도커 빌드캐시 9.2GB 를 지운 사고(2026-09-14) 이후의 규칙(도커는 호스트 공유)을 그대로 지킨다.
@@ -73,6 +74,55 @@ def _worktree_gc(primary: bool) -> None:
     auto_tick(0, primary=primary)
 
 
+_updating = threading.Lock()
+
+
+def _is_dev() -> bool:
+    """레포에서 개발 실행 — 설치본으로 갈아타지도, 설치본을 받아 오지도 않는다."""
+    return HERE.parent.name == "plugin" and (HERE.parent.parent / ".git").exists()
+
+
+def _update(primary: bool) -> None:
+    """새 버전 받기는 따로 스레드에서 — 네트워크·검증에 몇 분 걸릴 수 있어 5초 게이트웨이 루프를 막으면 안 된다(리뷰 I5)."""
+    if _is_dev() or not _updating.acquire(blocking=False):
+        return                                        # 개발 실행이거나, 앞선 받기가 아직 도는 중
+
+    def work() -> None:
+        try:
+            from marina_selfupdate import tick
+            res = tick(primary)
+            if not res.startswith(("skipped", "noop")):
+                _log(f"자동 업데이트: {res}")
+        except Exception as exc:
+            _log(f"자동 업데이트 실패(무시): {exc!r}")
+        finally:
+            _updating.release()
+    try:
+        threading.Thread(target=work, daemon=True, name="marina-selfupdate").start()
+    except Exception:                                 # 스레드를 못 띄우면 잠금을 쥔 채 남지 않게
+        _updating.release()
+        raise
+
+
+RECHECK_BAD_S = 3600.0        # 안 뜨는 설치본 — 한 시간 뒤 다시 본다(영영 안 갈아타는 일이 없게)
+RECHECK_UNAVAILABLE_S = 600.0  # 검증을 못 돌림(타임아웃 등) — 곧 다시
+
+
+def _new_code_ok(inst: Path) -> "tuple[bool, float]":
+    """갈아탈 새 설치본이 이 파이썬에서 뜨는지 → (갈아타도 되나, 안 되면 몇 초 뒤 다시 볼지).
+    안 뜨는 코드로 갈아타면 launchd 가 깨진 코드를 되풀이해 띄우고, 받기도 멈춰 고친 버전을 못 받는다(리뷰 I1).
+    설치는 Claude Code 세션 시작 때도 일어나 우리 검증을 안 거칠 수 있다."""
+    try:
+        from marina_selfupdate import preflight, unavailable
+        ok, err = preflight(inst)
+        wait = RECHECK_UNAVAILABLE_S if unavailable(err) else RECHECK_BAD_S
+    except Exception as exc:
+        ok, err, wait = False, repr(exc), RECHECK_UNAVAILABLE_S
+    if not ok:
+        _log(f"새 설치본({inst})을 못 쓴다 — 옛 코드로 계속 돈다({wait / 60:g}분 뒤 다시 확인): {err}")
+    return ok, wait
+
+
 def _log(line: str) -> None:
     print(time.strftime("%m-%d %H:%M:%S ") + line, flush=True)
 
@@ -81,8 +131,9 @@ class Loop:
     def __init__(self, gateway: Callable[[], None] = _refresh_gateway,
                  docker_gc: Callable[[bool], None] = _docker_gc,
                  worktree_gc: Callable[[bool], None] = _worktree_gc,
-                 primary: Optional[bool] = None, gateway_on: Optional[bool] = None) -> None:
-        self.gateway, self.docker_gc, self.worktree_gc = gateway, docker_gc, worktree_gc
+                 primary: Optional[bool] = None, gateway_on: Optional[bool] = None,
+                 update: Callable[[bool], None] = _update) -> None:
+        self.gateway, self.docker_gc, self.worktree_gc, self.update = gateway, docker_gc, worktree_gc, update
         self.primary = is_primary() if primary is None else primary
         self.gateway_on = _GATEWAY_ON if gateway_on is None else gateway_on
         self.started: Optional[float] = None
@@ -118,7 +169,8 @@ class Loop:
             self._safe("gateway", self.gateway)
         if now - self.started >= GC_BOOT_DELAY_S and now - self.last_gc >= GC_EVERY_S:
             self.last_gc = now
-            self._safe("docker-gc", lambda: self.docker_gc(self.primary))
+            self._safe("update", lambda: self.update(self.primary))   # 새 버전 받기 — 대시보드가 꺼져 있어도 최신으로. GC 보다 먼저:
+            self._safe("docker-gc", lambda: self.docker_gc(self.primary))    # GC 가 고장 나도 고친 버전은 받는다
             self._safe("worktree-gc", lambda: self.worktree_gc(self.primary))
         return True
 
@@ -148,16 +200,22 @@ def run_forever() -> int:
         except Exception as exc:
             _log(f"reaper 기동 실패(무시): {exc!r}")
     last_check = time.time()
+    hold: "tuple[Optional[Path], float]" = (None, 0.0)   # (검증에 떨어진 설치본, 다시 볼 시각) — 매분 다시 검증하지 않는다
     while True:
         now = time.time()
         loop.step(now)
         if now - last_check >= CODE_CHECK_EVERY_S:
             last_check = now
             inst = installed_scripts_dir()
-            dev = HERE.parent.name == "plugin" and (HERE.parent.parent / ".git").exists()   # 레포에서 개발 실행은 그대로
-            if not dev and stale_code(HERE, inst) and inst is not None and (inst / "marina_runtimed.py").is_file():
-                _log(f"플러그인이 업데이트됨({HERE} → {inst}) — 끝내고 새 코드로 다시 뜬다")
-                return 0
+            held = inst is not None and inst == hold[0] and now < hold[1]
+            # 받는 중(_updating)엔 끝내지 않는다 — 같은 프로세스 그룹의 `claude plugin …` 자식이 함께 죽는다(재리뷰 M-1)
+            if (not _is_dev() and stale_code(HERE, inst) and inst is not None and not held
+                    and not _updating.locked() and (inst / "marina_runtimed.py").is_file()):
+                ok, wait = _new_code_ok(inst)
+                if ok:
+                    _log(f"플러그인이 업데이트됨({HERE} → {inst}) — 끝내고 새 코드로 다시 뜬다")
+                    return 0
+                hold = (inst, time.time() + wait)
         time.sleep(1.0)
 
 

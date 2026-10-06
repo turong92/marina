@@ -21,24 +21,18 @@
 from __future__ import annotations
 
 import json
-import os
-import subprocess
-import sys
-import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
 
-from marina_state import CLAUDE_CONFIG_DIR, MARINA_HOME, MARKETPLACE, PLUGIN_ID, _bin, _env
+from marina_state import CLAUDE_CONFIG_DIR, MARINA_HOME, MARKETPLACE, PLUGIN_ID, _bin
+# 받기·검증의 공용 부품은 runtime 쪽(marina_selfupdate)에 있다 — runtimed 도 같은 것으로 새 버전을 받는다
+from marina_selfupdate import (_run, _update_lock, enabled, interval_s, marketplace_scripts_dir,  # noqa: F401
+                               preflight, unavailable)
 
 STATE_FILE = MARINA_HOME / "auto-update-state.json"
 LOG_FILE = MARINA_HOME / "auto-update.log"
-# 데몬이 부팅 때 import 하는 모듈 — 하나라도 실패하면 새 데몬이 안 뜬다
-PREFLIGHT_MODULES = ("marina_state", "marina_handler", "marina_compose_svc", "marina_lifecycle", "marina_sessions",
-                     "marina_docker_gc", "marina_worktree_gc", "marina_update", "marina_autoupdate",
-                     "marina_worktrees", "marina_liveness", "marina_runtimed")
-PREFLIGHT_FILES = ("marina-compose.py", "marina-control.py")   # 하이픈 이름 — 파일로 로드(실행은 안 함)
 MAX_RESTART_TRIES = 3            # 재시작해도 serving 이 installed 로 안 바뀌면 여기서 멈춘다(매시간 재시작 루프 방지)
 MAX_CLIENT_DEFER_S = 6 * 3600    # 대시보드·폰이 붙어 있으면 재시작을 미루되 이만큼까지만
 
@@ -72,61 +66,6 @@ def _save_state(state: dict[str, Any]) -> None:
         tmp.replace(STATE_FILE)
     except OSError:
         pass
-
-
-def enabled() -> bool:
-    return str(os.environ.get("MARINA_AUTO_UPDATE", "1")).strip().lower() not in ("0", "off", "false", "no")
-
-
-def interval_s() -> float:
-    try:
-        return max(0.1, float(_env("AUTO_UPDATE_HOURS", "1") or "1")) * 3600
-    except ValueError:
-        return 3600.0
-
-
-def marketplace_scripts_dir() -> Path:
-    """`claude plugin marketplace update` 가 새 코드를 받아 두는 곳 — 설치(plugin update) 전에 여기서 검증한다."""
-    return CLAUDE_CONFIG_DIR / "plugins" / "marketplaces" / MARKETPLACE / "plugin" / "scripts"
-
-
-def _run(argv: list[str], timeout: float = 180) -> tuple[int, str]:
-    try:
-        p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
-        return p.returncode, ((p.stdout or "") + (p.stderr or "")).strip()
-    except Exception as exc:
-        return 1, str(exc)
-
-
-def preflight(scripts: Path, python: str | None = None) -> tuple[bool, str]:
-    """새 코드를 데몬과 같은 인터프리터로 격리 홈에서 import. (ok, 마지막 에러 줄)."""
-    python = python or sys.executable
-    code = (
-        "import importlib.util, sys\n"
-        f"sys.path.insert(0, {str(scripts)!r})\n"
-        f"for m in {PREFLIGHT_MODULES!r}:\n"
-        "    __import__(m)\n"
-        f"for f in {PREFLIGHT_FILES!r}:\n"
-        f"    p = {str(scripts)!r} + '/' + f\n"
-        "    src = open(p, encoding='utf-8').read()\n"
-        "    compile(src, p, 'exec')\n"
-        "for name, f in (('mc_pre', 'marina-compose.py'), ('ctl_pre', 'marina-control.py')):\n"
-        "    s = importlib.util.spec_from_file_location(name, " + repr(str(scripts)) + " + '/' + f)\n"
-        "    m = importlib.util.module_from_spec(s); s.loader.exec_module(m)\n"
-        "print('preflight-ok')\n"
-    )
-    with tempfile.TemporaryDirectory() as home:
-        env = {k: v for k, v in os.environ.items() if not k.startswith("MARINA_")}
-        env["MARINA_HOME"] = home
-        try:
-            p = subprocess.run([python, "-c", code], capture_output=True, text=True, timeout=120, env=env, cwd=home)
-        except Exception as exc:
-            return False, str(exc)
-    out = ((p.stdout or "") + (p.stderr or "")).strip()
-    if p.returncode == 0 and "preflight-ok" in out:
-        return True, ""
-    lines = [l for l in out.splitlines() if l.strip()]
-    return False, (lines[-1] if lines else f"exit {p.returncode}")[:300]
 
 
 def _lifecycle_busy() -> bool:
@@ -194,6 +133,9 @@ def _gated_restart(state: dict[str, Any], now: float, installed: str | None, bus
         return "gave-up"                                            # 이 버전으론 재시작이 수렴 안 함 — 새 버전까지 멈춤
     d = installed_dir_fn()
     ok, err = preflight_fn(d) if d else (False, "installPath 를 못 읽음")
+    if not ok and unavailable(err):                                 # 검증을 못 돌렸다(타임아웃 등) — 버전을 막지 않고 다음에 다시
+        state["lastError"] = f"installed preflight: {err}"
+        return "failed:preflight-unavailable"
     if not ok:                                                      # 설치된 코드가 실제로 뜨는지 — 검증과 설치 사이 경합까지 막는다
         state.update({"badSha": installed, "lastError": f"installed preflight: {err}"})
         _log(f"REJECTED installed {installed} — 재시작하지 않음(옛 데몬 유지): {err}")
@@ -216,6 +158,10 @@ def _install_new(state: dict[str, Any], st: dict, origin: Any, now: float, run_f
         _save_state(state); _log(f"FAILED marketplace update {origin}: {out[-200:]}")
         return "failed:marketplace"
     ok, err = preflight_fn(marketplace_scripts_dir())
+    if not ok and unavailable(err):
+        state["lastError"] = f"preflight: {err}"
+        _save_state(state); _log(f"FAILED {origin} 검증을 못 돌림, 다음 주기에 다시: {err}")
+        return "failed:preflight-unavailable"
     if not ok:
         state.update({"badSha": origin, "lastError": f"preflight: {err}"})
         _save_state(state)
@@ -234,23 +180,6 @@ def _install_new(state: dict[str, Any], st: dict, origin: Any, now: float, run_f
     _save_state(state)
     _log(f"UPDATED {st.get('serving')} → {origin} ({res})")
     return "updated" if res == "restarted" else f"installed:{res}"
-
-
-def _update_lock():
-    """runtime·discord 자동 업데이트가 같은 마켓플레이스 사본·설치 목록을 동시에 만지지 않게 하는 공용 잠금(리뷰 M3).
-    잡혀 있으면 None — 이번엔 미룬다. discord(marina_session.self_update_tick)도 같은 파일을 쓴다."""
-    import fcntl
-    try:
-        MARINA_HOME.mkdir(parents=True, exist_ok=True)
-        fh = open(MARINA_HOME / "plugin-update.lock", "w")
-    except OSError:
-        return None
-    try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        fh.close()
-        return None
-    return fh
 
 
 def auto_update_tick(port: int, now: float | None = None, primary: bool | None = None,
