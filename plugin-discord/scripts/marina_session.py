@@ -2539,9 +2539,13 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
     if arch:
         room = str(rec.get("title") or rec.get("task")).replace("@", "")
         big = [f for f in files if f.stat().st_size > 10 * 1024 * 1024]
+        # 원래 대화로 바로 가는 링크 — 지금 답하고 있는 지시 메시지(답은 그 바로 아래에 달린다). 형 2026-10-06
+        mid = str(_activity_state(Path(str(rec.get("stateDir") or "/nonexistent"))).get("mid") or "")
+        origin = (f" · [원문 보기](<https://discord.com/channels/{cfg['guildId']}/{rec.get('channelId')}/{mid}>)"
+                  if re.fullmatch(r"\d{5,25}", mid) else "")
         try:
             marina_share.upload_message(Discord(read_token(cfg)).base, read_token(cfg), arch,
-                                        f"📎 [{room}] {title}\n원래 방: <#{rec.get('channelId')}>" + (f"\n열어보기: <{view_url}>" if view_url else ""),
+                                        f"📎 [{room}] {title}\n원래 방: <#{rec.get('channelId')}>{origin}" + (f"\n열어보기: <{view_url}>" if view_url else ""),
                                         [f for f in files if f not in big])
             notes.append("#자료실 에도 올렸어")
         except Exception as exc:

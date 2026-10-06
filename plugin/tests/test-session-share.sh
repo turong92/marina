@@ -122,6 +122,13 @@ check(up and up[-1]["b"]["payload"].get("allowed_mentions") == {"parse": []}, "�
 r, e = call({"path": str(root / "목록.md")})
 check(not r.get("isError") and str(root / "미리보기" / "목록-1.png") in r["content"][0]["text"], f"md 도 미리보기 이미지(2026-10-05): {r}")
 (root / "메모.txt").write_text("x")
+# 자료실 글에서 원래 대화로 바로 간다(형 2026-10-06) — 지금 지시 메시지가 있으면 그 메시지 링크, 없으면 방 링크만
+last = lambda: [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{arch}/messages"][-1]["b"]["payload"]["content"]
+check("discord.com/channels" not in last(), f"지시 메시지를 모르면 방 링크만: {last()}")
+(Path(rec["stateDir"]) / "activity.json").write_text(json.dumps({"mid": "424242"}))
+r, e = call({"path": "메모.txt"})
+check(f"https://discord.com/channels/G1/{rec['channelId']}/424242" in last() and f"<#{rec['channelId']}>" in last(), f"원문 메시지 링크: {last()}")
+(Path(rec["stateDir"]) / "activity.json").unlink()
 r, e = call({"path": "메모.txt"})
 check(not r.get("isError") and "미리보기" not in r["content"][0]["text"], f"html·md 아닌 파일은 원본만: {r}")
 for bad in ("/etc/hosts", "../discord.json", "없는파일.html", str(mh / "discord.json")):
