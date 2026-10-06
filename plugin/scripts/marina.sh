@@ -70,8 +70,10 @@ if [[ "$SOURCE_ROOT" != "$ROOT" ]]; then
 fi
 CODEX_WORKTREES_ROOT="${CODEX_WORKTREES_ROOT:-$HOME/.codex/worktrees}"
 CODEX_NODE_BIN="${CODEX_NODE_BIN:-$HOME/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin}"
-if [[ -x "$CODEX_NODE_BIN/node" ]]; then
-  export PATH="$CODEX_NODE_BIN:$PATH"
+# Codex 에 딸린 node 는 마지막 수단 — PATH 맨 뒤에, 한 번만. 맨 앞에 붙였더니 marina 가 띄운 세션의 node·vitest·pnpm 이
+# 사용자가 깐 node 대신 Codex 번들(업데이트마다 버전이 바뀐다)로 돌았다(2026-10-06). 부를 때마다 겹쳐 쌓이기도 했다.
+if [[ -x "$CODEX_NODE_BIN/node" && ":$PATH:" != *":$CODEX_NODE_BIN:"* ]]; then
+  export PATH="$PATH:$CODEX_NODE_BIN"
 fi
 export COREPACK_ENABLE_PROJECT_SPEC="${COREPACK_ENABLE_PROJECT_SPEC:-0}"
 
