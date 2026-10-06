@@ -144,10 +144,48 @@ assert_restart_keeps_login_item_untouched() {
   # 재시작은 로그인 plist 를 지우지 않는다(명시적 stop 만 지운다)
   PATH="$FAKE:$PATH" MARINA_DRY_RUN=1 MARINA_CONTROL_PORT=59997 bash "$V/bbbbbbbbbbbb/scripts/marina-dashboard.sh" start >/dev/null 2>&1
   touch -t 202001010000 "$L"
-  PATH="$FAKE:$PATH" MARINA_RESTART_HELPER=1 MARINA_CONTROL_PORT=59997 \
+  PATH="$FAKE:$PATH" MARINA_RESTART_HELPER=1 MARINA_CONTROL_PORT=59997 MARINA_DASHBOARD_WAIT=1 \
     bash "$V/bbbbbbbbbbbb/scripts/marina-dashboard.sh" restart >/dev/null 2>&1
   [[ -f "$L" ]] || { echo "FAIL[login-item]: restart removed the login plist"; exit 1; }
   [[ "$L" -ot "$TMP/ref" ]] || { echo "FAIL[login-item]: restart rewrote the login plist"; exit 1; }
+  rm -rf "$TMP"
+}
+
+# 맥이 바쁘면 대시보드가 1초 안에 못 뜬다 — 그때 nohup 예비 실행까지 띄우면 launchd 것과 포트를 다툰다
+# (실측 2026-10-06, load 50: 재시작마다 예비 실행이 뜨고 launchd 작업은 exit 1 로 되풀이).
+assert_slow_listener_does_not_fall_back() {
+  local TMP; TMP="$(mktemp -d)"
+  export MARINA_HOME="$TMP/.marina" HOME="$TMP" CLAUDE_CONFIG_DIR="$TMP/.claude" CODEX_HOME="$TMP/.codex"
+  mkdir -p "$CLAUDE_CONFIG_DIR/plugins"
+  local FAKE="$TMP/fakebin" PORT=59996; mkdir -p "$FAKE"
+  printf '#!/usr/bin/env bash\necho Darwin\n' > "$FAKE/uname"
+  # kickstart 3초 뒤에야 듣기 시작하는 가짜 launchd
+  cat > "$FAKE/launchctl" <<SH
+#!/usr/bin/env bash
+if [[ "\$1" == kickstart ]]; then
+  ( sleep 3; exec python3 -m http.server $PORT --bind 127.0.0.1 --directory "$TMP/empty" >/dev/null 2>&1 ) &
+  echo \$! > "$TMP/listener.pid"
+fi
+exit 0
+SH
+  chmod +x "$FAKE/"*; mkdir -p "$TMP/empty"
+  # 이 테스트가 띄운 것만 치운다 — 어떻게 끝나든(포트로 찾아 죽이면 그 포트의 남의 프로세스를 죽일 수 있다)
+  trap '[[ -f "'"$TMP"'/listener.pid" ]] && kill "$(cat "'"$TMP"'/listener.pid")" 2>/dev/null; true' EXIT
+  # 예비 실행으로 떨어져도 실제 대시보드가 뜨지 않게 가짜 설치본에서 돌린다
+  local V="$TMP/.claude/plugins/cache/marina-dev/marina/cccccccccccc/scripts"; mkdir -p "$V"
+  cp "$HERE/../scripts/marina-dashboard.sh" "$HERE/../scripts/marina-resolve.sh" "$V/"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$V/marina-entrypoint.sh"; chmod +x "$V/marina-entrypoint.sh"
+  printf 'print("FAKE_CONTROL")\n' > "$V/marina-control.py"
+  local out; out="$(PATH="$FAKE:$PATH" MARINA_CONTROL_PORT=$PORT bash "$V/marina-dashboard.sh" start 2>&1)"
+  local pid; pid="$(lsof -nP -tiTCP:$PORT -sTCP:LISTEN 2>/dev/null | head -1 || true)"
+  echo "$out" | grep -q "dashboard started pid=$pid " || { echo "FAIL[slow-listener]: should wait for the launchd listener — $out"; exit 1; }
+  ! grep -q "falling back to nohup" "$MARINA_HOME/dashboard.log" || { echo "FAIL[slow-listener]: fell back to nohup while launchd was starting"; exit 1; }
+  # 대기 값이 숫자가 아니어도 스크립트가 죽지 않는다(기본값으로)
+  kill "$(cat "$TMP/listener.pid")" 2>/dev/null || true; sleep 1
+  PATH="$FAKE:$PATH" MARINA_CONTROL_PORT=$PORT MARINA_DASHBOARD_WAIT=abc bash "$V/marina-dashboard.sh" start >/dev/null 2>&1 \
+    || { echo "FAIL[slow-listener]: non-numeric MARINA_DASHBOARD_WAIT broke start"; exit 1; }
+  kill "$(cat "$TMP/listener.pid")" 2>/dev/null || true
+  trap - EXIT
   rm -rf "$TMP"
 }
 
@@ -207,6 +245,7 @@ run_case Darwin launchd
 assert_no_versioned_path_in_plist
 assert_dev_launcher_prefers_baked_source
 assert_restart_keeps_login_item_untouched
+assert_slow_listener_does_not_fall_back
 assert_bind_survives_restart
 assert_launchd_restart_escapes_dashboard_job
 echo "PASS test-dashboard-launch"

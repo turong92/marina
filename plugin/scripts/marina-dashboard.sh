@@ -215,6 +215,19 @@ WantedBy=default.target
 EOF
 }
 
+wait_listener() {
+  # 맥이 바쁘면 1초 안에 못 뜬다 — 그때 nohup 예비 실행을 띄우면 launchd 것과 포트를 다툰다(2026-10-06, load 50).
+  local secs="${MARINA_DASHBOARD_WAIT:-20}" n=0 got=""
+  [[ "$secs" =~ ^[1-9][0-9]*$ ]] || secs=20         # 숫자가 아니거나 0 이면 기본값 — 산술 오류로 스크립트가 죽지 않게
+  while :; do                                        # 적어도 한 번은 확인한다
+    got="$(listener_pids | paste -sd, -)"
+    [[ -n "$got" ]] && break
+    n=$(( n + 1 )); (( n >= secs * 2 )) && break
+    sleep 0.5
+  done
+  echo "$got"
+}
+
 start_nohup() {
   CODEX_WORKTREES_ROOT="$CODEX_WORKTREES_ROOT" MARINA_HOME="$MARINA_HOME" MARINA_CONTROL_HOST="$HOST" MARINA_CONTROL_PORT="$PORT" MARINA_GATEWAY="$MARINA_GATEWAY" MARINA_GATEWAY_PORT="$MARINA_GATEWAY_PORT" MARINA_GATEWAY_ADMIN="$MARINA_GATEWAY_ADMIN" MARINA_GATEWAY_POLL="$MARINA_GATEWAY_POLL" PYTHONUNBUFFERED=1 nohup "$LAUNCHER" >> "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
@@ -258,8 +271,7 @@ start() {
       launchctl bootout "$(launchctl_domain)" "$PLIST_FILE" >/dev/null 2>&1 || true
       if launchctl bootstrap "$(launchctl_domain)" "$PLIST_FILE"; then
         launchctl kickstart -k "$(launchctl_domain)/$LABEL" >/dev/null 2>&1 || true
-        sleep 1
-        listeners="$(listener_pids | paste -sd, -)"
+        listeners="$(wait_listener)"
         if [[ -n "$listeners" ]]; then
           echo "$listeners" | cut -d, -f1 > "$PID_FILE"
           echo "dashboard started pid=$(cat "$PID_FILE") url=http://$HOST:$PORT log=$LOG_FILE"
