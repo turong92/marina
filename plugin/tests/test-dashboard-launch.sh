@@ -106,6 +106,51 @@ JSON
   rm -rf "$TMP"
 }
 
+# macOS 는 로그인 자동 실행 항목이 새로 생기거나 실행 파일이 바뀌면 "백그라운드 항목이 추가됨" 알림을 띄운다.
+# 자동 업데이트 재시작마다 떴다(형 2026-10-06): 재시작이 로그인 plist 를 지웠다 다시 만들고, 런처에 버전 경로가 박혀 매번 달라졌다.
+assert_restart_keeps_login_item_untouched() {
+  local TMP; TMP="$(mktemp -d)"
+  # 런처를 실제로 실행한다 — 실 설치본(Codex config 의 marketplace source)을 잡지 않게 CODEX_HOME 도 격리(리뷰 I2)
+  export MARINA_HOME="$TMP/.marina" HOME="$TMP" CLAUDE_CONFIG_DIR="$TMP/.claude" CODEX_HOME="$TMP/.codex"
+  mkdir -p "$CLAUDE_CONFIG_DIR/plugins"
+  local FAKE="$TMP/fakebin"; mkdir -p "$FAKE"
+  printf '#!/usr/bin/env bash\necho Darwin\n' > "$FAKE/uname"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE/launchctl"
+  chmod +x "$FAKE/"*
+  local sha V L="$HOME/Library/LaunchAgents/marina.dashboard.plist" LA="$MARINA_HOME/dashboard-launch.sh"
+  for sha in aaaaaaaaaaaa bbbbbbbbbbbb; do
+    V="$TMP/.claude/plugins/cache/marina-dev/marina/$sha/scripts"; mkdir -p "$V"
+    cp "$HERE/../scripts/marina-dashboard.sh" "$HERE/../scripts/marina-resolve.sh" "$V/"
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$V/marina-entrypoint.sh"; chmod +x "$V/marina-entrypoint.sh"
+    printf 'print("CONTROL_%s")\n' "$sha" > "$V/marina-control.py"
+  done
+  V="$TMP/.claude/plugins/cache/marina-dev/marina"
+  PATH="$FAKE:$PATH" MARINA_DRY_RUN=1 bash "$V/aaaaaaaaaaaa/scripts/marina-dashboard.sh" start >/dev/null 2>&1
+  [[ -f "$L" && -x "$LA" ]] || { echo "FAIL[login-item]: first start did not install"; exit 1; }
+  grep -q "aaaaaaaaaaaa" "$LA" && { echo "FAIL[login-item]: launcher bakes the versioned path"; exit 1; }
+  [[ "$(stat -f %Lp "$LA" 2>/dev/null || stat -c %a "$LA")" == 755 ]] || { echo "FAIL[login-item]: launcher mode should stay 755"; exit 1; }
+  cp "$LA" "$TMP/launcher.v1"; touch -t 202001010000 "$L" "$LA"; touch -t 202101010000 "$TMP/ref"
+  # 새 버전으로 다시 start — 내용이 같으면 두 파일 다 손대지 않는다
+  PATH="$FAKE:$PATH" MARINA_DRY_RUN=1 bash "$V/bbbbbbbbbbbb/scripts/marina-dashboard.sh" start >/dev/null 2>&1
+  cmp -s "$LA" "$TMP/launcher.v1" || { echo "FAIL[login-item]: launcher content changed across versions"; exit 1; }
+  [[ "$L" -ot "$TMP/ref" ]] || { echo "FAIL[login-item]: identical login plist was rewritten"; exit 1; }
+  [[ "$LA" -ot "$TMP/ref" ]] || { echo "FAIL[login-item]: identical launcher was rewritten"; exit 1; }
+  ls "$MARINA_HOME"/dashboard-launch.sh.?????? >/dev/null 2>&1 && { echo "FAIL[login-item]: temp launcher left behind"; exit 1; }
+  # 설치 기록(manifest)이 없을 때의 fallback = 런처를 마지막으로 만든 버전(옆 파일). Claude Code 는 밀려난 직전 버전 폴더에
+  # .orphaned_at 을 써서 그쪽 mtime 이 더 늦다 — 폴더 시각으로 고르면 직전 버전이 뜬다(리뷰 I1)
+  touch "$V/aaaaaaaaaaaa/.orphaned_at"; touch "$V/aaaaaaaaaaaa"
+  local out; out="$("$LA")"
+  [[ "$out" == "CONTROL_bbbbbbbbbbbb" ]] || { echo "FAIL[login-item]: fallback should be the version that last emitted the launcher, got: $out"; exit 1; }
+  # 재시작은 로그인 plist 를 지우지 않는다(명시적 stop 만 지운다)
+  PATH="$FAKE:$PATH" MARINA_DRY_RUN=1 MARINA_CONTROL_PORT=59997 bash "$V/bbbbbbbbbbbb/scripts/marina-dashboard.sh" start >/dev/null 2>&1
+  touch -t 202001010000 "$L"
+  PATH="$FAKE:$PATH" MARINA_RESTART_HELPER=1 MARINA_CONTROL_PORT=59997 \
+    bash "$V/bbbbbbbbbbbb/scripts/marina-dashboard.sh" restart >/dev/null 2>&1
+  [[ -f "$L" ]] || { echo "FAIL[login-item]: restart removed the login plist"; exit 1; }
+  [[ "$L" -ot "$TMP/ref" ]] || { echo "FAIL[login-item]: restart rewrote the login plist"; exit 1; }
+  rm -rf "$TMP"
+}
+
 assert_bind_survives_restart() {
   local TMP; TMP="$(mktemp -d)"
   export MARINA_HOME="$TMP/.marina" HOME="$TMP" CLAUDE_CONFIG_DIR="$TMP/.claude"
@@ -161,6 +206,7 @@ run_case Linux  systemd
 run_case Darwin launchd
 assert_no_versioned_path_in_plist
 assert_dev_launcher_prefers_baked_source
+assert_restart_keeps_login_item_untouched
 assert_bind_survives_restart
 assert_launchd_restart_escapes_dashboard_job
 echo "PASS test-dashboard-launch"

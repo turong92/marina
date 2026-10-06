@@ -166,7 +166,8 @@ EOF
 install_login_plist() {
   [[ "$MARINA_HOME" == "$HOME/.marina" ]] || return 0
   mkdir -p "$(dirname "$LOGIN_PLIST_FILE")"
-  cp "$PLIST_FILE" "$LOGIN_PLIST_FILE"
+  # 내용이 같으면 손대지 않는다 — macOS 는 로그인 항목 파일이 새로 생기거나 바뀌면 "백그라운드 항목이 추가됨" 알림을 띄운다
+  cmp -s "$PLIST_FILE" "$LOGIN_PLIST_FILE" || cp "$PLIST_FILE" "$LOGIN_PLIST_FILE"
 }
 
 write_launcher() { marina_emit_launcher "$LAUNCHER" dashboard; }
@@ -289,8 +290,8 @@ start() {
   esac
 }
 
-stop() {
-  local pid
+stop() {   # $1=keep-login: 재시작 중 — 로그인 항목은 그대로 둔다(지웠다 다시 만들면 macOS 가 새 항목 알림을 띄운다)
+  local pid keep="${1:-}"
   if [[ "${MARINA_DRY_RUN:-}" == "1" ]]; then
     echo "dry-run: not stopping dashboard"
     return 0
@@ -298,7 +299,7 @@ stop() {
   if use_launchctl; then
     [[ -f "$PLIST_FILE" ]] && launchctl bootout "$(launchctl_domain)" "$PLIST_FILE" >/dev/null 2>&1 || true
     # 명시적 stop 은 다음 로그인에도 안 뜨게 — systemd 의 disable --now 와 같은 뜻.
-    if [[ "$MARINA_HOME" == "$HOME/.marina" ]]; then rm -f "$LOGIN_PLIST_FILE"; fi
+    if [[ "$MARINA_HOME" == "$HOME/.marina" && "$keep" != keep-login ]]; then rm -f "$LOGIN_PLIST_FILE"; fi
   fi
   if command -v systemctl >/dev/null 2>&1 && [[ -f "$SYSTEMD_UNIT" ]]; then
     systemctl --user disable --now marina-dashboard >/dev/null 2>&1 || true
@@ -337,7 +338,7 @@ restart() {
     echo "dashboard restart scheduled"
     return
   fi
-  stop
+  stop keep-login
   start
 }
 
