@@ -292,7 +292,7 @@ def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
 AGENT_FRESH = 300.0      # 빌드·긴 도구 호출로 몇 분 조용한 에이전트도 — 끝난 것은 끝남 알림으로 뺀다(리뷰 I2)
 
 
-def _recent_agents(tr: Path, born: float = 0.0) -> list[dict[str, Any]]:
+def _recent_agents(tr: Path, born: float = 0.0, fresh: float = AGENT_FRESH) -> list[dict[str, Any]]:
     """subagents/ 에서 최근 움직인 에이전트 = 도는 중. 띄운 줄이 기록 끝 2MB 밖이거나(긴 세션) 팀·중첩 에이전트라
     agentId 형식이 아니어도 잡힌다(실사용: ovation 19MB 기록, 팀장 에이전트가 띄운 손자 에이전트). 설명은 .meta.json."""
     d = tr.parent / tr.stem / "subagents"
@@ -306,7 +306,7 @@ def _recent_agents(tr: Path, born: float = 0.0) -> list[dict[str, Any]]:
             m = f.stat().st_mtime
         except OSError:
             continue
-        if now - m > AGENT_FRESH or m < born:
+        if now - m > fresh or m < born:
             continue
         try:
             meta = json.loads(f.with_suffix(".meta.json").read_text())
@@ -1391,14 +1391,14 @@ def _short_model(model: str) -> str:
     return m.group(1) + (f" {ver}" if ver else "")
 
 
-def _agents_running(rec: dict[str, Any]) -> list[dict[str, Any]]:
+def _agents_running(rec: dict[str, Any], fresh: float = AGENT_FRESH) -> list[dict[str, Any]]:
     """지금 도는 서브에이전트 + 그 기록 파일. 끝남 알림이 왔거나 기록이 end_turn 으로 끝난 것은 뺀다.
     채팅방 세션은 Agent 도구가 없다 — 보지 않는다(혼잣말이 방 사람들에게 나가지 않게, 리뷰 M3)."""
     name = str(rec.get("tmux") or "")
     if rec.get("kind") in ms.CHAT_KINDS or not name or not ms.tmux_alive(name):
         return []
     tr = _session_transcript(rec)
-    recent = _recent_agents(tr, _session_born(name)) if tr else []
+    recent = _recent_agents(tr, _session_born(name), fresh) if tr else []
     if not tr or not recent:
         return []
     done = _scan_tasks(tr)[1]
@@ -1570,8 +1570,96 @@ def typeable(text: str) -> bool:
     return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK)) or text == ms.RESUME_TEXT
 
 
-def restart_blockers(rec: dict[str, Any]) -> list[str]:
-    """안전 재시작을 막는 이유(훅 기록 기준 — 화면 짐작 아님). 빈 목록이면 지금 재시작해도 된다."""
+RESTART_AGENT_FRESH = 1800.0     # 재시작 판정: 안 끝난 에이전트는 30분 조용해야 죽은 것으로 본다(긴 빌드·녹화로 5분 넘게 조용한 에이전트가 있었다, 2026-10-07 사고)
+WAKEUP_GRACE = 120.0             # 예약 시각이 이만큼 지나도 안 울렸으면 죽은 예약
+RESTART_QUIET = 60.0             # 막는 이유 없는 상태가 이만큼 이어져야 재시작한다
+
+
+def _tail_text(path: Path, size: int = 2_000_000) -> str:
+    """파일 끝 size 바이트만(seek) — 수십 MB 기록을 통째로 읽지 않는다."""
+    with open(path, "rb") as fh:
+        end = fh.seek(0, 2)
+        fh.seek(max(0, end - size))
+        return fh.read().decode("utf-8", "replace")
+
+
+def _row_time(row: dict[str, Any]) -> float:
+    try:
+        return datetime.datetime.fromisoformat(str(row.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def _pending_wakeup(tr: Path | None, born: float = 0.0) -> float:
+    """기록 끝에서 아직 안 울린 ScheduleWakeup 의 예정 시각(epoch). 없으면 0.
+    마지막 ScheduleWakeup 이 {stop:true} 면 없음 · 그 뒤 scheduled_task_fire 가 있으면 없음 ·
+    세션이 뜨기(born) 전에 건 예약은 재시작으로 죽었다. 읽기 실패는 예외로 올린다."""
+    if not tr:
+        return 0.0
+    due = 0.0
+    for raw in _tail_text(tr).splitlines():
+        if '"ScheduleWakeup"' not in raw and '"scheduled_task_fire"' not in raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        if row.get("type") == "system" and row.get("subtype") == "scheduled_task_fire":
+            due = 0.0
+            continue
+        content = (row.get("message") or {}).get("content")
+        for b in content if isinstance(content, list) else []:
+            if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "ScheduleWakeup"):
+                continue
+            inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+            if inp.get("stop"):
+                due = 0.0
+                continue
+            at = _row_time(row)
+            if not at:
+                due = time.time() + WAKEUP_GRACE      # 시각을 못 읽으면 막는 쪽
+            elif at < born:
+                due = 0.0
+            else:
+                try:
+                    due = at + float(inp.get("delaySeconds") or 0)
+                except (ValueError, TypeError):
+                    due = time.time() + WAKEUP_GRACE
+    return due
+
+
+TURN_STALE = 1800.0              # 마지막 줄이 이보다 오래됐으면(Esc·오류로 끝난 턴) 진행 중으로 안 본다
+_TURN_END = ("stop_hook_summary", "turn_duration")
+
+
+def _turn_in_progress(tr: Path | None) -> bool:
+    """작업 기록으로 본 턴 진행 중 — 마지막 의미 있는 줄이 턴 끝 표시(system stop_hook_summary·turn_duration)나
+    Esc 표시가 아니고 user(tool_result 포함)·assistant 면 진행 중. 그 줄이 30분 넘게 오래됐으면 아님.
+    attachment·queue-operation·bridge_status 등은 건너뛴다. 읽기 실패는 예외로 올린다."""
+    if not tr:
+        return False
+    for raw in reversed(_tail_text(tr, 300_000).splitlines()):
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue                                  # 끝에서 자른 첫 줄 등
+        if not isinstance(row, dict):
+            continue
+        kind = row.get("type")
+        if kind == "system" and row.get("subtype") in _TURN_END:
+            return False
+        if kind not in ("user", "assistant"):
+            continue
+        if kind == "user" and "[Request interrupted by user" in raw:
+            return False
+        at = _row_time(row) or tr.stat().st_mtime
+        return time.time() - at < TURN_STALE
+    return False
+
+
+def _restart_blockers(rec: dict[str, Any]) -> list[str]:
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))
     def num(name: str) -> float:
         try:
@@ -1579,23 +1667,35 @@ def restart_blockers(rec: dict[str, Any]) -> list[str]:
         except (OSError, ValueError):
             return 0.0
     out = []
+    name = str(rec.get("tmux") or "")
+    alive = bool(name) and ms.tmux_alive(name)
+    tr = _session_transcript(rec)
     # 턴 끝 기록은 Esc·API 오류로 끝난 턴엔 안 남는다 — 10분 지난 턴은 화면만 본다(리뷰 I1)
     turn = num("turn-at")
-    if (turn > num("stopped-at") and time.time() - turn < 600) or _pane_busy(str(rec.get("tmux") or ""))[1]:
+    if (turn > num("stopped-at") and time.time() - turn < 600) or _pane_busy(name)[1]:
         out.append("작업 중")
-    t = live_tasks(rec) if ms.tmux_alive(str(rec.get("tmux") or "")) else []
+    if _turn_in_progress(tr):                        # 화면·turn-at 이 놓친 긴 턴(2026-10-07 사고)
+        out.append("턴 진행 중")
+    t = live_tasks(rec) if alive else []
     if t:
         out.append(f"백그라운드 {len(t)}")
-    name = str(rec.get("tmux") or "")
-    if name and ms.tmux_alive(name):
+    if alive:
         tail = (ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()[-8:]
         if any(l.strip() == "⏺ main" for l in tail):    # 아래 에이전트 목록 = SendMessage 로 맡긴 팀 에이전트(재시작하면 같이 죽는다, 실사용)
             out.append("팀 에이전트 일하는 중")
+        if _pane_permission(name):                   # 서브에이전트 권한 창은 perm-*.json 이 안 생긴다
+            out.append("권한 창 기다림")
+    # 화면 말고 작업 기록으로도 — 백그라운드·이름 붙은 팀 에이전트, 안 끝났으면 30분까지 조용해도 일하는 중
+    agents = _agents_running(rec, RESTART_AGENT_FRESH)
+    if agents:
+        out.append(f"에이전트 {len(agents)}개 일하는 중")
+    due = _pending_wakeup(tr, _session_born(name) if alive else 0.0)
+    if due and due + WAKEUP_GRACE > time.time():
+        out.append("예약 기다림")
     if (sd / "question.json").exists():
         out.append("질문 답 기다림")
     if list(sd.glob("perm-*.json")):
         out.append("권한 버튼 기다림")
-    tr = _session_transcript(rec)
     try:
         if tr and time.time() - tr.stat().st_mtime < 30:
             out.append("방금 메시지·작업 기록이 움직임")
@@ -1604,11 +1704,110 @@ def restart_blockers(rec: dict[str, Any]) -> list[str]:
     return out
 
 
-def safe_restart(refs: list[str], wait: float = 6 * 3600.0, poll: float = 15.0,
-                 log: Any = None) -> tuple[list[str], list[str]]:
-    """막는 이유가 없을 때만 하나씩 재시작한다. 풀릴 때까지 기다리다 시간이 지나면 남은 것을 돌려준다."""
+def restart_blockers(rec: dict[str, Any]) -> list[str]:
+    """안전 재시작을 막는 이유(훅·작업 기록 기준). 빈 목록이면 지금 재시작해도 된다.
+    판정 중 예외(기록 못 읽음 등)는 '막는다' — 모르면 죽이지 않는다."""
+    try:
+        return _restart_blockers(rec)
+    except Exception as exc:
+        return [f"판정 실패({type(exc).__name__}: {str(exc)[:80]})"]
+
+
+def _restart_lock_path() -> Path:
+    return ms.marina_home() / "restart-wait.lock"
+
+
+def _write_restart_status(fh: Any, remaining: list[str], started: float) -> None:
+    fh.seek(0)
+    fh.truncate()
+    fh.write(json.dumps({"pid": os.getpid(), "startedAt": started, "remaining": remaining}, ensure_ascii=False))
+    fh.flush()
+
+
+def _acquire_restart_lock(remaining: list[str]) -> Any:
+    """재시작 대기는 한 번에 하나 — flock. 이미 있으면 SessionError(pid). 잠금 파일에 pid·시작·남은 세션을 적는다."""
+    import fcntl
+    path = _restart_lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fh = open(path, "a+")
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        st = restart_status(_locked=True)
+        raise ms.SessionError(f"이미 재시작 대기가 돌고 있다(pid {st['pid'] if st else '?'})")
+    _write_restart_status(fh, remaining, time.time())
+    return fh
+
+
+def _release_restart_lock(fh: Any) -> None:
+    import fcntl
+    try:
+        fh.seek(0)
+        fh.truncate()
+        fcntl.flock(fh, fcntl.LOCK_UN)
+    finally:
+        fh.close()
+
+
+def restart_status(_locked: bool = False) -> dict[str, Any] | None:
+    """돌고 있는 재시작 대기의 {pid, startedAt, remaining}. 없으면 None(잠금이 안 잡혀 있으면 남은 파일은 낡은 것)."""
+    import fcntl
+    try:
+        fh = open(_restart_lock_path(), "a+")
+    except OSError:
+        return None
+    try:
+        if not _locked:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                pass                                   # 누가 쥐고 있다 = 돌고 있다
+            else:
+                fcntl.flock(fh, fcntl.LOCK_UN)
+                return None
+        fh.seek(0)
+        try:
+            st = json.loads(fh.read() or "null")
+        except ValueError:
+            return None
+        return st if isinstance(st, dict) and st.get("pid") else None
+    finally:
+        fh.close()
+
+
+def restart_cancel() -> int | None:
+    """돌고 있는 재시작 대기 프로세스를 끝낸다. 끝낸 pid, 없으면 None."""
+    import signal
+    st = restart_status()
+    if not st:
+        return None
+    try:
+        os.kill(int(st["pid"]), signal.SIGTERM)
+    except (OSError, ValueError):
+        return None
+    return int(st["pid"])
+
+
+def safe_restart(refs: list[str], wait: float = 30 * 60.0, poll: float = 15.0,
+                 log: Any = None, quiet: float = RESTART_QUIET,
+                 reasons: dict[str, str] | None = None) -> tuple[list[str], list[str]]:
+    """막는 이유가 없는 상태가 quiet 초 연속으로 이어질 때만(폴링마다 다시 확인, 중간에 막히면 처음부터) 하나씩 재시작한다.
+    tmux_stop 직전에도 한 번 더 확인(살아 있는 세션만 — 꺼진 세션은 그냥 시작). 풀릴 때까지 기다리다 시간이 지나면 남은 것을 돌려준다.
+    reasons 를 주면 못 한 세션의 마지막 막은 이유를 채운다. 재시작 대기는 한 번에 하나(잠금)."""
+    lock = _acquire_restart_lock(list(dict.fromkeys(refs)))
+    try:
+        return _safe_restart(refs, wait, poll, log, quiet, reasons if reasons is not None else {}, lock)
+    finally:
+        _release_restart_lock(lock)
+
+
+def _safe_restart(refs: list[str], wait: float, poll: float, log: Any, quiet: float,
+                  reasons: dict[str, str], lock: Any) -> tuple[list[str], list[str]]:
     pending, done, failures = list(dict.fromkeys(refs)), [], []
-    end = time.time() + wait
+    started_at = time.time()
+    end = started_at + wait
+    clear_since: dict[str, float] = {}
     while pending:
         for ref in list(pending):
             try:
@@ -1616,22 +1815,33 @@ def safe_restart(refs: list[str], wait: float = 6 * 3600.0, poll: float = 15.0,
             except ms.SessionError:
                 pending.remove(ref)          # 기다리는 사이 지워진 세션 — 나머지는 계속(리뷰 S3)
                 continue
-            why = restart_blockers(rec) if ms.tmux_alive(str(rec.get("tmux") or "")) else []
-            if why:
-                continue
-            ms.tmux_stop(str(rec.get("tmux") or ""))
-            started, failed = ms.cmd_start(ref)
+            if ms.tmux_alive(str(rec.get("tmux") or "")):
+                why = restart_blockers(rec)
+                if not why:
+                    since = clear_since.setdefault(ref, time.time())
+                    if time.time() - since < quiet:
+                        reasons[ref] = "조용한 시간 재는 중"
+                        continue
+                    why = restart_blockers(rec)      # 죽이기 직전 한 번 더
+                if why:
+                    clear_since.pop(ref, None)
+                    reasons[ref] = "·".join(why)
+                    continue
+                ms.tmux_stop(str(rec.get("tmux") or ""))
+            started, failed = ms.cmd_start(ref)  # 꺼진 세션은 막는 이유 없이 시작만
             pending.remove(ref)
+            reasons.pop(ref, None)
             if started:
                 done.append(ref)
             else:
                 failures.append(ref)         # 꺼진 채 남았다 — 성공으로 세지 않는다(리뷰 I4)
             if log:
                 log(f"✓ 재시작: {ref}" if started else f"✗ {failed}")
+        _write_restart_status(lock, list(pending), started_at)
         if not pending or time.time() >= end:
             break
         if log:
-            log("기다리는 중: " + ", ".join(f"{r}({'·'.join(restart_blockers(ms.find_session(r)))})" for r in pending))
+            log("기다리는 중: " + ", ".join(f"{r}({reasons.get(r, '')})" for r in pending))
         time.sleep(poll)
     return done, pending + failures
 

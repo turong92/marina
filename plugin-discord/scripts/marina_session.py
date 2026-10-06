@@ -3048,7 +3048,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("restart")
     p.add_argument("refs", nargs="*")
     p.add_argument("--all", action="store_true")
-    p.add_argument("--wait", type=float, default=6 * 3600.0)
+    p.add_argument("--wait", type=float, default=30 * 60.0)
+    p.add_argument("--status", action="store_true", help="돌고 있는 재시작 대기 현황")
+    p.add_argument("--cancel", action="store_true", help="돌고 있는 재시작 대기를 끝낸다")
     sub.add_parser("hook-stop")
     sub.add_parser("hook-typing")
     sub.add_parser("hook-reply-to")
@@ -3188,6 +3190,16 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "restart":
             # 안전 재시작: 쉬고(턴 끝)·뒤에서 도는 일·질문·권한 대기가 없을 때만. 아니면 풀릴 때까지 기다린다
             import marina_discord_bot as mb
+            if a.status or a.cancel:
+                st = mb.restart_status()
+                if not st:
+                    print("돌고 있는 재시작 대기 없음")
+                    return 0
+                when = time.strftime("%m-%d %H:%M:%S", time.localtime(float(st.get("startedAt") or 0)))
+                print(f"재시작 대기 pid {st['pid']} · 시작 {when} · 남은 세션: {', '.join(st.get('remaining') or []) or '(없음)'}")
+                if a.cancel:
+                    print(f"✓ 취소: pid {mb.restart_cancel()}")
+                return 0
             refs = [f"{x['project']}/{x['task']}" for x in load_sessions()] if a.all else \
                 [f"{find_session(r)['project']}/{find_session(r)['task']}" for r in a.refs]
             me = _session_from_env()                  # 세션 안에서 부르면 자기 자신은 빼고(자기를 기다리며 멈춘다, 리뷰 I8)
@@ -3198,9 +3210,10 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"⚠ 자기 세션({mine})은 빼고 한다 — 다른 곳에서 restart 해 줘", file=sys.stderr)
             if not refs:
                 raise SessionError("restart <작업…> 또는 restart --all")
-            done, waiting = mb.safe_restart(refs, wait=a.wait, log=print)
+            why: dict[str, str] = {}
+            done, waiting = mb.safe_restart(refs, wait=a.wait, log=print, reasons=why)
             for x in waiting:
-                print(f"✗ 못 함(계속 바쁨): {x}", file=sys.stderr)
+                print(f"✗ 못 함(계속 바쁨): {x}" + (f" — {why[x]}" if why.get(x) else ""), file=sys.stderr)
             return 1 if waiting else 0
         elif a.cmd == "stop":
             s = find_session(a.ref)
