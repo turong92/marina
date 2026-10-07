@@ -114,6 +114,16 @@ class SessionError(Exception):
 
 # ── 경로·이름 ────────────────────────────────────────────────────────────────
 
+_CTRL = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]")
+_SECRET = re.compile(r"(?i)(bearer\s+|authorization:\s*\S+\s+|(?:token|secret|password|passwd|api[_-]?key|key)\s*[=:]\s*)\S+"
+                     r"|AKIA[0-9A-Z]{12,}|-----BEGIN [A-Z ]+-----[\s\S]*?(?:-----END [A-Z ]+-----|$)|(?:sk|ghp|xox[bp])-?[A-Za-z0-9_-]{16,}")
+
+
+def clean_output(text: str) -> str:
+    """Discord·세션으로 내보내는 셸 출력: 제어문자 제거 + 흔한 비밀 모양 가리기. [보기]·터미널 화면 넘기기가 같이 쓴다(공용)."""
+    return _SECRET.sub(lambda m: (m.group(1) or "") + "•••", _CTRL.sub("", text))
+
+
 def marina_home() -> Path:
     return Path(os.environ.get("MARINA_HOME") or "~/.marina").expanduser()
 
@@ -2630,7 +2640,7 @@ def _ask_terminal(rec: dict[str, Any], args: dict[str, Any]) -> str:
     except Exception as exc:        # 버튼을 못 보내도 세션이 막히지 않게 — 같은 안내로(떠 있던 터미널은 치운다)
         tb.revoke(token)
         raise SessionError(f"터미널 버튼을 못 보냈어({str(exc)[:200]}) — {ask_human}")
-    return "버튼 보냈어 — 형이 실행하고 알려 주면 이어서"
+    return "버튼 보냈어 — 명령이 끝나면 알림이 와. 결과는 형이 넘겨 줄 때까지 기다려."
 
 
 def _dev_preview_dir(rec: dict[str, Any]) -> Path:

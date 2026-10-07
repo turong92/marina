@@ -11,6 +11,9 @@
   h1 { font-size: 17px; margin: 0 0 4px; }
   #why { margin: 0 0 4px; }
   #cmd { margin: 0 0 12px; color: var(--mut); font: 13px ui-monospace, Menlo, monospace; overflow-wrap: anywhere; }
+  #done { margin: 0 0 12px; padding: 10px 12px; border-radius: 8px; background: #e6f4ea; color: #0b5d1e; font-weight: 600; }
+  @media (prefers-color-scheme: dark) { #done { background: #12301a; color: #8fe3a4; } }
+  #done[hidden] { display: none; }
   #status { font-size: 13px; color: var(--mut); margin: 0 0 8px; }
   #screen { margin: 0 0 12px; padding: 10px; background: var(--scr); color: var(--scrfg); border-radius: 8px; overflow-x: auto;
             font: 13px/1.35 ui-monospace, Menlo, monospace; height: 50vh; overflow-y: auto; white-space: pre; }
@@ -22,6 +25,8 @@
 </head>
 <body>
 <h1>터미널</h1>
+<p id="done" role="status" hidden></p>
+<p id="shareRow" hidden><button id="share" type="button" hidden>화면 끝 40줄을 세션에 넘기기</button> <span id="shareMsg"></span></p>
 <p id="why"></p>
 <p id="cmd"></p>
 <p id="status">연결 중…</p>

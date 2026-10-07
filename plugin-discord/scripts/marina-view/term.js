@@ -25,6 +25,9 @@
         last = j.screen;
         if (stick) screenEl.scrollTop = screenEl.scrollHeight;
       }
+      $("done").hidden = !j.done;                                    // 끝난 뒤에도 화면은 계속 본다(폴링 유지)
+      if (j.done) $("done").textContent = "✅ 명령이 끝났어 — Discord 로 돌아가도 돼";
+      $("shareRow").hidden = $("share").hidden = !j.done;            // 화면은 사람이 넘길 때만 세션에 간다
       statusEl.textContent = j.alive ? "연결됨" : "터미널이 끝났어(세션 없음)";
       if (j.alive) schedule();
     }).catch(function (e) {
@@ -45,6 +48,16 @@
     if (!v) return;
     $("t").value = "";
     send({ text: v });
+  });
+  $("share").addEventListener("click", function () {
+    var msg = $("shareMsg");
+    fetch("share", { method: "POST", credentials: "same-origin" }).then(function (r) {
+      if (!r.ok) throw new Error(String(r.status));
+      return r.json();
+    }).then(function (j) {
+      msg.textContent = j.ok ? "넘겼어" : (j.reason === "asleep" ? "세션이 잠들어 있어 — Discord 에 글을 써서 깨운 뒤 다시 눌러" : "넘기지 못했어");
+      if (j.ok) $("share").textContent = "다시 넘기기";
+    }).catch(function () { msg.textContent = "넘기지 못했어"; });
   });
   Array.prototype.forEach.call(document.querySelectorAll("button[data-key]"), function (b) {
     b.addEventListener("click", function () { send({ key: b.getAttribute("data-key") }); });

@@ -491,7 +491,8 @@ class _Handler(BaseHTTPRequestHandler):
             else:
                 info = tb.meta(token, cookie) or {}
                 self._json(200, {"screen": tb.screen(token, cookie) or "", "alive": bool(info.get("alive")),
-                                 "command": info.get("command", ""), "why": info.get("why", "")})
+                                 "command": info.get("command", ""), "why": info.get("why", ""),
+                                 "done": bool(info.get("done")), "doneAt": info.get("doneAt")})
         else:
             self._text(404)
 
@@ -514,17 +515,17 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = urllib.parse.urlparse(self.path).path
-        m = re.fullmatch(r"/t/([A-Za-z0-9_-]{20,64})/keys", path)
+        m = re.fullmatch(r"/t/([A-Za-z0-9_-]{20,64})/(keys|share)", path)
         if not m:
             self._send(405, "text/plain; charset=utf-8", b"method not allowed")      # 기존 /v/ 는 GET 만
             return
-        token = m.group(1)
+        token, action = m.group(1), m.group(2)
         origin = self.headers.get("origin")      # SameSite=Lax 라 CSRF 방어선은 이 검사다 — fetch POST 는 늘 Origin 을 싣는다
         if not origin or urllib.parse.urlparse(origin).netloc != (self.headers.get("host") or ""):
             self._send(403, "text/plain; charset=utf-8", b"forbidden")
             return
         try:
-            length = int(self.headers.get("content-length") or "")
+            length = int(self.headers.get("content-length") or ("0" if action == "share" else ""))      # share 는 본문이 없다
         except ValueError:
             self._send(411, "text/plain; charset=utf-8", b"length required")
             return
@@ -539,6 +540,9 @@ class _Handler(BaseHTTPRequestHandler):
         if not auth:
             self._send(403, "text/plain; charset=utf-8", b"forbidden")
             return
+        if action == "share":
+            self._term_share(token)
+            return
         try:
             body = json.loads(self.rfile.read(length).decode("utf-8"))
             text, key = body.get("text"), body.get("key")
@@ -551,10 +555,25 @@ class _Handler(BaseHTTPRequestHandler):
             self._send(400, "text/plain; charset=utf-8", b"bad request")
 
 
+    def _term_share(self, token: str) -> None:
+        """[화면 끝 40줄을 세션에 넘기기] — 끝난 터미널만(409), 쿠키 주인·Origin 은 do_POST 가 이미 확인했다. 실제 일은 서버에 걸린 on_share(봇)가 한다."""
+        data = tb._load_live(token) or {}
+        on_share = getattr(self.server, "on_share", None)
+        if not data.get("doneAt") or on_share is None:
+            self._send(409, "text/plain; charset=utf-8", b"not finished")
+            return
+        try:
+            res = on_share(token)
+        except Exception:
+            res = {"ok": False, "reason": "failed"}
+        self._json(200, res if isinstance(res, dict) else {"ok": False, "reason": "failed"})
+
+
 class ViewServer:
     """127.0.0.1:<port> 보기 서버(스레드). start() 는 예외를 안 던지고 성공 여부를 돌려준다 — 실패 이유는 .error."""
 
-    def __init__(self, port: int = DEFAULT_PORT, public_base: str = "") -> None:
+    def __init__(self, port: int = DEFAULT_PORT, public_base: str = "", on_share: "Any" = None) -> None:
+        self.on_share = on_share            # 터미널 [넘기기] 처리기(token → {"ok":…}) — 봇이 건다
         self.want = int(port)
         self.public_base = str(public_base or "").strip().rstrip("/")     # https 면 터미널 쿠키에 Secure
         self.port = 0
@@ -572,6 +591,7 @@ class ViewServer:
             return False
         srv.daemon_threads = True
         srv.public_base = self.public_base          # type: ignore[attr-defined]  # _Handler 가 쿠키 Secure 판단에 쓴다
+        srv.on_share = self.on_share                # type: ignore[attr-defined]
         self._srv, self.port, self.error = srv, srv.server_address[1], ""
         self._thread = threading.Thread(target=srv.serve_forever, name="marina-view", daemon=True)
         self._thread.start()

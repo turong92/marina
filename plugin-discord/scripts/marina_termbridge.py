@@ -7,6 +7,15 @@
   - 기록 <MARINA_HOME>/discord-term/<token>.json (폴더 0700, 파일 0600) = {root, command, why, channel, tmux, createdAt, claimedBy, claimedAt, lastActiveAt}.
     claimedBy 는 처음 연 브라우저 cookie 의 sha256 — 원문은 남기지 않는다.
   - 링크는 처음 연 브라우저에 묶이고(claim), 10분 안에 아무도 안 열면 죽는다. 마지막 활동 30분 뒤엔 세션도 정리한다(sweep).
+  - 끝(2026-10-07): watch() 가 5초마다 열린 터미널을 본다. 판정은 tmux 가 주는 값(전경 프로세스)만 — 화면 글자 짐작·셸 설정 개입 없음.
+    끝 = (Enter 가 keys 로 들어왔거나 실행 중을 봤고) + 지금 셸이 유휴 + 그 상태가 2초 이상 유지 + 화면 마지막 줄이 묻는 프롬프트가 아님.
+    '실행 중을 봤다'는 Enter 가 없을 땐 만든 지 10초 뒤의 연속 두 표본이어야 한다(셸 rc 가 뜨며 잠깐 도는 외부 명령은 실행이 아니다).
+    tmux 세션이 사라졌어도(exit·C-d) Enter·sawBusy 가 있었으면 끝. 터미널당 한 번(doneAt), 알린 뒤 notifiedAt.
+    끝난 터미널은 max(doneAt, 마지막 키 입력) + 30분에 정리한다. 기록엔 enterAt·sawBusy·busyN·idleSince 도 남아 데몬이 다시 떠도 이어진다.
+  - 알려진 한계(오판 가능): 셸 함수·내장 안에서 오래 도는 일(read -t 없이 기다리는 함수, wait 등)은 전경이 셸 자신이라 유휴로 보인다 — Enter 뒤 2초면 끝으로 본다.
+    묻는 줄 판정은 '막는' 방향으로만 쓴다(막지 못하는 질문 모양은 끝으로 샌다). 사람이 명령을 지우고 빈 줄에 Enter 를 눌러도 끝으로 본다.
+    Enter 기록 없이 5초 표본 사이에 끝나는 짧은 직접 실행은 놓친다(오탐보다 누락을 택했다).
+  - 화면 내용은 끝 알림에 안 실린다. 사람이 페이지의 버튼을 눌렀을 때만 share() 가 비밀을 가린 끝 40줄을 파일로 쓴다(호출 쪽이 세션에 알린다).
   - discord 모듈이라 runtime(plugin/scripts) 모듈을 import 하지 않는다(test-discord-boundary). tmux 호출은 marina_session._tmux(테스트 소켓을 따른다).
 """
 from __future__ import annotations
@@ -17,6 +26,7 @@ import json
 import os
 import re
 import secrets
+import subprocess
 import tempfile
 import threading
 import time
@@ -31,6 +41,17 @@ MAX_COMMAND_BYTES = 1000     # UTF-8 바이트 기준. macOS 정규 입력 모�
 MAX_TEXT = 2000
 _SHELLS = frozenset(("sh", "bash", "zsh", "dash", "fish", "ksh", "tcsh", "csh"))
 SCREEN_LINES = 200
+DONE_HOLD = 2.0              # 셸이 이만큼 유휴로 유지돼야 끝(Enter 직후 fork 전 찰나·표본 흔들림을 거른다)
+TAIL_LINES = 40              # 세션에 넘기는 화면 끝 줄 수
+SETTLE = 10.0                # 만든 지 이만큼 전의 실행 중 표본은 안 센다(셸 rc 가 뜨는 중)
+DEAD_GRACE = 600.0           # 세션이 닫혔어도 끝을 아직 못 알렸으면 이만큼은 기록을 둔다
+_ASKS = re.compile(
+    r"\[nyae\]\?\s*$"                                             # zsh correct
+    r"|\b(?:remove|overwrite|replace|delete)\b.*\?\s*$"            # rm·mv·cp 확인
+    r"|^(?:\w*quote|heredoc)?>\s*$"                                # dquote>·quote>·heredoc>·> 이어쓰기
+    r"|(?:password|passphrase)[^:\n]*:\s*$"
+    r"|\[y/n\]\s*\??\s*$"
+    r"|\(yes/no(?:/\[fingerprint\])?\)\??\s*$", re.I)
 ALLOWED_KEYS = frozenset(("Enter", "C-c", "C-d", "Tab", "Escape", "Up", "Down", "Left", "Right", "BSpace"))
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{20,64}")
 _lock = threading.Lock()
@@ -75,8 +96,21 @@ def _drop(token: str, data: Optional[dict]) -> None:
     """tmux 세션을 죽이고 기록을 지운다."""
     if data and data.get("tmux"):
         _tmux("kill-session", "-t", "=" + str(data["tmux"]))
+    _drop_last(data)
     try:
         (_dir() / f"{token}.json").unlink()
+    except OSError:
+        pass
+
+
+def _drop_last(data: Optional[dict]) -> None:
+    """세션에 넘긴 화면 끝(term-last*.txt) 정리 — 내가 쓴 그 파일일 때만(다른 터미널이 덮어썼으면 그쪽 것이니 둔다)."""
+    path = str((data or {}).get("lastFile") or "")
+    if not path or not os.path.basename(path).startswith("term-last"):
+        return
+    try:
+        if os.stat(path).st_mtime_ns == (data or {}).get("lastFileNs"):
+            os.unlink(path)
     except OSError:
         pass
 
@@ -90,11 +124,35 @@ def _alive(name: str) -> bool:
     return bool(name) and _tmux("has-session", "-t", "=" + name).returncode == 0
 
 
+def _fg_other(pid: str) -> bool:
+    """터미널의 전경 프로세스 그룹이 이 셸 것이 아닌가 — `cloud …` 같은 셸 스크립트 래퍼는 이름이 bash/sh 로 보여도
+    자기 그룹을 전경으로 가져가므로 pane_current_command 만으론 못 잡는다(실측). 알 수 없으면 아니다."""
+    try:
+        out = subprocess.run(["ps", "-o", "pgid=,tpgid=", "-p", pid], capture_output=True, text=True, timeout=5).stdout.split()
+        pgid, tpgid = int(out[0]), int(out[1])
+    except (OSError, subprocess.SubprocessError, ValueError, IndexError):
+        return False
+    return tpgid > 0 and tpgid != pgid
+
+
 def _busy(name: str) -> bool:
-    """셸이 아닌 무언가(로그인·빌드 …)가 돌고 있나. 알 수 없으면 아니다."""
-    r = _tmux("display-message", "-p", "-t", _pane(name), "#{pane_current_command}")
-    cmd = (r.stdout or "").strip().lstrip("-")
-    return r.returncode == 0 and bool(cmd) and os.path.basename(cmd) not in _SHELLS
+    """셸 밖의 무언가(로그인·빌드 …)가 전경에서 돌고 있나. 알 수 없으면 아니다."""
+    r = _tmux("display-message", "-p", "-t", _pane(name), "#{pane_current_command}\t#{pane_pid}")
+    cmd, _, pid = (r.stdout or "").strip().partition("\t")
+    cmd = cmd.lstrip("-")
+    if r.returncode != 0 or not cmd:
+        return False
+    return os.path.basename(cmd) not in _SHELLS or _fg_other(pid.strip())
+
+
+def _asks_line(line: str) -> bool:
+    """셸·명령이 사람에게 답을 묻는 줄인가 — 끝 판정을 **막는** 쪽으로만 쓴다."""
+    return bool(_ASKS.search(line.strip()))
+
+
+def _asks(name: str) -> bool:
+    out = (_tmux("capture-pane", "-p", "-t", _pane(name)).stdout or "").rstrip().splitlines()
+    return bool(out) and _asks_line(out[-1])
 
 
 def _type(name: str, text: str) -> bool:
@@ -235,7 +293,8 @@ def meta(token: str, cookie: Any) -> Optional[dict]:
     data = _load_live(token)
     if data is None or not _owner(data, cookie):
         return None
-    return {"command": data.get("command", ""), "why": data.get("why", ""), "alive": _alive(data["tmux"])}
+    return {"command": data.get("command", ""), "why": data.get("why", ""), "alive": _alive(data["tmux"]),
+            "done": bool(data.get("doneAt")), "doneAt": data.get("doneAt")}
 
 
 def screen(token: str, cookie: str) -> Optional[str]:
@@ -273,8 +332,31 @@ def send(token: str, cookie: str, text: Optional[str] = None, key: Optional[str]
             cur = _load(token)
             if cur is not None:
                 cur["lastActiveAt"] = time.time()
+                if key == "Enter":
+                    cur["enterAt"] = cur["lastActiveAt"]      # 끝 판정의 보조 신호 — 사람이 명령을 실행했다
                 _write(_dir(), token, cur)
     return ok
+
+
+def _sweep_files(now: float) -> None:
+    """세션 상태 폴더의 오래된 term-last-*.txt·.tmp-term-last-*(30분 넘은 것) — 터미널 기록이 먼저 사라졌어도 남지 않게."""
+    import marina_session as ms
+    try:
+        dirs = {str(x.get("stateDir")) for x in ms.load_sessions() if x.get("stateDir")}
+    except Exception:
+        return
+    for sd in dirs:
+        base = Path(sd)
+        for pat in ("term-last-*.txt", ".tmp-term-last-*"):
+            try:
+                for f in base.glob(pat):
+                    try:
+                        if now - f.stat().st_mtime > IDLE_TTL:
+                            f.unlink()
+                    except OSError:
+                        pass
+            except OSError:
+                pass
 
 
 def sweep(now: Optional[float] = None) -> int:
@@ -282,6 +364,7 @@ def sweep(now: Optional[float] = None) -> int:
     tmux 세션이 이미 없으면 기록만 지운다. 지운 개수."""
     now = time.time() if now is None else now
     d, n = _dir(), 0
+    _sweep_files(now)
     if not d.is_dir():
         return 0
     with _lock:
@@ -290,14 +373,120 @@ def sweep(now: Optional[float] = None) -> int:
             data = _load(token)
             if data is None:
                 continue
-            if not data.get("claimedBy"):
+            too_old = now - float(data.get("createdAt") or 0) > MAX_AGE
+            if not _alive(data["tmux"]):
+                owed = (data.get("sawBusy") or data.get("enterAt")) and not data.get("notifiedAt")
+                if owed and now - float(data.get("lastActiveAt") or data.get("createdAt") or 0) < DEAD_GRACE:
+                    continue                  # 닫혔는데 끝을 아직 못 알렸다 — watch 가 알릴 틈을 준다
+                _drop(token, data)
+                n += 1
+                continue
+            if data.get("doneAt"):
+                # 끝난 터미널은 max(끝난 때, 마지막 키 입력) + 30분 — 끝난 뒤에도 쓰는 터미널·또 돌리는 명령은 안 죽인다
+                last_use = max(float(data["doneAt"]), float(data.get("lastActiveAt") or 0))
+                stale = too_old or (now - last_use > IDLE_TTL and not _busy(data["tmux"]))
+            elif not data.get("claimedBy"):
                 stale = now - float(data.get("createdAt") or 0) > UNCLAIMED_TTL
             else:
                 last = float(data.get("lastActiveAt") or data.get("claimedAt") or data.get("createdAt") or 0)
-                too_old = now - float(data.get("createdAt") or 0) > MAX_AGE
                 # 무활동 30분이어도 안에서 무언가(로그인·빌드 …)가 돌고 있으면 건너뛴다 — 절대 상한은 예외 없이
                 stale = too_old or (now - last > IDLE_TTL and not _busy(data["tmux"]))
-            if stale or not _alive(data["tmux"]):
+            if stale:
                 _drop(token, data)
                 n += 1
     return n
+
+
+def _judge(data: dict, now: float) -> bool:
+    """끝 판정 한 표본 — data 를 고치고 바뀌었으면 True. 끝이면 doneAt 을 단다."""
+    name, changed = data["tmux"], False
+    if _busy(name):                       # 실행 중 — 유휴 타이머는 처음부터
+        if data.get("enterAt"):
+            n = 2
+        elif now - float(data.get("createdAt") or 0) < SETTLE:
+            n = 0                         # 셸 rc 가 뜨는 중 — 표본으로 안 센다
+        else:
+            n = min(2, int(data.get("busyN") or 0) + 1)
+        if n != int(data.get("busyN") or 0):
+            data["busyN"], changed = n, True
+        if n >= 2 and not data.get("sawBusy"):
+            data["sawBusy"], changed = True, True
+        if data.get("idleSince") is not None:
+            data["idleSince"], changed = None, True
+        return changed
+    if data.get("busyN"):
+        data["busyN"], changed = 0, True      # 연속이 끊겼다
+    if not (data.get("sawBusy") or data.get("enterAt")):
+        return changed                    # 사람이 아직 안 돌렸다 — 미리 쳐 둔 명령이 입력창에 있을 뿐
+    if _asks(name):                       # 묻는 중(y/N·이어쓰기·Password:) — 아직 끝이 아니다
+        if data.get("idleSince") is not None:
+            data["idleSince"], changed = None, True
+        return changed
+    since = data.get("idleSince")
+    if since is None:
+        data["idleSince"] = now
+        return True
+    if now - max(float(since), float(data.get("enterAt") or 0)) >= DONE_HOLD:
+        data["doneAt"] = now
+        return True
+    return changed
+
+
+def watch(now: Optional[float] = None) -> "list[tuple[str, dict]]":
+    """열린(끝 안 난) 터미널을 한 번 훑어 끝난 것에 doneAt 을 달고, **끝났는데 아직 알리지 않은** (토큰, 기록)을 돌려준다.
+    알린 뒤엔 mark_notified — 알림이 실패하면 다음 훑기에 다시 나온다."""
+    now = time.time() if now is None else now
+    d, out = _dir(), []
+    if not d.is_dir():
+        return out
+    with _lock:
+        for f in sorted(d.glob("*.json")):
+            token = f.stem
+            data = _load(token)
+            if data is None:
+                continue
+            if not data.get("doneAt"):
+                if _alive(data["tmux"]):
+                    if _judge(data, now):
+                        _write(d, token, data)
+                elif data.get("sawBusy") or data.get("enterAt"):      # 사람이 exit·C-d 로 닫았다 — 돌린 적이 있으면 끝
+                    data["doneAt"] = now
+                    _write(d, token, data)
+            if data.get("doneAt") and not data.get("notifiedAt"):
+                out.append((token, dict(data)))
+    return out
+
+
+def mark_notified(token: str) -> None:
+    with _lock:
+        cur = _load(token)
+        if cur is not None and not cur.get("notifiedAt"):
+            cur["notifiedAt"] = time.time()
+            _write(_dir(), token, cur)
+
+
+def save_tail(token: str, dest: Path, lines: int = TAIL_LINES, clean: "Any" = None) -> Optional[Path]:
+    """화면 끝 `lines` 줄을 (clean 을 거쳐) dest 에 0600 으로 쓴다. 기록에 남겨 터미널을 정리할 때 같이 지운다. 임시 파일은 실패해도 남기지 않는다."""
+    with _lock:
+        data = _load(token)
+        if data is None:
+            return None
+        r = _tmux("capture-pane", "-p", "-t", _pane(data["tmux"]), "-S", f"-{SCREEN_LINES}")
+        if r.returncode != 0:
+            return None
+        text = "\n".join(r.stdout.rstrip("\n").splitlines()[-lines:]) + "\n"
+        dest = Path(dest)
+        fd, tmp = tempfile.mkstemp(dir=str(dest.parent), prefix=".tmp-term-last-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(clean(text) if clean else text)
+            os.chmod(tmp, 0o600)
+            os.rename(tmp, dest)
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
+        data["lastFile"], data["lastFileNs"] = str(dest), dest.stat().st_mtime_ns
+        _write(_dir(), token, data)
+        return dest

@@ -118,8 +118,14 @@ def _pane_busy(name: str) -> tuple[bool, bool]:
 
 
 def _ctx_percent(rec: dict[str, Any]) -> float | None:
-    sid = str(rec.get("sessionId") or "")
-    path = ms.find_transcript(sid) if sid else None
+    path = _session_transcript(rec)      # sessionId 없는 새 방은 방 폴더의 가장 최근 기록으로
+    if path and not rec.get("sessionId"):
+        # 같은 폴더에서 사람이 연 다른 세션일 수 있다 — 이 세션이 뜨기 전에 끝난 기록은 이 방 것이 아니다
+        try:
+            if path.stat().st_mtime < _session_born(str(rec.get("tmux") or "")):
+                return None
+        except OSError:
+            return None
     if not path:
         return None
     try:
@@ -269,7 +275,8 @@ def _pane_team(name: str) -> list[dict[str, Any]]:
     for l in lines[i + 1:]:
         m = _TEAM.match(l)
         if m:
-            out.append({"id": m.group(1), "kind": "agent", "desc": m.group(2).strip()[:80]})
+            # 상태 문구 뒤엔 칸 맞춤 공백이 길게 붙는다 — 접어서 80자로. "pane" = 화면에서만 본 것(보기 목록의 중복 제거용 표시, 개수엔 영향 없음)
+            out.append({"id": m.group(1), "kind": "agent", "desc": " ".join(m.group(2).split())[:120], "pane": True})
     return out
 
 
@@ -784,22 +791,78 @@ def _allowed(rec: dict[str, Any], channel: str, user: str, dc: ms.Discord) -> bo
     return not (allow and str(user) not in [str(a) for a in allow]) and str(user) != dc.me()
 
 
+def _words_line(text: str) -> str:
+    """에이전트 마지막 말 → 첫 줄 한 줄 140자. 목록 기호·굵게·백틱은 풀고, 번역하지 않는다."""
+    for ln in str(text).splitlines():
+        ln = re.sub(r"^[\s>#*+\-•]+", "", ln).replace("**", "").replace("`", "")
+        ln = " ".join(ln.split())
+        if ln:
+            return ln[:139] + "…" if len(ln) > 140 else ln
+    return ""
+
+
+_PANE_TAIL = re.compile(r"\s+(?:(\d+)m\s*)?\d+s\s*·.*$")
+
+
+def _pane_now(text: str) -> str:
+    """화면 상태 문구 끝의 '11m 30s · ↓ 194.7k tokens' 는 '· 11분' 으로 줄인다(초 단위만이면 뗀다)."""
+    m = _PANE_TAIL.search(text)
+    return text if not m else text[:m.start()] + (f" · {m.group(1)}분" if m.group(1) else "")
+
+
+def _view_agents(tr: Path, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """[보기] 표시용 — 같은 에이전트는 한 번만. 화면 아래 팀 목록 줄('pane')은 기록의 에이전트와 같은 이름·같은 역할·같은 설명이면
+    그 항목에 합친다(항목의 "now" = 화면 상태 문구) — 같은 역할이 여럿이면 순서대로 짝짓는다. 짝이 없는 줄만 남는다.
+    개수 판정(live_tasks 를 쓰는 #상태·restart_blockers)은 이 목록을 안 쓴다 — 표시만 합친다."""
+    def norm(x: str) -> str:
+        return " ".join(str(x).split())
+    recs = [t for t in tasks if not t.get("pane") and t["kind"] == "agent"]
+    for t in recs:
+        try:
+            meta = json.loads((tr.parent / tr.stem / "subagents" / f"agent-{t['id']}.meta.json").read_text())
+        except (OSError, ValueError):
+            meta = {}
+        meta = meta if isinstance(meta, dict) else {}
+        t["name"] = str(t.get("name") or meta.get("name") or "")
+        t["role"] = str(t.get("role") or meta.get("customAgentType") or meta.get("agentType") or "")
+    free = list(recs)
+    out = []
+    for t in tasks:
+        if not t.get("pane"):
+            out.append(t)
+            continue
+        pair = next((r for r in free if r["name"] == t["id"]), None) or next((r for r in free if norm(r["desc"]) == norm(t["desc"])), None) \
+            or next((r for r in free if r["role"] == t["id"]), None)      # 이름 → 설명 → 역할 — 같은 역할이 여럿일 때 엉뚱한 항목에 붙는 걸 줄인다
+        if pair:
+            free.remove(pair)
+            pair["now"] = t["desc"]
+        else:
+            out.append(t)
+    return out
+
+
 def view(channel: str, user: str) -> str:
-    """[보기]: 뒤에서 도는 셸의 출력 끝·에이전트의 마지막 말(누른 사람에게만). 명령 원문은 안 보낸다(설명만)."""
+    """[보기]: 뒤에서 도는 셸의 출력 끝·에이전트의 마지막 말. 응답은 공개(#상태 채널을 보는 사람 누구나 — bot.ts 가 deferReply 를 공개로 한다).
+    명령 원문은 안 보낸다(설명만)."""
     rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
     if not rec:
         return "모르는 채널이야"
     if not _allowed(rec, channel, user, _dc(ms.load_config())):
         return "볼 권한이 없어"
     tr = _session_transcript(rec)
-    tasks = live_tasks(rec) if tr else []
+    tasks = _view_agents(tr, live_tasks(rec)) if tr else []
     if not tasks or not tr:
         return "지금 뒤에서 도는 일은 없어"
     parts = []
     budget = max(120, 1800 // len(tasks))
-    for t in tasks[:12]:
-        head = f"{'⏳' if t['kind'] == 'shell' else '🤖'} **{_clean(t['desc'] or t['id'])[:80]}**"
+    titles = [_clean(t["id"] if t.get("pane") else (t["desc"] or t["id"])).strip()[:80] for t in tasks]
+    for t, title in zip(tasks[:12], titles):
+        if t["kind"] == "agent" and titles.count(title) > 1:
+            title += " #" + _agent_tag(t["id"], str(t.get("name") or ""))      # 같은 설명으로 둘 띄움 — 진행 줄과 같은 꼬리표
+        head = f"{'⏳' if t['kind'] == 'shell' else '🤖'} **{title}**"
         room = max(40, budget - len(head) - 12)
+        if t["kind"] == "agent" and not t.get("pane") and t.get("now"):
+            room = max(40, room - len(f"\n지금: {_clean(_pane_now(t['now']))}"))      # 지금: 줄도 예산에 넣는다
         if t["kind"] == "shell":
             p = _task_output(tr, t["id"])
             try:
@@ -808,15 +871,23 @@ def view(channel: str, user: str) -> str:
                 tail = ""
             body = "\n".join(tail.rstrip().splitlines()[-8:])[-room:].replace("```", "ʼʼʼ")
             parts.append(head + ("\n```\n" + body + "\n```" if body else "\n-# 출력 없음"))
+        elif t.get("pane"):
+            parts.append(head + (f"\n지금: {_clean(_pane_now(t['desc']))}" if t["desc"] else "\n-# 아직 말 없음"))
         else:
-            words = _clean(_agent_last_words(tr, t["id"]))[-room:]
-            parts.append(head + ("\n" + words if words else "\n-# 아직 말 없음"))
-    out = ""
+            words = _clean(_words_line(_agent_last_words(tr, t["id"])))[:room]
+            now = f"\n지금: {_clean(_pane_now(t['now']))}" if t.get("now") else ""
+            parts.append(head + now + ("\n" + words if words else ("" if now else "\n-# 아직 말 없음")))
+    if len(parts) == len(tasks) and len("\n".join(parts)) <= 1900:
+        return "\n".join(parts)
+    out, shown, cap = "", 0, 1900 - 16          # 16 = 맨 끝 "… 외 N개" 줄 자리
     for part in parts:                 # 조각 단위로 자른다 — 코드 펜스가 중간에 끊기지 않게(리뷰 M2)
-        if len(out) + len(part) + 1 > 1900:
+        if len(out) + len(part) + 1 > cap:
             break
         out += ("\n" if out else "") + part
-    return out or parts[0][:1900]
+        shown += 1
+    if not out:
+        out, shown = parts[0][:cap], 1
+    return out + f"\n… 외 {len(tasks) - shown}개"
 
 
 def interrupt(channel: str, user: str, message: str) -> str:
@@ -867,14 +938,11 @@ def interrupt(channel: str, user: str, message: str) -> str:
 
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
-_CTRL = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|[\x00-\x08\x0b-\x1f\x7f]")
-_SECRET = re.compile(r"(?i)(bearer\s+|authorization:\s*\S+\s+|(?:token|secret|password|passwd|api[_-]?key|key)\s*[=:]\s*)\S+"
-                     r"|AKIA[0-9A-Z]{12,}|-----BEGIN [A-Z ]+-----[\s\S]*?(?:-----END [A-Z ]+-----|$)|(?:sk|ghp|xox[bp])-?[A-Za-z0-9_-]{16,}")
 
 
 def _clean(text: str) -> str:
     """Discord 로 내보내는 셸 출력: 제어문자 제거 + 흔한 비밀 모양 가리기(리뷰 I7)."""
-    return _SECRET.sub(lambda m: (m.group(1) or "") + "•••", _CTRL.sub("", text))
+    return ms.clean_output(text)
 _DIM = re.compile(r"\x1b\[2m.*?(?:\x1b\[(?:22|0)?m|$)")
 
 
@@ -940,6 +1008,51 @@ def _spawn_type(tmux: str, text: str, channel: str, mid: str, button: str = "") 
 
 
 SLEEPING_TEXT = "이 방은 잠들어 있어 — 글을 쓰면 깨어나"
+
+
+def _term_rec(channel: str) -> "dict[str, Any] | None":
+    """터미널을 요청한 개발 세션 기록 — 모르는 채널(지워진 방)·채팅 세션이면 None(ask_terminal 은 개발 세션 전용)."""
+    rec = next((x for x in ms.load_sessions() if channel and str(x.get("channelId")) == channel), None)
+    return None if not rec or rec.get("kind") in ms.CHAT_KINDS else rec
+
+
+def notify_term_done(token: str, data: dict) -> None:
+    """ask_terminal 로 넘긴 명령이 끝났다 — 켜진 세션엔 **내용 없는** 고정 문구만 입력창에(턴 중이면 기다렸다 친다), 꺼진 방은 깨우지 않고
+    채널에 조용한 한 줄. 화면은 사람이 페이지에서 넘길 때만 간다(share_term_screen). 채널 POST 가 429 아닌 4xx 로 실패하면 다시 해도 같으니 닫는다."""
+    channel = str(data.get("channel") or "")
+    rec = _term_rec(channel)
+    if not rec:
+        return
+    if ms.tmux_alive(str(rec.get("tmux") or "")):
+        _spawn_type(str(rec["tmux"]), TERM_DONE_TEXT, channel, "")
+        return
+    try:
+        _dc(ms.load_config())._req("POST", f"/channels/{channel}/messages",
+                                   {"content": TERM_DONE_LINE, "flags": 4096, "allowed_mentions": {"parse": []}})
+    except ms.DiscordError as exc:
+        if exc.code == 429 or exc.code >= 500:
+            raise
+        _log(f"term done: 꺼진 방 알림을 못 올려 닫음({exc.code})")
+
+
+def share_term_screen(token: str) -> dict[str, Any]:
+    """페이지의 [화면 끝 40줄을 세션에 넘기기] — 호출 쪽(서버)이 쿠키 주인·Origin 을 이미 확인했다.
+    끝 40줄을 `[보기]` 와 같은 비밀 가림으로 <상태 폴더>/term-last-<tmux id>.txt(0600)에 쓰고 세션에 두 번째 고정 문구를 친다.
+    돌려줌: {"ok": True} | {"ok": False, "reason": "asleep"(세션 꺼짐) | "failed"}."""
+    import marina_termbridge as tb
+    data = tb._load(token) or {}
+    rec = _term_rec(str(data.get("channel") or ""))
+    if not rec or not rec.get("stateDir"):
+        return {"ok": False, "reason": "failed"}
+    if not ms.tmux_alive(str(rec.get("tmux") or "")):
+        return {"ok": False, "reason": "asleep"}
+    dest = Path(str(rec["stateDir"])) / f"term-last-{str(data['tmux']).removeprefix('term-')}.txt"
+    if not _TERM_PATH_RE.fullmatch(str(dest)):          # 허용 밖 문자가 든 경로는 입력창에 치지 않는다
+        return {"ok": False, "reason": "failed"}
+    if not tb.save_tail(token, dest, clean=ms.clean_output):
+        return {"ok": False, "reason": "failed"}
+    _spawn_type(str(rec["tmux"]), f"{TERM_SHARE_PRE}{dest}{TERM_SHARE_POST}", str(data["channel"]), "")
+    return {"ok": True}
 
 
 def say(channel: str, user: str, message: str = "") -> str:
@@ -1593,11 +1706,27 @@ def clear_perms(sd: Path, channel: str) -> None:
                 pass
 
 
-def typeable(text: str) -> bool:
-    """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글, 이어받기 안내, 허용 명령만."""
+# 터미널 끝 알림은 내용 없는 고정 문구 — 화면(prod 조회 결과·토큰이 있을 수 있다)은 사람이 넘길 때만 세션에 간다
+TERM_DONE_TEXT = "[마리나] 터미널에서 넘긴 명령이 끝났어 — 결과는 형이 넘겨 주거나 말해 줄 때까지 기다려."
+TERM_SHARE_PRE = "[마리나] 형이 터미널 화면을 넘겼어: "
+TERM_SHARE_POST = " — 읽고 이어서 해. 내용을 Discord 에 그대로 옮기지 마."
+TERM_SHARE_RE = re.compile(re.escape(TERM_SHARE_PRE) + r"(/[A-Za-z0-9._/-]+/term-last-[0-9a-f]+\.txt)" + re.escape(TERM_SHARE_POST))
+_TERM_PATH_RE = re.compile(r"/[A-Za-z0-9._/-]+/term-last-[0-9a-f]+\.txt")
+TERM_DONE_LINE = "🖥️ 터미널 명령이 끝났어"
+TERM_WATCH_EVERY = 5.0
+
+
+def typeable(text: str, channel: str = "") -> bool:
+    """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글, 이어받기 안내, 터미널 끝 안내(고정 문구 정확 일치),
+    화면 넘김 안내(고정 앞뒤 + 그 채널 상태 폴더 아래 term-last-<id>.txt 정확 경로 — channel 을 모르면 거절), 허용 명령만."""
     import marina_discord_wake as mw
-    return (ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK))
-            or text in (ms.RESUME_TEXT, mw.WAKE_LATE_TEXT))
+    if text in (TERM_DONE_TEXT, ms.RESUME_TEXT, mw.WAKE_LATE_TEXT):
+        return True
+    m = TERM_SHARE_RE.fullmatch(text)
+    if m:
+        rec = next((x for x in ms.load_sessions() if channel and str(x.get("channelId")) == str(channel)), None)
+        return bool(rec and rec.get("stateDir")) and os.path.dirname(m.group(1)) == str(rec["stateDir"])
+    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK))
 
 
 RESTART_AGENT_FRESH = 1800.0     # 재시작 판정: 안 끝난 에이전트는 30분 조용해야 죽은 것으로 본다(긴 빌드·녹화로 5분 넘게 조용한 에이전트가 있었다, 2026-10-07 사고)
@@ -2285,6 +2414,7 @@ class Loop:
         self.last_vsweep = -3600.0       # 보기 기록 정리(원본이 7일 넘게 없는 것) — 한 시간마다
         self.vnext = 0.0                 # 포트를 못 열었으면 이 시각 전엔 다시 안 시도
         self.last_tsweep = -60.0         # 터미널 넘기기 정리(미개봉 10분·무활동 30분) — 1분마다
+        self.last_twatch = -TERM_WATCH_EVERY   # 터미널 넘기기 끝 감지 — 5초마다
         self.idler: Any = None           # 쉰 방 내리기(marina_discord_idle.Idler) — 속도 제한(20초 표본·1분에 하나)은 Idler 안
         self.born = time.time()          # 이 데몬이 뜬 시각 — 쉰 방 내리기는 그 뒤 글 이벤트를 받은 표식이 있어야 동작
 
@@ -2356,7 +2486,7 @@ class Loop:
         self.stop_view()
         if now < self.vnext:
             return
-        srv = mv.ViewServer(port, base)
+        srv = mv.ViewServer(port, base, on_share=share_term_screen)
         if srv.start():
             self.vsrv = srv
             _log(f"view server: 127.0.0.1:{srv.port}")
@@ -2381,6 +2511,19 @@ class Loop:
         except Exception as exc:         # 정리가 실패해도 데몬은 계속(토큰은 로그에 안 남는다)
             _log(f"term sweep failed: {exc!r}")
 
+    def watch_term(self, now: float) -> None:
+        """넘긴 명령이 끝났는지 5초마다 본다(페이지가 안 열려 있어도). 끝났으면 요청한 세션에 한 번 알린다."""
+        if now - self.last_twatch < TERM_WATCH_EVERY:
+            return
+        self.last_twatch = now
+        import marina_termbridge as tb
+        for token, data in tb.watch(now):
+            try:
+                notify_term_done(token, data)
+                tb.mark_notified(token)
+            except Exception as exc:     # 한 터미널의 실패가 나머지를 막지 않는다 — 알렸다고 안 적었으니 다음 훑기에 다시
+                _log(f"term done notify failed: {exc!r}")
+
     def stop_view(self) -> None:
         srv, self.vsrv = self.vsrv, None
         if srv is not None:
@@ -2396,7 +2539,7 @@ class Loop:
             return False
         if not self.own():
             return False
-        for name, fn in (("bot", lambda: self.supervise(cfg, now)), ("viewsrv", lambda: self.view_server(cfg, now)), ("viewsweep", lambda: self.sweep_view(now)), ("termsweep", lambda: self.sweep_term(now)),
+        for name, fn in (("bot", lambda: self.supervise(cfg, now)), ("viewsrv", lambda: self.view_server(cfg, now)), ("viewsweep", lambda: self.sweep_view(now)), ("termsweep", lambda: self.sweep_term(now)), ("termwatch", lambda: self.watch_term(now)),
                          ("view", lambda: self.view(now))):
             try:
                 fn()
@@ -2570,7 +2713,7 @@ def main(argv: list[str]) -> int:
         run_suggest(a.tmux, a.channel, a.msg, started=a.started)
         return 0
     if a.cmd == "type":
-        if typeable(a.text):
+        if typeable(a.text, a.channel):
             typed = run_slash(a.tmux, a.text, a.channel, a.mid,
                               timeout=float(os.environ.get("MARINA_TYPE_TIMEOUT") or type_timeout(a.text)))
             if not typed and a.button:
