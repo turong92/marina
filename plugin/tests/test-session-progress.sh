@@ -73,6 +73,35 @@ tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content":
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
 arch = [x["p"] for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True]
 check(arch[n:] == [f"/channels/{tids['9777']}"], f"다 끝난 뒤 턴 끝에 밀린 스레드를 접는다(새 지시 없어도): {arch[n:]}")
+# 에이전트가 도는 중에도 지난 지시의 스레드는 접고, 진행 줄이 지금 올라가는 스레드(activity.json 의 mid) 하나만 열어 둔다
+# — 개발 에이전트를 계속 붙든 세션은 턴마다 에이전트가 돌아 스레드가 5시간 동안 9개 쌓였다(형 2026-10-07)
+sdir = Path(rec["stateDir"])
+for m in ("9801", "9802", "9803"):
+    ms._progress(rec, {"message_id": m, "text": f"지시 {m}"})
+tids = json.loads((sdir / "threads.json").read_text())
+npatch = lambda: [x["p"] for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True]
+act = json.loads((sdir / "activity.json").read_text()) if (sdir / "activity.json").exists() else {}
+act["mid"] = "9803"
+(sdir / "activity.json").write_text(json.dumps(act))
+tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}) + "\n")
+ms._agents_running_now = lambda s: True
+n = len(npatch())
+ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
+check(sorted(npatch()[n:]) == sorted([f"/channels/{tids['9801']}", f"/channels/{tids['9802']}"]), f"에이전트 도는 중: 옛 스레드만 접는다: {npatch()[n:]}")
+check("9803" not in json.loads((sdir / "threads-archived.json").read_text()), "최근 지시 스레드는 열어 둔다")
+ms._agents_running_now = lambda s: False
+n = len(npatch())
+ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
+check(npatch()[n:] == [f"/channels/{tids['9803']}"], f"에이전트가 없으면 남은 것도 접는다: {npatch()[n:]}")
+for m in ("9811", "9812"):
+    ms._progress(rec, {"message_id": m, "text": f"지시 {m}"})
+act = json.loads((sdir / "activity.json").read_text()); act.pop("mid", None)
+(sdir / "activity.json").write_text(json.dumps(act))
+ms._agents_running_now = lambda s: True
+n = len(npatch())
+ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
+check(npatch()[n:] == [], f"최근 지시를 모르면 에이전트 도는 중엔 아무것도 안 접는다: {npatch()[n:]}")
+ms._agents_running_now = lambda s: False
 # 작업 중 표시: 도구를 쓸 때마다 '입력 중…'(8초에 한 번만) — 개발·채팅 세션 모두
 for ref in ("proj/feat/p", "chat/room"):
     r2 = ms.find_session(ref)

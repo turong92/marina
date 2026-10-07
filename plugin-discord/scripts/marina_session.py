@@ -1800,10 +1800,15 @@ def hook_stop(payload: dict[str, Any]) -> None:
     finally:
         if lockf:
             lockf.close()
-    # 뒤에서 서브에이전트가 도는 동안엔 스레드를 열어 둔다 — 진행 줄이 쌓이는 중인데 턴이 끝날 때마다 닫혔다(형 2026-10-06).
-    # 다 끝난 뒤의 턴 끝(끝남 알림으로 이어진 턴 — 새 지시 메시지가 없다)에 밀린 것까지 접는다
+    # 뒤에서 서브에이전트가 도는 동안엔 진행 줄이 올라가는 스레드(가장 최근 지시)만 열어 둔다 — 턴마다 닫히면 쌓이는 줄이 끊기고(형 2026-10-06),
+    # 전부 열어 두면 에이전트를 계속 붙든 세션은 지난 지시 스레드가 끝없이 쌓인다(형 2026-10-07).
+    # 최근 지시를 모르면(activity.json 에 mid 없음) 아무것도 접지 않는다. 다 끝난 뒤의 턴 끝엔 밀린 것까지 접는다
     if not _agents_running_now(s):
         _archive_threads(s, dc)
+    else:
+        keep = str(_activity_state(sd).get("mid") or "")
+        if keep:
+            _archive_threads(s, dc, keep=keep)
 
 
 
@@ -1846,7 +1851,7 @@ def _agents_running_now(s: dict[str, Any]) -> bool:
         return False
 
 
-def _archive_threads(s: dict[str, Any], dc: "Discord") -> None:
+def _archive_threads(s: dict[str, Any], dc: "Discord", keep: str = "") -> None:
     # 끝난 지시의 진행 스레드는 접는다 — 채널 목록에 계속 쌓이지 않게(열면 기록은 그대로)
     # 턴이 끝났고 뒤에서 도는 일도 없으니 아직 안 접은 스레드는 모두 끝난 것. 접은 스레드는 목록에서 뺀다(다음 턴에 다시 안 부르게).
     tfile = Path(str(s.get("stateDir") or "")) / "threads.json"
@@ -1859,7 +1864,7 @@ def _archive_threads(s: dict[str, Any], dc: "Discord") -> None:
         archived = set(json.loads(afile.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError):
         archived = set()
-    done = [m for m in threads if threads.get(m) and m not in archived]
+    done = [m for m in threads if threads.get(m) and m not in archived and m != keep]
     for mid in done:
         try:
             dc._req("PATCH", f"/channels/{threads[mid]}", {"archived": True})
