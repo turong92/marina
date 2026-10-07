@@ -58,7 +58,7 @@ ALLOW = [
     "find . -name '*.tmp' -exec rm {} +", 'find "$D" -name x -exec rm -f {} ' + BS + ";",
     # 다른 도구의 하위명령 · rm 이 낀 이름
     "git rm --cached $FILE", 'git rm -r "$dir"', "docker rm -f $CID", "docker rm -f $(docker ps -aq)", "docker compose rm -f $SVC",
-    "docker image rm $IMG", "npm rm $pkg", "docker run --rm -v $PWD:/w img", "npm run rm-cache -- $A", "ls bin/rm $A",
+    "docker image rm $IMG", "npm rm $pkg", "docker run --rm -v $PWD:/w img", "npm run rm-cache -- $A", "ls bin/rm $A",   # e2e-label:skip (판정 시험용 문자열, 실행 아님)
     # 실행이 아니라 글자로 담긴 rm
     "ls $A | grep rm", "grep rm $FILE", "grep -n \"rm \" f | awk '{print $1}'", 'echo "about to rm stuff" && echo $HOME',
     'git commit -m "chore: rm old cache" && git push origin $BRANCH', "sed -n '/rm /p' f; echo $x",

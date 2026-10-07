@@ -9,11 +9,19 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 [ "${MARINA_E2E:-}" = "1" ] || { echo "FAIL: 하네스가 MARINA_E2E=1 을 세우지 않는다"; exit 1; }
 
 bad=""
+skips=0
 for t in "$HERE"/test-*.sh; do
   # 주석 제외, `docker run` 을 실제로 치는 줄만
   while IFS= read -r line; do
-    case "$line" in *"--label marina.e2e=1"*) ;; *) bad="$bad
-  $(basename "$t"): $line" ;; esac
+    # 시험용 문자열에 든 `docker run`(실행 아님)은 줄 끝에 `e2e-label:skip` 표식을 단다 — 허용은 아래 한 곳(파일·개수 고정)뿐
+    case "$line" in
+      *"--label marina.e2e=1"*) ;;
+      *"e2e-label:skip"*)
+        if [ "$(basename "$t")" = "test-discord-rm-guard.sh" ] && [ "$skips" -lt 1 ]; then skips=$((skips + 1)); else bad="$bad
+  $(basename "$t"): 허용되지 않은 e2e-label:skip — $line"; fi ;;
+      *) bad="$bad
+  $(basename "$t"): $line" ;;
+    esac
   done < <(grep -nE '^[^#]*\bdocker run\b' "$t" || true)
 done
 if [ -n "$bad" ]; then
