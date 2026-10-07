@@ -14,6 +14,7 @@ ADMIN="${MARINA_GATEWAY_ADMIN:-localhost:2021}"
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 GW="$HERE/marina-gateway.py"
 LOCK_FILE="$GW_DIR/control.flock"
+STOP_MARK="$GW_DIR/stopped-by-user"   # `stop` 이 남기고 `start` 가 지운다 — runtimed 의 부팅 자동 기동이 의도적 정지를 뒤집지 않게
 mkdir -p "$GW_DIR"
 
 case "${1:-}" in
@@ -90,6 +91,7 @@ wait_pid_exit() {
 
 case "${1:-}" in
   start)
+    rm -f "$STOP_MARK"
     cb="$(caddy_bin)"; [[ -n "$cb" ]] || { echo "caddy 미설치 — 'brew install caddy'(mac) 또는 'apt install caddy'(linux) 후 다시. 게이트웨이 없이 나머지 marina 는 정상." >&2; exit 3; }
     ensure_config
     MARINA_GATEWAY_ADMIN="$ADMIN" python3 "$GW" sync-admin --config "$CFG"
@@ -125,6 +127,7 @@ case "${1:-}" in
       exit 2
     fi ;;
   stop)
+    : > "$STOP_MARK"
     if gw_process; then
       old_pid="$(cat "$PID")"; kill "$old_pid" 2>/dev/null || true
       if wait_pid_exit "$old_pid"; then rm -f "$PID"; echo "게이트웨이 정지"

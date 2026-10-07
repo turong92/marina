@@ -120,7 +120,9 @@ for name in tests:
     # 도커·caddy 를 실제로 띄우는 e2e 는 한 건에 수 분이다. 컨테이너 오케스트레이션을 건드리지
     # 않았으면 기본 실행에서 뺀다(--all 로 돌린다). 무엇을 뺐는지는 아래에서 반드시 말한다.
     container_e2e = ("docker compose" in text or "caddy" in text)
-    touches_containers = any(mod in ("marina_compose", "marina_gateway", "marina_weave", "marina_links")
+    # 파일명은 하이픈(marina-compose.py)인데 모듈 이름은 밑줄이라, 그대로 비교하면 marina-compose.py 를 고쳐도
+    # "컨테이너 코드 안 바뀜"으로 도커 e2e 를 통째로 건너뛴다 — 하이픈을 밑줄로 맞춰 비교한다.
+    touches_containers = any(mod.replace("-", "_") in ("marina_compose", "marina_gateway", "marina_weave", "marina_links")
                              for mod in changed_modules)
     hits = lambda names: any(re.search(rf"\b{re.escape(n)}\b", text) for n in names)
     if (name in changed_tests or hits(changed_modules) or hits(changed_symbols)

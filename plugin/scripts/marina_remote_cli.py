@@ -7,6 +7,7 @@ import getpass
 import http.client
 import json
 import os
+import socket
 import subprocess
 import sys
 from pathlib import Path
@@ -61,6 +62,15 @@ def _print_status(payload: dict) -> None:
         print(f"check.{check.get('id')}={'ok' if check.get('ok') else 'blocked'}")
 
 
+def _dashboard_listening(host: str, port: int) -> bool:
+    host = "127.0.0.1" if host in ("localhost", "0.0.0.0", "::", "") else host
+    try:
+        socket.create_connection((host, int(port)), timeout=1).close()
+        return True
+    except OSError:
+        return False
+
+
 def run(args: argparse.Namespace) -> int:
     home = Path(os.environ.get("MARINA_HOME", str(Path.home() / ".marina")))
     store = AuthStore(
@@ -81,6 +91,10 @@ def run(args: argparse.Namespace) -> int:
         result = service.activate(args.command, principal, password=password)
     _print_status({**result, "dashboardHost": service.control_host, "dashboardPort": service.control_port})
     if result.get("restartRequired") and os.environ.get("MARINA_REMOTE_NO_RESTART") != "1":
+        if (home / "dashboard-off").exists() and not _dashboard_listening(service.control_host, service.control_port):
+            # 대시보드를 일부러 꺼 둔 맥 — 되살리지 않는다(표시가 있어도 실제로 떠 있으면 평소대로 재시작)
+            print("대시보드는 꺼 둠 — 켜려면 marina dashboard start")
+            return 0
         dashboard = Path(__file__).resolve().parent / "marina-dashboard.sh"
         subprocess.run(["bash", str(dashboard), "restart"], check=True)
     return 0

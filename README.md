@@ -515,13 +515,13 @@ ssh-copy-id -i ~/.ssh/id_ed25519.pub <user>@<box>
 ssh <user>@<box> 'docker run -d --name marina-redis --restart unless-stopped -p 6379:6379 redis:7-alpine'
 
 # 3) 박스 주소를 marina 에 알려준다 (전역 1회)
-marina remote use ssh://<user>@<box> --global
+marina runtime use ssh://<user>@<box> --global
 ```
 
 ### 쓰기
 
 ```bash
-marina remote status     # 지금 어디서 도나
+marina runtime status    # 지금 어디서 도나 + 어느 계층이 정했나
 marina start --all       # 평소대로. 컨테이너는 박스에서 뜬다
 marina stop --all        # 정지도 박스를 향한다
 ```
@@ -529,21 +529,39 @@ marina stop --all        # 정지도 박스를 향한다
 브라우저는 평소와 같다 — `marina ports` 나 대시보드에 뜨는 `<워크트리>.<프로젝트>.localhost` 를 연다.
 게시된 포트는 marina 가 `ssh -L` 로 **같은 번호로** 맥에 되돌리므로 게이트웨이 설정이 로컬과 동일하다.
 
-### 워크트리별로 다르게
+### 프로젝트별·워크트리별로 다르게
 
-전역은 기본값일 뿐이고, 워크트리마다 덮을 수 있다.
+설정은 세 계층이고 **위가 아래를 덮는다**: 전역 < 프로젝트 < 워크트리.
+"mdc 만 원격으로"는 프로젝트 계층에 건다 — 그 뒤 새로 만드는 mdc 워크트리는 설정 없이도 원격이다.
+
+```bash
+marina runtime use ssh://<user>@<box> --global   # 박스 주소를 전역에 한 번(주소는 여기가 기본 저장소)
+marina runtime use --project mdc                 # mdc 프로젝트만 원격 (주소는 전역에서 물려받음). id 는 `marina project ls` 의 id
+marina runtime local                             # 이 워크트리만 로컬로 고정
+```
 
 | 명령 | 뜻 |
 |---|---|
-| `marina remote use` | 이 워크트리를 원격으로 (주소는 전역에서 물려받음) |
-| `marina remote off` | 이 워크트리만 **로컬로 고정** (전역이 원격이어도) |
-| `marina remote inherit` | 이 워크트리의 설정을 지움 → 전역 기본을 따름 |
-| `marina remote ... --global` | 위 셋을 전역에 적용 |
+| `marina runtime use [<ssh://…>]` | 원격으로. 주소를 생략하면 아래 계층(프로젝트 → 전역)의 주소를 물려받는다. 어디에도 주소가 없으면 로컬 |
+| `marina runtime local` | 그 계층을 **로컬로 고정** (아래 계층이 원격이어도 이 계층은 로컬. 더 위 계층이 따로 정했으면 그쪽이 이긴다) |
+| `marina runtime inherit` | 그 계층의 설정을 지움 → 아래 계층을 따름 |
+| `marina runtime status` | 지금 워크트리가 어디서 도는지 + 어느 계층이 정했는지 + 각 계층 값 |
 
-`off` 와 `inherit` 는 다른 뜻이다. 전역이 원격일 때 특정 워크트리만 로컬로 빼는 게 `off`,
-그걸 되돌리는 게 `inherit` 다.
+계층 고르기: 기본은 **이 워크트리**, `--project [<id>]` 는 프로젝트(id 를 생략하면 현재 워크트리의
+프로젝트), `--global` 은 전역이다. `--global` 의 `use` 는 주소가 필수다. 워크트리 밖에서도
+`marina runtime status --project mdc` · `--global` 로 볼 수 있다.
 
-대시보드에서는 **서버 현황(메모리 표시) 옆 배지**로 보인다. 로컬이면 배지가 없고, 원격이면
+설정 파일 위치: 전역 `~/.marina/runtime-target.json` · 프로젝트 `~/.marina/<project-id>/runtime-target.json`
+· 워크트리 `<워크트리>/.workspace/marina/<세션>/runtime-target.json`. 손으로 고치지 말고 위 명령을 쓴다.
+
+주소를 어디서도 못 얻는 `use`(주소 생략 + 아래 계층에도 주소 없음)는 거부한다 — 성공처럼 보이고 로컬로 도는 걸 막는다.
+
+`local` 과 `inherit` 는 다른 뜻이다. 전역이 원격일 때 특정 프로젝트·워크트리만 로컬로 빼는 게 `local`,
+그걸 되돌리는 게 `inherit` 다. (옛 `marina remote use|off|inherit` 는 이 명령으로 옮겼다 —
+`marina remote` 는 Tailscale funnel 도구다. 옛 `off` 는 `local`.)
+
+대시보드에서는 **서버 현황(메모리 표시) 옆 배지**로 보인다. 단 배지는 전역·워크트리 단위만 그린다 —
+**프로젝트 계층 원격은 배지에 안 뜬다**(상태는 `marina runtime status` 로 확인). 로컬이면 배지가 없고, 원격이면
 `☁ <box>` 가 뜬다 — 그 옆의 Docker/Host 수치가 맥이 아니라 **박스의 값**이기 때문이다.
 이 워크트리만 전역과 다르면 테두리가 점선이다. 눌러서 로컬로 되돌릴 수 있다.
 
@@ -765,7 +783,7 @@ x-marina:
 | 등록 관리 | `marina project ls \| infer <path> \| rm <id> \| default <id> a,b,c` |
 | 실행 | `marina start\|stop\|restart\|rebuild\|clean-rebuild <svc>\|--all` · `marina status \| ports \| logs [svc]` |
 | 게이트웨이 | `marina gateway start\|stop\|status\|install\|uninstall` (보통 서비스 start 시 자동 기동이라 수동 불필요) |
-| 원격 런타임 | `marina remote use [<ssh://user@host>] \| off \| inherit \| status` + `--global` (컨테이너를 어느 기계에서 돌릴지) |
+| 원격 런타임 | `marina runtime use [<ssh://user@host>] \| local \| inherit \| status` + `--global` \| `--project [<id>]` (컨테이너를 어느 기계에서 돌릴지. 전역 < 프로젝트 < 워크트리) |
 | 워크트리(작업 시작) | `marina worktree create <branch> [base] [--project <id>]` — git worktree(-b) + 서브레포를 같은 브랜치로 미러 (Claude 자동 `claude/<id>` 대신 `feature/{task}` 등으로). `--project`=cwd 무관(프로젝트 밖에서도). attach 범위는 `marina project default <id> a,b,c` 로 좁힘(예: compose 서브레포만) |
 
 내부 호출은 `marina.sh`(launcher)와 `marina-control.py`(데몬·CLI 브리지)지만, 평소엔 위 `marina` 래퍼만

@@ -889,8 +889,8 @@ def _target_for(root):
     """워크트리 root → 런타임 타깃. 못 읽으면 로컬(기존 동작)."""
     try:
         import marina_paths
-        from marina_runtime_target import load_target
-        return load_target(str(marina_paths.session_dir(Path(root))))
+        from marina_runtime_target import load_target, project_id_for_root
+        return load_target(str(marina_paths.session_dir(Path(root))), project_id=project_id_for_root(root))
     except Exception:
         return None
 

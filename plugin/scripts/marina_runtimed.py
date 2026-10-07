@@ -60,8 +60,9 @@ def _gateway_every() -> float:
 
 
 def _refresh_gateway() -> None:
-    from marina_lifecycle import refresh_gateway
-    refresh_gateway()
+    from marina_lifecycle import boot_gateway, refresh_gateway
+    refresh_gateway()      # 떠 있으면 라우트 갱신
+    boot_gateway()         # 꺼져 있으면(재부팅 직후 등) 띄운다 — 의도적 정지는 존중
 
 
 def _docker_gc(primary: bool) -> None:

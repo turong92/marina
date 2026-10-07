@@ -36,3 +36,11 @@ after="$(bash "$TMP/plugin/tests/run-affected.sh" --list 2>/dev/null || true)"
 echo "$after" | grep -qx "$want" && { echo "FAIL: 안 바꿨는데도 선택됐다 — 선택기가 헐겁다"; exit 1; }
 
 echo "PASS: 웹 자산을 고치면 그 파일을 부르는 테스트가 선택된다"
+
+# 컨테이너 코드 판정: 변경 모듈 이름이 파일명(marina-compose, 하이픈)이라 `marina_compose`(밑줄)와 비교하면
+# marina-compose.py 를 고쳐도 "컨테이너 코드 안 바뀜"으로 도커 e2e 를 통째로 건너뛰었다.
+echo "# 선택기 확인용" >> "$TMP/plugin/scripts/marina-compose.py"
+picked="$(bash "$TMP/plugin/tests/run-affected.sh" --list 2>/dev/null || true)"
+note="$(bash "$TMP/plugin/tests/run-affected.sh" --list 2>&1 >/dev/null || true)"
+echo "$note" | grep -q "컨테이너 코드 안 바뀜" && { echo "FAIL: marina-compose.py 를 고쳤는데 도커 e2e 를 건너뛴다: $note"; exit 1; }
+echo "PASS: marina-compose.py 변경이 컨테이너 코드로 취급된다"

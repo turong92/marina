@@ -19,7 +19,7 @@ import importlib.util as _ilu
 import threading
 
 from marina_state import LIFECYCLE_BUSY, MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_du_cache, _worktree_info_cache, busy_key
-from marina_cache import cache_items_by_category, compose_build_image_items, compose_project_volume_items, disk_usage_mb, docker_image_rm, docker_volume_rm
+from marina_cache import _docker_cmd, cache_items_by_category, compose_build_image_items, compose_project_volume_items, disk_usage_mb, docker_env, docker_image_rm, docker_volume_rm
 from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
@@ -391,6 +391,16 @@ def reclaim_worktree_docker(root: Path, volumes: str = "all") -> dict[str, Any]:
     **항목 하나가 실패해도 계속 간다** — 회수는 부가 작업이라 워크트리 삭제 자체를 막으면 안 된다.
     실패는 errors 에 담아 결과에 실어 보낸다(조용히 삼키지 않는다)."""
     out: dict[str, Any] = {"images": [], "volumes": [], "freedMb": 0, "errors": []}
+    # 원격 워크트리는 그 박스의 데몬을 본다(marina_cache.docker_env). 박스가 안 닿으면 **건너뛴다** — 로컬 데몬으로
+    # 대신 돌리면 이름이 같은 로컬 자원을 지우고, 조용히 [] 로 돌아가면 회수한 줄 안다.
+    _env = docker_env(root)
+    _rk = {"root": root} if _env is not None else {}      # 로컬은 호출 모양을 안 바꾼다(기존 시그니처 그대로)
+    if _env is not None:
+        try:
+            subprocess.check_output(_docker_cmd("info"), stderr=subprocess.DEVNULL, timeout=15, env=_env)
+        except Exception:
+            out["errors"].append(f"런타임 박스({_env.get('DOCKER_HOST')})에 닿지 않아 이미지·볼륨 회수를 건너뜀")
+            return out
     try:
         images = compose_build_image_items(root)
     except Exception as exc:
@@ -401,7 +411,7 @@ def reclaim_worktree_docker(root: Path, volumes: str = "all") -> dict[str, Any]:
         if not image_id:
             continue
         try:
-            docker_image_rm(image_id)
+            docker_image_rm(image_id, **_rk)
             out["images"].append(image_id)
             out["freedMb"] += int(item.get("sizeMb") or 0)
         except Exception as exc:
@@ -430,7 +440,7 @@ def reclaim_worktree_docker(root: Path, volumes: str = "all") -> dict[str, Any]:
             keep.add(name)
             continue
         try:
-            docker_volume_rm(name)
+            docker_volume_rm(name, **_rk)
             out["volumes"].append(name)
             out["freedMb"] += int(item.get("sizeMb") or 0)
         except Exception as exc:
@@ -626,7 +636,7 @@ def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
         try:
             if item.get("type") == "volume":
                 volume = str(item.get("volume") or "")
-                docker_volume_rm(volume)
+                docker_volume_rm(volume, **({"root": root} if docker_env(root) is not None else {}))
                 removed.append(volume)
             else:
                 path = item.get("path")
@@ -657,7 +667,7 @@ def clear_worktree_images(root: Path) -> dict[str, Any]:
         if not image_id:
             continue
         size = int(item.get("sizeMb") or 0)
-        docker_image_rm(image_id)
+        docker_image_rm(image_id, **({"root": root} if docker_env(root) is not None else {}))
         removed.append(image_id)
         freed += size
     _worktree_du_cache.pop(str(root), None)
@@ -831,6 +841,31 @@ def ensure_gateway() -> None:
         _gw().apply(snap, port, _GATEWAY_STATE, force=running and not listener_ready)
     except Exception as exc:
         sys.stderr.write(f"gateway ensure 실패(무시): {exc}\n")
+
+
+_BOOT_EVERY_S = 60.0
+_boot_last = float("-inf")
+
+
+def boot_gateway() -> None:
+    """runtimed 가 뜰 때·틱마다 — 게이트웨이가 **꺼져 있으면** 띄운다(대시보드 없이 재부팅한 맥에서 caddy 가 안 뜨던 구멍).
+
+    refresh_gateway 는 이미 떠 있을 때만 갱신하므로 이 경로가 따로 필요하다. 기동은 서비스 start 가 쓰던
+    ensure_gateway 를 그대로 쓴다(라우팅할 실행 서비스가 있을 때만 띄움). `marina gateway stop` 으로 일부러 끈 경우
+    (gateway/stopped-by-user)는 존중한다. 꺼져 있는 동안 5초마다 스냅샷을 뜨지 않도록 간격을 둔다. 절대 예외 안 던짐."""
+    global _boot_last
+    if not _GATEWAY_ON:
+        return
+    try:
+        if (_GW_DIR / "stopped-by-user").exists() or not _gw().caddy_bin() or _gw_pid_alive():
+            return
+        now = time.time()
+        if now - _boot_last < _BOOT_EVERY_S:
+            return
+        _boot_last = now
+        ensure_gateway()
+    except Exception as exc:
+        sys.stderr.write(f"gateway boot 실패(무시): {exc}\n")
 
 
 def refresh_gateway() -> None:

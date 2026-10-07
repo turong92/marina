@@ -8,6 +8,9 @@
 다루지 않는다 — 단 marina 밖에서 지워진 워크트리의 이미지·정지 컨테이너는 ⑤ orphans 가 회수한다.
 명명 볼륨(사용자 데이터일 수 있다)과 사용 중인 어떤 것도 **어느 단계에서도** 지우지 않는다.
 
+**로컬 전용.** 여기 정책 정리(빌드캐시·dangling·익명 볼륨)는 이 맥의 데몬만 본다 — 원격 박스의 워크트리 자원은
+`remove_worktree` 가 그 워크트리의 런타임 타깃 데몬으로 회수한다(marina_lifecycle.reclaim_worktree_docker).
+
 **구조.** 도커 호출은 전부 `run(args) -> str` 하나를 통해 나간다 — 테스트는 가짜 run 을 주입해 명령·순서·
 판정을 검증하고, 실 도커를 만지는 테스트는 dry-run 경로만 탄다.
 설계: docs/superpowers/specs/2026-09-14-docker-gc-policy-design.md

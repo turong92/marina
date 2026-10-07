@@ -39,6 +39,19 @@ CACHE_TARGET_NAMES = {
 def _docker_cmd(*args: str) -> list[str]:
     return [_bin("docker"), *args]
 
+def docker_env(root: Path | None = None) -> dict[str, str] | None:
+    """root 워크트리의 런타임 타깃이 원격이면 docker 호출에 줄 env(DOCKER_HOST 포함), 로컬이면 None(= 지금 그대로).
+
+    워크트리 단위 회수(이미지·볼륨)는 그 워크트리의 컨테이너가 도는 **그 기계**의 데몬을 봐야 한다."""
+    if root is None:
+        return None
+    try:
+        from marina_runtime_target import docker_env_for_root
+        delta = docker_env_for_root(root)
+    except Exception:
+        return None
+    return {**os.environ, **delta} if delta else None
+
 LOCAL_CACHE_TARGET_NAMES = CACHE_TARGET_NAMES - {"node_modules"}
 
 
@@ -102,9 +115,14 @@ def _volume_actual_name(project: dict[str, Any], root: Path, volume_key: str, sp
         return str(spec["name"])
     return f"{_mc().compose_project_name(str(project.get('id') or ''), session_id(root))}_{volume_key}"
 
-def docker_volume_exists(name: str) -> bool:
+def _root_kw(root: Path | None) -> dict[str, Any]:
+    """원격 워크트리일 때만 root 를 넘긴다 — 로컬은 호출 모양이 지금과 같다."""
+    return {"root": root} if docker_env(root) is not None else {}
+
+def docker_volume_exists(name: str, root: Path | None = None) -> bool:
     try:
-        subprocess.check_output(_docker_cmd("volume", "inspect", name), stderr=subprocess.DEVNULL, timeout=5)
+        subprocess.check_output(_docker_cmd("volume", "inspect", name), stderr=subprocess.DEVNULL, timeout=5,
+                                env=docker_env(root))
         return True
     except Exception:
         return False
@@ -134,12 +152,12 @@ def _parse_size_mb(value: Any) -> int:
     }
     return max(0, int(amount * factors.get(unit, 0)))
 
-def docker_volume_sizes_mb(names: list[str] | tuple[str, ...] | set[str] | None = None) -> dict[str, int]:
+def docker_volume_sizes_mb(names: list[str] | tuple[str, ...] | set[str] | None = None, root: Path | None = None) -> dict[str, int]:
     wanted = set(names or [])
     try:
         out = subprocess.check_output(
             _docker_cmd("system", "df", "-v", "--format", "json"),
-            text=True, stderr=subprocess.DEVNULL, timeout=12,
+            text=True, stderr=subprocess.DEVNULL, timeout=12, env=docker_env(root),
         )
     except Exception:
         return {}
@@ -172,12 +190,14 @@ def docker_volume_sizes_mb(names: list[str] | tuple[str, ...] | set[str] | None 
             sizes[str(name)] = _parse_size_mb(size)
     return sizes
 
-def docker_volume_rm(name: str) -> bool:
-    subprocess.check_output(_docker_cmd("volume", "rm", name), text=True, stderr=subprocess.STDOUT, timeout=30)
+def docker_volume_rm(name: str, root: Path | None = None) -> bool:
+    subprocess.check_output(_docker_cmd("volume", "rm", name), text=True, stderr=subprocess.STDOUT, timeout=30,
+                            env=docker_env(root))
     return True
 
-def docker_image_rm(image_id: str) -> bool:
-    subprocess.check_output(_docker_cmd("image", "rm", image_id), text=True, stderr=subprocess.STDOUT, timeout=30)
+def docker_image_rm(image_id: str, root: Path | None = None) -> bool:
+    subprocess.check_output(_docker_cmd("image", "rm", image_id), text=True, stderr=subprocess.STDOUT, timeout=30,
+                            env=docker_env(root))
     return True
 
 def _json_docs(value: str) -> list[Any]:
@@ -261,7 +281,7 @@ def compose_build_image_items(root: Path) -> list[dict[str, Any]]:
         try:
             out = subprocess.check_output(
                 [*base, "images", "--format", "json", service],
-                text=True, stderr=subprocess.DEVNULL, timeout=12,
+                text=True, stderr=subprocess.DEVNULL, timeout=12, env=docker_env(root),
             )
         except Exception:
             continue
@@ -307,14 +327,14 @@ def compose_project_volume_items(root: Path) -> list[dict[str, Any]]:
     try:
         out = subprocess.check_output(
             _docker_cmd("volume", "ls", "-q", "--filter", f"label=com.docker.compose.project={name}"),
-            text=True, stderr=subprocess.DEVNULL, timeout=15,
+            text=True, stderr=subprocess.DEVNULL, timeout=15, env=docker_env(root),
         )
     except Exception:
         return []
     names = sorted({line.strip() for line in out.splitlines() if line.strip()})
     if not names:
         return []
-    sizes = docker_volume_sizes_mb(names)
+    sizes = docker_volume_sizes_mb(names, **_root_kw(root))
     return [{"type": "volume", "category": "project", "volume": n, "sizeMb": sizes.get(n, 0)} for n in names]
 
 def _compose_cache_volumes(root: Path, project: dict[str, Any] | None, data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -342,7 +362,7 @@ def _compose_cache_volumes(root: Path, project: dict[str, Any] | None, data: dic
             if isinstance(volume_spec, dict) and volume_spec.get("external"):
                 continue
             volume_name = _volume_actual_name(project, root, str(source), volume_spec)
-            if volume_name in seen or not docker_volume_exists(volume_name):
+            if volume_name in seen or not docker_volume_exists(volume_name, **_root_kw(root)):
                 continue
             seen.add(volume_name)
             category = _category_name(str(source))
@@ -355,7 +375,7 @@ def _compose_cache_volumes(root: Path, project: dict[str, Any] | None, data: dic
                 "volume": volume_name,
                 "sizeMb": 0,
             })
-    sizes = docker_volume_sizes_mb([item["volume"] for item in items])
+    sizes = docker_volume_sizes_mb([item["volume"] for item in items], **_root_kw(root))
     for item in items:
         item["sizeMb"] = sizes.get(item["volume"], 0)
     return items

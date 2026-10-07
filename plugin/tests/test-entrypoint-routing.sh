@@ -27,6 +27,13 @@ echo "$out" | grep -q "unknown command" && { echo "FAIL: forward 가 unknown com
 out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" term-request 2>&1 || true)
 echo "$out" | grep -q "unknown command" && { echo "FAIL: term-request 가 unknown command"; exit 1; }
 echo "$out" | grep -q "usage: marina term-request" || { echo "FAIL: term-request 미라우팅 — $out"; exit 1; }
+# runtime: 런타임 타깃(옛 marina remote use) — 입구에 안 걸면 unknown command. status 는 전역 기본(로컬)이 나와야 한다
+out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" runtime status --global 2>&1 || true)
+echo "$out" | grep -q "unknown command" && { echo "FAIL: runtime 이 unknown command"; exit 1; }
+echo "$out" | grep -q "^런타임: 로컬" || { echo "FAIL: runtime 미라우팅 — $out"; exit 1; }
+# remote use|inherit: 옮겼다고 안내하고 실패(argparse invalid choice 로 떨어지면 안 됨), funnel 도움말은 그대로
+rc=0; out=$(MARINA_HOME="$(mktemp -d)" bash "$EP" remote use 2>&1) || rc=$?
+[[ "$rc" != 0 ]] && echo "$out" | grep -q "marina runtime" || { echo "FAIL: remote use 안내 없음 rc=$rc — $out"; exit 1; }
 # link: 등록 안 된 tmp cwd 에서도 전역 usage 가 아닌 marina.sh 응답(성공/무출력/자체 에러)이어야 함
 out=$(cd "$(mktemp -d)" && MARINA_HOME="$(mktemp -d)" bash "$EP" link 2>&1 || true)
 echo "$out" | grep -q "전역 CLI" && { echo "FAIL: link 가 전역 usage 로 떨어짐"; exit 1; }

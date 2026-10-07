@@ -64,12 +64,12 @@ def _targets_own_runtime(cmd: str, cwd: str) -> bool:
     무관한 기계면 False — 기존의 "원격은 안 막는다" 취지를 그대로 둔다."""
     try:
         from marina_paths import session_dir
-        from marina_runtime_target import load_target
+        from marina_runtime_target import load_target, project_id_for_root
         root = subprocess.run(["git", "-C", cwd, "rev-parse", "--show-toplevel"],
                               capture_output=True, text=True, timeout=5).stdout.strip()
         if not root:
             return False
-        target = load_target(str(session_dir(Path(root))))
+        target = load_target(str(session_dir(Path(root))), project_id=project_id_for_root(root))
         if not getattr(target, "is_remote", False):
             return False
         host = target.host.split("://", 1)[-1].strip("/")

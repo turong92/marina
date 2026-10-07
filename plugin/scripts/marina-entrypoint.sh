@@ -4,7 +4,8 @@
 #   marina start|stop|restart|rebuild|clean-rebuild <svc..> # 현재 worktree(cwd) 의 서비스 (전체는 --all)
 #   marina status | ports | logs [svc]       # 현재 worktree 상태/포트/로그
 #   marina project {add|rm|ls|default|infer} # 프로젝트 레지스트리 (~/.marina/projects.json)
-#   marina dashboard [start|stop|restart|status|open]# 전역 대시보드(:3900). 무인자 marina = dashboard start
+#   marina dashboard [start|stop|off|on|restart|status|open]# 전역 대시보드(:3900). 무인자 marina = dashboard start
+#     off = stop + "꺼 둠" 표시(무인자 marina 가 안 띄움) · on = 표시 삭제 + start
 #
 # 스크립트는 모두 이 파일의 형제(scripts/) — 어디서 실행하든 위치독립.
 
@@ -73,13 +74,15 @@ usage (marina = 전역 CLI):
   고아 프로세스 (Claude 세션이 남긴 ppid=1 고아 — 데몬이 주기적으로 같은 판정으로 정리):
     marina reap [--dry-run] [--min-age-hours N]     # 로그: ~/.marina/reaper.log · MARINA_REAPER=0 으로 끔
   dashboard (:3900):
-    marina dashboard [start|stop|restart|status|open]    # 무인자 marina = dashboard start
+    marina dashboard [start|stop|off|on|restart|status|open]    # 무인자 marina = dashboard start · off = stop + 꺼 둠 표시(무인자 marina 가 안 띄움) · on = 표시 삭제 + start
   mobile:
     marina mobile enable|url|address|open|token|rotate|status|doctor|disable [host-or-base-url]
   accounts:
     marina auth status|reset-admin|disable
     marina user list|add|approve|reject|disable|reset-password
     marina remote status|serve|funnel|off
+  runtime (컨테이너가 도는 기계 — 전역 < 프로젝트 < 워크트리):
+    marina runtime use [<ssh://user@host>] | local | inherit | status   [--global | --project [<id>]]
   setup: marina attach | install-cli | uninstall-cli
 EOF
 }
@@ -211,11 +214,18 @@ mobile_probe_dashboard() {
   fi
 }
 
+bare_marina=0; [[ -z "${1:-}" ]] && bare_marina=1
 command="${1:-dashboard}"
 shift || true
 
 case "$command" in
   remote)
+    # 런타임 타깃(use|inherit)은 `marina runtime` 로 옮겼다 — 이 명령은 Tailscale funnel 도구다. 안 알리면 argparse 에러만 본다.
+    case "${1:-}" in
+      use|inherit)
+        echo "런타임 타깃은 \`marina runtime $*\` 로 옮겼다 (marina remote 는 Tailscale funnel 도구: status|serve|funnel|off)" >&2
+        exit 2 ;;
+    esac
     exec "${MARINA_PYTHON:-$(command -v python3 || echo /usr/bin/python3)}" "$REMOTE_CLI" "$@"
     ;;
   docker)
@@ -245,18 +255,32 @@ case "$command" in
     done
     exec_session_with_env "$command" ${lifecycle_args[@]+"${lifecycle_args[@]}"}
     ;;
+  runtime)
+    # root 를 start|stop|status 와 같은 방식으로 푼다(서브레포 cwd → 워크스페이스 루트). 그냥 위임하면 서브레포 폴더에 세션 설정이 써진다.
+    exec_session_with_env runtime "$@"
+    ;;
   status|ports|logs)
     # 변환 불요(단일/무인자)
     exec_session_with_env "$command" "$@"
     ;;
   dashboard)
+    # "꺼 둠" 표시 — 사람이 친 `marina dashboard off` 만 만들고(stop 은 원래대로 표시 없음), on·명시적 start|restart 가 지운다.
+    dashboard_off_mark="${MARINA_HOME:-$HOME/.marina}/dashboard-off"
+    if [[ "$bare_marina" == 1 && -e "$dashboard_off_mark" ]]; then
+      echo "대시보드는 꺼 둠 — 켜려면 marina dashboard start"
+      usage
+      exit 0
+    fi
     case "${1:-start}" in
-      start|"") "$DASHBOARD" start; print_dashboard_url ;;
+      start|"") rm -f "$dashboard_off_mark"; "$DASHBOARD" start; print_dashboard_url ;;
       stop)     "$DASHBOARD" stop ;;
-      restart)  "$DASHBOARD" restart; print_dashboard_url ;;
+      off)      "$DASHBOARD" stop
+                if [[ "${MARINA_DRY_RUN:-}" != "1" ]]; then mkdir -p "$(dirname "$dashboard_off_mark")"; : > "$dashboard_off_mark"; fi ;;
+      on)       rm -f "$dashboard_off_mark"; "$DASHBOARD" start; print_dashboard_url ;;
+      restart)  rm -f "$dashboard_off_mark"; "$DASHBOARD" restart; print_dashboard_url ;;
       status)   "$DASHBOARD" status ;;
       open)     shift; exec "$0" open ;;
-      *) echo "usage: marina dashboard {start|stop|restart|status|open}" >&2; exit 2 ;;
+      *) echo "usage: marina dashboard {start|stop|off|on|restart|status|open}" >&2; exit 2 ;;
     esac
     ;;
   runtimed)

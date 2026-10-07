@@ -31,11 +31,11 @@ from marina_paths import selected_log, session_dir, session_id, write_config, wr
 def _runtime_target_describe(root=None):
     """서버 현황 영역이 그릴 런타임 타깃. root 가 없으면 전역만(대시보드 상단은 워크트리 무관)."""
     try:
-        from marina_runtime_target import describe
+        from marina_runtime_target import describe, project_id_for_root
         sd = str(session_dir(Path(root))) if root else ""
-        return describe(sd, home=str(MARINA_HOME))
+        return describe(sd, home=str(MARINA_HOME), project_id=project_id_for_root(root))
     except Exception:
-        return {"kind": "local", "host": None, "scope": "default", "globalHost": None}
+        return {"kind": "local", "host": None, "scope": "default", "projectHost": None, "globalHost": None}
 from marina_cli import _marina_cli, run_marina, run_marina_registry
 from marina_build import build_summary
 

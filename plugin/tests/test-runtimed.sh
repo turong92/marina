@@ -102,4 +102,60 @@ assert rd._new_code_ok(Path("/x")) == (False, rd.RECHECK_BAD_S)
 su.preflight = lambda d: (False, su.UNAVAILABLE + "timeout")
 assert rd._new_code_ok(Path("/x")) == (False, rd.RECHECK_UNAVAILABLE_S)
 PY2
+
+# 게이트웨이 부팅 — 대시보드를 영구히 내린 맥에서 재부팅 뒤 caddy(3902)가 안 떴다. refresh_gateway 는 "이미 떠 있을 때만"
+# 갱신하므로, runtimed 가 뜰 때(그리고 틱에서) 켜도록 설정돼 있고 caddy 가 있는데 꺼져 있으면 띄운다.
+# `marina gateway stop` 으로 일부러 끈 건 표시 파일(gateway/stopped-by-user)로 구분해 존중한다(start 가 지운다).
+PYTHONPATH="$SCRIPTS" python3 - <<'PY3'
+import sys
+from pathlib import Path
+import marina_lifecycle as ml
+import marina_runtimed as rd
+
+calls = []
+ml.ensure_gateway = lambda: calls.append("ensure")
+class GW:  # caddy 있음
+    @staticmethod
+    def caddy_bin(): return "/x/caddy"
+ml._gw = lambda: GW
+ml._GATEWAY_ON = True
+ml._gw_pid_alive = lambda: False
+mark = ml._GW_DIR / "stopped-by-user"
+mark.unlink(missing_ok=True)
+
+def boot():
+    ml._boot_last = float("-inf")           # 간격 제한 초기화
+    calls.clear(); ml.boot_gateway(); return list(calls)
+
+assert boot() == ["ensure"], f"꺼져 있고 caddy 있으면 띄운다: {boot()}"
+ml._GATEWAY_ON = False
+assert boot() == [], "게이트웨이 설정이 꺼져 있으면 안 띄운다"
+ml._GATEWAY_ON = True
+ml._gw_pid_alive = lambda: True
+assert boot() == [], "이미 떠 있으면 부팅 경로는 건드리지 않는다(갱신은 refresh)"
+ml._gw_pid_alive = lambda: False
+GW.caddy_bin = staticmethod(lambda: None)
+assert boot() == [], "caddy 가 없으면 조용히"
+GW.caddy_bin = staticmethod(lambda: "/x/caddy")
+mark.parent.mkdir(parents=True, exist_ok=True); mark.write_text("")
+assert boot() == [], "사용자가 marina gateway stop 으로 끈 건 존중한다"
+mark.unlink()
+# 간격 제한 — 꺼져 있는 동안 매 틱(5초)마다 스냅샷을 뜨지 않는다
+ml._boot_last = float("-inf"); calls.clear()
+ml.boot_gateway(); ml.boot_gateway()
+assert calls == ["ensure"], f"연속 호출은 한 번만: {calls}"
+
+# runtimed 의 기본 게이트웨이 틱이 갱신과 부팅을 둘 다 부른다
+seen = []
+ml.refresh_gateway = lambda: seen.append("refresh")
+ml.boot_gateway = lambda: seen.append("boot")
+rd._refresh_gateway()
+assert seen == ["refresh", "boot"], f"runtimed 틱: {seen}"
+PY3
+# stop 은 표시를 남기고 start 는 지운다(자동 기동이 의도적 정지를 뒤집지 않게)
+GWH="$(mktemp -d)"
+MARINA_HOME="$GWH" bash "$SCRIPTS/marina-gateway-control.sh" stop >/dev/null
+[ -f "$GWH/gateway/stopped-by-user" ] || fail "gateway stop 이 표시 파일을 안 남겼다"
+grep -q 'rm -f "\$STOP_MARK"' "$SCRIPTS/marina-gateway-control.sh" || fail "gateway start 가 표시를 안 지운다"
+rm -rf "${GWH:?}"
 echo "PASS test-runtimed"

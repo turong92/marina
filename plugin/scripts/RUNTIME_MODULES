@@ -9,6 +9,7 @@ marina_memory
 marina_cache
 marina_logtext
 marina_runtime_target
+marina_runtime_cli
 marina_ssh_mux
 marina_worktrees
 marina_liveness

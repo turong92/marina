@@ -167,6 +167,13 @@ compose_main() {
       [[ $# -gt 0 ]] || { echo "usage: marina $command <--service..|--all>   (전체 스택은 --all)" >&2; exit 2; } ;;
   esac
 
+  # 런타임 타깃(원격 박스)이면 이 함수의 모든 docker 호출(info·compose ps·logs -f)과 그 자식(marina-compose.py)이 그 박스를 본다.
+  # 로컬(설정 없음)이면 `env` 가 아무것도 안 내므로 환경이 한 글자도 안 바뀐다.
+  local _rt_line
+  while IFS= read -r _rt_line; do
+    [[ "$_rt_line" == *=* ]] && export "$_rt_line"
+  done < <(PYTHONPATH="$SCRIPT_DIR" python3 "$SCRIPT_DIR/marina_runtime_cli.py" env --root "$ROOT" 2>/dev/null || true)
+
   command -v docker >/dev/null 2>&1 || die "compose 실행엔 docker 필요 — 설치·기동 후 다시."
   if [[ "$command" == "start" || "$command" == "restart" || "$command" == "rebuild" || "$command" == "clean-rebuild" ]]; then
     docker info >/dev/null 2>&1 || die "docker 데몬 미가동 (docker info 실패) — 기동 후 다시."

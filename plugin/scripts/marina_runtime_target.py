@@ -154,33 +154,96 @@ def _read_config(path: Path) -> dict | None:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
-        sys.stderr.write(f"warning: runtime-target 설정을 읽지 못했습니다({path}): {exc} — 로컬로 처리합니다\n")
+        sys.stderr.write(f"warning: runtime-target 설정을 읽지 못했습니다({path}): {exc} — 이 계층을 건너뜁니다\n")
         return None
     if not isinstance(raw, dict) or not raw.get("kind"):
-        sys.stderr.write(f"warning: runtime-target 설정에 kind 가 없습니다({path}) — 로컬로 처리합니다\n")
+        sys.stderr.write(f"warning: runtime-target 설정에 kind 가 없습니다({path}) — 이 계층을 건너뜁니다\n")
         return None
     return raw
 
 
-def load_target(session_dir: str, home: str | None = None):
-    """런타임 타깃을 계층으로 해석한다: **전역 기본 < 세션(워크트리) override**.
+def _home(home: str | None) -> str:
+    return home or os.environ.get("MARINA_HOME") or os.path.expanduser("~/.marina")
 
-    - 전역   `<MARINA_HOME>/runtime-target.json` — 박스 주소를 여기 한 번 저장한다.
-    - 세션   `<session_dir>/runtime-target.json` — 이 워크트리만 켜고 끈다. 전역을 양방향으로 덮는다.
 
-    세션이 `{"kind":"remote"}` 만 적고 주소를 생략하면 **전역 주소를 물려받는다** — 팀원이 워크트리를
-    원격으로 넘길 때 매번 IP 를 칠 일이 없게. 물려받을 주소도 없으면 로컬로 떨어진다: 어디로 가는지
-    모르는 채 원격을 시도하는 것이 로컬로 도는 것보다 위험하다."""
-    home = home or os.environ.get("MARINA_HOME") or os.path.expanduser("~/.marina")
-    g = _read_config(Path(home, CONFIG_NAME)) or {}
-    sess = _read_config(Path(session_dir, CONFIG_NAME)) if session_dir else None
-    cfg = sess if sess is not None else g                     # 세션이 말했으면 그게 최종(양방향 override)
-    if cfg.get("kind") != "remote":
-        return LocalTarget()
-    host = cfg.get("host") or (g.get("host") if sess is not None else None)   # 세션이 주소 생략 → 전역 물려받기
-    if not isinstance(host, str) or not host.strip():
-        return LocalTarget()
-    return RemoteTarget(host.strip())
+def project_dir(project_id: str, home: str | None = None) -> str:
+    """프로젝트 설정 폴더 — marina 가 프로젝트별 상태(보관 compose 등)를 두는 `<MARINA_HOME>/<project-id>/`.
+
+    id 가 경로를 벗어나면(`../x`, `a/b`) 거부한다 — 설정 쓰기가 엉뚱한 폴더로 가면 안 된다."""
+    pid = (project_id or "").strip()
+    if not pid or pid in (".", "..") or "/" in pid or "\\" in pid:
+        raise ValueError(f"프로젝트 id 가 올바르지 않다: {project_id!r}")
+    return str(Path(_home(home), pid))
+
+
+def project_id_for_root(root) -> str | None:
+    """워크트리 root → 프로젝트 id(레지스트리). 못 알아내면 None = 프로젝트 계층 없이 지금 동작 그대로."""
+    if not root:
+        return None
+    try:
+        import marina_registry
+        project = marina_registry.project_for(Path(root))
+        return str(project["id"]) if project else None
+    except Exception:
+        return None
+
+
+def layers(session_dir: str, home: str | None = None, project_id: str | None = None) -> dict:
+    """계층별 원본 설정. 말 안 한 계층은 None. 키: session · project · global."""
+    home = _home(home)
+    project = None
+    if project_id:
+        try:
+            project = _read_config(Path(project_dir(project_id, home), CONFIG_NAME))
+        except ValueError:
+            project = None
+    return {
+        "session": _read_config(Path(session_dir, CONFIG_NAME)) if session_dir else None,
+        "project": project,
+        "global": _read_config(Path(home, CONFIG_NAME)),
+    }
+
+
+def inherited_host(ly: dict, below: str) -> str | None:
+    """`below` 계층(session|project|global) **아래**에서 물려받을 주소. 없으면 None."""
+    order = ("session", "project", "global")
+    for name in order[order.index(below) + 1:]:
+        h = (ly[name] or {}).get("host")
+        if isinstance(h, str) and h.strip():
+            return h.strip()
+    return None
+
+
+def _resolve(ly: dict):
+    """(결정한 계층 이름 | None, 최종 설정, 주소 | None). 위(세션)부터 처음 말한 계층이 최종이다."""
+    order = ("session", "project", "global")
+    for i, name in enumerate(order):
+        cfg = ly[name]
+        if cfg is None:
+            continue
+        if cfg.get("kind") != "remote":
+            return name, cfg, None
+        # 주소를 생략한 remote 는 바로 아래 계층들에서 주소를 찾는다(세션 → 프로젝트 → 전역)
+        for lower in order[i:]:
+            h = (ly[lower] or {}).get("host")
+            if isinstance(h, str) and h.strip():
+                return name, cfg, h.strip()
+        return name, cfg, None          # 어디에도 주소 없음 → 로컬(어디로 가는지 모르는 원격이 더 위험하다)
+    return None, {}, None
+
+
+def load_target(session_dir: str, home: str | None = None, project_id: str | None = None):
+    """런타임 타깃을 계층으로 해석한다: **전역 < 프로젝트 < 세션(워크트리)**. 위가 아래를 양방향으로 덮는다.
+
+    - 전역     `<MARINA_HOME>/runtime-target.json`
+    - 프로젝트 `<MARINA_HOME>/<project-id>/runtime-target.json` — "mdc 만 원격" 을 여기서 건다.
+    - 세션     `<session_dir>/runtime-target.json` — 이 워크트리만 켜고 끈다.
+
+    위 계층이 `{"kind":"remote"}` 만 적고 주소를 생략하면 **아래 계층의 주소를 물려받는다**(세션 → 프로젝트 →
+    전역) — 매번 IP 를 칠 일이 없게. 물려받을 주소도 없으면 로컬로 떨어진다: 어디로 가는지 모르는 채 원격을
+    시도하는 것이 로컬로 도는 것보다 위험하다. `project_id` 가 None 이면 프로젝트 계층은 없는 것(옛 동작)."""
+    _, _, host = _resolve(layers(session_dir, home, project_id))
+    return RemoteTarget(host) if host else LocalTarget()
 
 _KINDS = ("local", "remote", "inherit")
 
@@ -214,20 +277,23 @@ def write_target(directory: str, kind: str, host: str | None) -> None:
         raise
 
 
-def describe(session_dir: str, home: str | None = None) -> dict:
+def describe(session_dir: str, home: str | None = None, project_id: str | None = None) -> dict:
     """대시보드가 그대로 그릴 수 있는 상태.
 
-    `scope` 는 **누가 정했는지**다 — session(이 워크트리가 덮음) / global / default(아무도 안 말함).
-    UI 가 "이 워크트리만 다르다"를 구분해 보여주고 되돌릴 수 있어야 하므로 globalHost 도 같이 준다."""
-    home = home or os.environ.get("MARINA_HOME") or os.path.expanduser("~/.marina")
-    g = _read_config(Path(home, CONFIG_NAME)) or {}
-    sess = _read_config(Path(session_dir, CONFIG_NAME)) if session_dir else None
-    target = load_target(session_dir, home=home)
-    scope = "session" if sess is not None else ("global" if g else "default")
+    `scope` 는 **누가 정했는지**다 — session(이 워크트리가 덮음) / project / global / default(아무도 안 말함).
+    UI 가 "이 워크트리만 다르다"를 구분해 보여주고 되돌릴 수 있어야 하므로 globalHost·projectHost 도 같이 준다."""
+    return describe_layers(layers(session_dir, home, project_id))
+
+
+def describe_layers(ly: dict) -> dict:
+    """`describe` 의 본체 — 이미 읽은 계층으로 계산한다(CLI 가 같은 파일을 두 번 읽어 경고를 두 번 찍지 않게)."""
+    name, _, host = _resolve(ly)
+    g, p = ly["global"] or {}, ly["project"] or {}
     return {
-        "kind": "remote" if target.is_remote else "local",
-        "host": getattr(target, "host", None) if target.is_remote else None,
-        "scope": scope,
+        "kind": "remote" if host else "local",
+        "host": host,
+        "scope": name or "default",
+        "projectHost": (p.get("host") if p.get("kind") == "remote" else None),
         "globalHost": (g.get("host") if g.get("kind") == "remote" else None),
     }
 
@@ -241,6 +307,7 @@ def docker_env_for_root(root) -> dict:
         return {}
     try:
         import marina_paths
-        return load_target(str(marina_paths.session_dir(Path(root)))).docker_env()
+        return load_target(str(marina_paths.session_dir(Path(root))),
+                           project_id=project_id_for_root(root)).docker_env()
     except Exception:
         return {}

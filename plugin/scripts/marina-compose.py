@@ -1680,14 +1680,14 @@ def _write_invocation_overlay(session_dir, overlay_text):
         raise
 
 
-def _env_with(overrides, session_dir=None):
+def _env_with(overrides, session_dir=None, project_id=None):
     """compose 호출이 받을 env. 모든 호출(up/build/watch/config)이 여기서 나온다 = 초크포인트 1곳.
 
     session_dir 을 주면 그 워크트리의 런타임 타깃을 반영한다(원격이면 DOCKER_HOST). 로컬 타깃은 빈
     델타를 주므로 기존 호출과 완전히 같다. 명시 override(--env)가 타깃보다 우선한다 — 디버깅 탈출구."""
     env = dict(os.environ)
     if session_dir:
-        env.update(load_runtime_target(session_dir).docker_env())
+        env.update(load_runtime_target(session_dir, project_id=project_id).docker_env())
     for kv in overrides:
         k, _, v = kv.partition("=")
         if k:
@@ -1695,14 +1695,14 @@ def _env_with(overrides, session_dir=None):
     return env
 
 
-def _lifecycle_env(session_dir):
+def _lifecycle_env(session_dir, project_id=None):
     """stop/down/restart/status/logs 가 쓸 env. 원격이면 그 박스를 향한다.
 
     없으면 로컬 데몬을 보며 "그런 컨테이너 없다"고 한다 — 원격에 띄운 스택을 **정지조차 못 한다**.
     로컬 타깃은 빈 델타라 기존 호출과 완전히 같다."""
     env = dict(os.environ)
     if session_dir:
-        env.update(load_runtime_target(session_dir).docker_env())
+        env.update(load_runtime_target(session_dir, project_id=project_id).docker_env())
     return env
 
 
@@ -2272,7 +2272,7 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                     )
             # ⑦ 원격이면 기동이 create → inject → start 로 쪼개진다(부팅 전에 파일이 들어가야 함).
             # 로컬은 plan 이 항상 단일 up 이라 기존 동작과 동일하다.
-            _target = load_runtime_target(a.session_dir)
+            _target = load_runtime_target(a.session_dir, project_id=getattr(a, "project_id", None))
             plan = startup_plan(
                 _target, injection_plan_for(config, _target, services=requested + sidecars),
                 a.stored, overlay, a.project_dir, name, requested + sidecars,
@@ -2333,7 +2333,7 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                 summary = _forward_summary(_applied_forward(svc_cfg, requested, forward))
                 if summary:
                     print(summary)
-                _show_ports(name)
+                _show_ports(name, env=env)
             return rc
         finally:
             if overlay:
@@ -2344,7 +2344,7 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
 
 
 def cmd_up(a):
-    env = _env_with(a.env, session_dir=a.session_dir)               # P1: env first (+런타임 타깃)
+    env = _env_with(a.env, session_dir=a.session_dir, project_id=getattr(a, "project_id", None))               # P1: env first (+런타임 타깃)
     name = compose_project_name(a.project_id, a.session)
     try:
         config = docker_config_json(a.stored, a.project_dir, name, env)  # 비밀번호 in-memory only, 저장 안 함
@@ -2402,7 +2402,7 @@ def cmd_up(a):
             exp_env = resolve_expose_env(gw_gateway.get("expose") or {}, a.session, a.project_id, gwport,
                                          snap_services, gw_mod, primary=str(gw_gateway.get("primary") or ""))
         build_args = _parse_build_args(getattr(a, "build_arg", []))
-        _up_target = load_runtime_target(a.session_dir)
+        _up_target = load_runtime_target(a.session_dir, project_id=getattr(a, "project_id", None))
         overlay_text = build_overlay(config, build_args=build_args,
                                      connectivity=overlay_conn, expose_env=exp_env,
                                      target=_up_target,
@@ -2465,7 +2465,7 @@ def cmd_prebuild_run(a):
 
 
 def cmd_watchable(a):
-    env = _env_with(a.env, session_dir=getattr(a, 'session_dir', None))
+    env = _env_with(a.env, session_dir=getattr(a, 'session_dir', None), project_id=getattr(a, 'project_id', None))
     name = compose_project_name(a.project_id, a.session)
     try:
         session_dir = getattr(a, "session_dir", None)
@@ -2489,7 +2489,7 @@ def cmd_watchable(a):
 
 
 def cmd_watch(a):
-    env = _env_with(a.env, session_dir=getattr(a, 'session_dir', None))
+    env = _env_with(a.env, session_dir=getattr(a, 'session_dir', None), project_id=getattr(a, 'project_id', None))
     name = compose_project_name(a.project_id, a.session)
     argv = watch_argv(a.stored, _overlay_path(a.session_dir), a.project_dir, name, a.service)
     print("compose watch: " + " ".join(argv), flush=True)
@@ -2502,7 +2502,7 @@ def cmd_watch(a):
 
 def cmd_down(a):  # 전체 teardown (stop --all). --volumes 요청 시 compose named volume 도 제거
     name = compose_project_name(a.project_id, a.session)
-    env = _lifecycle_env(getattr(a, "session_dir", None))
+    env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
     _stop_remote_tunnel(getattr(a, "session_dir", None))     # 내려가면 터널도 같이 걷는다
     verb = ["down", "--remove-orphans"] + (["--volumes"] if getattr(a, "volumes", False) else [])
     return subprocess.call(label_argv(name, verb), env=env)  # P7/P8
@@ -2510,7 +2510,7 @@ def cmd_down(a):  # 전체 teardown (stop --all). --volumes 요청 시 compose n
 
 def cmd_stop(a):  # 선택 서비스만 정지 — 컨테이너 유지
     name = compose_project_name(a.project_id, a.session)
-    env = _lifecycle_env(getattr(a, "session_dir", None))
+    env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
     if not a.service:                                        # 전체 정지면 터널도 걷는다
         _stop_remote_tunnel(getattr(a, "session_dir", None))
     return subprocess.call(label_argv(name, ["stop", *a.service]), env=env)  # P7
@@ -2518,13 +2518,13 @@ def cmd_stop(a):  # 선택 서비스만 정지 — 컨테이너 유지
 
 def cmd_restart(a):  # 선택 서비스만 재시작 (quick bounce, config 재해석 안 함)
     name = compose_project_name(a.project_id, a.session)
-    env = _lifecycle_env(getattr(a, "session_dir", None))
+    env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
     return subprocess.call(label_argv(name, ["restart", *a.service]), env=env)   # P7
 
 
 def cmd_status(a):
     name = compose_project_name(a.project_id, a.session)
-    env = _lifecycle_env(getattr(a, "session_dir", None))
+    env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
     try:
         out = subprocess.check_output(label_argv(name, ["ps", "--format", "json"]), text=True, env=env)
     except subprocess.CalledProcessError:
@@ -2541,7 +2541,7 @@ def cmd_logs(a):
     name = compose_project_name(a.project_id, a.session)
     verb = ["logs"] + ([] if a.no_follow else ["-f"]) + list(a.service)
     return subprocess.call(label_argv(name, verb),
-                           env=_lifecycle_env(getattr(a, "session_dir", None)))   # P7
+                           env=_lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None)))   # P7
 
 
 # ---- test hooks (stdin) ----
