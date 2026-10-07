@@ -45,16 +45,24 @@ class H(BaseHTTPRequestHandler):
         log({"m": "GET", "p": self.path})
         if not self._auth():
             return
-        p = self._parts()
+        from urllib.parse import urlsplit, parse_qs
+        u = urlsplit(self.path); p = u.path.strip("/").split("/"); q = parse_qs(u.query)
+        mf = state / "messages.json"            # {채널ID: [메시지…]} — 테스트가 심는다
+        seeded = json.loads(mf.read_text()) if mf.exists() else {}
         if len(p) == 3 and p[0] == "guilds" and p[2] == "channels":
             with lock:
                 self._send(200, list(channels.values()))
             return
+        if len(p) == 3 and p[0] == "channels" and p[2] == "messages":
+            after = int((q.get("after") or ["0"])[0]); limit = int((q.get("limit") or ["50"])[0])
+            rows = sorted((m for m in seeded.get(p[1], []) if int(m["id"]) > after), key=lambda m: int(m["id"]))[:limit]
+            self._send(200, rows[::-1]); return     # Discord 처럼: after 에 가까운 것부터 limit 개를 최신이 먼저
         if len(p) == 4 and p[0] == "channels" and p[2] == "messages":
             gone = (state / "gone").read_text().split() if (state / "gone").exists() else []
             if p[3] in gone:
                 self._send(404, {"message": "Unknown Message"}); return
-            self._send(200, {"id": p[3]}); return
+            hit = next((m for m in seeded.get(p[1], []) if m["id"] == p[3]), None)
+            self._send(200, hit or {"id": p[3]}); return
         if p == ["users", "@me"]:
             self._send(200, {"id": "BOT1", "bot": True}); return
         if len(p) == 3 and p[0] == "guilds" and p[2] == "roles":

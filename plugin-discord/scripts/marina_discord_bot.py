@@ -132,6 +132,8 @@ def _ctx_percent(rec: dict[str, Any]) -> float | None:
 _BG_SHELL = re.compile(r"Command running in background with ID: (\w+)")
 _BG_AGENT = re.compile(r"agentId: (\w+)")
 _BG_MOVED = re.compile(r"moved to the background \(ID: (\w+)\)")   # 시간 초과로 하네스가 백그라운드로 옮긴 명령(실측)
+_MONITOR_START = re.compile(r"Monitor started \(task (\w+)(?:, (?:timeout (\d+)ms|expires in ([^)]*)))?")
+_MONITOR_DEFAULT_S = 3600.0        # 만료 시각을 못 읽으면 이만큼 지나야 끝난 것으로(막는 쪽)
 _TASK_DONE = re.compile(r"<task-id>(\w+)</task-id>.*?<status>(\w+)</status>", re.S)
 
 
@@ -149,9 +151,10 @@ def background_tasks(transcript: Path) -> list[dict[str, Any]]:
     return [t for i, t in started.items() if i not in done]
 
 
-def _scan_tasks(transcript: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
+def _scan_tasks(transcript: Path, monitors: "dict[str, dict[str, Any]] | None" = None) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """monitors 를 주면 Monitor 도구로 건 감시({id: {"at": 시작 시각(0=모름), "ttl": 만료까지 초}})도 채운다 — 셸·에이전트 목록과는 따로(대시보드 표시를 안 바꾼다)."""
     try:
-        data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
+        data = _tail_text(transcript)          # 끝 2MB 만 seek 로(통째로 읽지 않는다)
     except OSError:
         return {}, set()
     descs: dict[str, str] = {}
@@ -179,12 +182,20 @@ def _scan_tasks(transcript: Path) -> tuple[dict[str, dict[str, Any]], set[str]]:
                     bg_use[str(b.get("id"))] = "shell" if b.get("name") == "Bash" else "agent"
                 elif b.get("name") == "Bash":
                     bg_use[str(b.get("id"))] = "moved"
+                if b.get("name") == "Monitor":
+                    bg_use[str(b.get("id"))] = "monitor"
                 if b.get("name") in ("TaskStop", "KillShell", "KillBash"):    # 손으로 끈 건 알림이 없다(실측)
                     done.add(str(b["input"].get("task_id") or b["input"].get("shell_id") or b["input"].get("bash_id") or ""))
             elif b.get("type") == "tool_result":
                 # 백그라운드로 띄운 도구의 결과만 — 동기 에이전트 결과·파일 내용 속 같은 글자는 무시(리뷰 I1)
                 kind = bg_use.get(str(b.get("tool_use_id")))
                 if not kind:
+                    continue
+                if kind == "monitor":
+                    for t in _texts(b.get("content")):
+                        m = _MONITOR_START.search(t)
+                        if m and monitors is not None:
+                            monitors[m.group(1)] = {"at": _row_time(row), "ttl": float(m.group(2)) / 1000.0 if m.group(2) else _MONITOR_DEFAULT_S}
                     continue
                 rx = {"shell": _BG_SHELL, "agent": _BG_AGENT, "moved": _BG_MOVED}[kind]
                 for t in _texts(b.get("content")):
@@ -345,6 +356,11 @@ def _pane_permission(name: str) -> bool:
 def snapshot(full: bool = True) -> dict[str, Any]:
     """full=False: 4초마다 도는 가벼운 판정(작업 중 여부만). ctx·사용량·서버는 그릴 때만."""
     rows = []
+    import marina_discord_wake as mw
+    try:
+        wake_on = mw.enabled(ms.load_config())
+    except ms.SessionError:
+        wake_on = False
     for rec in ms.load_sessions():
         if str(rec.get("kind") or "").endswith("lobby") or not rec.get("channelId"):
             continue
@@ -354,6 +370,7 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         act = ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent")))
         rows.append({"ref": f"{rec.get('project')}/{rec.get('task')}", "channelId": str(rec["channelId"]),
                      "alive": alive, "busy": busy, "bg": bg, "emoji": str(act.get("emoji") or "") if busy else "",
+                     "wakeable": (not alive) and wake_on and Path(str(rec.get("root") or "/nonexistent")).is_dir(),   # 글을 쓰면 깨어나는 방
                      "ctx": _ctx_percent(rec) if alive and full else None,
                      "tasks": live_tasks(rec) if alive and full else [],
                      "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists(),
@@ -473,7 +490,7 @@ def _view_button(r: dict[str, Any]) -> dict[str, Any]:
 
 
 def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
-    """#상태 메시지(Components V2). 섹션: 작업 중(줄마다 정지 버튼) · 대기 · 꺼짐. 같으면 고쳐 쓰지 않는다.
+    """#상태 메시지(Components V2). 섹션: 작업 중(줄마다 정지 버튼) · 대기 · 잠듦(글을 쓰면 깨어남) · 꺼짐. 같으면 고쳐 쓰지 않는다.
     디스크·부하·시각은 꼬리말로 따로 — 매번 바뀌는 값이 비교를 흔들지 않게."""
     use = [f"{w.get('label')} `{_bar(float(w.get('usedPercent') or 0))}` {round(float(w.get('usedPercent') or 0))}%"
            for w in snap["usage"] if w.get("key") in ("fiveHour", "weekly")]
@@ -485,9 +502,10 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     busy = [r for r in rows if r["busy"]]
     bg = [r for r in rows if r["alive"] and not r["busy"] and r.get("tasks")]
     idle = [r for r in rows if r["alive"] and not r["busy"] and not r.get("tasks")]
-    off = [r for r in rows if not r["alive"]]
-    # 메시지당 구성요소 40개(중첩 포함) — 아래 대기·꺼짐·꼬리말 몫(6)을 남기고 넘치면 '외 N개'(리뷰 I2)
-    room = [40 - 6 - (2 if snap.get("roleUsage") else 0) - _count(out) - 4]
+    asleep = [r for r in rows if not r["alive"] and r.get("wakeable")]
+    off = [r for r in rows if not r["alive"] and not r.get("wakeable")]
+    # 메시지당 구성요소 40개(중첩 포함) — 아래 백그라운드 머리·'외 N개'·대기·잠듦·꺼짐·꼬리말 몫(9)을 남기고 넘치면 '외 N개'(리뷰 I2)
+    room = [40 - 9 - (2 if snap.get("roleUsage") else 0) - _count(out) - 4]
     def add(block: list[dict[str, Any]]) -> bool:
         if _count(block) > room[0]:
             return False
@@ -513,6 +531,9 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
         out.append(_text(_role_block(snap["roleUsage"])))
     out.append({"type": 14})
     out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) for r in idle)))
+    if asleep:
+        out.append({"type": 14})
+        out.append(_text(f"### 🌙 잠듦 {len(asleep)}\n-# 글을 쓰면 깨어나" + "".join("\n" + _row(r, proj_w) for r in asleep)))
     if off:
         out.append({"type": 14})
         out.append(_text(f"### ⚫ 꺼짐 {len(off)}" + "".join("\n" + _row(r, proj_w) for r in off)))
@@ -918,6 +939,9 @@ def _spawn_type(tmux: str, text: str, channel: str, mid: str, button: str = "") 
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
+SLEEPING_TEXT = "이 방은 잠들어 있어 — 글을 쓰면 깨어나"
+
+
 def say(channel: str, user: str, message: str = "") -> str:
     """[▶ 추천] 누름: 한 번만. 허용 명령은 그대로, 글은 '[Discord 추천 버튼]' 을 붙여 입력창에(답은 Discord 로 — 규칙).
     누른 버튼이 지금 추천의 메시지가 아니면(남은 옛 버튼) 치지 않고 그 버튼을 뗀다(리뷰 I3)."""
@@ -927,6 +951,8 @@ def say(channel: str, user: str, message: str = "") -> str:
     dc = _dc(ms.load_config())
     if not _allowed(rec, channel, user, dc):
         return "누를 권한이 없어"
+    if not ms.tmux_alive(str(rec.get("tmux") or "")):
+        return SLEEPING_TEXT
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))
     try:
         sug = json.loads((sd / "suggest.json").read_text(encoding="utf-8"))
@@ -1017,6 +1043,8 @@ def slash(channel: str, user: str, name: str, value: str = "", args: str = "", m
         return "이 채널은 세션 명령을 안 받아"
     if not _allowed(rec, channel, user, _dc(ms.load_config())):
         return "쓸 권한이 없어"
+    if not ms.tmux_alive(str(rec.get("tmux") or "")):
+        return SLEEPING_TEXT
     if name == "stop":
         return interrupt(channel, user, "")
     if name == "skill":
@@ -1567,7 +1595,9 @@ def clear_perms(sd: Path, channel: str) -> None:
 
 def typeable(text: str) -> bool:
     """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글, 이어받기 안내, 허용 명령만."""
-    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK)) or text == ms.RESUME_TEXT
+    import marina_discord_wake as mw
+    return (ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK))
+            or text in (ms.RESUME_TEXT, mw.WAKE_LATE_TEXT))
 
 
 RESTART_AGENT_FRESH = 1800.0     # 재시작 판정: 안 끝난 에이전트는 30분 조용해야 죽은 것으로 본다(긴 빌드·녹화로 5분 넘게 조용한 에이전트가 있었다, 2026-10-07 사고)
@@ -1588,6 +1618,107 @@ def _row_time(row: dict[str, Any]) -> float:
         return datetime.datetime.fromisoformat(str(row.get("timestamp") or "").replace("Z", "+00:00")).timestamp()
     except ValueError:
         return 0.0
+
+
+def _live_monitors(tr: Path, born: float) -> list[str]:
+    """Monitor 도구로 건 감시 중 안 끝난 것 — 끝남 알림(status)·TaskStop·만료 시각 경과로 끝난 것은 뺀다. 세션이 뜨기 전 것은 그 세션과 함께 죽었다.
+    시작 시각을 못 읽으면 끝났는지 모르니 막는다."""
+    mons: dict[str, dict[str, Any]] = {}
+    _started, done = _scan_tasks(tr, mons)
+    now = time.time()
+    out = []
+    for tid, m in mons.items():
+        if tid in done:
+            continue
+        at = m["at"]
+        if at and at < born:
+            continue
+        if at and at + m["ttl"] < now:
+            continue
+        out.append(tid)
+    return out
+
+
+_CRON_JOB = re.compile(r"\bjob (\w+)")
+
+
+CRON_EXPIRE_S = 7 * 86400.0         # 결과 문구 "Auto-expires after 7 days" — 만든 지 이만큼 지난 예약은 이미 사라졌다
+
+
+def _cron_next(expr: str, after: float) -> float:
+    """숫자로만 적힌 5필드 크론 식(분 시 일 월 요일, 일·월·요일은 *도 가능)의 after 다음 발화 시각(로컬). 못 풀면 0."""
+    f = str(expr).split()
+    if len(f) != 5 or not f[0].isdigit() or not f[1].isdigit() or any(not (x == "*" or x.isdigit()) for x in f[2:]):
+        return 0.0
+    minute, hour = int(f[0]), int(f[1])
+    base = datetime.datetime.fromtimestamp(after)
+    for d in range(0, 400):
+        day = (base + datetime.timedelta(days=d)).replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if f[2] != "*" and day.day != int(f[2]) or f[3] != "*" and day.month != int(f[3]):
+            continue
+        if f[4] != "*" and (day.weekday() + 1) % 7 != int(f[4]) % 7:
+            continue
+        if day.timestamp() > after:
+            return day.timestamp()
+    return 0.0
+
+
+def _pending_crons(tr: Path | None, born: float = 0.0) -> list[str]:
+    """세션이 뜬(born) 뒤 CronCreate 로 걸었고 아직 끝나지 않은 예약들(세션 안에만 사는 작업 — 세션을 끄면 같이 죽는다).
+    끝난 것: 그 job 의 CronDelete · 만든 지 7일 · recurring:false 인데 예정 시각이 지났거나 그 뒤 scheduled_task_fire 가 있음.
+    job id 를 못 찾거나 시각·식을 못 읽으면 살아 있다고 본다. 기록 전체를 줄 단위로 훑는다(예약은 오래전에 걸렸을 수 있다)."""
+    if not tr:
+        return []
+    created: dict[str, dict[str, Any]] = {}    # CronCreate tool_use id → {job, at, once, cron}
+    deleted: set[str] = set()
+    fires: list[float] = []
+    with open(tr, "rb") as fh:
+        for rawb in fh:
+            if b"Cron" not in rawb and b"Scheduled" not in rawb and b"scheduled_task_fire" not in rawb:
+                continue
+            try:
+                row = json.loads(rawb)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if row.get("type") == "system" and row.get("subtype") == "scheduled_task_fire":
+                fires.append(_row_time(row))
+                continue
+            content = (row.get("message") or {}).get("content")
+            for b in content if isinstance(content, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "tool_use" and b.get("name") == "CronCreate":
+                    at = _row_time(row)
+                    inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                    if not at or at >= born:
+                        created[str(b.get("id") or "")] = {"job": "", "at": at, "once": inp.get("recurring") is False, "cron": inp.get("cron") or ""}
+                elif b.get("type") == "tool_use" and b.get("name") == "CronDelete":
+                    inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                    deleted.add(str(inp.get("id") or ""))
+                elif b.get("type") == "tool_result" and str(b.get("tool_use_id") or "") in created:
+                    res = b.get("content")
+                    text = res if isinstance(res, str) else " ".join(str(x.get("text") or "") for x in res or [] if isinstance(x, dict))
+                    m = _CRON_JOB.search(text)
+                    if m:
+                        created[str(b["tool_use_id"])]["job"] = m.group(1)
+    now = time.time()
+    live = []
+    for tid, c in created.items():
+        if c["job"] and c["job"] in deleted:
+            continue
+        at = c["at"]
+        if at and now - at > CRON_EXPIRE_S:
+            continue
+        if c["once"] and at:
+            if any(f > at for f in fires if f):
+                continue
+            nxt = _cron_next(c["cron"], at)
+            if nxt and nxt < now:
+                continue
+        live.append(tid)
+    return live
 
 
 def _pending_wakeup(tr: Path | None, born: float = 0.0) -> float:
@@ -1679,6 +1810,9 @@ def _restart_blockers(rec: dict[str, Any]) -> list[str]:
     t = live_tasks(rec) if alive else []
     if t:
         out.append(f"백그라운드 {len(t)}")
+    shells = _pane_shells(name) if alive else 0     # 기록(끝 2MB)이 놓친 셸도 — 화면에 N shell 이 보이면 그것으로 막는다
+    if shells > 0:
+        out.append(f"백그라운드 셸 {shells}")
     if alive:
         tail = (ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()[-8:]
         if any(l.strip() == "⏺ main" for l in tail):    # 아래 에이전트 목록 = SendMessage 로 맡긴 팀 에이전트(재시작하면 같이 죽는다, 실사용)
@@ -1692,6 +1826,10 @@ def _restart_blockers(rec: dict[str, Any]) -> list[str]:
     due = _pending_wakeup(tr, _session_born(name) if alive else 0.0)
     if due and due + WAKEUP_GRACE > time.time():
         out.append("예약 기다림")
+    if alive and _pending_crons(tr, _session_born(name)):
+        out.append("예약 기다림(cron)")
+    if alive and tr and _live_monitors(tr, _session_born(name)):
+        out.append("감시 중(Monitor)")
     if (sd / "question.json").exists():
         out.append("질문 답 기다림")
     if list(sd.glob("perm-*.json")):
@@ -1735,7 +1873,7 @@ def _acquire_restart_lock(remaining: list[str]) -> Any:
     except OSError:
         fh.close()
         st = restart_status(_locked=True)
-        raise ms.SessionError(f"이미 재시작 대기가 돌고 있다(pid {st['pid'] if st else '?'})")
+        raise ms.SessionError(f"이미 재시작 대기가 돌고 있다(pid {st['pid'] if st else '?'}) — 끝내려면 marina session restart --cancel")
     _write_restart_status(fh, remaining, time.time())
     return fh
 
@@ -1802,6 +1940,94 @@ def safe_restart(refs: list[str], wait: float = 30 * 60.0, poll: float = 15.0,
         _release_restart_lock(lock)
 
 
+def _stop_start(ref: str, rec: dict[str, Any], stop: bool, on_stop: Any = None) -> tuple[list[str], list[str], bool]:
+    """(started, failed, up) — 방 잠금을 쥔 채 stop → start. 그 사이에 글이 와도 깨우기(wake)는 busy 로 물러난다.
+    잠금을 기다리는 사이 깨우기가 먼저 띄웠으면 cmd_start 는 아무것도 안 하고 돌아온다 — 떠 있으면 up(실패 아님)."""
+    name, sd, t0 = str(rec.get("tmux") or ""), Path(str(rec.get("stateDir") or "/nonexistent")), time.time()
+    t_start = t0
+    with ms.room_lock(sd, wait=ms.ROOM_LOCK_WAIT) as got:
+        if not got:
+            _log(f"restart {ref}: 방 잠금을 못 잡고 진행(깨우기와 겹칠 수 있다)")
+        killed_at = 0.0
+        if stop and ms.tmux_alive(name):
+            killed_at = time.time()
+            ms.tmux_stop(name)
+            if on_stop:
+                on_stop()
+        t_start = time.time()                  # 실제 기동 시각 — 잠금을 기다린 시간은 빼고
+        started, failed = ms.cmd_start(ref)
+        if started:
+            up = True
+        elif failed:
+            up = False
+        else:                                  # 아무것도 안 했다 = 이미 떠 있다. 죽인 방이면 '새로 뜬' 세션일 때만 성공(kill 이 안 먹은 옛 세션을 가리지 않게)
+            up = ms.tmux_alive(name) and (not killed_at or _session_born(name) >= int(killed_at))
+    _settle_after_restart(rec, sd, t0, t_start)
+    return started, failed, up
+
+
+def _settle_after_restart(rec: dict[str, Any], sd: Path, t0: float, started: "float | None" = None) -> None:
+    """재시작한 방은 항상 — 새 세션이 못 받은 글이 있는지 한 번 보게 한다(깨우기가 busy 표식을 못 남기고 지나간 경합도 덮는다).
+    기준은 실제 기동 시각. 재시작 중에 온 글을 깨우기가 busy 로 돌려보냈다면(표식) 그 글까지 닿게 t0(재시작 시작)부터."""
+    base = time.time() if started is None else started
+    try:
+        if float((sd / "wake-busy-at").read_text()) >= t0:
+            base = t0
+            (sd / "wake-busy-at").unlink(missing_ok=True)
+    except (OSError, ValueError):
+        pass
+    if rec.get("channelId") and ms.tmux_alive(str(rec.get("tmux") or "")):
+        import marina_discord_wake as mw
+        mw._spawn_settle(str(rec["channelId"]), base)
+
+
+def force_restart(refs: list[str], log: Any = None) -> tuple[list[str], list[str]]:
+    """사람이 시킨 강제 재시작 — 막는 이유는 찍기만 하고 무시, 대기·조용한 시간 없이 바로 stop → start.
+    재시작 대기 잠금은 그대로 지킨다(다른 대기가 돌고 있으면 SessionError). 못 켠 세션은 사유와 켜는 법을 담은 줄로 돌려준다.
+    세션 하나가 예외로 실패해도 나머지는 계속한다."""
+    lock = _acquire_restart_lock(list(dict.fromkeys(refs)))
+    try:
+        done, failed = [], []
+        for ref in dict.fromkeys(refs):
+            try:
+                rec = ms.find_session(ref)
+                name = str(rec.get("tmux") or "")
+                alive = ms.tmux_alive(name)
+                why = restart_blockers(rec) if alive else []
+                if log:
+                    log(f"강제 재시작: {ref} — 무시한 것: {'·'.join(why) if why else '막는 이유 없음'}")
+                started, why_not, up = _stop_start(ref, rec, alive, on_stop=lambda r=rec: _drop_pending_prompts(r))
+                if up:
+                    done.append(ref)
+                    if log:
+                        log(f"✓ 재시작: {ref}" if started else f"✓ 이미 떠 있음: {ref}")
+                    continue
+                detail = "; ".join(why_not) or "시작되지 않았다"
+            except Exception as exc:
+                detail = str(exc) or type(exc).__name__
+            failed.append(f"✗ {detail} — 지금 꺼져 있다: marina session start {ref}")
+        return done, failed
+    finally:
+        _release_restart_lock(lock)
+
+
+def _drop_pending_prompts(rec: dict[str, Any]) -> None:
+    """죽은 세션이 남긴 질문·권한 버튼과 기록을 정리한다(기존 정리 함수 — 버튼은 늦게 눌러도 소용없다)."""
+    sd, ch = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("channelId") or "")
+    if not sd.is_dir():
+        return
+    try:
+        import marina_discord_ask
+        marina_discord_ask.done(sd, ch, "재시작으로 취소")
+        (sd / "question.json").unlink(missing_ok=True)
+    except Exception:
+        pass
+    try:
+        clear_perms(sd, ch)
+    except Exception:
+        pass
+
+
 def _safe_restart(refs: list[str], wait: float, poll: float, log: Any, quiet: float,
                   reasons: dict[str, str], lock: Any) -> tuple[list[str], list[str]]:
     pending, done, failures = list(dict.fromkeys(refs)), [], []
@@ -1827,16 +2053,18 @@ def _safe_restart(refs: list[str], wait: float, poll: float, log: Any, quiet: fl
                     clear_since.pop(ref, None)
                     reasons[ref] = "·".join(why)
                     continue
-                ms.tmux_stop(str(rec.get("tmux") or ""))
-            started, failed = ms.cmd_start(ref)  # 꺼진 세션은 막는 이유 없이 시작만
+                stop = True
+            else:
+                stop = False                 # 꺼진 세션은 막는 이유 없이 시작만
+            started, failed, up = _stop_start(ref, rec, stop)
             pending.remove(ref)
             reasons.pop(ref, None)
-            if started:
-                done.append(ref)
+            if up:
+                done.append(ref)             # 그 사이 깨우기가 먼저 띄웠어도(이미 떠 있음) 떠 있으니 성공
             else:
                 failures.append(ref)         # 꺼진 채 남았다 — 성공으로 세지 않는다(리뷰 I4)
             if log:
-                log(f"✓ 재시작: {ref}" if started else f"✗ {failed}")
+                log((f"✓ 재시작: {ref}" if started else f"✓ 이미 떠 있음: {ref}") if up else f"✗ {failed}")
         _write_restart_status(lock, list(pending), started_at)
         if not pending or time.time() >= end:
             break
@@ -1956,7 +2184,7 @@ def bot_command(cfg: dict[str, Any]) -> dict[str, Any] | None:
     bun = _bun()
     if not bun:
         return None
-    env = {k: v for k, v in os.environ.items() if k.startswith("MARINA_") or k in ("HOME", "USER", "LANG", "TMPDIR")}
+    env = {k: v for k, v in os.environ.items() if k.startswith("MARINA_") or k in ("HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SSH_AUTH_SOCK")}
     env.update(PATH=f"{Path(bun).parent}:/usr/bin:/bin", DISCORD_BOT_TOKEN=ms.read_token(cfg),
                MARINA_GUILD=str(cfg["guildId"]), MARINA_PY=sys.executable, MARINA_BOT_PY=str(Path(__file__).resolve()),
                MARINA_PARENT_PID=str(os.getpid()))
@@ -2057,6 +2285,8 @@ class Loop:
         self.last_vsweep = -3600.0       # 보기 기록 정리(원본이 7일 넘게 없는 것) — 한 시간마다
         self.vnext = 0.0                 # 포트를 못 열었으면 이 시각 전엔 다시 안 시도
         self.last_tsweep = -60.0         # 터미널 넘기기 정리(미개봉 10분·무활동 30분) — 1분마다
+        self.idler: Any = None           # 쉰 방 내리기(marina_discord_idle.Idler) — 속도 제한(20초 표본·1분에 하나)은 Idler 안
+        self.born = time.time()          # 이 데몬이 뜬 시각 — 쉰 방 내리기는 그 뒤 글 이벤트를 받은 표식이 있어야 동작
 
     def own(self) -> bool:
         """같은 마리나 홈에선 한 인스턴스만(프리뷰 데몬이 실 ~/.marina 를 공유해도 봇이 둘 뜨지 않게, 리뷰 I1)."""
@@ -2187,6 +2417,12 @@ class Loop:
                     _log(f"reconcile: 워크트리가 사라진 세션 정리 {gone}")
             except Exception as exc:
                 _log(f"reconcile 실패: {exc!r}")
+        try:                              # import 도 안에서 — 내리기 모듈이 깨져도 아래 #상태·typing·권한 창은 계속
+            import marina_discord_idle as mi
+            self.idler = self.idler or mi.Idler(started=self.born)
+            self.idler.tick(now, bot_up=self.proc is not None and self.proc.poll() is None)
+        except Exception as exc:          # 내리기가 실패해도 데몬은 계속(모르면 안 내린다)
+            _log(f"idle 실패: {exc!r}")
         self.last_panel = panel_tick(self.last_panel, now)
         light = snapshot(full=False)
         typing_tick(light, self.ty, now, self.live)
@@ -2212,12 +2448,55 @@ class Loop:
             meter_tick(self.meters)
 
 
-def run_forever(stop: "Callable[[], bool] | None" = None) -> None:
-    """stop() 이 참이면 끝낸다 — discord 데몬은 플러그인이 업데이트되면 스스로 끝나고 다음 훅이 새 코드로 다시 띄운다(분리 B)."""
+def beat_path() -> Path:
+    return ms.marina_home() / "discord-daemon.beat"
+
+
+def _boot_time() -> float:
+    """맥이 부팅한 시각(kern.boottime). 못 읽으면 0 — 모르면 '재부팅 아님'으로 본다(끊긴 방을 켜지 않는 쪽)."""
+    try:
+        out = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5).stdout
+        m = re.search(r"sec\s*=\s*(\d+)", out)
+        return float(m.group(1)) if m else 0.0
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return 0.0
+
+
+def _spawn_sweep(since: float, resume: bool = False) -> None:
+    wake_py = Path(__file__).resolve().with_name("marina_discord_wake.py")
+    subprocess.Popen([sys.executable, str(wake_py), "sweep", str(since), *(["--resume"] if resume else [])], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def run_forever(stop: "Callable[[], bool] | None" = None, max_steps: "int | None" = None) -> None:
+    """stop() 이 참이면 끝낸다 — discord 데몬은 플러그인이 업데이트되면 스스로 끝나고 다음 훅이 새 코드로 다시 띄운다(분리 B).
+    max_steps 는 테스트용(기본 None = 끝없이)."""
     loop = Loop()
+    try:
+        prev = beat_path().stat().st_mtime     # 지난 데몬이 마지막으로 살아 있던 때 — 그 뒤 온 글은 이벤트로 못 받았다
+    except OSError:
+        prev = 0.0                             # 첫 배포: 훑지 않는다(옛 글로 방들이 한꺼번에 깨지 않게)
+    swept, last_beat, steps = False, 0.0, 0
     last_check = time.time()
     while True:
-        time.sleep(4 if loop.step(time.time()) else 30)
+        ok = loop.step(time.time())
+        if ok and not swept:
+            swept = True
+            if prev:
+                try:
+                    _spawn_sweep(prev, resume=_boot_time() > prev)     # 일하던 방 다시 켜기는 재부팅 뒤 첫 훑기만(업데이트·크래시 재시작은 아님)
+                except OSError as exc:
+                    _log(f"sweep 띄우기 실패: {exc!r}")
+        if ok and time.time() - last_beat >= 60:
+            last_beat = time.time()
+            try:
+                beat_path().touch()
+            except OSError:
+                pass
+        steps += 1
+        if max_steps is not None and steps >= max_steps:
+            return
+        time.sleep(4 if ok else 30)
         if stop and time.time() - last_check >= 60:
             last_check = time.time()
             if stop():

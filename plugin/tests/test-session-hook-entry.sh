@@ -11,8 +11,9 @@ V1="$(cd "$DSCRIPTS/.." && pwd -P)"
 printf '{"version":2,"plugins":{"marina-discord@test-market":[{"installPath":"%s"}]}}\n' "$V1" > "$CHOME/plugins/installed_plugins.json"
 export MARINA_CLAUDE_HOME="$CHOME"
 
-PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$TMPROOT" "$CHOME" <<'PY'
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" V1="$V1" python3 - "$TMPROOT" "$CHOME" <<'PY'
 import json, os, subprocess, sys
+V1 = os.environ["V1"]
 from pathlib import Path
 import marina_session as ms
 tmp, chome = Path(sys.argv[1]), Path(sys.argv[2])
@@ -31,6 +32,24 @@ mcp = json.loads((sd / "mcp.json").read_text())["mcpServers"]["marina"]
 check(mcp["command"] == str(shim), f"MCP 도 같은 입구: {mcp}")
 r = subprocess.run([str(shim), "hook-stop"], input="{}", text=True, capture_output=True, env=dict(os.environ, DISCORD_STATE_DIR=str(sd)))
 check(r.returncode == 0, f"입구로 훅 실행: {r.stderr}")
+# 입구 본문은 배포마다 바뀌면 안 된다 — macOS 가 "백그라운드 항목이 추가됨" 알림을 띄운다(LaunchAgent 가 이 파일을 실행). 바뀌는 값은 옆 파일로
+body0 = shim.read_text(); side = shim.with_name("marina-session-hook.path")
+check(side.is_file(), "바뀌는 값(폴백 경로·파이썬)은 옆 파일 marina-session-hook.path 에")
+check(str(Path(ms.__file__).resolve()) not in body0 and sys.executable not in body0, "입구 본문에 설치 버전 폴더·파이썬 경로가 박히지 않는다")
+v9 = tmp / "v9"; (v9 / "scripts").mkdir(parents=True)
+real_file, real_exe = ms.__file__, sys.executable
+ms.__file__ = str(v9 / "scripts" / "marina_session.py"); sys.executable = "/other/python9"
+(chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"marina-discord@test-market": [{"installPath": str(v9)}]}}))
+mt = shim.stat().st_mtime_ns; mt_side = side.stat().st_mtime_ns
+import time; time.sleep(0.05)
+ms._hook_entry()
+check(shim.read_text() == body0 and shim.stat().st_mtime_ns == mt, "다른 버전·파이썬으로 다시 써도 입구 본문·mtime 은 그대로")
+check("v9" in side.read_text() and "/other/python9" in side.read_text(), f"옆 파일이 새 값을 담는다: {side.read_text()!r}")
+mt_side = side.stat().st_mtime_ns; time.sleep(0.05); ms._hook_entry()
+check(side.stat().st_mtime_ns == mt_side, "같은 내용이면 옆 파일도 다시 쓰지 않는다")
+ms.__file__, sys.executable = real_file, real_exe
+(chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"marina-discord@test-market": [{"installPath": str(V1)}]}}))
+ms._hook_entry()
 # 새 버전 설치 → 같은 입구가 새 버전을 부른다(재시작 없음)
 v2 = tmp / "v2" / "scripts"; v2.mkdir(parents=True)
 (v2 / "marina_session.py").write_text("import sys; print('V2', sys.argv[1:])\n")
@@ -41,6 +60,13 @@ check(r.stdout.strip() == "V2 ['hook-stop']", f"새 버전을 부른다: {r.stdo
 (chome / "plugins" / "installed_plugins.json").write_text("broken")
 r = subprocess.run([str(shim), "hook-stop"], input="{}", text=True, capture_output=True, env=dict(os.environ, DISCORD_STATE_DIR=str(sd)))
 check(r.returncode == 0 and "V2" not in r.stdout, f"폴백: {r.stdout!r} {r.stderr!r}")
+# 설치 목록도 폴백 경로도 없으면 빈 인자로 python 을 돌리지 않는다 — 조용히 0 으로 끝
+side.write_text("\n\n")
+(chome / "plugins" / "installed_plugins.json").write_text("broken")
+r = subprocess.run([str(shim), "hook-stop"], input="{}", text=True, capture_output=True)
+check(r.returncode == 0 and r.stderr.strip() == "", f"대상이 비면 exit 0: rc={r.returncode} {r.stderr!r}")
+(chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"marina-discord@test-market": [{"installPath": V1}]}}))
+ms._hook_entry()
 # 설치본이 아닌 곳(작업 트리 테스트)에서 실행되면 예전처럼 직접 경로
 (chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {}}))
 ms.write_settings(sd)

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import ipaddress
 import json
 import os
@@ -365,6 +366,22 @@ class Discord:
             raise
 
 
+    def get_messages(self, cid: str, after: str, limit: int = 100, pages: int = 3) -> list[dict[str, Any]]:
+        """after 뒤의 글(가까운 것부터)을 오래된 것부터 — 한 쪽 limit 개, 꽉 차면 최대 pages 쪽까지."""
+        out: list[dict[str, Any]] = []
+        for _ in range(pages):                       # 한 쪽이 꽉 차면 그 뒤를 한 쪽 더(Discord 는 after 에 가까운 것부터 limit 개)
+            rows = self._req("GET", f"/channels/{cid}/messages?after={urllib.parse.quote(str(after))}&limit={int(limit)}") or []
+            rows = sorted((r for r in rows if isinstance(r, dict) and str(r.get("id") or "").isdigit()), key=lambda r: int(r["id"]))
+            out += rows
+            if len(rows) < int(limit):
+                break
+            after = str(rows[-1]["id"])
+        return out
+
+    def get_message(self, cid: str, mid: str) -> dict[str, Any]:
+        return self._req("GET", f"/channels/{cid}/messages/{mid}") or {}
+
+
 def ensure_category(dc: Discord, cfg: dict[str, Any], project: str) -> str:
     """프로젝트 카테고리 ID. 저장된 ID 가 Discord 에 없으면(직접 지움) 새로 만들고 discord.json 을 고친다."""
     pc = project_config(cfg, project)
@@ -508,12 +525,14 @@ def claude_argv(project: str, task: str, resume: bool = False, session_id: str =
     return argv
 
 
-def chat_argv(project: str, task: str, session_id: str, resume: bool = False, from_id: str = "") -> list[str]:
+def chat_argv(project: str, task: str, session_id: str, resume: bool = False, from_id: str = "",
+              first: str = "") -> list[str]:
     """채팅 세션(실측 2026-10-01): 형 로그인 그대로 쓰되 --restricted 로 사용자 설정·메모리를 무시하고
     파일 도구를 폴더 안에 가둔다. 묻지 않고 거절 + 허용 목록(settings) + 허용 도구만(Bash 없음).
     받은 첨부는 상태 폴더 inbox 에 떨어지므로 그 폴더만 더한다.
     채팅 세션은 한 폴더를 함께 쓰므로 --continue(폴더의 최근 대화) 대신 자기 대화 ID 로 잇는다.
-    from_id = 기존 대화의 복사본으로 시작(--fork-session — 원본을 다른 곳이 열고 있어도 안전, 실측)."""
+    from_id = 기존 대화의 복사본으로 시작(--fork-session — 원본을 다른 곳이 열고 있어도 안전, 실측).
+    first = 첫 지시. 가변 인자 옵션(--disallowedTools)이 뒤따르는 글을 도구 이름으로 삼키므로 `--` 뒤에 둔다(실측 2026-10-07)."""
     sdir = state_dir(project, task)
     argv = ["claude"]
     if resume:
@@ -530,6 +549,8 @@ def chat_argv(project: str, task: str, session_id: str, resume: bool = False, fr
              "--mcp-config", str(sdir / "mcp.json"),     # 마리나 도구(채팅: share_file, 로비: open_chat)
              "--settings", str(sdir / "settings.json"),
              "--disallowedTools", "AskUserQuestion"]
+    if first:
+        argv += ["--", first]
     return argv
 
 
@@ -539,9 +560,10 @@ def transcript_path(cwd: Path, session_id: str) -> Path:
     return root / re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(cwd))) / f"{session_id}.jsonl"
 
 
-def lobby_argv(project: str, task: str, session_id: str, resume: bool = False, dev: bool = False) -> list[str]:
+def lobby_argv(project: str, task: str, session_id: str, resume: bool = False, dev: bool = False,
+               first: str = "") -> list[str]:
     """로비: 내장 도구 없이 마리나 MCP(open_chat·list_chats)와 Discord 도구만."""
-    argv = chat_argv(project, task, session_id, resume=resume)
+    argv = chat_argv(project, task, session_id, resume=resume, first=first)
     argv[argv.index("--tools") + 1] = ""
     argv[argv.index("--append-system-prompt") + 1] = DEV_LOBBY_RULES if dev else LOBBY_RULES
     return argv
@@ -590,7 +612,7 @@ def session_argv(s: dict[str, Any], resume: bool = False) -> list[str]:
     return session_launch(s, resume)[1]
 
 
-def session_argv_simple(s: dict[str, Any], resume: bool = False) -> list[str]:
+def session_argv_simple(s: dict[str, Any], resume: bool = False, first: str = "") -> list[str]:
     if s.get("kind") in CHAT_KINDS:
         sid = str(s.get("sessionId") or "")
         if not sid:
@@ -600,27 +622,27 @@ def session_argv_simple(s: dict[str, Any], resume: bool = False) -> list[str]:
         has = transcript_path(Path(str(s["root"])), sid).is_file()
         if s.get("kind") in LOBBY_KINDS:
             return lobby_argv(str(s["project"]), str(s["task"]), sid, resume=resume and has,
-                              dev=s.get("kind") == "dev-lobby")
+                              dev=s.get("kind") == "dev-lobby", first=first)
         return chat_argv(str(s["project"]), str(s["task"]), sid, resume=resume and has,
-                         from_id="" if has else str(s.get("forkedFrom") or ""))
-    return claude_argv(str(s["project"]), str(s["task"]), resume=resume)       # 보통 개발 세션: --continue
+                         from_id="" if has else str(s.get("forkedFrom") or ""), first=first)
+    return claude_argv(str(s["project"]), str(s["task"]), resume=resume, first=first)       # 보통 개발 세션: --continue
 
 
-def session_launch(s: dict[str, Any], resume: bool = False) -> tuple[Path, list[str]]:
+def session_launch(s: dict[str, Any], resume: bool = False, first: str = "") -> tuple[Path, list[str]]:
     """(띄울 폴더, 인자). 옮겨 온 개발 대화는 기록을 전역에서 찾는다 — 세션 안에서 다른 워크트리로 옮겨 가면
     기록도 그 폴더 키로 옮겨 가고 --resume 은 거기서만 찾는다(리뷰 2). 기록이 아직 없을 때만 다시 fork."""
     root = Path(str(s.get("root") or ""))
     sid = str(s.get("sessionId") or "")
     if s.get("kind") in CHAT_KINDS or not sid:
-        return root, session_argv_simple(s, resume)
+        return root, session_argv_simple(s, resume, first)
     tr = find_transcript(sid)
     home = conversation_home(tr) if tr else ""
     if tr and not home and tr.parent.name == re.sub(r"[^A-Za-z0-9]", "-", os.path.realpath(str(root))):
         home = str(root)                        # 기록에 cwd 줄이 아직 없어도 저장 폴더가 곧 세션 폴더
     if tr and home and Path(home).is_dir():
-        return Path(home), claude_argv(str(s["project"]), str(s["task"]), resume=resume, session_id=sid)
+        return Path(home), claude_argv(str(s["project"]), str(s["task"]), resume=resume, session_id=sid, first=first)
     return root, claude_argv(str(s["project"]), str(s["task"]), resume=False, session_id=sid,
-                             from_id=str(s.get("forkedFrom") or ""))
+                             from_id=str(s.get("forkedFrom") or ""), first=first)
 
 
 def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str], notify_ref: str = "") -> None:
@@ -639,6 +661,67 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
     time.sleep(float(os.environ.get("MARINA_SESSION_BOOT_WAIT") or 2.0))
     if not tmux_alive(name):
         raise SessionError(f"claude 가 바로 꺼졌어 — 직접 확인: cd {shlex.quote(str(cwd))} && claude --channels {PLUGIN}")
+    _save_launch_env(env_extra.get("DISCORD_STATE_DIR") or "")
+
+
+_LAUNCH_ENV_KEYS = ("PATH", "LANG", "LC_ALL")
+
+
+def _save_launch_env(sdir: str) -> None:
+    """이 세션을 띄운 환경을 적어 둔다 — 봇(launchd 의 짧은 PATH)이 깨울 때 같은 환경으로 띄우게(스펙 §4.7)."""
+    if not sdir or not Path(sdir).is_dir():
+        return
+    try:
+        _write_json(Path(sdir) / "launch-env.json", {k: os.environ[k] for k in _LAUNCH_ENV_KEYS if os.environ.get(k)})
+    except OSError:
+        pass
+
+
+def apply_launch_env(sdir: Path) -> bool:
+    """_save_launch_env 로 적어 둔 PATH·LANG·LC_ALL 을 os.environ 에 입힌다. 파일이 없거나 PATH 가 없으면 False."""
+    try:
+        d = json.loads((sdir / "launch-env.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(d, dict) or not d.get("PATH"):
+        return False
+    for k in _LAUNCH_ENV_KEYS:
+        if d.get(k):
+            os.environ[k] = str(d[k])
+        else:
+            os.environ.pop(k, None)
+    return True
+
+ROOM_LOCK_WAIT = 120.0           # restart 가 방 잠금을 기다리는 최대(깨우는 중이면 몇 초~수십 초)
+
+
+@contextlib.contextmanager
+def room_lock(sd: Any, wait: float = 0.0) -> Any:
+    """방별 기동 잠금(<상태 폴더>/wake.lock). 깨우기(wake)와 재시작(stop→start)이 같은 잠금을 쓴다 — 한쪽이
+    stop~start 사이에 있으면 다른 쪽은 세션을 띄우지 않는다. 잡았으면 True(못 잡거나 폴더가 없으면 False)."""
+    import fcntl
+    try:
+        fh: Any = open(Path(str(sd)) / "wake.lock", "w")
+    except OSError:
+        fh = None
+    got = False
+    if fh is not None:
+        end = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                got = True
+                break
+            except OSError:
+                if time.monotonic() >= end:
+                    break
+                time.sleep(0.1)
+    try:
+        yield got
+    finally:
+        if fh is not None:
+            fh.close()                   # 닫으면 잠금도 풀린다
+
 
 def tmux_stop(name: str) -> None:
     if tmux_alive(name):
@@ -1103,10 +1186,14 @@ def _hook_entry() -> list[str]:
     shim = marina_home() / "bin" / "marina-session-hook"
     body = f"""#!/bin/sh
 # 마리나 세션 훅 입구 — 부를 때마다 설치 목록에서 지금 깔린 마리나를 찾아 실행한다(새 버전 = 재시작 없이 적용).
+# 이 파일 본문은 배포마다 바뀌면 안 된다(LaunchAgent 가 실행하는 파일 — 바뀌면 macOS 가 "백그라운드 항목이 추가됨" 알림을 띄운다).
+# 바뀌는 값(마지막 폴백 파이썬·설치 경로)은 옆 파일 marina-session-hook.path 에: 1행 = 파이썬, 2행 = marina_session.py
+FB_PY=""; FB_TARGET=""
+if [ -f "$0.path" ]; then {{ IFS= read -r FB_PY; IFS= read -r FB_TARGET; }} < "$0.path"; fi
 # 파이썬은 쓴 프로세스 것이 아니라 흔한 고정 경로부터(세션마다 다른 venv 가 공유 입구를 바꾸지 않게, 리뷰 I5)
 PY=""
-for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 {shlex.quote(sys.executable)}; do
-  [ -x "$c" ] && PY="$c" && break
+for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 "$FB_PY"; do
+  [ -n "$c" ] && [ -x "$c" ] && PY="$c" && break
 done
 # 같은 이름 설치가 여럿이면 user 범위·가장 최근 것(리뷰 I6). 키는 marina-discord@ → marina@ 순으로, 파일이 있는 첫 설치본
 # (분리 D: marina 를 먼저 업데이트하면 새 marina@ 엔 이 파일이 없다 — 키 하나에 묶이면 옛 코드로 되돌아간다)
@@ -1123,10 +1210,12 @@ try:
                     print(f); sys.exit(0)
 except Exception:
     pass' {shlex.quote(str(plist))} 2>/dev/null)
-[ -n "$target" ] || target={shlex.quote(str(me))}
+[ -n "$target" ] || target="$FB_TARGET"
 if [ -n "${{MARINA_SHIM_WHICH:-}}" ]; then echo "$target"; exit 0; fi
+[ -n "$target" ] || exit 0     # 설치 목록도 폴백 경로도 비었다 — 빈 인자로 python 을 돌리지 않는다
 exec "$PY" "$target" "$@"
 """
+    side = shim.with_name(shim.name + ".path")
     try:
         shim.parent.mkdir(parents=True, exist_ok=True)
         if not shim.is_file() or shim.read_text() != body:
@@ -1134,6 +1223,11 @@ exec "$PY" "$target" "$@"
             tmp.write_text(body)
             os.chmod(tmp, 0o755)
             os.replace(tmp, shim)
+        side_body = f"{sys.executable}\n{me}\n"
+        if not side.is_file() or side.read_text() != side_body:      # 같으면 쓰지 않는다(cmp)
+            tmp = side.with_name(f"{side.name}.{os.getpid()}.tmp")
+            tmp.write_text(side_body)
+            os.replace(tmp, side)
     except OSError:
         return [sys.executable, str(me)]
     return [str(shim)]
@@ -1360,6 +1454,7 @@ def _daemon_env() -> dict[str, str]:
     env["PATH"] = daemon_path()
     env["MARINA_HOME"] = str(marina_home())
     env["PYTHONUNBUFFERED"] = "1"
+    env.pop("MARINA_DISCORD_SUPERVISED", None)       # launchd 자식이라는 표식은 떼어 띄운 데몬에 물려주지 않는다 — 물려주면 핸드오프가 아무도 안 띄운다
     return env
 
 
@@ -1384,6 +1479,28 @@ def _is_daemon_cmd(cmd: str) -> bool:
         p.endswith("marina_session.py") or p.endswith("marina-session-hook") for p in parts[:-1])
 
 
+def _off_notice() -> None:
+    """daemon-uninstall 로 끈 상태면 알린다(훅이 다시 안 띄우므로 형이 모르면 봇이 없는 채로 지낸다)."""
+    try:
+        import marina_discord_launchd as ld
+        if ld.off_mark().exists():
+            print("봇이 꺼져 있어 — marina-session daemon-install", file=sys.stderr)
+    except Exception:
+        pass
+
+
+def _stop_daemon() -> None:
+    """pid 파일의 데몬에 SIGTERM — 진짜 데몬 명령일 때만(재사용된 pid 를 죽이지 않게)."""
+    import signal
+    try:
+        pid = int(daemon_pid_path().read_text().strip())
+        cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=2).stdout
+        if _is_daemon_cmd(cmd.strip()):
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+
+
 def _daemon_alive() -> bool:
     try:
         pid = int(daemon_pid_path().read_text().strip())
@@ -1397,11 +1514,21 @@ def _daemon_alive() -> bool:
     return _is_daemon_cmd(cmd.strip())
 
 
+def _launchd_program(entry: "list[str] | None" = None) -> "list[str] | None":
+    """LaunchAgent 가 돌릴 명령. 고정 입구일 때만 — 작업 트리 파일을 가리키면 그 워크트리를 지우는 순간 봇이 죽는다."""
+    head = entry or _hook_entry()
+    shim = str(marina_home() / "bin" / "marina-session-hook")
+    return [shim, "daemon"] if head == [shim] else None
+
+
 def ensure_daemon(entry: "list[str] | None" = None) -> str:
     """discord 봇(#상태·🛑·숫자판·typing·bun 봇)을 discord 가 스스로 띄운다(분리 B — 대시보드가 안 띄운다).
     떠 있으면 그대로, 없을 때만 하나. 훅마다 불리므로 싸야 한다. 동시에 여러 훅이 불러도 하나만(잠금, 리뷰 I1)."""
     if os.environ.get("MARINA_DISCORD_DAEMON") == "off":
         return "off"
+    import marina_discord_launchd as ld
+    if ld.off_mark().exists():
+        return "off"                   # 형이 daemon-uninstall 로 끈 것 — 훅이 다시 등록하지 않는다(daemon-install 로 해제)
     if _daemon_alive():
         return "running"
     import fcntl
@@ -1414,6 +1541,12 @@ def ensure_daemon(entry: "list[str] | None" = None) -> str:
     try:
         if _daemon_alive():
             return "running"
+        program = _launchd_program(entry)
+        if program and ld.supervisor() == "launchd":       # 맥 기본 홈: launchd 가 유일한 주인(스펙 §3.2)
+            r = ld.ensure(program)
+            if not r.startswith("failed"):
+                return "launchd:" + r
+            sys.stderr.write(f"LaunchAgent 등록 실패 — 떼어 띄운다: {r[-200:]}\n")
         pid = _spawn_daemon(entry) if entry else _spawn_daemon()
         daemon_pid_path().write_text(f"{pid}\n")
         return "started"
@@ -1452,7 +1585,8 @@ def _newest_scripts(me: "Path | None" = None, home: "Path | None" = None) -> "Pa
 
 UPDATE_EVERY_S = 3600.0
 _DISCORD_PLUGIN = "marina-discord@marina-dev"
-_PREFLIGHT_MODULES = ("marina_session", "marina_discord_bot", "marina_discord_ask", "marina_share", "marina_discord_usage")
+_PREFLIGHT_MODULES = ("marina_session", "marina_discord_bot", "marina_discord_ask", "marina_share", "marina_discord_usage",
+                       "marina_discord_launchd", "marina_discord_wake", "marina_discord_idle")
 
 
 def _claude_home() -> Path:
@@ -1594,6 +1728,33 @@ def _daemon_stop_check(updated=None, preflight=None, tick=None) -> bool:
     return ok
 
 
+def _daemon_adopt_launchd() -> bool:
+    """떼어 띄워진 데몬(옛 방식·첫 배포)이 맥 기본 홈에서 입구로 떴으면 LaunchAgent 를 올리고 물러난다(스펙 §3.3)."""
+    if os.environ.get("MARINA_DISCORD_DAEMON") == "off":
+        return False
+    try:
+        import marina_discord_launchd as ld
+        program = _launchd_program()
+        if not program or ld.supervised() or ld.supervisor() != "launchd" or ld.off_mark().exists():
+            return False
+        import fcntl
+        marina_home().mkdir(parents=True, exist_ok=True)
+        with open(marina_home() / "discord-daemon.spawn.lock", "w") as lk:    # ensure_daemon 과 같은 잠금 — 훅이 동시에 등록하지 않게
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            return not ld.ensure(program).startswith("failed")
+    except Exception:
+        return False
+
+
+def _trim_daemon_log() -> None:
+    p = marina_home() / "discord-daemon.log"
+    try:
+        if p.stat().st_size > 1 << 20:
+            os.truncate(p, 0)
+    except OSError:
+        pass
+
+
 def _daemon_handoff() -> None:
     """업데이트로 끝난 데몬이 새 코드로 스스로 다시 띄운다 — 다음 훅(사람)을 기다리면 그사이 🛑·권한 버튼이 멈춘다(리뷰 I1)."""
     try:
@@ -1601,6 +1762,9 @@ def _daemon_handoff() -> None:
             daemon_pid_path().unlink()
     except OSError:
         pass
+    import marina_discord_launchd as ld
+    if ld.supervised():
+        return          # launchd(KeepAlive)가 새 코드로 다시 띄운다 — 직접 띄우면 둘이 된다(스펙 §3.4)
     # 고정 입구로 — 이 프로세스는 옛 설치본이라 _hook_entry() 가 자기 경로(옛 코드)를 돌려준다. 그러면 옛 데몬이
     # 1분마다 다시 뜬다(실배포 2026-10-04). 입구는 부를 때마다 설치 목록의 최신을 찾는다
     shim = marina_home() / "bin" / "marina-session-hook"
@@ -1915,8 +2079,9 @@ def notify_exit(ref: str, code: str) -> None:
     if not s.get("channelId"):
         return
     cfg = load_config()
+    again = " · 여기에 글을 쓰면 다시 켜져" if cfg.get("wake", True) is not False else ""   # marina_discord_wake 를 import 하지 않는다(알림 경로를 가볍게)
     Discord(read_token(cfg)).send_message(
-        str(s["channelId"]), f"⚠ 세션이 꺼졌어 (종료 코드 {code}) — 다시 켜기: `marina session start {ref}`")
+        str(s["channelId"]), f"⚠ 세션이 꺼졌어 (종료 코드 {code}) — 다시 켜기: `marina session start {ref}`{again}")
 
 
 def runtime_bin() -> "str | None":
@@ -2820,7 +2985,7 @@ def cmd_ls() -> list[dict[str, Any]]:
                  channel=None if ids is None else str(s.get("channelId")) in ids) for s in items]
 
 
-def cmd_start(ref: str = "", all_: bool = False) -> tuple[list[str], list[str]]:
+def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[str], list[str]]:
     targets = load_sessions() if all_ else [find_session(ref)]
     started: list[str] = []
     failed: list[str] = []
@@ -2843,15 +3008,16 @@ def cmd_start(ref: str = "", all_: bool = False) -> tuple[list[str], list[str]]:
                 _drop_ack_reaction(sdir / "access.json")
             if chat:
                 ensure_trusted(chat_home())
-            cwd, argv = session_launch(s, resume=True)
+            cwd, argv = session_launch(s, resume=True, first=first)
             tmux_start(name, cwd, argv,
                        chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
             lock_root(s)
             started.append(label)
-            try:
-                resume_unanswered(s)          # 재시작 전에 받고 못 답한 메시지가 있으면 이어서 답하게
-            except Exception:
-                pass
+            if not first:                         # 첫 지시가 있으면 그것이 이어받기까지 맡는다(턴 하나)
+                try:
+                    resume_unanswered(s)      # 재시작 전에 받고 못 답한 메시지가 있으면 이어서 답하게
+                except Exception:
+                    pass
         except SessionError as exc:
             failed.append(f"{label}: {exc}")
     return started, failed
@@ -3037,6 +3203,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("lock-all")
     sub.add_parser("daemon")
     sub.add_parser("daemon-ensure")
+    sub.add_parser("daemon-uninstall")
+    sub.add_parser("daemon-install", help="daemon-uninstall 로 끈 자동 기동을 다시 켠다")
+    p = sub.add_parser("idle-check", help="방마다 유휴 내림 대상인지·아니면 왜(읽기만, 아무것도 안 내린다)")
+    p.add_argument("--hours", type=float, default=None)
     p = sub.add_parser("view-setup", help="결과물 보기 서버를 Tailscale Funnel 로 공개하고 publicBase 를 저장")
     p.add_argument("--force", action="store_true", help="https 10000 에 이미 다른 매핑이 있어도 덮는다")
     p = sub.add_parser("view-revoke", help="결과물 보기 링크 끊기(토큰·파일 경로·--all-in 폴더)")
@@ -3051,6 +3221,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--wait", type=float, default=30 * 60.0)
     p.add_argument("--status", action="store_true", help="돌고 있는 재시작 대기 현황")
     p.add_argument("--cancel", action="store_true", help="돌고 있는 재시작 대기를 끝낸다")
+    p.add_argument("--force", action="store_true", help="막는 이유를 무시하고 바로 재시작(이름으로 준 세션만, --all 불가)")
     sub.add_parser("hook-stop")
     sub.add_parser("hook-typing")
     sub.add_parser("hook-reply-to")
@@ -3167,6 +3338,8 @@ def main(argv: list[str] | None = None) -> int:
             if r["warning"]:
                 print("  ⚠ " + r["warning"], file=sys.stderr)
         elif a.cmd == "ls":
+            if not a.json:
+                _off_notice()
             rows = cmd_ls()
             if a.json:
                 print(json.dumps(rows, ensure_ascii=False, indent=2))
@@ -3179,6 +3352,7 @@ def main(argv: list[str] | None = None) -> int:
             s = find_session(a.ref)
             os.execvp("tmux", _tmux_base() + ["attach", "-t", f"={s['tmux']}"])
         elif a.cmd == "start":
+            _off_notice()
             if not a.all and not a.ref:
                 raise SessionError("start <작업> 또는 start --all")
             started, failed = cmd_start(a.ref, a.all)
@@ -3200,16 +3374,24 @@ def main(argv: list[str] | None = None) -> int:
                 if a.cancel:
                     print(f"✓ 취소: pid {mb.restart_cancel()}")
                 return 0
+            if a.force and a.all:
+                raise SessionError("--force 는 세션 이름을 줘야 한다(--all 과 같이 못 씀)")
             refs = [f"{x['project']}/{x['task']}" for x in load_sessions()] if a.all else \
                 [f"{find_session(r)['project']}/{find_session(r)['task']}" for r in a.refs]
+            refs = list(dict.fromkeys(refs))          # 별칭+정식 이름이 같은 세션이면 한 번만
             me = _session_from_env()                  # 세션 안에서 부르면 자기 자신은 빼고(자기를 기다리며 멈춘다, 리뷰 I8)
             if me:
                 mine = f"{me['project']}/{me['task']}"
                 if mine in refs:
-                    refs.remove(mine)
+                    refs = [r for r in refs if r != mine]
                     print(f"⚠ 자기 세션({mine})은 빼고 한다 — 다른 곳에서 restart 해 줘", file=sys.stderr)
             if not refs:
                 raise SessionError("restart <작업…> 또는 restart --all")
+            if a.force:
+                done, failed = mb.force_restart(refs, log=print)
+                for x in failed:
+                    print(x, file=sys.stderr)
+                return 1 if failed else 0
             why: dict[str, str] = {}
             done, waiting = mb.safe_restart(refs, wait=a.wait, log=print, reasons=why)
             for x in waiting:
@@ -3218,13 +3400,37 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "stop":
             s = find_session(a.ref)
             tmux_stop(str(s["tmux"]))
+            # (의도) 턴 도중 stop → start 하면 이어받기(resume_unanswered)가 안 걸린다 — 형이 끈 방은 '끊긴 방'이 아니다
+            try:         # 끈 방은 '끊긴 방'(turn-at > stopped-at)이 아니다 — 재부팅 뒤 첫 훑기가 형이 끈 방을 살리지 않게
+                (Path(str(s["stateDir"])) / "stopped-at").write_text(f"{time.time()}\n")
+            except (OSError, KeyError):
+                pass
             print(f"✓ 정지: {s['project']}/{s['task']}")
         elif a.cmd == "daemon":
+            if _daemon_adopt_launchd():
+                return 0                     # launchd 가 띄운 데몬이 맡는다
+            _trim_daemon_log()
             daemon_pid_path().write_text(f"{os.getpid()}\n")
             import marina_discord_bot
             marina_discord_bot.run_forever(stop=_daemon_stop_check)
             _daemon_handoff()
         elif a.cmd == "daemon-ensure":
+            print(ensure_daemon())
+        elif a.cmd == "idle-check":
+            import marina_discord_idle as mi
+            print(mi.summary(a.hours))
+            for r in mi.check_all(a.hours):
+                state = "꺼짐" if not r["alive"] else ("내림 대상" if r["stop"] else "그대로")
+                idle = "-" if r["idleHours"] is None else f"{r['idleHours']}h"
+                print(f"{r['ref']}\t{state}\t{idle}\t{' · '.join(r['why'])}")
+        elif a.cmd == "daemon-uninstall":
+            import marina_discord_launchd as ld
+            if ld.managed():
+                _stop_daemon()                 # 떼어 띄운 데몬(pid 파일)도 멈춘다 — launchd 만 내리면 그 데몬이 남는다
+            print(ld.uninstall(permanent=True))
+        elif a.cmd == "daemon-install":
+            import marina_discord_launchd as ld
+            ld.clear_off()
             print(ensure_daemon())
         elif a.cmd == "view-setup":
             return cmd_view_setup(a.force)

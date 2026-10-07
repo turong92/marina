@@ -7,3 +7,6 @@ marina_share
 marina_discord_usage
 marina_view
 marina_termbridge
+marina_discord_launchd
+marina_discord_wake
+marina_discord_idle

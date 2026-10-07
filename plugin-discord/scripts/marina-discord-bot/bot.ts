@@ -12,7 +12,8 @@ const childEnv = { ...process.env };
 delete childEnv.DISCORD_BOT_TOKEN;
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessageReactions],
+  // GuildMessages: 꺼진 방에 온 글을 알아채려고(특권 인텐트 아님). 글 내용은 안 읽는다 — MessageContent 는 선언하지 않는다
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.GuildMessages],
   // 봇이 켜지기 전 메시지에 단 반응도 받으려면 partial 이 필요하다
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
 });
@@ -29,6 +30,24 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
   execFile(py, [script, "interrupt", "--channel", channelId, "--user", user.id, "--message", msg.id],
     { timeout: 20000, env: childEnv }, (err, out, errOut) => {
       console.log(new Date().toISOString(), "stop", channelId, msg.id, (out || errOut || String(err ?? "")).trim());
+    });
+});
+
+// 꺼진 방에 온 글 → 파이썬이 판단해 그 방 세션을 깨운다. 켜져 있으면 그 세션의 채널 플러그인이 직접 받으므로
+// 파이썬이 "alive" 로 바로 돌아온다. 여기서는 채널·글쓴이·메시지 ID 만 넘긴다(본문은 파이썬이 필요할 때 REST 로).
+const wakePy = script.replace(/marina_discord_bot\.py$/, "marina_discord_wake.py");
+client.on(Events.MessageCreate, async (msg) => {
+  if (!msg.author || msg.author.bot || msg.guildId !== guild) return;
+  let channelId = msg.channelId;
+  let thread = "";
+  try {
+    const ch = msg.channel ?? (await client.channels.fetch(msg.channelId));
+    if (ch?.isThread() && ch.parentId) { thread = msg.channelId; channelId = ch.parentId; } // 스레드 글은 부모 채널의 방
+  } catch {}
+  execFile(py, [wakePy, "wake", "--channel", channelId, "--user", msg.author.id, "--message", msg.id, `--thread=${thread}`],
+    { timeout: 120000, env: childEnv }, (err, out, errOut) => {
+      const res = (out || errOut || String(err ?? "")).trim();
+      if (res !== "alive" && !res.startsWith("ignored:")) console.log(new Date().toISOString(), "wake", channelId, msg.id, res.slice(0, 200));
     });
 });
 

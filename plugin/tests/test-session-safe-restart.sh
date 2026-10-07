@@ -4,6 +4,7 @@
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/session_fixture.sh"
+export MARINA_SH
 start_fake_discord
 fail() { echo "FAIL: $*"; exit 1; }
 msess new proj feat/a >/dev/null 2>&1 || fail "new"
@@ -254,6 +255,82 @@ check(not typed, "(리뷰 I2) 오래된 끊김은 건드리지 않는다")
 tr.write_text(row({"type": "user", "message": {"role": "user", "content": "터미널에서 친 말"}}))
 typed.clear(); ms.resume_unanswered(rec)
 check(not typed, "터미널 지시는 건드리지 않는다")
+
+# ── --force: 사람이 시킨 강제 재시작(막는 이유는 찍고 무시, 대기·조용한 시간 없음, 잠금은 지킨다) ──
+def created():
+    return subprocess.run(ms._tmux_base() + ["display-message", "-p", "-t", rec["tmux"], "#{session_created}"], capture_output=True, text=True).stdout
+def cli(*args, inside=False):
+    env = {k: v for k, v in os.environ.items() if inside or k != "DISCORD_STATE_DIR"}     # 기본: 세션 밖(사람 터미널)에서 친 것처럼
+    return subprocess.run(["bash", os.environ["MARINA_SH"], "session", *args], capture_output=True, text=True, timeout=60, env=env)
+ms.cmd_start("proj/feat/a")
+(sd / "question.json").write_text("{}")
+check(mb.restart_blockers(rec) != [], "(전제) 질문 대기로 막힌 세션")
+b4 = created(); time.sleep(1.1)
+r = cli("restart", "proj/feat/a", "--force")
+check(r.returncode == 0, f"--force 는 막힌 세션도 재시작: rc={r.returncode} {r.stderr}")
+check("강제 재시작: proj/feat/a — 무시한 것: " in r.stdout and "질문 답 기다림" in r.stdout, f"무시한 이유를 찍는다: {r.stdout!r}")
+check(created() != b4 and ms.tmux_alive(rec["tmux"]), "tmux 세션이 새로 떴다")
+(sd / "question.json").unlink(missing_ok=True)
+tr.write_text(base_rows); (sd / "stopped-at").write_text(str(time.time() - 100)); (sd / "turn-at").write_text("0")
+os.utime(tr, (old, old))
+time.sleep(1.1)
+r = cli("restart", "proj/feat/a", "--force")
+check(r.returncode == 0 and "무시한 것: 막는 이유 없음" in r.stdout, f"막는 이유 없으면 그렇게 찍는다: {r.stdout!r} {r.stderr}")
+r = cli("restart", "--all", "--force")
+check(r.returncode != 0 and "--force" in r.stderr, f"--all --force 는 거절: rc={r.returncode} {r.stderr!r}")
+r = cli("restart", "--force")
+check(r.returncode != 0, f"ref 없는 --force 도 거절: rc={r.returncode}")
+b4 = created()
+held = mb._acquire_restart_lock(["other"])
+try:
+    r = cli("restart", "proj/feat/a", "--force")
+    check(r.returncode != 0 and "이미 재시작 대기가 돌고 있다" in (r.stderr + r.stdout), f"잠금이 잡혀 있으면 거절: rc={r.returncode} {r.stderr!r}")
+    check(created() == b4, "거절되면 세션을 안 건드린다")
+finally:
+    mb._release_restart_lock(held)
+
+# ── 리뷰 반영 ──
+# 1) 별칭+정식 이름으로 같은 세션을 두 번 줘도 자기 세션은 빠진다(--force·안전 경로 모두)
+b4 = created()
+r = cli("restart", "feat/a", "proj/feat/a", "--force", inside=True)
+check(r.returncode != 0 and created() == b4 and "자기 세션" in r.stderr, f"중복 ref 로 자기 세션이 뚫렸다(force): rc={r.returncode} {r.stderr!r}")
+r = cli("restart", "feat/a", "proj/feat/a", "--wait", "1", inside=True)
+check(r.returncode != 0 and created() == b4 and "자기 세션" in r.stderr, f"중복 ref 로 자기 세션이 뚫렸다(안전): rc={r.returncode} {r.stderr!r}")
+# 3) 대기자 거절 안내에 취소 방법
+held = mb._acquire_restart_lock(["other"])
+try:
+    r = cli("restart", "proj/feat/a", "--force")
+    check("marina session restart --cancel" in (r.stderr + r.stdout), f"거절 메시지에 --cancel 안내: {r.stderr!r}")
+finally:
+    mb._release_restart_lock(held)
+# 4) 강제 stop 뒤 남은 질문·권한 기록 정리
+(sd / "question.json").write_text(json.dumps({"questions": [{"header": "h", "question": "q", "options": [{"label": "a"}]}], "answers": [None], "msg": "123"}))
+(sd / "perm-aaaaaaaaaaaa.json").write_text(json.dumps({"token": "aaaaaaaaaaaa", "msg": ""}))
+(sd / "perm-aaaaaaaaaaaa.answer").write_text("allow")
+time.sleep(1.1)
+r = cli("restart", "proj/feat/a", "--force")
+check(r.returncode == 0, f"(전제) 강제 재시작: {r.stderr!r}")
+check(not (sd / "question.json").exists() and not list(sd.glob("perm-*")), f"남은 질문·권한 기록을 정리: {sorted(x.name for x in sd.iterdir())}")
+# 2) start 실패 사유를 버리지 않는다 — 끝 줄에 어떻게 켜는지
+root_dir = Path(rec["root"]); moved = root_dir.with_name(root_dir.name + ".moved"); root_dir.rename(moved)
+try:
+    time.sleep(1.1)
+    r = cli("restart", "proj/feat/a", "--force")
+    check(r.returncode == 1, f"start 실패면 종료 코드 1: {r.returncode}")
+    check("워크트리가 없어 건너뜀" in r.stderr and "지금 꺼져 있다: marina session start proj/feat/a" in r.stderr, f"실패 사유+켜는 법: {r.stderr!r}")
+finally:
+    moved.rename(root_dir)
+ms.cmd_start("proj/feat/a")
+# 2) cmd_start 예외는 ref 단위로 잡고 나머지는 계속
+_o2 = (ms.find_session, ms.tmux_alive, ms.tmux_stop, ms.cmd_start)
+ms.find_session = lambda ref: {"tmux": "x", "stateDir": "/nonexistent", "channelId": "1"}; ms.tmux_alive = lambda n: False; ms.tmux_stop = lambda n: None
+def _cs(ref):
+    if ref == "bad": raise RuntimeError("boom")
+    return ([ref], [])
+ms.cmd_start = _cs
+done, failed = mb.force_restart(["bad", "good"], log=lambda *_: None)
+check(done == ["good"] and len(failed) == 1 and "bad" in failed[0] and "boom" in failed[0] and "marina session start bad" in failed[0], f"예외는 ref 단위로 잡는다: {done} {failed}")
+(ms.find_session, ms.tmux_alive, ms.tmux_stop, ms.cmd_start) = _o2
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

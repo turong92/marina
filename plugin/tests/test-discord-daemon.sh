@@ -68,6 +68,113 @@ check(len(spawned) == 1, f"동시 ensure 도 하나만: {len(spawned)}")
 os.environ["DISCORD_STATE_DIR"] = "/tmp/some-session"; os.environ["CLAUDECODE"] = "1"
 env = ms._daemon_env()
 check("DISCORD_STATE_DIR" not in env and "CLAUDECODE" not in env and env.get("MARINA_HOME") == str(ms.marina_home()), f"깨끗한 환경: {sorted(env)}")
+os.environ["MARINA_DISCORD_SUPERVISED"] = "launchd"
+check("MARINA_DISCORD_SUPERVISED" not in ms._daemon_env(), "launchd 자식 표식은 떼어 띄운 데몬에 물려주지 않는다(핸드오프가 아무도 안 띄우게 된다)")
+del os.environ["MARINA_DISCORD_SUPERVISED"]
+if fails:
+    print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
+PY
+# ── LaunchAgent 주인 규칙(스펙 §3.2~3.4) — 가짜 launchctl 만 ──
+LC="$TMPROOT/lc"; mkdir -p "$LC" "$MARINA_HOME/bin" "$TMPROOT/bin"
+cat > "$TMPROOT/bin/fake-launchctl" <<SH
+#!/bin/sh
+echo "\$*" >> "$LC/log"
+case "\$1" in
+  print) [ -f "$LC/loaded" ] || exit 113; echo "state = \$(cat "$LC/state" 2>/dev/null || echo running)" ;;
+  bootstrap) [ -e "$LC/fail_bootstrap" ] && exit 5; touch "$LC/loaded" ;;
+  bootout) rm -f "$LC/loaded" ;;
+  kickstart) echo running > "$LC/state" ;;
+esac
+SH
+chmod +x "$TMPROOT/bin/fake-launchctl"
+printf '#!/bin/sh\nexit 0\n' > "$MARINA_HOME/bin/marina-session-hook"; chmod +x "$MARINA_HOME/bin/marina-session-hook"
+export MARINA_LAUNCH_AGENTS_DIR="$MARINA_HOME/LaunchAgents" LC
+PYTHONPATH="$DSCRIPTS:$SCRIPTS" FAKE="$TMPROOT/bin/fake-launchctl" python3 - <<'PY'
+import os, sys, threading
+from pathlib import Path
+import marina_session as ms
+import marina_discord_launchd as ld
+fails = []
+def check(c, m):
+    if not c: fails.append(m)
+LC = Path(os.environ["LC"]); log = LC / "log"
+def calls(): return log.read_text().splitlines() if log.exists() else []
+shim = str(ms.marina_home() / "bin" / "marina-session-hook")
+spawned = []
+ms._spawn_daemon = lambda *a: spawned.append(1) or 4242
+ms.daemon_pid_path().unlink(missing_ok=True)
+os.environ.pop("MARINA_DISCORD_DAEMON", None)
+# 고정 입구가 아니면(작업 트리) 등록하지 않는다
+check(ms._launchd_program() is None, "작업 트리에서 돌면 launchd 프로그램 없음")
+check(ms._launchd_program([shim]) == [shim, "daemon"], "고정 입구면 [입구, daemon]")
+# 격리 홈(주인 = nohup): 지금 그대로 떼어 띄운다
+check(ms.ensure_daemon([shim]) == "started" and spawned == [1] and calls() == [], f"nohup 은 예전대로: {spawned} {calls()}")
+ms.daemon_pid_path().unlink(missing_ok=True); spawned.clear()
+# 주인 = launchd: 떼어 띄우지 않고 등록한다
+os.environ.update(MARINA_DISCORD_SUPERVISOR="launchd", MARINA_DISCORD_LAUNCHCTL=os.environ["FAKE"])
+check(ms.ensure_daemon([shim]) == "launchd:installed" and spawned == [], f"launchd 에 맡김: {spawned}")
+(LC / "state").write_text("not running")
+check(ms.ensure_daemon([shim]) == "launchd:kicked" and spawned == [], "죽어 있으면 kickstart — 직접 띄우지 않는다(둘 방지)")
+# 작업 트리(입구 아님)에서는 launchd 가 주인이어도 예전대로
+check(ms.ensure_daemon() == "started" and spawned == [1], "입구가 아니면 등록 안 하고 예전대로")
+ms.daemon_pid_path().unlink(missing_ok=True); spawned.clear()
+# 등록 실패 → 예전 방식으로 물러난다(봇이 없는 것보다 낫다)
+ld.uninstall(); (LC / "fail_bootstrap").touch()
+check(ms.ensure_daemon([shim]) == "started" and spawned == [1], "launchctl 실패면 떼어 띄움")
+(LC / "fail_bootstrap").unlink(); ms.daemon_pid_path().unlink(missing_ok=True); spawned.clear()
+# off 면 아무것도
+log.unlink(missing_ok=True); os.environ["MARINA_DISCORD_DAEMON"] = "off"
+check(ms.ensure_daemon([shim]) == "off" and calls() == [] and spawned == [], f"off 면 launchctl 호출 0건: {calls()}")
+check(ms._daemon_adopt_launchd() is False and calls() == [], "off 면 자기 이전도 안 함")
+del os.environ["MARINA_DISCORD_DAEMON"]
+# 동시 ensure 5개 → 등록 한 번
+ld.uninstall(); log.unlink(missing_ok=True)
+ts = [threading.Thread(target=lambda: ms.ensure_daemon([shim])) for _ in range(5)]
+[t.start() for t in ts]; [t.join() for t in ts]
+check(sum(c.startswith("bootstrap") for c in calls()) == 1, f"동시 ensure 도 bootstrap 한 번: {calls()}")
+# 핸드오프: launchd 자식은 아무것도 띄우지 않고 끝나기만 한다
+called = []
+real = ms.ensure_daemon
+ms.ensure_daemon = lambda *a: called.append(a) or "started"
+os.environ["MARINA_DISCORD_SUPERVISED"] = "launchd"
+ms._daemon_handoff()
+check(called == [], f"launchd 아래 핸드오프는 직접 안 띄운다: {called}")
+check(ms._daemon_adopt_launchd() is False, "이미 launchd 자식이면 이전할 것 없음")
+del os.environ["MARINA_DISCORD_SUPERVISED"]
+ms._daemon_handoff()
+check(len(called) == 1, "떼어 뜬 데몬의 핸드오프는 예전대로 다음 데몬을 띄운다")
+ms.ensure_daemon = real
+# 자기 이전: 떼어 뜬 데몬이 입구로 떴으면 등록하고 물러난다 — 입구가 아니면 그대로 돈다
+ld.uninstall()
+ms._hook_entry = lambda: [sys.executable, "/x/marina_session.py"]
+check(ms._daemon_adopt_launchd() is False, "작업 트리 데몬은 등록하지 않는다(LaunchAgent 가 워크트리를 물면 안 된다)")
+ms._hook_entry = lambda: [shim]
+import fcntl
+held = []
+real_ensure = ld.ensure
+def probe(program):
+    f = open(ms.marina_home() / "discord-daemon.spawn.lock", "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB); held.append(False)
+    except OSError:
+        held.append(True)
+    finally:
+        f.close()
+    return real_ensure(program)
+ld.ensure = probe
+check(ms._daemon_adopt_launchd() is True and ld.status() != "absent", "입구로 뜬 데몬은 등록하고 물러난다")
+ld.ensure = real_ensure
+check(held == [True], f"등록하는 동안 spawn 잠금을 쥔다(훅의 ensure_daemon 과 겹치지 않게): {held}")
+ld.uninstall(permanent=True)
+check(ms.ensure_daemon([shim]) == "off" and ms._daemon_adopt_launchd() is False, "끔 표식이 있으면 등록도 이전도 안 한다")
+ld.clear_off()
+# 로그 자르기
+lp = ms.marina_home() / "discord-daemon.log"
+lp.write_bytes(b"x" * ((1 << 20) + 10)); ms._trim_daemon_log()
+check(lp.stat().st_size == 0, "1MB 넘으면 비운다")
+lp.write_bytes(b"x" * 100); ms._trim_daemon_log()
+check(lp.stat().st_size == 100, "작으면 그대로")
+check("marina_discord_launchd" in ms._PREFLIGHT_MODULES, "업데이트 사전 검사에 새 모듈")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

@@ -88,6 +88,27 @@ t2 = txt(r2)
 check("🧪 ` 30%  b   ` <#3>" in t2 and "` 71%  a   ` <#1> ⚠\n` 10%  a   ` <#2>" in t2,
       f"프로젝트 너비 맞춤·프로젝트 순 정렬·70%↑ ⚠: {t2}")
 check(sum(1 for c in r2 if c.get("type") == 9) == 1, "정지 버튼은 작업 중에만")
+# 꺼진 방: 글을 쓰면 깨울 수 있는 방은 🌙 잠듦, 못 깨우는 방만 ⚫ 꺼짐
+def srow(ref, chn, alive=False, wakeable=False):
+    return {"ref": ref, "channelId": chn, "alive": alive, "busy": False, "bg": False, "emoji": "", "ctx": None, "tasks": [],
+            "asking": False, "permission": False, "wakeable": wakeable}
+snap_w = {"usage": [], "sessions": [srow("p/a", "1", wakeable=True), srow("p/b", "2", wakeable=True), srow("p/c", "3"), srow("p/d", "4", alive=True)]}
+texts = "\n".join(c.get("content", "") for c in mb.render(snap_w) if c.get("type") == 10)
+check("### 🌙 잠듦 2" in texts and "글을 쓰면 깨어나" in texts, f"깨울 수 있는 꺼진 방은 잠듦: {texts}")
+check("### ⚫ 꺼짐 1" in texts and texts.index("<#3>") > texts.index("⚫ 꺼짐"), "못 깨우는 방만 꺼짐")
+check(texts.index("<#1>") < texts.index("⚫ 꺼짐") and "### 💤 대기 1" in texts, "잠듦은 꺼짐 앞·대기는 그대로")
+only = {"usage": [], "sessions": [srow("p/c", "3")]}
+check("🌙" not in "\n".join(c.get("content", "") for c in mb.render(only) if c.get("type") == 10), "잠든 방이 없으면 구역도 없다")
+many = {"usage": [], "sessions": [dict(srow(f"p/w{i}", str(100 + i), alive=True), busy=True) for i in range(30)]
+        + [srow("p/a", "1", wakeable=True), srow("p/c", "3")]}
+check(mb._count(mb.render(many)) + 1 <= 40, f"구역이 늘어도 구성요소 40개 한도 안: {mb._count(mb.render(many))}")
+# 모든 구역이 한꺼번에 있을 때(백그라운드·역할별 사용량·대기·잠듦·꺼짐)도 40개 안 — 예약 몫이 모자라면 한 개 넘친다
+bgrows = [dict(srow(f"p/g{i}", str(300 + i), alive=True), tasks=[{"id": f"b{i}", "kind": "shell", "desc": "x"}]) for i in range(30)]
+worst = {"usage": [{"key": "weekly", "label": "주간", "usedPercent": 40, "resetsAt": int(time.time() + 86400)}],
+         "roleUsage": [{"role": "developer", "calls": 2, "tokens": 1200000, "models": ["sonnet-5-5"]}],
+         "sessions": [dict(srow(f"p/w{i}", str(100 + i), alive=True), busy=True, tasks=[{"id": f"w{i}", "kind": "shell", "desc": "x"}]) for i in range(30)]
+         + bgrows + [srow("p/i1", "11", alive=True), srow("p/a", "1", wakeable=True), srow("p/c", "3")]}
+check(mb._count(mb.render(worst)) + 1 <= 40, f"모든 구역(작업 중·백그라운드·역할별·대기·잠듦·꺼짐)이 넘쳐도 40개 한도 안: {mb._count(mb.render(worst)) + 1}")
 # '입력 중…' 은 10초면 꺼진다 — 작업 중인 세션 채널에 8초마다 다시 보낸다(쉬는 세션엔 안 보냄)
 ty = {}
 n = len(log()); mb.typing_tick(snap, ty, now=1000)
@@ -178,6 +199,14 @@ check((sd / "acked").read_text().strip() == "9001", "멈춘 지시엔 진행 이
 check("모르는" in mb.interrupt("C-none", "U1", "1"), "세션 없는 채널")
 subprocess.run(base + ["kill-session", "-t", rec["tmux"]])
 check("쉬고" in mb.interrupt(ch, "U1", "9002"), "꺼진 세션엔 키를 안 보낸다")
+row0 = [r for r in mb.snapshot(full=False)["sessions"] if r["channelId"] == str(ch)][0]
+check(row0["alive"] is False and row0["wakeable"] is True, f"꺼져 있고 폴더가 있으면 깨울 수 있는 방: {row0}")
+cfgp = ms.config_path(); cfg_keep = cfgp.read_text(); cfgp.write_text(json.dumps(dict(json.loads(cfg_keep), wake=False)))
+check([r for r in mb.snapshot(full=False)["sessions"] if r["channelId"] == str(ch)][0]["wakeable"] is False, "깨우기를 끄면 그냥 꺼짐")
+cfgp.write_text(cfg_keep)
+root_keep = Path(rec["root"]); root_keep.rename(str(root_keep) + ".gone")
+check([r for r in mb.snapshot(full=False)["sessions"] if r["channelId"] == str(ch)][0]["wakeable"] is False, "폴더가 없으면 못 깨운다")
+Path(str(root_keep) + ".gone").rename(root_keep)
 subprocess.run(base + ["new-session", "-d", "-s", rec["tmux"], "sh", "-c",
                         "printf '✢ Schlepping… (9s) 는 위쪽 대화 내용\\n1\\n2\\n3\\n4\\n5\\n6\\n7\\n✻ Worked for 3m\\n────\\n❯ \\n────\\n'; exec cat"], check=True)
 time.sleep(0.5)
@@ -220,6 +249,14 @@ cmd = mb.bot_command(cfg)
 check(cmd is not None and cmd["env"]["DISCORD_BOT_TOKEN"] == "test-token" and cmd["env"]["MARINA_GUILD"] == "G1",
       f"봇 실행 env: {cmd and {k: v for k, v in cmd['env'].items() if k != 'DISCORD_BOT_TOKEN'}}")
 check(cmd and Path(cmd["cwd"]).joinpath("bot.ts").is_file(), "봇 코드 위치")
+_keep = {k: os.environ.get(k) for k in ("SHELL", "LOGNAME", "SSH_AUTH_SOCK")}
+os.environ.update(SHELL="/bin/zsh", LOGNAME="tester", SSH_AUTH_SOCK="/tmp/agent.sock")
+e2 = mb.bot_command(cfg)["env"]
+check(e2.get("SHELL") == "/bin/zsh" and e2.get("LOGNAME") == "tester" and e2.get("SSH_AUTH_SOCK") == "/tmp/agent.sock",
+      "봇이 깨운 세션이 손으로 켠 세션과 같은 환경(SHELL·LOGNAME·SSH_AUTH_SOCK)을 갖게 허용 키에 포함")
+for k, v in _keep.items():
+    if v is None: os.environ.pop(k, None)
+    else: os.environ[k] = v
 # ── 데몬 한 바퀴: 봇을 띄우고(죽으면 간격을 늘려 다시), 첫 바퀴엔 대시보드·숫자판을 그린다. 설정이 없으면 봇을 내린다 ──
 calls = []
 class P:
