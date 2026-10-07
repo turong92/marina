@@ -96,7 +96,7 @@ deny = st["permissions"]["deny"]
 for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md"):
     check(f"Edit(/{folder.resolve()}/{f})" in deny, f"폴더 안 설정 파일 쓰기 금지: {f}")
 pre = st["hooks"]["PreToolUse"][0]
-check(pre["matcher"] == "mcp__plugin_discord_discord__reply|WebFetch|Write|Edit", f"가드 매처: {pre['matcher']}")
+check(pre["matcher"] == "mcp__plugin_discord_discord__reply|WebFetch|Write|Edit|Read|Glob|Grep", f"가드 매처(남의 방 폴더 격리로 Read·Glob·Grep 포함): {pre['matcher']}")
 guard = pre["hooks"][0]["command"]
 def run(cmd, payload):
     p = subprocess.run(["/bin/sh", "-c", cmd], input=json.dumps(payload) if not isinstance(payload, str) else payload,

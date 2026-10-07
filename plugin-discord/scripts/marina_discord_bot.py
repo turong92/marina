@@ -2084,7 +2084,7 @@ def _stop_start(ref: str, rec: dict[str, Any], stop: bool, on_stop: Any = None) 
             if on_stop:
                 on_stop()
         t_start = time.time()                  # 실제 기동 시각 — 잠금을 기다린 시간은 빼고
-        started, failed = ms.cmd_start(ref)
+        started, failed = ms.start_with_launch_env(ref, sd) if ms.launched_by() == "daemon" else ms.cmd_start(ref)
         if started:
             up = True
         elif failed:
@@ -2316,7 +2316,7 @@ def bot_command(cfg: dict[str, Any]) -> dict[str, Any] | None:
     env = {k: v for k, v in os.environ.items() if k.startswith("MARINA_") or k in ("HOME", "USER", "LOGNAME", "SHELL", "LANG", "TMPDIR", "SSH_AUTH_SOCK")}
     env.update(PATH=f"{Path(bun).parent}:/usr/bin:/bin", DISCORD_BOT_TOKEN=ms.read_token(cfg),
                MARINA_GUILD=str(cfg["guildId"]), MARINA_PY=sys.executable, MARINA_BOT_PY=str(Path(__file__).resolve()),
-               MARINA_PARENT_PID=str(os.getpid()))
+               MARINA_PARENT_PID=str(os.getpid()), **{ms.BOT_MARK: "1"})     # 자식(new-from-text 등)이 '데몬이 띄운다'를 알게
     return {"argv": [bun, "bot.ts"], "cwd": str(BOT_DIR), "env": env, "bun": bun}
 
 
@@ -2364,7 +2364,8 @@ def new_from_text(project: str, user: str, text: str, channel: str, name: str = 
             return ms.new_task_first_prompt(text, who, ch, mid)
 
         slug = ms.unique_slug(project, ms.suggest_slug(text))
-        r = ms.cmd_new(project, slug, ms.extract_base(project, text), start=False, title=ms.task_title(text), first=first)
+        with ms.launch_env_scope(None):        # 새 세션도 사람의 환경(로그인 셸)으로 — 봇의 짧은 PATH 로 뜨지 않게
+            r = ms.cmd_new(project, slug, ms.extract_base(project, text), start=False, title=ms.task_title(text), first=first)
         return f"열었어: <#{r['channelId']}>"
     except ms.SessionError as exc:
         return str(exc)[:1500]

@@ -220,17 +220,8 @@ def wake(channel: str, user: str = "", message: str = "", thread: str = "", sinc
 
 
 def _start_with_launch_env(ref: str, sd: Path, first: str) -> tuple[list[str], list[str]]:
-    """마지막으로 띄운 환경(PATH·LANG·LC_ALL)으로 cmd_start — 끝나면 이 프로세스의 환경을 되돌린다(데몬 안에서 불려도 안전)."""
-    keep = {k: os.environ.get(k) for k in ms._LAUNCH_ENV_KEYS}
-    try:
-        ms.apply_launch_env(sd)
-        return ms.cmd_start(ref, first=first)
-    finally:
-        for k, v in keep.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
+    """사람의 환경(켠 기록 → 로그인 셸)으로 cmd_start — 끝나면 이 프로세스의 환경을 되돌린다(데몬 안에서 불려도 안전)."""
+    return ms.start_with_launch_env(ref, sd, first)
 
 
 def _wake_locked(rec: dict[str, Any], cfg: dict[str, Any], sd: Path, message: str, thread: str, since: "float | None") -> str:

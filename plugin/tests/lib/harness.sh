@@ -35,6 +35,14 @@ unset _marina_test_home_root
 # stale_test_artifacts_days 규칙이 라벨로 찾아 회수한다. 테스트가 직접 치는 `docker run` 은 --label marina.e2e=1 을 붙일 것.
 export MARINA_E2E=1
 
+# 마리나 세션 안에서 돌려도 그 세션의 상태 폴더를 물려받지 않는다 — marina_session.launched_by() 가 "session" 으로 읽는다.
+# (세션 상태를 쓰는 테스트는 스스로 세운다.)
+unset DISCORD_STATE_DIR
+
+# 데몬이 세션을 띄울 때 얻는 로그인 셸 환경(login_env) — 테스트가 형의 실제 zshrc 를 실행하지 않게 없는 셸로 막는다.
+# 필요한 테스트(test-discord-login-env)가 가짜 셸로 다시 세운다.
+export MARINA_LOGIN_SHELL=/nonexistent/login-shell
+
 # YAML 읽기는 진짜 docker 로. marina 는 compose YAML 을 `docker compose config --format json` 으로 읽는다(PyYAML 없음).
 # 테스트가 라이프사이클 흉내용 가짜 docker 를 PATH 앞에 올려도(up/ps/config 픽스처) YAML 파싱은 그 가짜가 아니라
 # 진짜 CLI 를 타야 한다 — 가짜의 `config --format json` 픽스처가 x-marina 로 둔갑하거나(prebuild-runtime), 가짜가

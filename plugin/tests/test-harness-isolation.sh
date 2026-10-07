@@ -40,9 +40,13 @@ leaked="$(bash -c '
   export MARINA_CONTROL_HOST=0.0.0.0 MARINA_CONTROL_PORT=44444 MARINA_TERM=1 MARINA_GATEWAY_PORT=9999
   export MARINA_HOME=/definitely/not/isolated
   . "$1/lib/harness.sh"
-  env | grep "^MARINA_" | grep -v "^MARINA_HOME=" | grep -v "^MARINA_E2E=" | grep -v "^MARINA_YAML_DOCKER=" || true
+  env | grep "^MARINA_" | grep -v "^MARINA_HOME=" | grep -v "^MARINA_E2E=" | grep -v "^MARINA_YAML_DOCKER=" | grep -v "^MARINA_LOGIN_SHELL=" || true
 ' _ "$HERE")"
 [ -z "$leaked" ] || { echo "FAIL: 하네스가 상속된 MARINA_* 를 남겼다 — $leaked"; exit 1; }
+
+# 마리나 세션 안에서 돌리면 DISCORD_STATE_DIR 도 물려받는다 — launched_by() 가 "session" 으로 읽어 기록·환경 판정이 달라진다.
+state="$(bash -c 'export DISCORD_STATE_DIR=/not/isolated; . "$1/lib/harness.sh"; printf %s "${DISCORD_STATE_DIR:-}"' _ "$HERE")"
+[ -z "$state" ] || { echo "FAIL: 하네스가 상속된 DISCORD_STATE_DIR 을 남겼다 — $state"; exit 1; }
 
 # 진짜 격리 확인: marina_state 가 굳히는 값이 실 홈이 아니어야 한다.
 got="$(PYTHONPATH="$HERE/../scripts" python3 -c 'from marina_state import MARINA_HOME; print(MARINA_HOME)')"

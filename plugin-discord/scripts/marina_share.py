@@ -62,8 +62,9 @@ def _public_addr(host: str, port: int) -> tuple[str, int] | None:
 class RenderServer:
     """공유 폴더만 내보내는 HTTP 서버 겸 크롬 전용 프록시."""
 
-    def __init__(self, root: Path, fit: str = "", virtual: "dict[str, bytes] | None" = None):
+    def __init__(self, root: Path, fit: str = "", virtual: "dict[str, bytes] | None" = None, block: "tuple[str, ...]" = ()):
         self.root = os.path.realpath(str(root))
+        self.block = tuple(x.casefold() for x in block)     # root 바로 아래 이 이름의 폴더는 내주지 않는다(채팅 폴더의 rooms/ — 다른 방 자료)
         self.virtual = virtual or {}     # 파일 없이 내주는 가상 페이지(경로 → HTML) — md 미리보기용
         self.fit = os.path.realpath(os.path.join(self.root, fit)) if fit else ""
         self.height = 0
@@ -105,7 +106,8 @@ class RenderServer:
                     return
                 rel = urllib.parse.unquote(u.path).lstrip("/")
                 p = os.path.realpath(os.path.join(outer.root, rel))
-                if not p.startswith(outer.root + os.sep) or not os.path.isfile(p):
+                first = os.path.relpath(p, outer.root).split(os.sep)[0].casefold() if p.startswith(outer.root + os.sep) else ""
+                if not p.startswith(outer.root + os.sep) or not os.path.isfile(p) or first in outer.block:
                     self.send_response(404)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
@@ -239,7 +241,7 @@ def _shot(chrome: str, port: int, height: int, out: Path, url: str, timeout: flo
         shutil.rmtree(profile, ignore_errors=True)
 
 
-def render_html(page: Path, root: Path, outdir: Path, timeout: float = 45) -> tuple[Path | None, str]:
+def render_html(page: Path, root: Path, outdir: Path, timeout: float = 45, block: "tuple[str, ...]" = ()) -> tuple[Path | None, str]:
     """page(root 안) 전체를 폰 폭 미리보기 PNG 한 장으로. (파일, 안내) — 실패면 (None, 이유)."""
     chrome = find_chrome()
     if not chrome:
@@ -247,7 +249,7 @@ def render_html(page: Path, root: Path, outdir: Path, timeout: float = 45) -> tu
     rel = os.path.relpath(os.path.realpath(str(page)), os.path.realpath(str(root)))
     outdir.mkdir(parents=True, exist_ok=True)
     out = outdir / f"{Path(rel).stem}.png"
-    srv = RenderServer(root, fit=rel)
+    srv = RenderServer(root, fit=rel, block=block)
     srv.start()
     try:
         url = f"http://127.0.0.1:{srv.port}/" + urllib.parse.quote(rel)
@@ -306,7 +308,8 @@ def md_preview_page(text: str, base_href: str) -> bytes:
             f'<script type="application/json" id="md-data">{payload}</script>{libs}<script>{js}</script></body></html>').encode("utf-8")
 
 
-def render_md(page: Path, root: Path, outdir: Path, max_images: int = 4, timeout: float = 45) -> "tuple[list[Path], str]":
+def render_md(page: Path, root: Path, outdir: Path, max_images: int = 4, timeout: float = 45,
+              block: "tuple[str, ...]" = ()) -> "tuple[list[Path], str]":
     """md(root 안)를 폰 폭 미리보기 PNG 로 — 길면 세로로 잘라 최대 max_images 장(앞쪽부터). (파일들, 안내) — 실패면 ([], 이유)."""
     chrome = find_chrome()
     if not chrome:
@@ -323,7 +326,7 @@ def render_md(page: Path, root: Path, outdir: Path, max_images: int = 4, timeout
     html = md_preview_page(Path(real).read_text(encoding="utf-8", errors="replace"), base)
     outdir.mkdir(parents=True, exist_ok=True)
     stem = Path(real).stem
-    srv = RenderServer(root, virtual={"/__marina/md.html": html})
+    srv = RenderServer(root, virtual={"/__marina/md.html": html}, block=block)
     srv.start()
     try:
         url = f"http://127.0.0.1:{srv.port}/__marina/md.html"

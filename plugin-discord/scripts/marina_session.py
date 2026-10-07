@@ -31,7 +31,7 @@ from typing import Any
 PLUGIN = "plugin:discord@claude-plugins-official"
 API_DEFAULT = "https://discord.com/api/v10"
 _TASK_RE = re.compile(r"[A-Za-z0-9._/-]+")
-_KEEP_ENV = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "TMPDIR", "SSH_AUTH_SOCK")
+_KEEP_ENV = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "JAVA_HOME", "SDKMAN_DIR", "TMPDIR", "SSH_AUTH_SOCK")
 
 CHANNEL_RULES = (
     "이 세션은 Discord 채널에 연결돼 있다. 상대는 Discord 만 보고 이 터미널은 보지 않는다.\n"
@@ -69,6 +69,9 @@ CHAT_RULES = (
     "열어보기 주소를 reply 본문에 넣는다 — 그 주소를 누르면 폰에서 바로 열리고 버튼·클릭도 된다.\n"
     "- 이 폴더 밖 파일은 읽거나 보낼 수 없다.\n"
     "- 상대가 보낸 첨부는 download_attachment 로 받아 읽는다.\n"
+    "- 받은 사진·파일을 HTML·문서에 쓰려면 take_attachment 로 먼저 가져와라. 받은 사진·파일과 그걸 쓰는 결과물은 이 방 폴더 "
+    "rooms/<이 방 id>/ 안에 둔다(take_attachment 가 경로를 알려 준다 — 다른 방과 섞이지 않게).\n"
+    "- 사용자에게 터미널 명령을 부탁하지 마라.\n"
     "- 이 컴퓨터 주인의 다른 파일·설정·계정 정보는 묻더라도 다루지 않는다."
 )
 CHAT_LIMIT = 20
@@ -674,25 +677,208 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
     _save_launch_env(env_extra.get("DISCORD_STATE_DIR") or "")
 
 
-_LAUNCH_ENV_KEYS = ("PATH", "LANG", "LC_ALL")
+_LAUNCH_ENV_KEYS = ("PATH", "LANG", "LC_ALL", "JAVA_HOME", "SDKMAN_DIR")   # 읽고 적고 입히는 키는 이것뿐 — 토큰이 든 변수는 만지지 않는다
+LOGIN_ENV_TTL = 6 * 3600.0
+LOGIN_ENV_TIMEOUT = 10.0
+LOGIN_ENV_RETRY = 600.0                  # 조회가 실패하면 이만큼은 다시 부르지 않는다
+_LOGIN_ENV_PASS = ("HOME", "USER", "LOGNAME", "SHELL", "PATH", "LANG", "TMPDIR")      # 로그인 셸 rc 에 넘기는 환경 — 봇 토큰·MARINA_* 는 안 넘긴다
+BOT_MARK = "MARINA_DISCORD_BOTPROC"      # 봇 프로세스(launchd·nohup 둘 다)와 그 자식이 가진 표식
+_RC_FILES = (".zshenv", ".zprofile", ".zshrc")
+_DAEMON_DEPTH = [0]
+
+
+@contextlib.contextmanager
+def daemon_context() -> Any:
+    """데몬(깨우기·이어받기·새 작업)이 세션을 띄우는 동안 — 이때의 환경은 사람이 켠 환경이 아니다."""
+    _DAEMON_DEPTH[0] += 1
+    try:
+        yield
+    finally:
+        _DAEMON_DEPTH[0] -= 1
+
+
+def launched_by() -> str:
+    """누가 세션을 띄우나: session(세션 안에서 부른 restart·start·open_chat) → daemon(봇 프로세스·그 자식) → human."""
+    if os.environ.get("DISCORD_STATE_DIR"):
+        return "session"
+    if _DAEMON_DEPTH[0] or os.environ.get(BOT_MARK) or os.environ.get("MARINA_DISCORD_SUPERVISED") == "launchd":
+        return "daemon"
+    return "human"
+
+
+def _login_env_path() -> Path:
+    return marina_home() / "login-env.json"
+
+
+def _login_env_fail_path() -> Path:
+    return marina_home() / "login-env.fail"
+
+
+def _login_env_read(fresh: bool) -> "dict[str, str] | None":
+    """캐시. fresh=True 면 6시간 안이고 rc(.zshenv·.zprofile·.zshrc)보다 새로울 때만, False 면 낡아도 있는 대로."""
+    p = _login_env_path()
+    try:
+        age = p.stat().st_mtime
+        if fresh:
+            if time.time() - age > LOGIN_ENV_TTL:
+                return None
+            for rc in _RC_FILES:
+                try:
+                    if (Path.home() / rc).stat().st_mtime > age:
+                        return None
+                except OSError:
+                    pass
+        d = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    out = {k: str(d[k]) for k in _LAUNCH_ENV_KEYS if isinstance(d, dict) and d.get(k)}
+    return out if out.get("PATH") else None
+
+
+def _login_shell() -> str:
+    """MARINA_LOGIN_SHELL → 계정의 셸 → $SHELL → /bin/zsh."""
+    got = os.environ.get("MARINA_LOGIN_SHELL")
+    if got:
+        return got
+    try:
+        import pwd
+        got = pwd.getpwuid(os.getuid()).pw_shell
+    except (ImportError, KeyError, OSError):
+        got = ""
+    return got or os.environ.get("SHELL") or "/bin/zsh"
+
+
+def _login_env_run() -> "dict[str, str] | None":
+    """사용자의 대화형 로그인 셸에서 환경을 얻는다. 시작 표식 뒤 ~ 끝 표식 앞의 `env -0` 출력만 믿고(끝 표식이 있으면 EOF 가 안 와도 완결),
+    허용한 키만 뽑는다. 셸에는 HOME·USER·LOGNAME·SHELL·PATH·LANG·TMPDIR 만 넘긴다."""
+    import signal
+    shell = _login_shell()
+    uid = uuid.uuid4().hex
+    mark, end = f"__MARINA_ENV_{uid}__", f"__MARINA_END_{uid}__"
+    env = {k: os.environ[k] for k in _LOGIN_ENV_PASS if os.environ.get(k)}
+    env["SHELL"] = shell
+    try:
+        proc = subprocess.Popen([shell, "-l", "-i", "-c", f"printf '%s\\0' {mark}; env -0; printf '%s\\0' {end}"], stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, start_new_session=True, env=env)
+    except OSError:
+        return None
+    try:
+        out, _ = proc.communicate(timeout=LOGIN_ENV_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        out = exc.output or b""
+        with contextlib.suppress(OSError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        try:
+            more, _ = proc.communicate(timeout=2)      # 손자가 stdout 을 쥐고 있으면 EOF 가 안 온다 — 오래 안 기다린다
+            out = more if more is not None else out
+        except subprocess.TimeoutExpired as exc2:
+            out = exc2.output or out
+        except (OSError, ValueError):
+            pass
+    head, tail = (mark + "\0").encode(), ("\0" + end + "\0").encode()
+    if head not in out or tail not in out:         # 끝 표식까지 읽었을 때만 완결로 본다
+        return None
+    got: dict[str, str] = {}
+    body = out.split(head, 1)[1].split(tail, 1)[0]
+    for item in body.split(b"\0"):
+        k, eq, v = item.decode("utf-8", "replace").partition("=")
+        if eq and k in _LAUNCH_ENV_KEYS and v:
+            got[k] = v
+    if not got.get("PATH"):
+        return None
+    parts = [x for x in got["PATH"].split(":") if x]
+    got["PATH"] = ":".join(parts + [x for x in daemon_path().split(":") if x not in parts])     # claude·tmux 를 못 찾는 일 방지
+    return got
+
+
+def login_env() -> "dict[str, str] | None":
+    """데몬이 세션을 띄울 때 쓸 '사람의 환경'(로그인 셸). 캐시가 없거나 낡았을 때만 셸을 부르고 동시에 하나만.
+    조회가 실패하면 이전 캐시를 그대로 쓰고(없으면 None), 실패 시각을 적어 10분간 다시 부르지 않는다."""
+    got = _login_env_read(True)
+    if got:
+        return got
+    stale = _login_env_read(False)
+    try:
+        if time.time() - _login_env_fail_path().stat().st_mtime < LOGIN_ENV_RETRY:
+            return stale
+    except OSError:
+        pass
+    try:
+        marina_home().mkdir(parents=True, exist_ok=True)
+        lock = open(marina_home() / "login-env.lock", "w")
+    except OSError:
+        return stale
+    import fcntl
+    with lock:
+        end = time.monotonic() + LOGIN_ENV_TIMEOUT + 2
+        while True:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError:
+                if time.monotonic() > end:
+                    return stale
+                time.sleep(0.1)
+        got = _login_env_read(True)           # 기다리는 사이 다른 쪽이 얻었을 수 있다
+        if got:
+            return got
+        env = _login_env_run()
+        if not env:
+            with contextlib.suppress(OSError):
+                _login_env_fail_path().write_text(f"{time.time()}\n")
+            print("login-env: 로그인 셸에서 환경을 못 얻었다 — " + ("이전 캐시를 쓴다" if stale else "지금 환경으로 띄운다"), file=sys.stderr)
+            return stale
+        with contextlib.suppress(OSError):
+            _login_env_fail_path().unlink()
+        try:
+            _write_json(_login_env_path(), env)
+        except OSError:
+            pass
+        print(f"login-env: 로그인 셸 환경 갱신 (PATH {len(env['PATH'].split(':'))}개 항목)", file=sys.stderr)
+        return env
+
+
+def _bot_path_entries() -> "set[str]":
+    """봇이 자기 PATH 로 굳히는 항목: bun 위치 + /usr/bin:/bin (bot_command 와 같은 규칙)."""
+    out = {"/usr/bin", "/bin"}
+    for cand in (shutil.which("bun"), "/opt/homebrew/bin/bun", str(Path.home() / ".bun/bin/bun"), "/usr/local/bin/bun"):
+        if cand and os.access(cand, os.X_OK):
+            out.add(str(Path(cand).parent))
+    return out
+
+
+def _launch_record_is_human(d: Any) -> bool:
+    if not isinstance(d, dict) or not d.get("PATH"):
+        return False
+    if d.get("by"):
+        return d["by"] == "human"
+    # 옛 기록(by 없음): 데몬이 굳힌 PATH 는 daemon_path() 뒤에 봇 PATH(bun 위치:/usr/bin:/bin)가 붙은 꼴이다 —
+    # 모든 항목이 그 두 집합 안에 있으면 데몬 것, 하나라도 밖이면 사람 것
+    known = set(daemon_path().split(":")) | _bot_path_entries()
+    return any(x and x not in known for x in str(d["PATH"]).split(":"))
 
 
 def _save_launch_env(sdir: str) -> None:
-    """이 세션을 띄운 환경을 적어 둔다 — 봇(launchd 의 짧은 PATH)이 깨울 때 같은 환경으로 띄우게(스펙 §4.7)."""
-    if not sdir or not Path(sdir).is_dir():
+    """사람이 이 세션을 켠 환경을 적어 둔다 — 봇(launchd 의 짧은 PATH)이 깨울 때 같은 환경으로 띄우게(스펙 §4.7).
+    데몬·세션이 띄운 환경은 사람의 것이 아니라 적지 않는다."""
+    if not sdir or not Path(sdir).is_dir() or launched_by() != "human":
         return
     try:
-        _write_json(Path(sdir) / "launch-env.json", {k: os.environ[k] for k in _LAUNCH_ENV_KEYS if os.environ.get(k)})
+        _write_json(Path(sdir) / "launch-env.json", {**{k: os.environ[k] for k in _LAUNCH_ENV_KEYS if os.environ.get(k)}, "by": "human"})
     except OSError:
         pass
 
 
-def apply_launch_env(sdir: Path) -> bool:
-    """_save_launch_env 로 적어 둔 PATH·LANG·LC_ALL 을 os.environ 에 입힌다. 파일이 없거나 PATH 가 없으면 False."""
-    try:
-        d = json.loads((sdir / "launch-env.json").read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
+def apply_launch_env(sdir: "Path | None") -> bool:
+    """띄울 환경을 os.environ 에 입힌다: 사람이 켠 기록(launch-env.json) → 로그인 셸 → (없으면 입히지 않고 False)."""
+    d: Any = None
+    if sdir is not None:
+        try:
+            d = json.loads((sdir / "launch-env.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    if not _launch_record_is_human(d):
+        d = login_env()
     if not isinstance(d, dict) or not d.get("PATH"):
         return False
     for k in _LAUNCH_ENV_KEYS:
@@ -701,6 +887,29 @@ def apply_launch_env(sdir: Path) -> bool:
         else:
             os.environ.pop(k, None)
     return True
+
+
+@contextlib.contextmanager
+def launch_env_scope(sd: "Path | None") -> Any:
+    """데몬이 세션을 띄우는 동안 — 사람의 환경을 입히고, 끝나면 이 프로세스의 환경을 되돌린다."""
+    keep = {k: os.environ.get(k) for k in _LAUNCH_ENV_KEYS}
+    try:
+        with daemon_context():
+            apply_launch_env(sd)
+            yield
+    finally:
+        for k, v in keep.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+
+
+def start_with_launch_env(ref: str, sd: Path, first: str = "") -> tuple[list[str], list[str]]:
+    """데몬이 세션을 띄운다 — 사람의 환경을 입혀 cmd_start."""
+    with launch_env_scope(sd):
+        return cmd_start(ref, first=first)
+
 
 ROOM_LOCK_WAIT = 120.0           # restart 가 방 잠금을 기다리는 최대(깨우는 중이면 몇 초~수십 초)
 
@@ -1243,7 +1452,7 @@ exec "$PY" "$target" "$@"
     return [str(shim)]
 
 
-def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = False) -> Path:
+def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = False, room: str = "") -> Path:
     """채널 세션 전용 설정(--settings). 사용자 설정과 합쳐진다.
     Stop 훅 = 턴이 끝나면 진행 표시를 뗀다. enabledPlugins = 사용자 범위에서 플러그인을 꺼도 이 세션에서만 켜지게."""
     # 버전 캐시 경로가 지워지면 exit 2 가 claude 종료를 막는다 → 실패해도 0(최종 리뷰 I2). start 가 다시 쓴다.
@@ -1253,7 +1462,7 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
     if chat_root is not None:
         # 플러그인은 첨부 경로에서 자기 상태 폴더만 막는다 — 폴더 밖 파일은 훅으로 막는다(실측).
         guard = shlex.join(_hook_entry() + ["hook-chat-guard",
-                            str(chat_root), str(sdir / "inbox")])
+                            str(chat_root), str(sdir / "inbox")] + (["--room", str(room)] if room else []))
         # 판정기가 어떤 이유로든 죽으면(파이썬 경로 바뀜 등) exit 2 = 도구 호출을 막는다(리뷰 I1)
         guard += " || exit 2"
         real = os.path.realpath(str(chat_root))
@@ -1261,10 +1470,11 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
             "allow": ["Read", "Glob", "Grep", "Write", "Edit", "WebSearch", "WebFetch"]
                      + [f"mcp__plugin_discord_discord__{t}" for t in
                         ("reply", "react", "edit_message", "fetch_messages", "download_attachment")]
-                     + (["mcp__marina__open_chat", "mcp__marina__list_chats"] if lobby else ["mcp__marina__share_file", "mcp__marina__progress"]),
+                     + (["mcp__marina__open_chat", "mcp__marina__list_chats"] if lobby
+                        else ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__take_attachment"]),
             # 다음 기동 때 실행될 수 있는 폴더 안 설정 파일은 못 쓰게(리뷰 I2). '//' = 절대 경로
             "deny": [f"Edit(/{real}/{f})" for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md")]}
-        settings["hooks"]["PreToolUse"] = [{"matcher": f"{_REPLY_TOOL}|WebFetch|Write|Edit",
+        settings["hooks"]["PreToolUse"] = [{"matcher": f"{_REPLY_TOOL}|WebFetch|Write|Edit|Read|Glob|Grep",
                                             "hooks": [{"type": "command", "command": guard, "timeout": 15}]}]
     # 작업 중 표시: 도구를 쓸 때마다 채널에 '입력 중…'(8초에 한 번) — 👀 만으론 진행 여부를 알 수 없다(형 요청)
     typing = shlex.join(_hook_entry() + ["hook-typing"]) + " || true"
@@ -1333,17 +1543,75 @@ def _public_host(host: str) -> bool:
     return bool(addrs) and all(ipaddress.ip_address(a).is_global for a in addrs)
 
 
-def chat_guard(root: Path, inbox: Path, payload: dict[str, Any]) -> dict[str, Any] | None:
-    """채팅 세션 PreToolUse. 답장 첨부는 채팅 폴더·받은 첨부(inbox) 안 절대 경로만,
-    웹 읽기는 공인 주소만. 거절이면 결정을 돌려준다."""
-    ti = payload.get("tool_input") or {}
-    if payload.get("tool_name") in ("Write", "Edit"):
-        # deny 규칙은 대소문자(APFS 는 구분 안 함)·하위 폴더를 놓친다 — 경로 구성요소로 본다(리뷰 I-b)
-        parts = [x.casefold() for x in Path(str(ti.get("file_path") or "")).parts]
-        if ".claude" in parts or (parts and parts[-1] in _CHAT_CONFIG_NAMES):
-            return _deny(f"설정 파일은 만들거나 고칠 수 없어: {ti.get('file_path')}")
+_GLOB_CHARS = set("*?[{")
+
+
+def _rooms_segments(root: Path, raw: str, base: str = "") -> "list[str] | None":
+    """raw(경로·패턴)를 작업 폴더(root) 기준 구성요소로. 심볼릭 링크는 풀고(남의 방으로 새는 링크), 대소문자는 그대로 둔다(비교는 casefold).
+    root 밖이면 None(그건 claude 자신의 폴더 제한 몫)."""
+    rr = os.path.realpath(str(root))
+    p = raw if os.path.isabs(raw) else os.path.join(base or rr, raw)
+    head = []
+    parts = [x for x in p.split(os.sep) if x not in ("", ".")]
+    # 와일드카드 앞까지만 realpath(패턴 자체는 파일이 아니다)
+    for i, x in enumerate(parts):
+        if _GLOB_CHARS & set(x):
+            head, tail = parts[:i], parts[i:]
+            break
+    else:
+        head, tail = parts, []
+    real_head = os.path.realpath(os.sep + os.sep.join(head)) if head else os.sep
+    full = [x for x in real_head.split(os.sep) if x] + tail
+    rp = [x for x in rr.split(os.sep) if x]
+    if [x.casefold() for x in full[:len(rp)]] != [x.casefold() for x in rp]:
         return None
-    if payload.get("tool_name") == "WebFetch":
+    return full[len(rp):]
+
+
+def _room_violation(segs: "list[str] | None", room: str, recursive: bool) -> str:
+    """작업 폴더 기준 구성요소가 남의 방(또는 방 전체)을 가리키면 이유, 아니면 ''.
+    recursive = 그 아래를 훑는 도구(Glob 패턴·Grep 폴더)."""
+    if segs is None or not segs:
+        return "rooms/ 를 훑는 검색은 이 방 폴더(rooms/<이 방 id>/)를 path 로 정해서 해줘" if (segs is not None and recursive) else ""
+    first = segs[0]
+    if first.casefold() == "rooms":
+        if len(segs) < 2 or _GLOB_CHARS & set(segs[1]) or not room or segs[1].casefold() != str(room).casefold():
+            return f"다른 방 폴더는 쓸 수 없어 — 이 방 폴더(rooms/{room or '<이 방 id>'}/)만 써"
+        return ""
+    if _GLOB_CHARS & set(first) and (len(segs) > 1 or "**" in first):
+        return "이 폴더 전체를 훑는 검색은 다른 방 자료가 섞여 — 이 방 폴더(rooms/<이 방 id>/)를 path 로 정해서 해줘"
+    return ""
+
+
+def chat_guard(root: Path, inbox: Path, payload: dict[str, Any], room: str = "") -> dict[str, Any] | None:
+    """채팅 세션 PreToolUse. 답장 첨부는 채팅 폴더·받은 첨부(inbox) 안 절대 경로만,
+    웹 읽기는 공인 주소만, 남의 방 폴더(rooms/<다른 id>/)는 읽기·검색·쓰기·첨부 모두 거절. 거절이면 결정을 돌려준다.
+    한계: Glob/Grep 은 작업 폴더 맨 위를 통째로 훑는 호출(패턴이 첫 칸부터 와일드카드이거나 Grep path 가 맨 위)을 거절하는 방식이라,
+    이 방 폴더를 path 로 정하면 되지만 맨 위 파일만 검색하는 것도 막힌다."""
+    ti = payload.get("tool_input") or {}
+    tool = payload.get("tool_name")
+    if tool in ("Write", "Edit", "Read"):
+        fp = str(ti.get("file_path") or "")
+        if tool != "Read":
+            # deny 규칙은 대소문자(APFS 는 구분 안 함)·하위 폴더를 놓친다 — 경로 구성요소로 본다(리뷰 I-b)
+            parts = [x.casefold() for x in Path(fp).parts]
+            if ".claude" in parts or (parts and parts[-1] in _CHAT_CONFIG_NAMES):
+                return _deny(f"설정 파일은 만들거나 고칠 수 없어: {ti.get('file_path')}")
+        why = _room_violation(_rooms_segments(root, fp) if fp else None, room, False)
+        return _deny(why) if why else None
+    if tool in ("Glob", "Grep"):
+        base = str(ti.get("path") or "")
+        if tool == "Glob":
+            pat = str(ti.get("pattern") or "")
+            if ".." in pat.split("/"):
+                return _deny("패턴에 '..' 은 쓸 수 없어")
+            segs = _rooms_segments(root, pat, os.path.realpath(base) if base and os.path.isabs(base) else
+                                   os.path.join(os.path.realpath(str(root)), base) if base else "")
+        else:
+            segs = _rooms_segments(root, base or str(root))
+        why = _room_violation(segs, room, True)
+        return _deny(why) if why else None
+    if tool == "WebFetch":
         url = urllib.parse.urlsplit(str(ti.get("url") or ""))
         if url.scheme not in ("http", "https") or not url.hostname or not _public_host(url.hostname):
             return _deny(f"이 컴퓨터·내부망 주소는 열 수 없어: {ti.get('url')}")
@@ -1355,6 +1623,9 @@ def chat_guard(root: Path, inbox: Path, payload: dict[str, Any]) -> dict[str, An
     for f in files:
         if not isinstance(f, str) or not os.path.isabs(f) or not _inside(f, bases):
             return _deny(f"채팅 폴더 밖 파일은 보낼 수 없어: {f}")
+        why = _room_violation(_rooms_segments(root, f), room, False)
+        if why:
+            return _deny(why)
     return None
 
 
@@ -1464,6 +1735,7 @@ def _daemon_env() -> dict[str, str]:
     env["PATH"] = daemon_path()
     env["MARINA_HOME"] = str(marina_home())
     env["PYTHONUNBUFFERED"] = "1"
+    env[BOT_MARK] = "1"                              # nohup 으로 띄운 데몬도 '데몬' 이다(launchd 는 SUPERVISED 로 이미 안다)
     env.pop("MARINA_DISCORD_SUPERVISED", None)       # launchd 자식이라는 표식은 떼어 띄운 데몬에 물려주지 않는다 — 물려주면 핸드오프가 아무도 안 띄운다
     return env
 
@@ -2278,7 +2550,7 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
         channel_id = dc.create_text_channel(cfg["guildId"], chan, cat, LOBBY_TOPIC if lobby else title)
         write_state_dir(sdir, channel_id, cfg["projects"][project].get("allow") or [], tf)
         (sdir / "inbox").mkdir(exist_ok=True)
-        write_settings(sdir, chat_root=folder, lobby=lobby)
+        write_settings(sdir, chat_root=folder, lobby=lobby, room=channel_id)
         argv = lobby_argv(project, name, record["sessionId"]) if lobby else \
             chat_argv(project, name, record["sessionId"], from_id=from_id.lower())
         tmux_start(tmux, folder, argv, chat_env(sdir), notify_ref=f"{project}/{name}")
@@ -2499,6 +2771,117 @@ def chat_env(sdir: Path) -> dict[str, str]:
     return dict(session_env(sdir), ENABLE_CLAUDEAI_MCP_SERVERS="false")   # 형의 claude.ai 커넥터 끔
 
 
+TAKE_MAX_FILE = 20 * 1024 * 1024          # 첨부 한 개 — 열어보기 서버 상한(marina_view.MAX_BYTES)과 같다(넘으면 페이지에 못 싣는다, 테스트가 강제)
+TAKE_MAX_ROOM = 500 * 1024 * 1024         # 방 하나의 assets 합계
+_TAKE_NAME_BAD = re.compile(r"[^A-Za-z0-9._\-\u3131-\u318e\uac00-\ud7a3]")
+_TAKE_EXTS = frozenset("png jpg jpeg gif webp heic heif bmp tif tiff svg pdf txt md html htm csv json mp4 mov mp3 wav m4a "
+                       "doc docx xls xlsx ppt pptx zip".split())      # name 에 준 꼬리가 이 확장자일 때만 버린다(v1.2 의 .2 는 이름의 일부)
+_TAKE_RESERVED = _CHAT_CONFIG_NAMES + ("settings.json", "settings.local.json")
+
+
+def _take_name(want: str, original: str) -> tuple[str, str]:
+    """저장 이름 (줄기, 확장자). NFC → 허용 문자 외엔 '_', 확장자는 늘 원본 것.
+    최종 이름(줄기+확장자)이 열어보기가 막는 이름(.env·id_ …)이거나 설정 파일 이름(CLAUDE.md·settings.json …)이면 앞에 '_'."""
+    ext = re.sub(r"[^A-Za-z0-9]", "", Path(original).suffix)[:8].lower()
+    base = unicodedata.normalize("NFC", want.strip() or Path(original).stem)
+    if want.strip():
+        m = re.search(r"(?<=.)\.([A-Za-z0-9]{1,5})$", base)
+        if m and m.group(1).lower() in _TAKE_EXTS:
+            base = base[:m.start()]
+    stem = _TAKE_NAME_BAD.sub("_", base).lstrip(".")[:80] or "file"
+    ext = "." + ext if ext else ""
+    import marina_view
+    if marina_view.blocked_name(Path(stem + ext)) or (stem + ext).casefold() in _TAKE_RESERVED:
+        stem = "_" + stem
+    return stem, ext
+
+
+def _copy_limited(src: Any, dst: Any, size: int) -> None:
+    """size 바이트까지만 복사한다 — 재는 사이 원본이 커져도 그만큼만."""
+    left = size
+    while left > 0:
+        chunk = src.read(min(1 << 20, left))
+        if not chunk:
+            break
+        dst.write(chunk)
+        left -= len(chunk)
+
+
+def _take_attachment(rec: dict[str, Any], args: dict[str, Any]) -> str:
+    """수신함(<상태 폴더>/inbox)의 일반 파일을 작업 폴더 rooms/<방 channelId>/assets/ 로 복사한다. 채팅방은 Bash 가 없어 직접 못 옮긴다.
+    원본은 자기 방 수신함 안만(심볼릭 링크·.. 거절), 대상은 그 방 폴더만(방끼리·공개 링크로 안 섞이게). 돌려주는 것은 방 폴더·작업 폴더 기준 경로."""
+    if rec.get("kind") != "chat" or not rec.get("root"):
+        raise SessionError("take_attachment 는 채팅방 전용이야")
+    raw = str(args.get("path") or "").strip()
+    if not raw or "\x00" in raw:
+        raise SessionError("path 가 필요해(수신함 파일의 경로나 이름)")
+    if ".." in Path(raw).parts:
+        raise SessionError("'..' 이 든 경로는 쓸 수 없어")
+    inbox = os.path.realpath(str(Path(str(rec["stateDir"])) / "inbox"))
+    lex = raw if os.path.isabs(raw) else os.path.join(inbox, raw)
+    lex = os.path.normpath(lex)
+    for base in (inbox, os.path.join(str(rec["stateDir"]), "inbox")):
+        if lex.startswith(base + os.sep):
+            rel = os.path.relpath(lex, base)
+            break
+    else:
+        raise SessionError(f"이 방의 수신함 파일만 가져올 수 있어: {raw}")
+    cur = inbox
+    for part in Path(rel).parts:            # 중간 폴더·파일이 링크면 거절
+        cur = os.path.join(cur, part)
+        if os.path.islink(cur):
+            raise SessionError(f"링크는 가져올 수 없어: {raw}")
+    if not os.path.isfile(cur):
+        raise SessionError(f"수신함에 그런 파일이 없어: {raw}")
+    root = Path(os.path.realpath(str(rec["root"])))
+    room = str(rec.get("channelId") or "")
+    if not re.fullmatch(r"\d{1,25}", room):
+        raise SessionError("이 방의 기록에 채널 id 가 없어")
+    dest_dir = root / "rooms" / room / "assets"
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        raise SessionError("이 방의 첨부 폴더를 만들 수 없어 — 이 컴퓨터 주인에게 알려라")
+    if os.path.realpath(str(dest_dir)) != str(dest_dir):          # 링크로 다른 곳을 가리키면 거절
+        raise SessionError("이 방의 첨부 폴더가 이상해 — 이 컴퓨터 주인에게 알려라")
+    try:
+        src_fd = os.open(cur, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError:
+        raise SessionError(f"파일을 열 수 없어: {raw}")
+    tmp = dest_dir / f".take-{uuid.uuid4().hex}.tmp"
+    try:
+        size = os.fstat(src_fd).st_size
+        if size > TAKE_MAX_FILE:
+            raise SessionError(f"파일이 너무 커서({size // 1048576}MB) 가져올 수 없어 — 20MB 까지만 돼")
+        used = sum(p.stat().st_size for p in dest_dir.rglob("*") if p.is_file())
+        if used + size > TAKE_MAX_ROOM:
+            raise SessionError("더 못 가져온다 — 이 방에서 받은 사진이 500MB 를 넘었다. 이 컴퓨터 주인에게 정리를 부탁하라고 알려라")
+        stem, ext = _take_name(str(args.get("name") or ""), os.path.basename(cur))
+        try:
+            with os.fdopen(os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as out, \
+                    os.fdopen(src_fd, "rb", closefd=False) as src:
+                _copy_limited(src, out, size)
+            n = 1
+            while True:                                      # 같은 이름이 있으면 -2, -3 (link 는 덮어쓰지 않는다)
+                fname = f"{stem}{ext}" if n == 1 else f"{stem}-{n}{ext}"
+                try:
+                    os.link(str(tmp), str(dest_dir / fname))
+                    break
+                except FileExistsError:
+                    n += 1
+        except OSError:
+            raise SessionError("파일을 가져오지 못했어 — 잠시 뒤 다시 해 보고, 계속 안 되면 이 컴퓨터 주인에게 알려라")
+    finally:
+        os.close(src_fd)
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+    kb = f"{size / 1048576:.1f}MB" if size >= 1048576 else f"{max(size // 1024, 1)}KB"
+    return (f"가져왔어: rooms/{room}/assets/{fname} ({kb})\n"
+            f"- 방 폴더 기준: assets/{fname}\n- 작업 폴더 기준: rooms/{room}/assets/{fname}\n"
+            f"이 사진을 쓰는 HTML 은 `rooms/{room}/` 폴더 안에 만들어라(예: rooms/{room}/page.html 에서 src=\"assets/{fname}\") — "
+            "다른 곳에 두면 미리보기·열어보기 링크에 사진이 안 실린다.")
+
+
 _OPEN_CHAT_SCHEMA = {
     "type": "object",
     "properties": {"name": {"type": "string", "description": "채널 이름: 영문 소문자·숫자·하이픈 (예: wedding-prep)"},
@@ -2554,6 +2937,13 @@ _CHAT_TOOLS_MCP = [
      "inputSchema": {"type": "object",
                      "properties": {"path": {"type": "string", "description": "이 폴더 안 파일 경로(상대·절대)"},
                                     "title": {"type": "string", "description": "결과물 제목(자료실 표시용)"}},
+                     "required": ["path"]}},
+    {"name": "take_attachment",
+     "description": "Discord 로 받은 첨부(수신함)를 이 방 폴더(rooms/<방 id>/assets/)로 가져온다. HTML·문서에 넣을 사진은 먼저 이걸로 가져와라. "
+                    "돌려받은 경로 안내대로 HTML 은 rooms/<방 id>/ 안에 만들고 src 는 assets/파일 로 쓴다.",
+     "inputSchema": {"type": "object",
+                     "properties": {"path": {"type": "string", "description": "수신함 파일의 경로나 파일 이름(download_attachment 가 알려 준 것)"},
+                                    "name": {"type": "string", "description": "저장할 파일 이름(선택, 확장자는 원본 것을 쓴다)"}},
                      "required": ["path"]}},
     {"name": "ask_terminal",
      "description": "사람이 직접 실행해야 하는 명령(사람 확인이 박힌 래퍼 등)을 Discord 에 [터미널에서 열기] 버튼으로 넘긴다. "
@@ -2657,6 +3047,12 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         if not rec or not rec.get("channelId"):
             raise SessionError("이 세션의 기록을 찾지 못했어")
         return _ask_terminal(rec, args)
+    if name == "take_attachment":
+        sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+        rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
+        if not rec:
+            raise SessionError("이 세션의 기록을 찾지 못했어")
+        return _take_attachment(rec, args)
     if name == "progress":
         sdir = os.environ.get("DISCORD_STATE_DIR") or ""
         rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
@@ -2680,11 +3076,21 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
     parts_cf = [x.casefold() for x in path.relative_to(root).parts]
     if ".claude" in parts_cf or parts_cf[-1] in _CHAT_CONFIG_NAMES:
         raise SessionError(f"설정 파일은 공유할 수 없어: {raw}")
+    serve_root, block = root, ()
+    if rec.get("kind") in CHAT_KINDS:
+        room = str(rec.get("channelId") or "")
+        if _room_violation(_rooms_segments(root, str(path)), room, False):
+            raise SessionError("다른 방 폴더의 파일은 공유할 수 없어 — 이 방 폴더(rooms/<이 방 id>/) 안 파일만")
+        mine = Path(os.path.realpath(str(root / "rooms" / room))) if room else None
+        if mine is not None and str(path).startswith(str(mine) + os.sep):
+            serve_root = mine                    # 방 폴더 안 페이지는 그 방 폴더만 내주는 렌더 서버로(다른 방 자료를 싣지 못하게)
+        else:
+            block = ("rooms",)                   # 맨 위 페이지는 rooms/ 를 못 싣는다
     files, notes = [path], []
     if path.suffix.lower() in (".html", ".htm"):
         # 개발 세션은 레포 밖(상태 폴더)에 — 워크트리에 두면 git add 로 커밋에 딸려 간다(리뷰)
         outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else _dev_preview_dir(rec)
-        prev, why = marina_share.render_html(path, root, outdir)
+        prev, why = marina_share.render_html(path, serve_root, outdir, block=block)
         if not prev:
             notes.append(f"미리보기를 만들지 못했어({why}) — HTML 파일만 보내")
         else:
@@ -2693,7 +3099,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
                 notes.append(why)
     if path.suffix.lower() in (".md", ".markdown"):
         outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else _dev_preview_dir(rec)
-        imgs, why = marina_share.render_md(path, root, outdir)
+        imgs, why = marina_share.render_md(path, serve_root, outdir, block=block)
         if not imgs:
             notes.append(f"미리보기를 만들지 못했어({why}) — md 파일만 보내")
         else:
@@ -2738,8 +3144,16 @@ def mcp_lobby(stdin: Any = None, stdout: Any = None) -> None:
     mcp_serve(_LOBBY_TOOLS, lobby_tool, stdin, stdout)
 
 
+def chat_tools_for(rec: "dict[str, Any] | None") -> list[dict[str, Any]]:
+    """mcp-chat 의 도구 목록 — take_attachment 는 채팅방에만(개발 세션은 Bash 가 있다)."""
+    chat = bool(rec) and (rec or {}).get("kind") == "chat"
+    return [t for t in _CHAT_TOOLS_MCP if chat or t["name"] != "take_attachment"]
+
+
 def mcp_chat(stdin: Any = None, stdout: Any = None) -> None:
-    mcp_serve(_CHAT_TOOLS_MCP, chat_tool, stdin, stdout)
+    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    rec = next((x for x in load_sessions() if sdir and x.get("stateDir") == sdir), None)
+    mcp_serve(chat_tools_for(rec), chat_tool, stdin, stdout)
 
 
 def mcp_serve(tools: list[dict[str, Any]], handler: Any, stdin: Any = None, stdout: Any = None) -> None:
@@ -3019,7 +3433,8 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
             if s.get("stateDir") and sdir.is_dir():
                 # 업데이트로 바뀐 스크립트 경로를 다시 적는다
                 guard = sdir / "inbox" if s.get("kind") == "dev-lobby" else root
-                write_settings(sdir, chat_root=guard if chat else None, lobby=s.get("kind") in LOBBY_KINDS)
+                write_settings(sdir, chat_root=guard if chat else None, lobby=s.get("kind") in LOBBY_KINDS,
+                               room=str(s.get("channelId") or ""))
                 _drop_ack_reaction(sdir / "access.json")
             if chat:
                 ensure_trusted(chat_home())
@@ -3036,6 +3451,20 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
         except SessionError as exc:
             failed.append(f"{label}: {exc}")
     return started, failed
+
+
+def _remove_room_dir(s: dict[str, Any]) -> None:
+    """채팅 방을 지울 때 작업 폴더의 rooms/<channelId>/ 를 지운다. 숫자 id 이고, 링크가 아니며, realpath 가 chat_home()/rooms/<id> 일 때만."""
+    if s.get("kind") not in CHAT_KINDS:
+        return
+    cid = str(s.get("channelId") or "")
+    if not re.fullmatch(r"\d{1,25}", cid):
+        return
+    base = Path(os.path.realpath(str(chat_home() / "rooms")))
+    d = base / cid
+    if d.is_symlink() or not d.is_dir() or os.path.realpath(str(d)) != str(d):
+        return
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def teardown(s: dict[str, Any]) -> list[str]:
@@ -3066,6 +3495,10 @@ def teardown(s: dict[str, Any]) -> list[str]:
             marina_termbridge.revoke_channel(str(s["channelId"]))
     except Exception as exc:
         warnings.append(f"터미널 정리 실패: {exc}")
+    try:       # 이 방이 받은 사진·결과물(rooms/<channelId>/)
+        _remove_room_dir(s)
+    except Exception as exc:
+        warnings.append(f"방 폴더 정리 실패: {exc}")
     if s.get("stateDir"):
         remove_state_dir(Path(str(s["stateDir"])))
     save_sessions([x for x in load_sessions()
@@ -3249,6 +3682,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("hook-chat-guard")
     p.add_argument("root")
     p.add_argument("inbox")
+    p.add_argument("--room", default="")
     p = sub.add_parser("notify-exit")
     p.add_argument("ref")
     p.add_argument("code")
@@ -3313,7 +3747,7 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "hook-chat-guard":
         # 판정 실패는 거절로(첨부를 막는 쪽이 안전) — 잘못된 입력이면 exit 2 로 도구 호출을 막는다
         try:
-            decision = chat_guard(Path(a.root), Path(a.inbox), json.loads(sys.stdin.read() or "{}"))
+            decision = chat_guard(Path(a.root), Path(a.inbox), json.loads(sys.stdin.read() or "{}"), room=a.room)
         except Exception as exc:
             print(f"첨부 확인 실패: {exc}", file=sys.stderr)
             return 2

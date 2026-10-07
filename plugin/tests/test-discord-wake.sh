@@ -157,7 +157,8 @@ check(ms.session_argv_simple({"kind": "chat", "project": "chat", "task": "t", "s
 # 띄운 환경을 적어 둔다
 env0 = json.loads((sd / "launch-env.json").read_text())
 check(bool(env0.get("PATH")), f"new 가 띄운 PATH 를 적어 둔다: {env0}")
-check(set(env0) <= {"PATH", "LANG", "LC_ALL"}, f"PATH·LANG·LC_ALL 만: {sorted(env0)}")
+check(set(env0) <= {"PATH", "LANG", "LC_ALL", "JAVA_HOME", "SDKMAN_DIR", "by"}, f"허용한 키와 by 만: {sorted(env0)}")
+check(env0.get("by") == "human", f"손으로 띄웠으니 by:human: {env0}")
 # 꺼졌다가 — 짧은 PATH 의 프로세스(봇)가 깨워도 적어 둔 환경으로, 첫 지시를 얹어
 ms.tmux_stop(rec["tmux"])
 rich = env0["PATH"]

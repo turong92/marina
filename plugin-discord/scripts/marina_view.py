@@ -235,6 +235,9 @@ def locate(root: str, token_rel: str, sub: str) -> Optional[Path]:
         return None
     real_root = os.path.realpath(root)
     folder = os.path.realpath(os.path.join(real_root, os.path.dirname(token_rel)))
+    if sub and folder == real_root and Path(sub).parts and Path(sub).parts[0].casefold() == "rooms" \
+            and real_root == os.path.realpath(str(_dir().parent / "chat")):
+        return None               # 채팅 폴더 맨 위 파일은 rooms/(방별 자료)를 못 싣는다 — 다른 방 사진이 공개 링크로 새지 않게. 방 폴더 안 파일은 그 폴더에 갇힌다
     real = os.path.realpath(os.path.join(real_root, token_rel) if not sub else os.path.join(folder, sub))
     if not os.path.isfile(real):
         return None
