@@ -19,7 +19,7 @@ import importlib.util as _ilu
 import threading
 
 from marina_state import LIFECYCLE_BUSY, MARINA_ATTACH, MARINA_HOME, WORKTREES_ROOT, _GATEWAY_ON, _GATEWAY_PORT, _GATEWAY_STATE, _env, _gw, _mc, _roots_cache, _status_cache, _worktree_du_cache, _worktree_info_cache, busy_key
-from marina_cache import _docker_cmd, cache_items_by_category, compose_build_image_items, compose_project_volume_items, disk_usage_mb, docker_env, docker_image_rm, docker_volume_rm
+from marina_cache import _docker_cmd, remote_owner_block, cache_items_by_category, compose_build_image_items, compose_project_volume_items, disk_usage_mb, docker_env, docker_image_rm, docker_volume_rm
 from marina_registry import discover_roots, has_attached_subrepos, is_source_checkout, project_for, project_label, source_root_for, subrepos_of
 from marina_paths import session_dir, session_id
 from marina_cli import _marina_cli, _marina_cli_logged, marina_env, script
@@ -93,10 +93,16 @@ def stop_service(root: Path, service: str) -> dict[str, Any]:
     refresh_gateway()   # 이벤트 즉시반영
     return {"stopped": True, "output": out[-1000:]}
 
+class ForeignStackError(ValueError):
+    """박스에 같은 이름의 **다른 사람 스택**이 있어 marina 가 stop 을 거부했다(종료 코드 3). 확인 불가(4)와 다르다."""
+
+
 def stop_all(root: Path) -> dict[str, Any]:
     try:
         out = _marina_cli(root, "stop", "--all")          # compose_main → docker compose down --remove-orphans
     except subprocess.CalledProcessError as exc:
+        if exc.returncode == 3:
+            raise ForeignStackError(f"stop-all skipped: {(exc.output or '')[-500:]}")
         raise ValueError(f"stop-all failed: {(exc.output or '')[-500:]}")
     for k in [k for k in LIFECYCLE_BUSY if k.startswith(f"{root}::")]:
         _clear_busy_error(k)
@@ -184,13 +190,19 @@ def start_all(root: Path, force: bool = False) -> dict[str, Any]:
         reservation_token=reservation,
     )
 
-def _stop_all_if_any(root: Path) -> None:
-    """compose 를 등록 안 한 프로젝트(예: marina 자신)는 띄운 서비스가 없다 — 그것 때문에 삭제가 막히면 안 된다(실측)."""
+def _stop_all_if_any(root: Path) -> str | None:
+    """compose 를 등록 안 한 프로젝트(예: marina 자신)는 띄운 서비스가 없다 — 그것 때문에 삭제가 막히면 안 된다(실측).
+
+    박스에 같은 이름의 **남의 스택**이 있어 거부되면 "박스에 내 것 없음"이다 — stop 만 건너뛰고 이유를 돌려준다
+    (워크트리 삭제는 계속 진행). 박스가 안 닿는 등 확인 불가는 지금처럼 예외로 중단한다."""
     try:
         stop_all(root)
+    except ForeignStackError as exc:
+        return " ".join(str(exc).split())[-300:]
     except ValueError as exc:
         if "compose 파일 없음" not in str(exc):
             raise
+    return None
 
 
 def cleanup_session(root: Path) -> dict[str, Any]:
@@ -401,6 +413,10 @@ def reclaim_worktree_docker(root: Path, volumes: str = "all") -> dict[str, Any]:
         except Exception:
             out["errors"].append(f"런타임 박스({_env.get('DOCKER_HOST')})에 닿지 않아 이미지·볼륨 회수를 건너뜀")
             return out
+        _blocked = remote_owner_block(root)       # 박스에 같은 이름의 남의 스택이 있으면 그 이미지·볼륨은 남의 것
+        if _blocked:
+            out["errors"].append(_blocked if "건너뜀" in _blocked else _blocked + " — 회수를 건너뜀")
+            return out
     try:
         images = compose_build_image_items(root)
     except Exception as exc:
@@ -472,26 +488,32 @@ def remove_worktree(root: Path, force: bool = False, keep_images: bool = False, 
         raise ValueError(f"잠김: {held['reason']} — 쓰는 중인 워크트리입니다(force 로 지울 수 있음)")
 
     sid = session_id(root)
-    _stop_all_if_any(root)
-    cleanup_session(root)
-    bootout_session_dashboard(sid)
-
     # 브랜치/worktree 정리는 원본(main) 체크아웃에서 돌아야 한다 (삭제될 worktree 경로가 아니라).
     main_checkout = source_root_for(root)
     if main_checkout.resolve() == root.resolve():
         raise ValueError("원본 체크아웃을 찾지 못해 삭제를 중단합니다")
+    stop_skipped = _stop_all_if_any(root)       # 남의 스택과 이름이 겹치면 stop 만 건너뛴다(이유는 결과 stopSkipped)
+    # 이미지·볼륨 회수는 **세션 폴더가 지워지기 전에** — 원격 타깃(세션 계층 설정)과 "이 박스에 띄운 기록"이 거기 있다.
+    # cleanup_session 뒤에 하면 세션 계층에만 원격 설정이 있던 워크트리의 회수가 로컬 데몬을 보고, 기록도 읽지 못한다.
+    reclaim_result = None
+    if not keep_images:
+        try:
+            reclaim_result = reclaim_worktree_docker(root, volumes=volumes)
+        except Exception as exc:
+            reclaim_result = {"images": [], "volumes": [], "freedMb": 0, "errors": [str(exc)[-200:]]}
+    cleanup_session(root)
+    bootout_session_dashboard(sid)
+
     branch = f"codex/{sid}"
     try:
         root_branch = git_output(["branch", "--show-current"], root).strip()
     except Exception:
         root_branch = ""
     results: dict[str, Any] = {"subrepos": {}, "branches": {}, "root": None}
-    if not keep_images:
-        # 워크트리 폴더가 사라지기 **전에** — compose images 조회가 --project-directory(=root)를 쓴다.
-        try:
-            results["reclaim"] = reclaim_worktree_docker(root, volumes=volumes)
-        except Exception as exc:
-            results["reclaim"] = {"images": [], "volumes": [], "freedMb": 0, "errors": [str(exc)[-200:]]}
+    if stop_skipped:
+        results["stopSkipped"] = stop_skipped
+    if reclaim_result is not None:
+        results["reclaim"] = reclaim_result
     for repo in subrepos_of(root):
         target = root / repo
         source_repo = main_checkout / repo
@@ -631,6 +653,10 @@ def clear_worktree_cache(root: Path, category: str = "all") -> dict[str, Any]:
     targets = [item for cat, items in by_category.items() if category in ("all", cat) for item in items]
     removed: list[str] = []
     freed = 0
+    if any(item.get("type") == "volume" for item in targets):
+        _blocked = remote_owner_block(root)       # 원격 볼륨을 지우기 전 주인 확인(로컬이면 None)
+        if _blocked:
+            raise ValueError(_blocked)
     for item in targets:
         size = int(item.get("sizeMb") or 0)
         try:
@@ -662,6 +688,9 @@ def clear_worktree_images(root: Path) -> dict[str, Any]:
     items = compose_build_image_items(root)
     removed: list[str] = []
     freed = 0
+    _blocked = remote_owner_block(root) if items else None     # 원격 이미지를 지우기 전 주인 확인(로컬이면 None)
+    if _blocked:
+        raise ValueError(_blocked)
     for item in items:
         image_id = str(item.get("imageId") or "")
         if not image_id:

@@ -41,6 +41,7 @@ try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로
     )
     from marina_logtext import redact_text
     import marina_prebuild
+    import marina_remote_owner
     from marina_runtime_target import LocalTarget, Mount, load_target as load_runtime_target
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -1826,6 +1827,56 @@ def _lifecycle_env(session_dir, project_id=None):
     return env
 
 
+def _remote_target(a):
+    """이 호출의 런타임 타깃이 원격이면 그 타깃, 로컬(또는 session_dir 없음)이면 None."""
+    session_dir = getattr(a, "session_dir", None)
+    if not session_dir:
+        return None
+    target = load_runtime_target(session_dir, project_id=getattr(a, "project_id", None))
+    return target if getattr(target, "is_remote", False) else None
+
+
+def _owner_verdict(a, env, project_name):
+    """원격 타깃이면 박스에서 그 이름의 스택 주인을 확인한 결과(Verdict), 로컬이면 None(= 가드 없음, 조회도 없음).
+
+    내 폴더(`--project-directory` 로 compose 에 넘기는 값)를 모르면 판정할 수 없다 — 모르면 건드리지 않는다."""
+    if _remote_target(a) is None:
+        return None
+    project_dir = getattr(a, "project_dir", None)
+    if not project_dir:
+        return marina_remote_owner.Verdict(False, "unreachable", detail="--project-dir 없음 — 내 폴더를 몰라 비교할 수 없다")
+    return marina_remote_owner.check(project_name, project_dir, env)
+
+
+def _owner_guard(a, env, project_name, creating=False):
+    """원격에서 컨테이너·볼륨·네트워크를 만들거나 바꾸거나 지우기 **전에** 부른다. None=진행, 정수=거부(안내는 stderr).
+
+    남의 것이면 3, 확인 못 하면 4 — 아무것도 실행하지 않는다. `--owner-ok`(셸 앞단이 이미 확인) 면 다시 묻지 않는다.
+    `creating`(up) 이고 컨테이너 0개인데 이 워크트리가 띄운 기록이 없으면, 같은 이름 볼륨이 박스에 있을 때 경고만 한다."""
+    if getattr(a, "owner_ok", False):
+        return None
+    verdict = _owner_verdict(a, env, project_name)
+    if verdict is None:
+        return None
+    if verdict.ok:
+        if creating and verdict.reason == "none":
+            target = _remote_target(a)
+            if not marina_remote_owner.read_owned(a.session_dir, target.host, project_name) \
+                    and marina_remote_owner.volume_exists(project_name, env):
+                sys.stderr.write(marina_remote_owner.VOLUME_WARNING % project_name + "\n")
+        return None
+    sys.stderr.write(marina_remote_owner.message(project_name, verdict, getattr(a, "project_dir", "") or "") + "\n")
+    return marina_remote_owner.exit_code(verdict)
+
+
+def cmd_owner_check(a):
+    """셸 앞단용 — 원격 쓰기 명령(start/restart/rebuild/stop…)이 prebuild·watch 갱신 같은 부수 작업을 하기 **전에** 한 번 확인한다.
+    0=진행(로컬 포함), 3=남의 스택, 4=확인 불가. 안내는 stderr."""
+    name = compose_project_name(a.project_id, a.session)
+    env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
+    return _owner_guard(a, env, name, creating=a.creating) or 0
+
+
 def _show_ports(project_name, env=None):
     try:
         out = subprocess.check_output(label_argv(project_name, ["ps", "--format", "json"]), text=True, env=env)
@@ -2466,6 +2517,9 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
 def cmd_up(a):
     env = _env_with(a.env, session_dir=a.session_dir, project_id=getattr(a, "project_id", None))               # P1: env first (+런타임 타깃)
     name = compose_project_name(a.project_id, a.session)
+    _denied = _owner_guard(a, env, name, creating=True)            # 원격: 남의 스택 위에 만들지(재생성·파일 주입) 않는다
+    if _denied is not None:
+        return _denied
     try:
         config = docker_config_json(a.stored, a.project_dir, name, env)  # 비밀번호 in-memory only, 저장 안 함
     except FileNotFoundError:
@@ -2533,9 +2587,15 @@ def cmd_up(a):
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
-    return _run_up_locked(
+    rc = _run_up_locked(
         a, env, name, config, xm, overlay_text, overlay_conn, build_args,
     )
+    if rc == 0 and _up_target.is_remote:               # 이 워크트리가 그 박스에 띄웠다는 기록 — 컨테이너 0개일 때 회수가 주인을 가린다
+        try:
+            marina_remote_owner.write_owned(a.session_dir, _up_target.host, name)
+        except OSError as exc:
+            sys.stderr.write(f"warning: 박스 소유 기록을 남기지 못했습니다({exc}) — 워크트리 삭제 때 이미지·볼륨 회수를 건너뛸 수 있습니다\n")
+    return rc
 
 
 def cmd_prebuild_run(a):
@@ -2611,6 +2671,9 @@ def cmd_watchable(a):
 def cmd_watch(a):
     env = _env_with(a.env, session_dir=getattr(a, 'session_dir', None), project_id=getattr(a, 'project_id', None))
     name = compose_project_name(a.project_id, a.session)
+    _denied = _owner_guard(a, env, name)      # 남의 스택에 내 watcher 를 붙이지 않는다(sync·rebuild 가 그쪽 컨테이너를 바꾼다)
+    if _denied is not None:
+        return _denied
     argv = watch_argv(a.stored, _overlay_path(a.session_dir), a.project_dir, name, a.service)
     print("compose watch: " + " ".join(argv), flush=True)
     try:
@@ -2623,6 +2686,9 @@ def cmd_watch(a):
 def cmd_down(a):  # 전체 teardown (stop --all). --volumes 요청 시 compose named volume 도 제거
     name = compose_project_name(a.project_id, a.session)
     env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
+    _denied = _owner_guard(a, env, name)
+    if _denied is not None:
+        return _denied
     _stop_remote_tunnel(getattr(a, "session_dir", None))     # 내려가면 터널도 같이 걷는다
     verb = ["down", "--remove-orphans"] + (["--volumes"] if getattr(a, "volumes", False) else [])
     return subprocess.call(label_argv(name, verb), env=env)  # P7/P8
@@ -2631,6 +2697,9 @@ def cmd_down(a):  # 전체 teardown (stop --all). --volumes 요청 시 compose n
 def cmd_stop(a):  # 선택 서비스만 정지 — 컨테이너 유지
     name = compose_project_name(a.project_id, a.session)
     env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
+    _denied = _owner_guard(a, env, name)
+    if _denied is not None:
+        return _denied
     if not a.service:                                        # 전체 정지면 터널도 걷는다
         _stop_remote_tunnel(getattr(a, "session_dir", None))
     return subprocess.call(label_argv(name, ["stop", *a.service]), env=env)  # P7
@@ -2639,12 +2708,18 @@ def cmd_stop(a):  # 선택 서비스만 정지 — 컨테이너 유지
 def cmd_restart(a):  # 선택 서비스만 재시작 (quick bounce, config 재해석 안 함)
     name = compose_project_name(a.project_id, a.session)
     env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
+    _denied = _owner_guard(a, env, name)
+    if _denied is not None:
+        return _denied
     return subprocess.call(label_argv(name, ["restart", *a.service]), env=env)   # P7
 
 
 def cmd_status(a):
     name = compose_project_name(a.project_id, a.session)
     env = _lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None))
+    _verdict = _owner_verdict(a, env, name) if getattr(a, "project_dir", None) else None   # 조회 전용 — 막지 않고 알리기만(stderr: stdout 은 파싱된다)
+    if _verdict is not None and _verdict.reason == "foreign":
+        sys.stderr.write(marina_remote_owner.status_warning(name, _verdict) + "\n")
     try:
         out = subprocess.check_output(label_argv(name, ["ps", "--format", "json"]), text=True, env=env)
     except subprocess.CalledProcessError:
@@ -2704,16 +2779,17 @@ def main(argv=None):
     p = sub.add_parser("overlay"); p.set_defaults(fn=cmd_overlay)
     p = sub.add_parser("psports"); p.set_defaults(fn=cmd_psports)
     p = sub.add_parser("xmarina"); p.add_argument("--stored", required=True); p.add_argument("--key"); p.set_defaults(fn=cmd_xmarina)
-    p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.add_argument("--clean-build", action="store_true"); p.set_defaults(fn=cmd_up)
+    p = sub.add_parser("up"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--build-arg", action="append", default=[], dest="build_arg"); p.add_argument("--connectivity"); p.add_argument("--build", action="store_true"); p.add_argument("--clean-build", action="store_true"); p.add_argument("--owner-ok", action="store_true"); p.set_defaults(fn=cmd_up)
     p = sub.add_parser("prebuild-run"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.add_argument("--legacy-prebuild"); p.add_argument("--compose-version", required=True); p.set_defaults(fn=cmd_prebuild_run)
     p = sub.add_parser("watchable"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir"); p.add_argument("--with-signature", action="store_true"); p.add_argument("--service", action="append", default=[]); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watchable)
     p = sub.add_parser("watch"); name_args(p); p.add_argument("--stored", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--session-dir", required=True); p.add_argument("--service", action="append", required=True); p.add_argument("--env", action="append", default=[]); p.set_defaults(fn=cmd_watch)
     p = sub.add_parser("forward"); p.add_argument("--session-dir", required=True); p.add_argument("--stored"); p.add_argument("--project-dir"); p.add_argument("port", nargs="?"); p.add_argument("target", nargs="?"); p.add_argument("--reset", action="store_true"); p.set_defaults(fn=cmd_forward)
     p = sub.add_parser("build-active"); p.add_argument("--session-dir", required=True); p.set_defaults(fn=cmd_build_active)
-    p = sub.add_parser("down"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
-    p = sub.add_parser("stop"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_stop)
-    p = sub.add_parser("restart"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_restart)
-    p = sub.add_parser("status"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--ports-only", action="store_true"); p.set_defaults(fn=cmd_status)
+    p = sub.add_parser("down"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--project-dir"); p.add_argument("--owner-ok", action="store_true"); p.add_argument("--volumes", action="store_true"); p.set_defaults(fn=cmd_down)
+    p = sub.add_parser("stop"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--project-dir"); p.add_argument("--owner-ok", action="store_true"); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_stop)
+    p = sub.add_parser("restart"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--project-dir"); p.add_argument("--owner-ok", action="store_true"); p.add_argument("--service", action="append", default=[]); p.set_defaults(fn=cmd_restart)
+    p = sub.add_parser("owner-check"); name_args(p); p.add_argument("--session-dir", required=True); p.add_argument("--project-dir", required=True); p.add_argument("--creating", action="store_true"); p.set_defaults(fn=cmd_owner_check)
+    p = sub.add_parser("status"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--project-dir"); p.add_argument("--ports-only", action="store_true"); p.set_defaults(fn=cmd_status)
     p = sub.add_parser("logs"); name_args(p); p.add_argument("--session-dir"); p.add_argument("--service", action="append", default=[]); p.add_argument("--no-follow", action="store_true"); p.set_defaults(fn=cmd_logs)
 
     args = ap.parse_args(argv)

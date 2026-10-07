@@ -17,7 +17,7 @@ from typing import Any
 import importlib.util as _ilu
 
 from marina_registry import project_for
-from marina_paths import session_id
+from marina_paths import session_dir, session_id
 from marina_state import MARINA_HOME, _bin, _mc
 
 
@@ -114,6 +114,30 @@ def _volume_actual_name(project: dict[str, Any], root: Path, volume_key: str, sp
     if isinstance(spec, dict) and spec.get("name"):
         return str(spec["name"])
     return f"{_mc().compose_project_name(str(project.get('id') or ''), session_id(root))}_{volume_key}"
+
+def remote_owner_block(root: Path | None) -> str | None:
+    """원격 워크트리에서 이미지·볼륨을 지우기 전 주인 확인. 막아야 하면 한 줄 안내, 진행해도 되면 None.
+
+    - 박스에 같은 이름(`<project-id>-<워크트리>`)의 **다른 사람 스택**이 있으면 그 이미지·볼륨은 남의 것이다.
+    - 확인 못 하면(연결 오류) 건드리지 않는다.
+    - 컨테이너가 0개면(상대가 내려 둔 동안일 수 있다) 주인을 알 수 없다 — **이 워크트리가 그 박스에 띄운 기록**
+      (세션 폴더의 remote-owned.json)이 없으면 건너뛴다. 실패 방향은 누수다.
+    로컬 워크트리는 조회 없이 None — 호출 모양이 지금과 같다. 세션 폴더가 지워지기 전에 불러야 한다."""
+    env = docker_env(root)
+    if env is None:
+        return None
+    project = project_for(root)
+    if not project:
+        return None
+    import marina_remote_owner as _owner
+    name = _mc().compose_project_name(str(project.get("id") or ""), session_id(root))
+    mine = os.path.realpath(str(root))     # marina.sh 가 --project-directory 로 넘기는 값($ROOT = pwd -P)과 같은 물리 경로
+    verdict = _owner.check(name, mine, env, docker_bin=_bin("docker"))
+    if not verdict.ok:
+        return " ".join(_owner.message(name, verdict, mine).split())
+    if verdict.reason == "none" and not _owner.read_owned(session_dir(root), env.get("DOCKER_HOST"), name):
+        return "이 워크트리가 이 박스에 띄운 기록이 없어 회수를 건너뜀"
+    return None
 
 def _root_kw(root: Path | None) -> dict[str, Any]:
     """원격 워크트리일 때만 root 를 넘긴다 — 로컬은 호출 모양이 지금과 같다."""

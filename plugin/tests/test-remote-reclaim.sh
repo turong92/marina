@@ -47,6 +47,13 @@ grep -q "volume rm marina_vol1" "$LOG" || fail "로컬 회수가 볼륨을 안 �
 
 # 프로젝트 원격: 모든 docker 호출이 박스를 향한다
 (cd "$R" && bash "$SCRIPTS/marina-entrypoint.sh" runtime use ssh://pbox --project >/dev/null)
+# 컨테이너 0개인 박스의 회수는 "이 워크트리가 그 박스에 띄운 기록"이 있어야 한다(주인 확인 가드, test-remote-owner-guard.sh) — 기록을 남겨 둔다
+PYTHONPATH="$SCRIPTS" python3 - "$R/.claude/worktrees/x" <<'PYREC'
+import sys
+from pathlib import Path
+import marina_paths, marina_remote_owner
+marina_remote_owner.write_owned(str(marina_paths.session_dir(Path(sys.argv[1]))), "ssh://pbox", "repo-x")
+PYREC
 out="$(run 0)"
 ! grep -v "^DH=ssh://pbox " "$LOG" | grep -q . || fail "원격 워크트리의 회수가 로컬 데몬을 봄: $(cat "$LOG")"
 grep -q "volume rm marina_vol1" "$LOG" || fail "원격 회수가 볼륨을 안 지움: $(cat "$LOG")"

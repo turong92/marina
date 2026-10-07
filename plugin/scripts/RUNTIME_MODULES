@@ -11,6 +11,7 @@ marina_logtext
 marina_runtime_target
 marina_runtime_cli
 marina_ssh_mux
+marina_remote_owner
 marina_worktrees
 marina_liveness
 marina_worktree_gc

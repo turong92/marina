@@ -208,6 +208,16 @@ compose_main() {
 	      [[ -n "$envvar" ]] && envargs+=("--env=$envvar=${MARINA_COMPOSE_ENV:-$envdef}")
 	      mkdir -p "$sd"
 	      cname="$(python3 "$cp" name "${nameargs[@]}")"
+	      # 원격이면 **어떤 부수 작업보다 먼저** 박스의 같은 이름 스택 주인을 한 번 확인한다(남의 것=3, 확인 불가=4).
+	      # 거부된 명령은 prebuild(gradle)·links·watch/logtail 갱신을 하나도 하지 않고 그대로 끝난다 — 거부 뒤에
+	      # refresh_compose_watch 가 돌면 내 watcher 가 남의 스택에 붙는다. 통과하면 이후 python 호출은 --owner-ok 로 다시 묻지 않는다.
+	      local -a okarg=() _own_creating=()
+	      local _own_rc=0
+	      [[ "$command" == "stop" ]] || _own_creating=(--creating)
+	      python3 "$cp" owner-check "${nameargs[@]}" --session-dir "$sd" --project-dir "$ROOT" \
+	        ${_own_creating[@]+"${_own_creating[@]}"} || _own_rc=$?
+	      [[ "$_own_rc" -eq 0 ]] || return "$_own_rc"
+	      okarg=(--owner-ok)
 	      local MARINA_WATCH_STARTED_NS=""
 	      local watch_paused=0
 	      if [[ "$command" == "stop" ]]; then
@@ -308,7 +318,7 @@ PY
 	          local up_rc=0
 	          [[ "$command" == "rebuild" ]] && build_mode=(--build)
 	          [[ "$command" == "clean-rebuild" ]] && build_mode=(--build --clean-build)
-	          python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" \
+	          python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" ${okarg[@]+"${okarg[@]}"} "${nameargs[@]}" \
 	            ${svcs[@]+"${svcs[@]}"} ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} ${build_mode[@]+"${build_mode[@]}"} || up_rc=$?
           cname="$(python3 "$cp" name "${nameargs[@]}")"
           if [[ "$up_rc" -ne 0 ]]; then
@@ -329,20 +339,20 @@ PY
         stop)
           if [[ ${#svcs[@]} -gt 0 ]]; then
             for x in "${svcs[@]}"; do _compose_logtail_stop "${x#--service=}"; done
-            python3 "$cp" stop --session-dir "$sd" "${nameargs[@]}" "${svcs[@]}" || return $?
+            python3 "$cp" stop --session-dir "$sd" --project-dir "$ROOT" ${okarg[@]+"${okarg[@]}"} "${nameargs[@]}" "${svcs[@]}" || return $?
             cname="$(python3 "$cp" name "${nameargs[@]}")"
             refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
               ${envargs[@]+"${envargs[@]}"}
           else
             _compose_watch_stop
             _compose_logtail_stop
-            python3 "$cp" down --session-dir "$sd" "${nameargs[@]}"
+            python3 "$cp" down --session-dir "$sd" --project-dir "$ROOT" ${okarg[@]+"${okarg[@]}"} "${nameargs[@]}"
           fi ;;
         restart)
           if [[ ${#svcs[@]} -gt 0 ]]; then
             # bounce 대신 up 재적용 — build 없이 빠르게 설정 변경·컨테이너 상태를 반영한다.
             local restart_up_rc=0
-	            python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" \
+	            python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" ${okarg[@]+"${okarg[@]}"} "${nameargs[@]}" \
               "${svcs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || restart_up_rc=$?
             cname="$(python3 "$cp" name "${nameargs[@]}")"
             if [[ "$restart_up_rc" -ne 0 ]]; then
@@ -358,13 +368,13 @@ PY
           else
 	            _compose_logtail_stop
 	            local restart_down_rc=0 restart_all_up_rc=0
-	            python3 "$cp" down --session-dir "$sd" "${nameargs[@]}" || restart_down_rc=$?
+	            python3 "$cp" down --session-dir "$sd" --project-dir "$ROOT" ${okarg[@]+"${okarg[@]}"} "${nameargs[@]}" || restart_down_rc=$?
 	            if [[ "$restart_down_rc" -ne 0 ]]; then
 	              refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
 	                ${envargs[@]+"${envargs[@]}"} || true
 	              return "$restart_down_rc"
 	            fi
-	            python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || restart_all_up_rc=$?
+	            python3 "$cp" up --stored "$stored" --project-dir "$ROOT" --session-dir "$sd" ${okarg[@]+"${okarg[@]}"} "${nameargs[@]}" ${envargs[@]+"${envargs[@]}"} ${bargs[@]+"${bargs[@]}"} ${connarg[@]+"${connarg[@]}"} || restart_all_up_rc=$?
 	            if [[ "$restart_all_up_rc" -ne 0 ]]; then
 	              refresh_compose_watch "$stored" "$cp" "$ROOT" "$sd" "$pid" "$sid" "$cname" \
 	                ${envargs[@]+"${envargs[@]}"} || true
@@ -378,8 +388,8 @@ PY
               ${envargs[@]+"${envargs[@]}"}
           fi ;;
       esac ;;
-    status)  python3 "$cp" status --session-dir "$sd" "${nameargs[@]}" ;;
-    ports)   python3 "$cp" status --session-dir "$sd" "${nameargs[@]}" --ports-only ;;
+    status)  python3 "$cp" status --session-dir "$sd" --project-dir "$ROOT" "${nameargs[@]}" ;;
+    ports)   python3 "$cp" status --session-dir "$sd" --project-dir "$ROOT" "${nameargs[@]}" --ports-only ;;
     logs)
       local -a lsvc=(); [[ -n "${1:-}" ]] && lsvc+=("--service=$1")
       python3 "$cp" logs --session-dir "$sd" "${nameargs[@]}" ${lsvc[@]+"${lsvc[@]}"} ;;
