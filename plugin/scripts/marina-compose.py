@@ -1411,13 +1411,133 @@ def injection_source_path(inj, project_dir):
     return os.path.normpath(os.path.join(project_dir, inj.source))
 
 
-def inject_argv(inj, project_name, project_dir, is_dir):
-    """원격 3단계 기동의 2단계 — `docker cp` 로 컨테이너에 밀어 넣는다(Docker API 경유라 원격 안전).
+class TarInject(list):
+    """`docker cp - <컨테이너>:/` argv + 그 stdin 으로 흘릴 tar 를 만드는 방법.
 
-    디렉터리는 `<src>/.` 로 **내용만** 넣는다 — `docker cp ./libs c:/app/libs` 는 /app/libs/libs 를 만든다."""
+    `docker cp <파일> c:/run/gcp/x` 는 이미지에 /run/gcp 가 없으면 실패한다(부모 폴더를 안 만든다 — 로컬은
+    바인드 마운트가 만들어 줘서 안 드러났다). 그래서 대상의 상대 경로(run/gcp/x)와 중간 폴더 항목(0755)을 담은
+    tar 를 컨테이너 루트(`/`)에 푼다. Docker API 로 흐르므로 원격에서도, 미시작(Created) 컨테이너에도 된다."""
+
+    def __init__(self, argv, src, target, is_dir, service, container):
+        super().__init__(argv)
+        self.src, self.target, self.is_dir = src, target, is_dir
+        self.service, self.container = service, container
+
+    def describe(self):
+        kind = "dir" if self.is_dir else "file"
+        return f"tar({kind} {self.src} -> {self.target}) | " + " ".join(self)
+
+    def tar_bytes(self, exists_fn):
+        """exists_fn(컨테이너 절대경로) -> bool. 이미 있는 폴더는 항목으로 넣지 않는다 —
+        넣으면 docker 가 그 폴더의 소유자·모드(setgid 등)를 tar 항목 값으로 덮어쓴다."""
+        import io
+        import tarfile
+        rel = self.target.strip("/")
+        parts = rel.split("/")
+        top = len(parts) if self.is_dir else len(parts) - 1      # 폴더여야 하는 조상(+폴더 주입이면 대상 자신)
+        have = 0                                                  # 가장 깊은 쪽부터 확인해 처음 있는 곳까지
+        for i in range(top, 0, -1):
+            if exists_fn("/" + "/".join(parts[:i])):
+                have = i
+                break
+        buf = io.BytesIO()
+        with tarfile.open(fileobj=buf, mode="w") as tf:
+            def _dir(name):
+                ti = tarfile.TarInfo(name)
+                ti.type, ti.mode = tarfile.DIRTYPE, 0o755
+                tf.addfile(ti)
+            for i in range(have + 1, top + 1):
+                _dir("/".join(parts[:i]))
+            if self.is_dir:
+                for root, dirs, files in os.walk(self.src):
+                    dirs.sort()
+                    base = os.path.relpath(root, self.src)
+                    sub = rel if base == "." else rel + "/" + base
+                    if base != ".":
+                        _dir(sub)
+                    for fn in sorted(files):
+                        _add(tf, os.path.join(root, fn), sub + "/" + fn)
+            else:
+                _add(tf, self.src, rel)
+        return buf.getvalue()
+
+
+def container_path_exists(container, path, env=None):
+    """컨테이너(Created 여도, 원격이어도)에 path 가 있나. `docker cp c:path -` 의 첫 512바이트만 읽고 끝낸다.
+
+    없으면 False, 확인 자체가 실패하면(연결 오류 등) OSError — 호출자가 주입 실패로 다룬다."""
+    proc = subprocess.Popen(["docker", "cp", f"{container}:{path}", "-"], env=env,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        head = proc.stdout.read(512)
+        if head:
+            return True
+        err = proc.stderr.read().decode("utf-8", "replace").strip()
+        rc = proc.wait()
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.stdout.close()
+        proc.stderr.close()
+        proc.wait()
+    if rc == 0:
+        return True
+    if "Could not find the file" in err:
+        return False
+    raise OSError(err or f"docker cp 종료 코드 {rc}")
+
+
+def _add(tf, path, arcname):
+    import tarfile
+    ti = tf.gettarinfo(path, arcname)
+    ti.uid = ti.gid = 0
+    ti.uname = ti.gname = ""
+    if ti.isreg():
+        ti.mode = (ti.mode | 0o444) & 0o7777   # 바인드 마운트처럼 컨테이너 비root 사용자도 읽게
+    if ti.isreg():
+        with open(path, "rb") as fh:
+            tf.addfile(ti, fh)
+    else:
+        tf.addfile(ti)
+
+
+def inject_argv(inj, project_name, project_dir, is_dir):
+    """원격 3단계 기동의 2단계 — tar 스트림을 `docker cp -` 로 컨테이너 루트에 푼다(Docker API 경유라 원격 안전).
+
+    디렉터리는 내용만 대상 경로 아래에 들어간다(`<src>/.` 의미 그대로)."""
     src = injection_source_path(inj, project_dir)
-    return ["docker", "cp", src + "/." if is_dir else src,
-            f"{project_name}-{inj.service}-1:{inj.target}"]
+    container = f"{project_name}-{inj.service}-1"
+    return TarInject(["docker", "cp", "-", f"{container}:/"], src, inj.target, is_dir,
+                     inj.service, container)
+
+
+def cleanup_argv(stored, overlay, project_dir, project_name, services):
+    """주입 실패 뒤 Created 로 남은 컨테이너를 치운다(멈춘 것만 — 실행 중인 건 안 건드린다)."""
+    return _compose_base(stored, overlay, project_dir, project_name) + ["rm", "-f"] + list(services)
+
+
+def execute_plan(plan, cleanup, env):
+    """startup_plan 을 순서대로 돌린다. 주입이 실패하면 이유를 한 줄로 찍고 컨테이너를 치우고 멈춘다."""
+    for kind, argv in plan:
+        if isinstance(argv, TarInject):
+            try:
+                data = argv.tar_bytes(lambda p: container_path_exists(argv.container, p, env))
+                proc = subprocess.run(list(argv), input=data, env=env,
+                                      stderr=subprocess.PIPE)
+                rc, why = proc.returncode, proc.stderr.decode("utf-8", "replace").strip()
+            except OSError as exc:
+                rc, why = 1, str(exc)
+            if rc != 0:
+                sys.stderr.write(f"inject 실패: {argv.src} -> {argv.container}:{argv.target}: "
+                                 f"{(why.splitlines() or ['종료 코드 %d' % rc])[-1]}\n")
+                print("compose: " + " ".join(cleanup))
+                subprocess.call(cleanup, env=env)    # 비밀값이 든 .env 가 Created 컨테이너에 남지 않게
+                return rc
+            continue
+        rc = subprocess.call(argv, env=env)
+        if rc != 0:
+            return rc
+    return 0
 
 
 def _tunnel_pid_file(session_dir):
@@ -2279,7 +2399,8 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                 build=effective_build,
             )
             for _kind, _argv in plan:
-                print(("compose: " if _kind != "inject" else "inject: ") + " ".join(_argv))
+                print("inject: " + _argv.describe() if isinstance(_argv, TarInject)
+                      else "compose: " + " ".join(_argv))
             try:
                 with _effective_build_slot(
                     a.session_dir, effective_build, a.project_dir
@@ -2295,10 +2416,9 @@ def _run_up_locked(a, env, name, config, xm, overlay_text, overlay_conn, build_a
                         print("compose: " + " ".join(clean_argv))
                         rc = subprocess.call(clean_argv, env=env)
                     if rc == 0:
-                        for _kind, _argv in plan:               # 한 단계라도 실패하면 뒤를 돌리지 않는다
-                            rc = subprocess.call(_argv, env=env)
-                            if rc != 0:
-                                break
+                        # 한 단계라도 실패하면 뒤를 돌리지 않는다(주입 실패면 Created 컨테이너도 치운다)
+                        rc = execute_plan(plan, cleanup_argv(
+                            a.stored, overlay, a.project_dir, name, requested + sidecars), env)
                         if rc == 0:
                             # 포트를 개발자 맥으로 되돌린다 — 없으면 박스에 떠도 브라우저로 못 연다.
                             start_remote_tunnel(a.session_dir, _target, name, env)
