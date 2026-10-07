@@ -1389,6 +1389,8 @@ def role_usage(since: float) -> list[dict[str, Any]]:
     except OSError:
         return []
     agg: dict[str, dict[str, Any]] = {}
+    last: dict[str, dict[str, Any]] = {}
+    stops: list[dict[str, Any]] = []
     for raw in lines:
         try:
             ev = json.loads(raw)
@@ -1396,6 +1398,15 @@ def role_usage(since: float) -> list[dict[str, Any]]:
             continue
         if not isinstance(ev, dict) or ev.get("ev") != "stop" or float(ev.get("ts") or 0) < since:
             continue
+        aid = ev.get("agent")
+        if aid:                                       # SendMessage 로 이어 쓰면 같은 id 로 stop 이 또 난다 — 토큰은 누적값이라 창 안 마지막 것만
+            if str(aid) in last and float(last[str(aid)].get("ts") or 0) > float(ev.get("ts") or 0):
+                continue
+            last[str(aid)] = ev
+            continue
+        stops.append(ev)                              # agent 칸 없는 옛 이벤트는 줄마다
+    stops.extend(last.values())
+    for ev in stops:
         t = ev.get("tokens") if isinstance(ev.get("tokens"), dict) else {}
         n = sum(int(t.get(k) or 0) for k in ("in", "out", "cache_write"))
         if not n:

@@ -15,8 +15,10 @@ def check(cond, msg):
     if not cond: fails.append(msg)
 ev = Path(os.environ["ROLE_EVENTS"])
 now = time.time()
-def stop(role, tin, out, ts, model="claude-sonnet-5-5"):
-    return {"ev": "stop", "ts": ts, "session": "S", "agent": "a", "role": role, "model": "sonnet", "effort": "", "skills": [],
+_aid = [0]
+def stop(role, tin, out, ts, model="claude-sonnet-5-5", agent=None):
+    _aid[0] += 1                                      # 줄마다 다른 에이전트 — 같은 id 는 마지막 stop 만 센다(아래 케이스)
+    return {"ev": "stop", "ts": ts, "session": "S", "agent": agent or f"a{_aid[0]}", "role": role, "model": "sonnet", "effort": "", "skills": [],
             "desc": "", "secs": 10.0, "tokens": {"in": tin, "out": out, "cache_read": 999999, "cache_write": 0}, "models": [model]}
 check(mb.role_usage(now - 7 * 86400) == [], "이벤트 파일 없음 → 빈 목록")
 rows = [stop("developer", 500_000, 700_000, now - 100), stop("developer", 100, 100, now - 50),
@@ -38,6 +40,16 @@ with open(ev, "a") as fh:
 u2 = mb.role_usage(now - 7 * 86400)
 check([(r["role"], r["calls"]) for r in u2] == [("developer", 2), ("general-purpose", 2), ("planner", 1), ("Explore", 1), ("기타", 2)],
       f"종류별·토큰 0 제외: {[(r['role'], r['calls'], r['tokens']) for r in u2]}")
+# SendMessage 로 이어 쓴 에이전트: 같은 agent id 의 stop 은 토큰이 누적값 → 마지막 것만, 호출 1
+ev.write_text("\n".join(json.dumps(r) for r in [
+    stop("developer", 10, 74, now - 300, agent="X"), stop("developer", 10, 367, now - 200, agent="X"),
+    stop("developer", 5, 5, now - 100, agent="Y"),
+    stop("qa", 1, 99, now - 8 * 86400, agent="Z"), stop("qa", 1, 40, now - 50, agent="Z"),     # 창 밖 stop 은 버리고 창 안 마지막
+    {k: v for k, v in stop("planner", 7, 3, now - 40).items() if k != "agent"},
+    {k: v for k, v in stop("planner", 7, 3, now - 30).items() if k != "agent"}]) + "\n")
+u3 = mb.role_usage(now - 7 * 86400)
+check([(r["role"], r["calls"], r["tokens"]) for r in u3] == [("developer", 2, 387), ("qa", 1, 41), ("planner", 2, 20)],
+      f"같은 agent 의 stop 은 마지막만(호출 1)·agent 없는 옛 줄은 줄마다: {[(r['role'], r['calls'], r['tokens']) for r in u3]}")
 ev.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
 snap = {"usage": [{"key": "weekly", "label": "주간", "usedPercent": 40, "resetsAt": int(now + 86400)}], "sessions": [], "roleUsage": u}
 def txt(cs):
