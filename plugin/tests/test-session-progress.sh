@@ -36,6 +36,7 @@ ms.chat_tool("progress", {"message_id": "9002", "text": "다른 지시"})
 mk = [x for x in log() if x["m"] == "POST" and x["p"].endswith("/threads")]
 check(len(mk) == 2 and mk[0]["p"] == f"/channels/{rec['channelId']}/messages/9001/threads", f"지시마다 스레드 하나: {mk}")
 check(mk and 0 < len(mk[0]["b"].get("name", "")) <= 100, "스레드 이름")
+check(mk and mk[0]["b"].get("name") == "진행 · 원인 찾는 중…", f"(a) 에이전트 없이 세션 progress 줄로 열면 '진행 · 글자': {mk[:1]}")
 tid = json.loads((Path(rec["stateDir"]) / "threads.json").read_text())["9001"]
 posts = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{tid}/messages"]
 check(len(posts) == 2 and posts[1]["b"]["content"].startswith("테스트 통과"), f"같은 스레드에 이어 쓰기: {posts}")

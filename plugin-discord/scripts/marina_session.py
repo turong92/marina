@@ -2988,6 +2988,61 @@ _CHAT_TOOLS_MCP = [
                      "required": ["message_id", "text"]}}]
 
 
+THREAD_KINDS = ("진행", "조사", "역할", "리드")      # 인덱스 = 순위. 스레드 이름은 '종류 · 내용', 종류는 올라가기만 한다
+RENAME_RETRY = 300.0                                 # 이름 바꾸기가 실패(429 등)하면 이만큼 뒤에 다시
+
+
+def _json_list(path: Path) -> list[Any]:
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return d if isinstance(d, list) else []
+
+
+def _kinds(sd: Path) -> dict[str, Any]:
+    """mid → {k: 지금 이름의 종류 순위, retry: 이 시각 전엔 이름 바꾸기를 다시 안 한다}. 깨졌으면 빈 것."""
+    try:
+        d = json.loads((sd / "threads-kind.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in d.items() if isinstance(v, dict)} if isinstance(d, dict) else {}
+
+
+def _write_kinds(sd: Path, mid: str, entry: dict[str, Any]) -> None:
+    d = _kinds(sd)
+    d.pop(mid, None)
+    d[mid] = entry
+    _write_json(sd / "threads-kind.json", dict(list(d.items())[-50:]))
+
+
+def _thread_kind(sd: Path, mid: str, text: str) -> tuple[int, str]:
+    """그 지시 스레드에 고정된 에이전트(agent-threads.json)로 (종류 순위, 스레드 이름). 에이전트가 없으면 '진행 · 세션 첫 줄'.
+    리드 > 역할(researcher 아닌 에이전트, 역할 없는 것 포함) > 조사(researcher 만) > 진행. 내용 = 그 종류를 정한 첫 에이전트의 설명."""
+    mine = [v for v in _agent_pins(sd).values() if str(v["mid"]) == mid]
+    rank, first = 0, None
+    for v in mine:
+        r = 3 if v.get("role") == "lead" else 1 if v.get("role") == "researcher" else 2
+        if r > rank:
+            rank, first = r, v
+    if first is None:
+        return 0, ("진행 · " + re.sub(r"\s+", " ", text))[:90]
+    desc = re.sub(r"\s+", " ", str(first.get("desc") or "")).strip()
+    return rank, (THREAD_KINDS[rank] + (" · " + desc if desc else ""))[:90]
+
+
+def _maybe_rename(dc: "Discord", sd: Path, mid: str, tid: str, rank: int, name: str) -> None:
+    """종류가 올라갔으면 스레드 이름을 한 번 바꾼다. 실패는 조용히 — 기록해 두고 RENAME_RETRY 뒤에 다시."""
+    cur = _kinds(sd).get(mid) or {}
+    if rank <= int(cur.get("k") or 0) or time.time() < float(cur.get("retry") or 0):
+        return
+    try:
+        dc._req("PATCH", f"/channels/{tid}", {"name": name})
+        _write_kinds(sd, mid, {"k": rank, "retry": 0})
+    except Exception:
+        _write_kinds(sd, mid, {"k": int(cur.get("k") or 0), "retry": time.time() + RENAME_RETRY})
+
+
 def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
     """지시 메시지에 스레드를 열고(처음 한 번) 진행 한 줄을 알림 없이 남긴다."""
     mid, text = str(args.get("message_id") or ""), str(args.get("text") or "").strip()
@@ -3003,8 +3058,9 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
     except (OSError, ValueError):
         threads = {}
     tid = str(threads.get(mid) or "")
+    sd = Path(str(rec["stateDir"]))
+    rank, name = _thread_kind(sd, mid, text)
     if not tid:
-        name = ("진행 · " + re.sub(r"\s+", " ", text))[:90]
         try:
             tid = str(dc._req("POST", f"/channels/{rec['channelId']}/messages/{mid}/threads",
                               {"name": name, "auto_archive_duration": 60})["id"])
@@ -3015,8 +3071,16 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
             raise
         threads[mid] = tid
         tf.write_text(json.dumps(dict(list(threads.items())[-50:]), ensure_ascii=False) + "\n", encoding="utf-8")
+        _write_kinds(sd, mid, {"k": rank, "retry": 0})
+        created = True
+    else:
+        created = False
+    af = tf.with_name("threads-archived.json")
+    was_archived = mid in _json_list(af)
     dc._req("POST", f"/channels/{tid}/messages",
             {"content": text[:1900], "flags": 4096, "allowed_mentions": {"parse": []}})   # 4096 = 알림 없이
+    if not created and not was_archived:
+        _maybe_rename(dc, sd, mid, tid, rank, name)           # 종류가 올라갔을 때만 — 접힌 스레드는 건드리지 않는다
     af = tf.with_name("threads-archived.json")                 # 다시 열렸으니 턴이 끝나면 다시 접는다
     try:
         arch = json.loads(af.read_text(encoding="utf-8"))

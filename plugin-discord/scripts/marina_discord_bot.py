@@ -1521,6 +1521,18 @@ def _pin_mid(pins: dict[str, Any], aid: str, parent: Any, mid_now: str, now: flo
     return str(p["mid"])
 
 
+def _pin_info(p: dict[str, Any], role: Any, desc: Any) -> bool:
+    """스레드 이름의 종류를 정하는 데 쓰는 역할·설명을 고정 기록에 처음 한 번 적는다(role 은 '-'·빈 값이면 역할 없음). 바뀌었으면 True."""
+    role = "" if str(role or "-") == "-" else str(role)
+    desc = _clean(str(desc or ""))[:80]
+    changed = False
+    if "role" not in p:
+        p["role"] = role; changed = True
+    if desc and not p.get("desc"):
+        p["desc"] = desc; changed = True
+    return changed
+
+
 def _save_pins(sd: Path, pins: dict[str, Any], now: float) -> None:
     if sd.is_dir():
         ms._write_json(sd / "agent-threads.json", {k: v for k, v in pins.items() if now - float(v.get("ts") or 0) < ROLE_PIN_TTL})
@@ -1585,6 +1597,7 @@ def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_
             if not mid:
                 continue
             p = pins[aid]
+            _pin_info(p, ev.get("role"), ev.get("desc"))
             if not p.get("parent") and ev.get("parent"):
                 p["parent"] = str(ev["parent"])
             prev, p["last"] = p.get("last"), ev["ev"]
@@ -1807,6 +1820,7 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
             continue
         pins = ms._agent_pins(sd)
         pinned_before = set(pins)
+        pins_changed = False
         by_mid: dict[str, list[str]] = {}            # 줄은 에이전트가 고정된 지시 스레드로(없으면 지금 지시)
         for a in agents:
             aid = str(a["id"])
@@ -1819,6 +1833,7 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
             mid = _pin_mid(pins, aid, lambda: _meta_parent_at(Path(str(a["path"])).with_suffix(".meta.json")), mid_now, now)
             if not mid:
                 continue
+            pins_changed |= _pin_info(pins[aid], a.get("role"), a.get("desc"))
             st[aid] = (words, now)
             age = f" · {_fmt_secs(max(0.0, now - born))}" if born else ""
             if efforts is None:
@@ -1827,7 +1842,7 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
             who = " · ".join(x for x in ((str(a.get("role") or "") + "#" + _agent_tag(aid, str(a.get("name") or ""))) if a.get("role") else "",
                                          model) if x)
             by_mid.setdefault(mid, []).append(f"🤖 {f'`{_clean(who)}` ' if who else ''}{_clean(str(a.get('desc') or aid))}{age} — {words}")
-        if set(pins) != pinned_before:
+        if set(pins) != pinned_before or pins_changed:
             _save_pins(sd, pins, now)
         for mid, lines in by_mid.items():
             try:

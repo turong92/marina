@@ -324,6 +324,76 @@ ms._running_agent_ids = lambda s: set()
 dc = DC(); ms._turn_end_archive({"stateDir": str(sd)}, sd, dc)
 check(sorted(c[1] for c in dc.calls) == ["/channels/T1", "/channels/T2", "/channels/T3"], f"(I3) 도는 게 없으면 모두 접음: {dc.calls}")
 
+# ── 스레드 이름: 종류 · 내용 (2026-10-09) ──────────────────────────────────────────────────────
+def tname(mid):
+    return next((x["b"]["name"] for x in log() if x["m"] == "POST" and x["p"].endswith(f"/messages/{mid}/threads")), None)
+def renames(mid):
+    t = tid_of(mid)
+    return [x["b"]["name"] for x in log() if x["m"] == "PATCH" and x["p"] == f"/channels/{t}" and "name" in x["b"]]
+def D(agent, ts, role, desc, **kw):
+    return st(agent, ts, role=role, desc=desc, **kw)
+# (b) developer 시작 줄로 열린 스레드 — 기계 글자(역할명·모델) 없이 설명만
+act("8001"); put(D("n1", 1, "developer", "결제   버그 고치기")); mb.role_events_tick()
+check(tname("8001") == "역할 · 결제 버그 고치기", f"(b) 역할 · 설명: {tname('8001')}")
+# (c) researcher 만 → 조사
+act("8002"); put(D("n2", 1, "researcher", "캐시 조사")); mb.role_events_tick()
+check(tname("8002") == "조사 · 캐시 조사", f"(c) 조사 · 설명: {tname('8002')}")
+# 역할 없는 서브에이전트(role '-')도 역할 종류
+act("8010"); put(D("n10", 1, "-", "코드 찾기")); mb.role_events_tick()
+check(tname("8010") == "역할 · 코드 찾기", f"(b2) 역할 없는 에이전트도 역할: {tname('8010')}")
+# (d) 진행 스레드에 developer 가 붙으면 역할로 한 번, 같은 종류가 더 붙어도 그대로
+ms._progress(rec, {"message_id": "8003", "text": "세션 혼자 한 줄"})
+check(tname("8003") == "진행 · 세션 혼자 한 줄", f"(d) 처음은 진행: {tname('8003')}")
+act("8003"); put(D("n3", 1, "developer", "첫 개발")); mb.role_events_tick()
+check(renames("8003") == ["역할 · 첫 개발"], f"(d) 진행 → 역할 한 번: {renames('8003')}")
+put(D("n3b", 2, "qa", "두번째")); mb.role_events_tick()
+check(renames("8003") == ["역할 · 첫 개발"], f"(d) 같은 종류는 안 바꿈: {renames('8003')}")
+# 조사 → 역할 올라감, 내려가지 않음
+ms._progress(rec, {"message_id": "8011", "text": "x"})
+act("8011"); put(D("n11", 1, "researcher", "조사부터")); mb.role_events_tick()
+put(D("n11b", 2, "developer", "이어 구현")); mb.role_events_tick()
+check(renames("8011") == ["조사 · 조사부터", "역할 · 이어 구현"] or renames("8011") == ["역할 · 이어 구현"], f"(d2) 조사 → 역할: {renames('8011')}")
+put(D("n11c", 3, "researcher", "또 조사")); mb.role_events_tick()
+check(renames("8011")[-1:] == ["역할 · 이어 구현"], f"(d2) 내려가지 않음: {renames('8011')}")
+# (e) 리드가 붙으면 리드 · 리드 설명
+ms._progress(rec, {"message_id": "8004", "text": "시작"})
+act("8004"); put(D("n4", 1, "developer", "개발자 일")); mb.role_events_tick()
+put(D("ld4", 2, "lead", "전체 굴리기")); mb.role_events_tick()
+check(renames("8004")[-1:] == ["리드 · 전체 굴리기"], f"(e) 리드: {renames('8004')}")
+# (f) 리드 스레드에 자식 developer 가 붙어도 이름 그대로
+act("8006"); put(D("ld6", 1, "lead", "큰 작업")); mb.role_events_tick()
+put(D("k6", 2, "developer", "자식 구현", parent="ld6")); mb.role_events_tick()
+check(tname("8006") == "리드 · 큰 작업" and renames("8006") == [], f"(f) 리드 스레드 불변: {tname('8006')} {renames('8006')}")
+# 90자 제한
+act("8012"); put(D("n12", 1, "developer", "가" * 80)); mb.role_events_tick()
+check(tname("8012") == ("역할 · " + "가" * 80)[:90], f"(b3) 90자: {tname('8012')}")
+# (g) PATCH 실패 — 줄은 올라가고, 다음 틱에 바로 재시도하지 않는다
+ms._progress(rec, {"message_id": "8007", "text": "g"})
+(fd / "forbid").write_text(tid_of("8007"))
+act("8007"); put(D("n7", 1, "developer", "실패 케이스")); mb.role_events_tick()
+check(any("developer#n7 시작" in l for l in at("8007")), f"(g) 줄은 올라감: {at('8007')}")
+check(len(renames("8007")) == 1, f"(g) PATCH 한 번 시도: {renames('8007')}")
+put(D("n7b", 2, "developer", "더")); mb.role_events_tick()
+check(len(renames("8007")) == 1, f"(g) 바로 재시도 안 함: {renames('8007')}")
+(fd / "forbid").unlink()
+kf = sd / "threads-kind.json"
+kd = json.loads(kf.read_text()); kd["8007"]["retry"] = 0; kf.write_text(json.dumps(kd))
+put(D("n7c", 3, "developer", "또")); mb.role_events_tick()
+check(len(renames("8007")) == 2, f"(g) 재시도 시각이 지나면 다시: {renames('8007')}")
+put(D("n7d", 4, "developer", "또또")); mb.role_events_tick()
+check(len(renames("8007")) == 2, f"(g) 성공하면 더 안 함: {renames('8007')}")
+# (h) 접힌 스레드는 이름을 안 바꾼다(다시 열지도 않음)
+ms._progress(rec, {"message_id": "8008", "text": "h"})
+(sd / "threads-archived.json").write_text(json.dumps(["8008"]))
+n0 = len(log())
+act("8008"); put(D("n8", 1, "developer", "접힌 케이스")); mb.role_events_tick()
+check(renames("8008") == [], f"(h) 접힌 스레드는 이름 안 바꿈: {renames('8008')}")
+check(not any(x["m"] == "PATCH" and x["b"].get("archived") is False for x in log()[n0:]), "(h) 다시 열지 않음")
+# 상태 파일이 깨져도 안 죽음
+kf.write_text("{깨짐")
+act("8013"); put(D("n13", 1, "developer", "깨진 상태")); mb.role_events_tick()
+check(tname("8013") == "역할 · 깨진 상태", f"(N) 깨진 종류 기록 → 빈 것: {tname('8013')}")
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY
