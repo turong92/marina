@@ -1351,7 +1351,7 @@ def _fmt_role_event(ev: dict[str, Any]) -> str:
     if kind == "override_blocked":
         return f"⚠️ {who} 모델 지정({ev.get('asked')}) 무시 — 역할표대로 {ev.get('model')}"
     if kind == "start":
-        parts = [f"🤖 {who} 시작"]
+        parts = [f"🤖 {who} {'이어 씀' if ev.get('resumed') else '시작'}"]
         if role != "-":
             parts.append(f"{ev.get('model')}/{ev.get('effort')}" if ev.get("effort") else str(ev.get("model")))
             sk = [str(x).split(":")[-1] for x in ev.get("skills") or []]
@@ -1442,8 +1442,9 @@ def _role_block(rows: list[dict[str, Any]]) -> str:
 
 
 def role_events_tick() -> None:
-    """role-hook 이벤트 파일을 오프셋부터 읽어, Discord 세션이면 지금 지시 메시지 스레드에 한 줄씩(역할 에이전트 2026-10-04).
-    파일이 줄었으면(회전) 처음부터. 깨진 줄·남의 세션·지시 메시지 없는 세션은 건너뛰고 오프셋만 전진."""
+    """role-hook 이벤트 파일을 오프셋부터 읽어, Discord 세션이면 에이전트가 고정된 지시 메시지 스레드에 한 줄씩(역할 에이전트 2026-10-04).
+    파일이 줄었으면(회전) 처음부터. 깨진 줄·남의 세션·지시 메시지 없는 세션은 건너뛰고 오프셋만 전진.
+    새 줄이 없어도 붙잡은 끝 줄이 있는 세션은 때가 됐는지 본다."""
     path, off_f = _role_events_path(), ms.marina_home() / "role-events.offset"
     try:
         size = path.stat().st_size
@@ -1458,12 +1459,14 @@ def role_events_tick() -> None:
         off = size
     if off > size:
         off = 0
-    if off == size:
-        return
-    with open(path, "rb") as fh:
-        fh.seek(off)
-        chunk = fh.read(256_000)
-    lines = chunk.split(b"\n")[:-1][:ROLE_EVENTS_MAX]          # 끝나지 않은 마지막 줄은 다음 판에
+    lines: list[bytes] = []
+    if off != size:
+        with open(path, "rb") as fh:
+            fh.seek(off)
+            chunk = fh.read(256_000)
+        lines = chunk.split(b"\n")[:-1][:ROLE_EVENTS_MAX]      # 끝나지 않은 마지막 줄은 다음 판에
+    if not lines and _held_dirs is not None and not _held_dirs:
+        return                                    # 새 줄도 붙잡은 것도 없다 — 세션 목록도 안 읽는다
     by_sid = {str(r.get("sessionId")): r for r in ms.load_sessions() if r.get("sessionId") and r.get("channelId")}
     try:
         _role_events_post(lines, off, by_sid, off_f)
@@ -1471,25 +1474,175 @@ def role_events_tick() -> None:
         _log(f"role event: {exc!r}")
 
 
+ROLE_STOP_HOLD = 20.0        # 끝 줄을 최소 이만큼 붙잡는다 — 이어 쓰기의 start(또는 리드의 첫 자식 start)가 도착할 여유. 0 = 붙잡지 않고 즉시 게시(테스트 전용)
+ROLE_HOLD_MAX = 6 * 3600.0   # 붙잡기 상한 — 자식 stop 이 유실돼도 끝 줄이 영영 안 나가는 일이 없게
+ROLE_PIN_TTL = 86400.0       # 마지막 이벤트 후 이만큼 지난 고정 기록은 지운다
+_held_dirs: "set[str] | None" = None    # 붙잡은 끝 줄이 있는 세션 상태 폴더(메모리). None = 아직 안 훑음(봇 시작 직후) — 첫 틱에 한 번 훑는다
+
+
+def _now() -> float:
+    return time.time()
+
+
+def _load_json_dict(path: Path) -> dict[str, Any]:
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _meta_parent_at(meta_path: Path) -> str:
+    """하네스 meta(subagents/agent-<id>.meta.json)의 parentAgentId. 시작 줄엔 부모 칸이 비어 있다. 없으면 빈 문자열."""
+    try:
+        meta = json.loads(meta_path.read_text())
+        return str(meta.get("parentAgentId") or "") if isinstance(meta, dict) else ""
+    except (OSError, ValueError):
+        return ""
+
+
+def _meta_parent(rec: dict[str, Any], aid: str) -> str:
+    tr = _session_transcript(rec)
+    return _meta_parent_at(tr.parent / tr.stem / "subagents" / f"agent-{aid}.meta.json") if tr else ""
+
+
+def _pin_mid(pins: dict[str, Any], aid: str, parent: Any, mid_now: str, now: float) -> str:
+    """에이전트의 줄을 쓸 지시 메시지. 처음 보면 부모의 것(없으면 지금 것)에 고정하고, 이후엔 계속 그것. parent 는 값 또는 호출 가능.
+    정할 mid 가 없으면 고정을 만들지 않고 빈 문자열."""
+    p = pins.get(aid)
+    if not p:
+        par = str((parent() if callable(parent) else parent) or "")
+        pp = pins.get(par) if par else None
+        mid = str(pp["mid"]) if pp else mid_now
+        if not mid:
+            return ""
+        p = pins[aid] = {"mid": mid, "ts": now, "parent": par}
+    p["ts"] = now
+    return str(p["mid"])
+
+
+def _save_pins(sd: Path, pins: dict[str, Any], now: float) -> None:
+    if sd.is_dir():
+        ms._write_json(sd / "agent-threads.json", {k: v for k, v in pins.items() if now - float(v.get("ts") or 0) < ROLE_PIN_TTL})
+
+
+def _clean_held(raw: dict[str, Any]) -> dict[str, Any]:
+    return {a: h for a, h in raw.items() if isinstance(h, dict) and isinstance(h.get("ev"), dict) and isinstance(h.get("at"), (int, float))}
+
+
+def _rearchive(rec: dict[str, Any], mid: str) -> None:
+    """접혀 있던 스레드에 늦게 나간 줄이 스레드를 다시 열었다 — 그 스레드만 다시 접는다(기존 접기 함수 재사용)."""
+    threads = _load_json_dict(Path(str(rec["stateDir"])) / "threads.json")
+    if not threads.get(mid):                      # 못 읽었거나 없는 스레드 — keep 이 비면 열린 스레드를 몽땅 접는다
+        return
+    ms._archive_threads(rec, ms.Discord(ms.read_token(ms.load_config())), keep=set(threads) - {mid})
+
+
 def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_f: Path) -> None:
-    """한 판의 줄들은 스레드마다 메시지 하나로 묶는다 — 서브에이전트가 몰려도 도배 안 함(리뷰 M3)."""
+    """한 판의 줄들은 스레드마다 메시지 하나로 묶는다 — 서브에이전트가 몰려도 도배 안 함(리뷰 M3).
+    줄은 지금 지시가 아니라 에이전트가 처음 시작된 때의 지시 스레드에 쓴다(자식은 부모 것) — 질문을 더 해도 줄이 흩어지지 않게.
+    끝 줄은 붙잡는다: 같은 에이전트의 start 가 오면 이어 쓰기라 둘 다 버리고(구조 판정 — 시간과 무관),
+    그 에이전트를 부모로 둔 자식이 아직 도는 동안은 계속 붙잡고, 자식이 없으면 ROLE_STOP_HOLD 뒤에 쓴다."""
+    global _held_dirs
+    now = _now()
     groups: dict[tuple[str, str], tuple[dict[str, Any], list[str]]] = {}
+    state: dict[str, tuple[dict[str, Any], dict[str, Any], dict[str, Any]]] = {}     # stateDir → (rec, pins, held)
+    dirty: set[str] = set()
+    mixed: set[tuple[str, str]] = set()                      # 풀려난 끝 줄 말고 다른 줄도 간 그룹 — 재접기 대상 아님
+
+    def sess(rec: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        sdk = str(rec.get("stateDir") or "")
+        if sdk not in state:
+            sd = Path(sdk or "/nonexistent")
+            raw = _load_json_dict(sd / "role-held.json")
+            held = _clean_held(raw)
+            if len(held) != len(raw):
+                dirty.add(sdk)                                # 모양 틀린 항목은 버린다
+            state[sdk] = (rec, ms._agent_pins(sd), held)
+        return state[sdk]
+
+    def add(rec: dict[str, Any], mid: str, text: str, released: bool = False) -> None:
+        if mid and text:
+            groups.setdefault((str(rec.get("stateDir")), mid), (rec, []))[1].append(text)
+            if not released:
+                mixed.add((str(rec.get("stateDir")), mid))
+
     for raw in lines:
         off += len(raw) + 1
         try:
             ev = json.loads(raw.decode("utf-8", "replace"))
-        except ValueError:
-            continue
-        rec = by_sid.get(str(ev.get("session") or "")) if isinstance(ev, dict) else None
-        if not rec:
-            continue
-        mid = str(ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent"))).get("mid") or "")
-        text = _fmt_role_event(ev)
-        if not mid or not text:
-            continue
-        groups.setdefault((str(rec.get("stateDir")), mid), (rec, []))[1].append(text)
-    off_f.write_text(str(off))                    # 보내기 전에 — 보내다 죽어도 같은 줄을 다시 안 보낸다
+            rec = by_sid.get(str(ev.get("session") or "")) if isinstance(ev, dict) else None
+            if not rec:
+                continue
+            mid_now = str(ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent"))).get("mid") or "")
+            aid = str(ev.get("agent") or "")
+            if not aid or ev.get("ev") not in ("start", "stop"):
+                add(rec, mid_now, _fmt_role_event(ev))
+                continue
+            _, pins, held = sess(rec)
+            dirty.add(str(rec.get("stateDir") or ""))
+            mid = _pin_mid(pins, aid, lambda: str(ev.get("parent") or "") or _meta_parent(rec, aid), mid_now, now)
+            if not mid:
+                continue
+            p = pins[aid]
+            if not p.get("parent") and ev.get("parent"):
+                p["parent"] = str(ev["parent"])
+            prev, p["last"] = p.get("last"), ev["ev"]
+            if ev["ev"] == "stop":
+                if ROLE_STOP_HOLD > 0:
+                    held[aid] = {"ev": ev, "at": now}       # 곧 start(이어 쓰기)가 오거나 자식이 도는 중일 수 있다 — 일단 붙잡는다
+                else:
+                    add(rec, mid, _fmt_role_event(ev))
+                continue
+            if held.pop(aid, None):                          # 끝 직후 시작 = 한 에이전트가 계속 도는 것 — 둘 다 안 쓴다
+                continue
+            if prev == "stop":
+                ev["resumed"] = True                         # 끝 줄이 이미 나간 뒤의 start — '시작' 대신 '이어 씀'
+            add(rec, mid, _fmt_role_event(ev))
+        except Exception as exc:                              # 줄 하나가 이후 줄을 막지 않게(오프셋은 이미 전진 중)
+            _log(f"role event line: {exc!r}")
+    for rec in by_sid.values():                              # 새 줄이 없는 세션도 붙잡은 끝 줄의 때가 됐는지 본다(붙잡은 게 있는 세션만)
+        if _held_dirs is None or str(rec.get("stateDir") or "") in _held_dirs:
+            try:
+                sess(rec)
+            except Exception as exc:
+                _log(f"role held load: {exc!r}")
+    if _held_dirs is None:
+        _held_dirs = set()
+    for sdk, (rec, pins, held) in state.items():
+        sd = Path(sdk or "/nonexistent")
+        try:                                                  # 세션 하나의 모양 틀린 상태가 다른 세션 줄을 막지 않게
+            before = set(held)
+            if held:
+                for k, v in pins.items():                    # 시작 때 meta 가 아직 없어 부모가 빈 채 고정된 자식 — 다시 읽어 채운다(에이전트당 최대 3번)
+                    if not v.get("parent") and v.get("last") == "start" and int(v.get("pr") or 0) < 3:
+                        v["pr"] = int(v.get("pr") or 0) + 1
+                        v["parent"] = _meta_parent(rec, k)
+                        dirty.add(sdk)
+            for aid in list(held):
+                kids = {k: v for k, v in pins.items() if v.get("parent") == aid}
+                # 자식이 도는 중 — 마지막 이벤트가 start 이거나, 그 자식의 끝 줄도 아직 붙잡혀 있음(3단 중첩)
+                live = any((v.get("last") == "start" and now - float(v.get("ts") or 0) < ROLE_HOLD_MAX) or k in held for k, v in kids.items())
+                age = now - float(held[aid]["at"])
+                quiet = now - max([float(held[aid]["at"])] + [float(v.get("ts") or 0) for v in kids.values()])   # 마지막 자식 이벤트 뒤에도 start 가 올 여유
+                if age >= ROLE_HOLD_MAX or (quiet >= ROLE_STOP_HOLD and not live):
+                    h = held.pop(aid)
+                    add(rec, str(pins.get(aid, {}).get("mid") or ms._activity_state(sd).get("mid") or ""), _fmt_role_event(h["ev"]), released=True)
+        except Exception as exc:
+            _log(f"role held judge {sdk}: {exc!r}")
+        try:
+            if sdk in dirty or set(held) != before:
+                if sd.is_dir():
+                    ms._write_json(sd / "role-held.json", held)
+                _save_pins(sd, pins, now)
+        except Exception as exc:
+            _log(f"role held save {sdk}: {exc!r}")
+        (_held_dirs.add if held else _held_dirs.discard)(sdk)
+    if lines:
+        off_f.write_text(str(off))                # 보내기 전에 — 보내다 죽어도 같은 줄을 다시 안 보낸다
     for (_, mid), (rec, texts) in groups.items():
+        sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+        was_archived = mid in _load_json_dict_list(sd / "threads-archived.json")
         chunks, cur = [], ""
         for t in texts:                               # 1900자에서 잘리지 않게 줄 경계로 나눈다(리뷰 I1)
             if cur and len(cur) + 1 + len(t) > 1900:
@@ -1502,6 +1655,21 @@ def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_
                 ms._progress(rec, {"message_id": mid, "text": c})
             except Exception as exc:                  # 한 그룹 실패가 나머지를 막지 않게(리뷰 M3)
                 _log(f"role event: {exc!r}")
+        pins = state.get(str(rec.get("stateDir") or ""), (None, {}, {}))[1]
+        if was_archived and (str(rec.get("stateDir")), mid) not in mixed and not any(
+                v.get("mid") == mid and v.get("last") == "start" for v in pins.values()):
+            try:
+                _rearchive(rec, mid)
+            except Exception as exc:
+                _log(f"role rearchive: {exc!r}")
+
+
+def _load_json_dict_list(path: Path) -> list[Any]:
+    try:
+        d = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return d if isinstance(d, list) else []
 
 
 AGENT_WORDS_EVERY = 120.0    # 에이전트마다 — 하는 일이 바뀌어도 이보다 자주는 안 올린다(도배 방지)
@@ -1633,18 +1801,24 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
         if agents:
             live.add(str(rec["channelId"]))
         seen.update(str(a["id"]) for a in agents)
-        mid = str(ms._activity_state(Path(str(rec["stateDir"]))).get("mid") or "")
-        if not mid:
+        sd = Path(str(rec["stateDir"]))
+        mid_now = str(ms._activity_state(sd).get("mid") or "")
+        if not mid_now:
             continue
-        lines: list[str] = []
+        pins = ms._agent_pins(sd)
+        pinned_before = set(pins)
+        by_mid: dict[str, list[str]] = {}            # 줄은 에이전트가 고정된 지시 스레드로(없으면 지금 지시)
         for a in agents:
             aid = str(a["id"])
             words, born = _agent_now(Path(str(a["path"])))
             old = st.get(aid)
             if not words or (old and (old[0] == words or now - old[1] < AGENT_WORDS_EVERY)):
                 continue
-            if len(lines) >= AGENT_WORDS_MAX:         # 넘치는 건 기록하지 않고 다음 판에(리뷰 M5)
+            if sum(len(v) for v in by_mid.values()) >= AGENT_WORDS_MAX:     # 넘치는 건 기록하지 않고 다음 판에(리뷰 M5)
                 break
+            mid = _pin_mid(pins, aid, lambda: _meta_parent_at(Path(str(a["path"])).with_suffix(".meta.json")), mid_now, now)
+            if not mid:
+                continue
             st[aid] = (words, now)
             age = f" · {_fmt_secs(max(0.0, now - born))}" if born else ""
             if efforts is None:
@@ -1652,8 +1826,10 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
             model = "/".join(x for x in (str(a.get("model") or ""), efforts.get(aid, "")) if x)
             who = " · ".join(x for x in ((str(a.get("role") or "") + "#" + _agent_tag(aid, str(a.get("name") or ""))) if a.get("role") else "",
                                          model) if x)
-            lines.append(f"🤖 {f'`{_clean(who)}` ' if who else ''}{_clean(str(a.get('desc') or aid))}{age} — {words}")
-        if lines:
+            by_mid.setdefault(mid, []).append(f"🤖 {f'`{_clean(who)}` ' if who else ''}{_clean(str(a.get('desc') or aid))}{age} — {words}")
+        if set(pins) != pinned_before:
+            _save_pins(sd, pins, now)
+        for mid, lines in by_mid.items():
             try:
                 ms._progress(rec, {"message_id": mid, "text": "\n".join(lines)})
             except Exception as exc:

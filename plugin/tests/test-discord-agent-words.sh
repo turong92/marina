@@ -116,6 +116,18 @@ mb._agents_running = boom
 mb.agent_words_tick(st3, now=base + 5060)
 check(len(st3) == 9, "읽기 실패한 판은 상태 유지")
 
+# (리뷰 I1) 말 줄도 부모 mid 스레드로 — 자식 기록 옆 .meta.json 의 parentAgentId 로 부모를 찾는다(기록 .jsonl 을 json 으로 읽지 않는다)
+mb._agents_running = lambda r: agents if r.get("stateDir") == str(sd) else []
+(sd / "agent-threads.json").write_text(json.dumps({"par": {"mid": "9000", "ts": time.time()}}))
+kid = tmp / "agent-kid.jsonl"; kid.write_text(row("assistant", [{"type": "text", "text": "자식이 일한다"}]) + "\n")
+(tmp / "agent-kid.meta.json").write_text(json.dumps({"description": "자식", "parentAgentId": "par"}))
+del agents[:]; agents.append({"id": "kid", "desc": "자식 일", "path": kid})
+n = len(log()); mb.agent_words_tick({}, now=base + 9000)
+tids = json.loads((sd / "threads.json").read_text())
+posted = [x for x in log()[n:] if x["m"] == "POST" and x["p"] == f"/channels/{tids.get('9000')}/messages"]
+check(len(posted) == 1 and "자식이 일한다" in posted[0]["b"]["content"], f"자식의 말 줄은 부모 mid(9000) 스레드: {thread_posts(n)}")
+check(json.loads((sd / "agent-threads.json").read_text()).get("kid", {}).get("mid") == "9000", "자식도 고정됨")
+
 # 실제 _agents_running — 끝난 에이전트(기록이 end_turn 으로 끝남)·끝남 알림 온 것·채팅방 세션은 뺀다
 mb._agents_running = real_running
 proj = tmp / "projects" / "p"; sub = proj / "S1" / "subagents"; sub.mkdir(parents=True)

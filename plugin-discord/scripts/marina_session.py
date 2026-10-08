@@ -2085,13 +2085,7 @@ def hook_stop(payload: dict[str, Any]) -> None:
     # 뒤에서 서브에이전트가 도는 동안엔 진행 줄이 올라가는 스레드(가장 최근 지시)만 열어 둔다 — 턴마다 닫히면 쌓이는 줄이 끊기고(형 2026-10-06),
     # 전부 열어 두면 에이전트를 계속 붙든 세션은 지난 지시 스레드가 끝없이 쌓인다(형 2026-10-07).
     # 최근 지시를 모르면(activity.json 에 mid 없음) 아무것도 접지 않는다. 다 끝난 뒤의 턴 끝엔 밀린 것까지 접는다
-    if not _agents_running_now(s):
-        _archive_threads(s, dc)
-    else:
-        keep = str(_activity_state(sd).get("mid") or "")
-        if keep:
-            _archive_threads(s, dc, keep=keep)
-
+    _turn_end_archive(s, sd, dc)
 
 
 def _wait_lock(path: Path, timeout: float = 3.0) -> Any:
@@ -2124,16 +2118,48 @@ def _clear_locked(s: dict[str, Any], sd: Path, dc: "Discord", ids: list[str]) ->
         _write_json(sd / "activity.json", st)
 
 
-def _agents_running_now(s: dict[str, Any]) -> bool:
-    """지금 뒤에서 도는 서브에이전트가 있나(봇의 판정을 그대로 쓴다). 판정을 못 하면 '없음' — 스레드를 접는 쪽으로."""
+def _running_agent_ids(s: dict[str, Any]) -> set[str]:
+    """지금 뒤에서 도는 서브에이전트 id들(봇의 판정을 그대로 쓴다). 판정을 못 하면 빈 집합 — 스레드를 접는 쪽으로."""
     try:
         import marina_discord_bot as mb
-        return bool(mb._agents_running(s))
+        return {str(a["id"]) for a in mb._agents_running(s)}
     except Exception:
-        return False
+        return set()
 
 
-def _archive_threads(s: dict[str, Any], dc: "Discord", keep: str = "") -> None:
+def _turn_end_archive(s: dict[str, Any], sd: Path, dc: "Discord") -> None:
+    """턴 끝 접기. 뒤에서 도는 에이전트가 없으면 밀린 것까지 모두, 있으면 최근 지시 + 도는 에이전트가 줄을 쓰는(고정된) 스레드만 남긴다."""
+    running = _running_agent_ids(s)                  # 한 번만 — 도는 판정과 id 를 같이 쓴다
+    if not running:
+        _archive_threads(s, dc)
+        return
+    cur = str(_activity_state(sd).get("mid") or "")
+    if cur:
+        pins = _agent_pins(sd)
+        # 도는 중인 에이전트는 자기 이벤트가 30분 넘게 없어도 keep(실행의 ~10%) — 이벤트 시각 대신 지금 도는 id 로 본다
+        keep = {cur} | _live_pinned_mids(sd, time.time()) | {str(pins[i]["mid"]) for i in running if i in pins}
+        _archive_threads(s, dc, keep=keep)
+
+
+AGENT_PIN_LIVE = 1800.0      # 마지막 이벤트가 이 안이면 '살아 있는' 에이전트(리드는 중간 stop 이 나서 이벤트로 정확히 못 가린다)
+
+
+def _agent_pins(sd: Path) -> dict[str, Any]:
+    """에이전트 id → {mid: 처음 시작된 때의 지시 메시지, ts: 마지막 이벤트 시각}. 깨졌으면 빈 것."""
+    try:
+        d = json.loads((sd / "agent-threads.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return {k: v for k, v in d.items() if isinstance(v, dict) and v.get("mid") and isinstance(v.get("ts", 0), (int, float))}
+
+
+def _live_pinned_mids(sd: Path, now: float) -> set[str]:
+    return {str(v["mid"]) for v in _agent_pins(sd).values() if now - float(v.get("ts") or 0) < AGENT_PIN_LIVE}
+
+
+def _archive_threads(s: dict[str, Any], dc: "Discord", keep: Any = "") -> None:
     # 끝난 지시의 진행 스레드는 접는다 — 채널 목록에 계속 쌓이지 않게(열면 기록은 그대로)
     # 턴이 끝났고 뒤에서 도는 일도 없으니 아직 안 접은 스레드는 모두 끝난 것. 접은 스레드는 목록에서 뺀다(다음 턴에 다시 안 부르게).
     tfile = Path(str(s.get("stateDir") or "")) / "threads.json"
@@ -2146,7 +2172,8 @@ def _archive_threads(s: dict[str, Any], dc: "Discord", keep: str = "") -> None:
         archived = set(json.loads(afile.read_text(encoding="utf-8")))
     except (OSError, ValueError, TypeError):
         archived = set()
-    done = [m for m in threads if threads.get(m) and m not in archived and m != keep]
+    kept = {keep} if isinstance(keep, str) else set(keep)
+    done = [m for m in threads if threads.get(m) and m not in archived and m not in kept]
     for mid in done:
         try:
             dc._req("PATCH", f"/channels/{threads[mid]}", {"archived": True})

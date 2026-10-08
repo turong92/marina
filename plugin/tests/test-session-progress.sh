@@ -63,12 +63,12 @@ check(len([x for x in log() if x["m"] == "PATCH"]) == n, "다음 턴에 다시 �
 ms._progress(rec, {"message_id": "9777", "text": "뒤에서 도는 일"})
 tids = json.loads((Path(rec["stateDir"]) / "threads.json").read_text())
 tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": tag("9777")}}) + "\n")
-ms._agents_running_now = lambda s: True
+ms._running_agent_ids = lambda s: {"x"}
 n = len([x for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True])
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
 arch = [x["p"] for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True]
 check(len(arch) == n, f"에이전트가 도는 동안엔 안 접는다: {arch[n:]}")
-ms._agents_running_now = lambda s: False
+ms._running_agent_ids = lambda s: set()
 tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "<task-notification>끝</task-notification>"}}) + "\n")
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
 arch = [x["p"] for x in log() if x["m"] == "PATCH" and x["b"].get("archived") is True]
@@ -84,12 +84,12 @@ act = json.loads((sdir / "activity.json").read_text()) if (sdir / "activity.json
 act["mid"] = "9803"
 (sdir / "activity.json").write_text(json.dumps(act))
 tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": "<task-notification>x</task-notification>"}}) + "\n")
-ms._agents_running_now = lambda s: True
+ms._running_agent_ids = lambda s: {"x"}
 n = len(npatch())
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
 check(sorted(npatch()[n:]) == sorted([f"/channels/{tids['9801']}", f"/channels/{tids['9802']}"]), f"에이전트 도는 중: 옛 스레드만 접는다: {npatch()[n:]}")
 check("9803" not in json.loads((sdir / "threads-archived.json").read_text()), "최근 지시 스레드는 열어 둔다")
-ms._agents_running_now = lambda s: False
+ms._running_agent_ids = lambda s: set()
 n = len(npatch())
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
 check(npatch()[n:] == [f"/channels/{tids['9803']}"], f"에이전트가 없으면 남은 것도 접는다: {npatch()[n:]}")
@@ -97,11 +97,11 @@ for m in ("9811", "9812"):
     ms._progress(rec, {"message_id": m, "text": f"지시 {m}"})
 act = json.loads((sdir / "activity.json").read_text()); act.pop("mid", None)
 (sdir / "activity.json").write_text(json.dumps(act))
-ms._agents_running_now = lambda s: True
+ms._running_agent_ids = lambda s: {"x"}
 n = len(npatch())
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
 check(npatch()[n:] == [], f"최근 지시를 모르면 에이전트 도는 중엔 아무것도 안 접는다: {npatch()[n:]}")
-ms._agents_running_now = lambda s: False
+ms._running_agent_ids = lambda s: set()
 # 작업 중 표시: 도구를 쓸 때마다 '입력 중…'(8초에 한 번만) — 개발·채팅 세션 모두
 for ref in ("proj/feat/p", "chat/room"):
     r2 = ms.find_session(ref)
