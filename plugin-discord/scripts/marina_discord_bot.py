@@ -1506,14 +1506,79 @@ def _meta_parent(rec: dict[str, Any], aid: str) -> str:
     return _meta_parent_at(tr.parent / tr.stem / "subagents" / f"agent-{aid}.meta.json") if tr else ""
 
 
-def _pin_mid(pins: dict[str, Any], aid: str, parent: Any, mid_now: str, now: float) -> str:
-    """에이전트의 줄을 쓸 지시 메시지. 처음 보면 부모의 것(없으면 지금 것)에 고정하고, 이후엔 계속 그것. parent 는 값 또는 호출 가능.
-    정할 mid 가 없으면 고정을 만들지 않고 빈 문자열."""
+_CHAN_MID = re.compile(r'<channel\b[^>]*?\bchat_id="(\d+)"[^>]*?\bmessage_id="(\d+)"')
+_TASK_ID = re.compile(r"<task-id>([^<\s]+)</task-id>")
+TURN_SCAN_TAIL = 4_000_000       # 턴 시작을 찾느라 읽는 세션 기록 끝쪽 크기
+
+
+def _row_text(row: dict[str, Any]) -> str:
+    """user 행의 글 — 문자열이거나 text 블록들. tool_result 만 있는 행은 빈 문자열(턴의 시작이 아니다)."""
+    c = (row.get("message") or {}).get("content") if isinstance(row.get("message"), dict) else None
+    if isinstance(c, str):
+        return c
+    if isinstance(c, list):
+        return "\n".join(str(b.get("text") or "") for b in c if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def _turn_mid(rec: dict[str, Any], pins: dict[str, Any], desc: Any, ts: Any) -> str:
+    """부모 없는 에이전트를 띄운 Agent 호출(설명 일치, 시작 직전 가장 가까운 것)의 턴이 무엇으로 시작됐나 → 고정할 지시 메시지.
+    채널 메시지 → 그 id(이 방 것만) · 끝난 에이전트의 task-notification → 그 에이전트의 고정 mid, 에이전트가 아니면 더 앞으로 ·
+    못 찾거나 읽기 실패 → 빈 문자열(호출자가 지금 mid 로). 새 에이전트를 처음 볼 때 한 번만 부른다."""
+    try:
+        desc = _clean(str(desc or ""))
+        tr = _session_transcript(rec)
+        if not desc or not tr:
+            return ""
+        rows = []
+        lines = _tail_text(tr, TURN_SCAN_TAIL).splitlines()
+        for ln in lines[1:] if tr.stat().st_size > TURN_SCAN_TAIL else lines:      # 잘라 읽었으면 첫 줄은 잘렸을 수 있다
+            try:
+                r = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(r, dict) and not r.get("isSidechain"):
+                rows.append(r)
+        t0 = float(ts) if isinstance(ts, (int, float)) and ts > 1e9 else 0.0
+        hit = -1
+        for i, r in enumerate(rows):
+            if r.get("type") != "assistant" or (t0 and _row_time(r) > t0 + 30):
+                continue
+            c = (r.get("message") or {}).get("content") if isinstance(r.get("message"), dict) else None
+            for b in c if isinstance(c, list) else []:
+                if isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in ("Agent", "Task") \
+                        and _clean(str((b.get("input") or {}).get("description") or "")) == desc:
+                    hit = i
+        for r in reversed(rows[:hit] if hit >= 0 else []):
+            if r.get("type") != "user":
+                continue
+            text = _row_text(r)
+            if not text.strip():
+                continue                                                  # tool_result 등 — 턴의 시작이 아니다
+            ch = _CHAN_MID.findall(text)
+            if ch:
+                chat, mid = ch[-1]
+                return mid if chat == str(rec.get("channelId") or "") else ""
+            m = _TASK_ID.search(text)
+            if m and "<task-notification>" in text:
+                pp = pins.get(m.group(1))
+                if pp:
+                    return str(pp["mid"])
+                continue                                                  # 에이전트가 아닌 작업(셸 등) — 더 앞 입력으로
+            return ""                                                     # 모르는 입력(터미널 등)
+    except Exception as exc:
+        _log(f"turn mid: {exc!r}")
+    return ""
+
+
+def _pin_mid(pins: dict[str, Any], aid: str, parent: Any, mid_now: str, now: float, turn: Any = None) -> str:
+    """에이전트의 줄을 쓸 지시 메시지. 처음 보면 부모의 것(없으면 띄운 턴의 것 turn(), 그것도 없으면 지금 것)에 고정하고, 이후엔 계속 그것.
+    parent·turn 은 값 또는 호출 가능. 정할 mid 가 없으면 고정을 만들지 않고 빈 문자열."""
     p = pins.get(aid)
     if not p:
         par = str((parent() if callable(parent) else parent) or "")
         pp = pins.get(par) if par else None
-        mid = str(pp["mid"]) if pp else mid_now
+        mid = str(pp["mid"]) if pp else str((turn() if callable(turn) else turn) or "") or mid_now
         if not mid:
             return ""
         p = pins[aid] = {"mid": mid, "ts": now, "parent": par}
@@ -1593,7 +1658,8 @@ def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_
                 continue
             _, pins, held = sess(rec)
             dirty.add(str(rec.get("stateDir") or ""))
-            mid = _pin_mid(pins, aid, lambda: str(ev.get("parent") or "") or _meta_parent(rec, aid), mid_now, now)
+            mid = _pin_mid(pins, aid, lambda: str(ev.get("parent") or "") or _meta_parent(rec, aid), mid_now, now,
+                           lambda: _turn_mid(rec, pins, ev.get("desc"), ev.get("ts")))
             if not mid:
                 continue
             p = pins[aid]
@@ -1830,7 +1896,8 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
                 continue
             if sum(len(v) for v in by_mid.values()) >= AGENT_WORDS_MAX:     # 넘치는 건 기록하지 않고 다음 판에(리뷰 M5)
                 break
-            mid = _pin_mid(pins, aid, lambda: _meta_parent_at(Path(str(a["path"])).with_suffix(".meta.json")), mid_now, now)
+            mid = _pin_mid(pins, aid, lambda: _meta_parent_at(Path(str(a["path"])).with_suffix(".meta.json")), mid_now, now,
+                           lambda: _turn_mid(rec, pins, a.get("desc"), None))
             if not mid:
                 continue
             pins_changed |= _pin_info(pins[aid], a.get("role"), a.get("desc"))

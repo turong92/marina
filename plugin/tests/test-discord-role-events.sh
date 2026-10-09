@@ -394,6 +394,49 @@ kf.write_text("{깨짐")
 act("8013"); put(D("n13", 1, "developer", "깨진 상태")); mb.role_events_tick()
 check(tname("8013") == "역할 · 깨진 상태", f"(N) 깨진 종류 기록 → 빈 것: {tname('8013')}")
 
+# ── 부모 없는 에이전트는 '띄운 턴이 무엇으로 시작됐나'로 고정 (2026-10-09) ─────────────────────
+tr = proj / "S1.jsonl"
+def row(typ, ts, content, **kw):
+    return json.dumps(dict({"type": typ, "timestamp": ts, "message": {"content": content}}, **kw), ensure_ascii=False)
+def chan(mid, ts, chat=None):
+    return row("user", ts, f'<channel source="plugin:discord:discord" chat_id="{chat or ch}" message_id="{mid}" user="u">\n말\n</channel>')
+def note(tid, ts):
+    return row("user", ts, f"<task-notification>\n<task-id>{tid}</task-id>\n<status>completed</status>\n</task-notification>")
+def agent_use(desc, ts):
+    return row("assistant", ts, [{"type": "tool_use", "id": "t1", "name": "Agent", "input": {"description": desc, "prompt": "p"}}])
+def toolres(ts):
+    return row("user", ts, [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}])
+def pin_now(aid, mid):
+    pp = ms._agent_pins(sd); pp[aid] = {"mid": mid, "ts": T[0], "parent": ""}
+    (sd / "agent-threads.json").write_text(json.dumps(pp))
+Z = "2026-10-09T06:3%d:00.000Z"
+# (a) 채널 메시지로 시작한 턴이 띄운 에이전트 → 그 메시지(지금 mid 가 바뀌었어도)
+tr.write_text("\n".join([chan("6001", Z % 1), agent_use("턴-가", Z % 2), toolres(Z % 3)]) + "\n")
+act("6002"); put(st("tq1", 1, parent="", desc="턴-가")); mb.role_events_tick()
+check(any("#tq1 시작" in l for l in at("6001")) and not at("6002"), f"(턴a) 채널 메시지 mid: {at('6001')} / {at('6002')}")
+# (b) 끝난 에이전트의 task-notification 으로 시작한 턴 → 그 에이전트가 고정된 mid
+pin_now("P1", "6101")
+tr.write_text("\n".join([chan("6102", Z % 1), note("P1", Z % 2), agent_use("턴-나", Z % 3)]) + "\n")
+act("6103"); put(st("tq2", 2, parent="", desc="턴-나")); mb.role_events_tick()
+check(any("#tq2 시작" in l for l in at("6101")) and not at("6103"), f"(턴b) 끝난 에이전트의 mid: {at('6101')} / {at('6103')}")
+# (c) task-id 가 에이전트가 아니면(고정 없음) 그 앞 채널 메시지
+tr.write_text("\n".join([chan("6201", Z % 1), note("bshell9", Z % 2), agent_use("턴-다", Z % 3)]) + "\n")
+act("6203"); put(st("tq3", 3, parent="", desc="턴-다")); mb.role_events_tick()
+check(any("#tq3 시작" in l for l in at("6201")) and not at("6203"), f"(턴c) 앞 채널 메시지: {at('6201')} / {at('6203')}")
+# 다른 채널의 메시지 id 는 안 쓴다 → 지금 mid
+tr.write_text("\n".join([chan("6251", Z % 1, chat="999"), agent_use("턴-라", Z % 2)]) + "\n")
+act("6253"); put(st("tq4", 4, parent="", desc="턴-라")); mb.role_events_tick()
+check(any("#tq4 시작" in l for l in at("6253")), f"(턴c2) 다른 채널 id 는 무시: {at('6253')}")
+# (d) 기록에서 못 찾으면 지금 mid
+tr.write_text("\n".join([chan("6301", Z % 1), agent_use("전혀 다른 설명", Z % 2)]) + "\n")
+act("6303"); put(st("tq5", 5, parent="", desc="턴-마")); mb.role_events_tick()
+check(any("#tq5 시작" in l for l in at("6303")), f"(턴d) 못 찾으면 지금 mid: {at('6303')}")
+# (e) 기록 파일이 없어도 안 죽는다
+tr.unlink()
+act("6403"); put(st("tq6", 6, parent="", desc="턴-바")); mb.role_events_tick()
+check(any("#tq6 시작" in l for l in at("6403")), f"(턴e) 기록 없음 → 지금 mid: {at('6403')}")
+
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY
