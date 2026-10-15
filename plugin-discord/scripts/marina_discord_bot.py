@@ -70,10 +70,12 @@ def _save_section(key: str, val: dict[str, Any]) -> None:
 # ── 수집 ────────────────────────────────────────────────────────────────────
 
 def owner_ids(cfg: dict[str, Any]) -> list[str]:
-    """형 = 개발 프로젝트(chat 제외)의 allow 목록."""
+    """형 = 개발 프로젝트(채팅 프로젝트 제외)의 allow 목록."""
     out: list[str] = []
+    if ms.chat_project_items() is None:      # projects.json 을 못 읽으면 어느 쪽이 채팅인지 모른다 → 아무도 형으로 안 친다(닫는 쪽 실패)
+        return out
     for name, pc in (cfg.get("projects") or {}).items():
-        if name == ms.CHAT_PROJECT or not isinstance(pc, dict):
+        if ms.is_chat_project(name) or not isinstance(pc, dict):
             continue
         for u in pc.get("allow") or []:
             if str(u) not in out:

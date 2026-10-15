@@ -411,26 +411,26 @@ _VIEW = 1 << 10
 _TALK = _VIEW | (1 << 11) | (1 << 16) | (1 << 15) | (1 << 14) | (1 << 6)   # 보기·쓰기·기록·첨부·링크·반응
 
 
-def ensure_chat_category(dc: Discord, cfg: dict[str, Any]) -> tuple[str, bool]:
-    """CHAT 카테고리. 채팅 채널은 허용 목록이 비어 '보이면 명령 가능'이므로 서버 기본값에 기대지 않고
+def ensure_chat_category(dc: Discord, cfg: dict[str, Any], project: str = CHAT_PROJECT) -> tuple[str, bool]:
+    """채팅 프로젝트의 카테고리(이름 = 프로젝트.upper(), 역할 = 프로젝트 이름 — 기본 'chat' 은 CHAT·chat). 채팅 채널은 허용 목록이 비어 '보이면 명령 가능'이므로 서버 기본값에 기대지 않고
     만들 때부터 @everyone 을 막고 봇·chat 역할만 연다(봇에 역할 관리 권한이 없어도 생성 시엔 된다).
     돌려주는 bool = chat 역할을 찾아 열었는지."""
-    pc = cfg["projects"][CHAT_PROJECT]
+    pc = cfg["projects"][project]
     cid = str(pc.get("categoryId") or "")
     guild = str(cfg["guildId"])
-    role = next((str(r["id"]) for r in dc.list_roles(guild) if r.get("name") == CHAT_PROJECT), "")
+    role = next((str(r["id"]) for r in dc.list_roles(guild) if r.get("name") == project), "")
     found = next((c for c in dc.list_channels(guild) if cid and str(c.get("id")) == cid and c.get("type") == 4), None)
     if found:
         ow = {str(o.get("id")): o for o in found.get("permission_overwrites") or []}
         if not int((ow.get(guild) or {}).get("deny") or 0) & _VIEW:
-            raise SessionError("CHAT 카테고리가 @everyone 에게 보여 — Discord 에서 CHAT 카테고리 권한의 "
+            raise SessionError(f"{project.upper()} 카테고리가 @everyone 에게 보여 — Discord 에서 {project.upper()} 카테고리 권한의 "
                                "@everyone '채널 보기'를 끄거나, 카테고리를 지우면 막힌 채로 새로 만들어")
         return cid, bool(role) and bool(int((ow.get(role) or {}).get("allow") or 0) & _VIEW)
     ow = [{"id": guild, "type": 0, "allow": "0", "deny": str(_VIEW)},       # @everyone 역할 ID = 서버 ID
           {"id": dc.me(), "type": 1, "allow": str(_TALK), "deny": "0"}]
     if role:
         ow.append({"id": role, "type": 0, "allow": str(_TALK), "deny": "0"})
-    cid = dc.create_category(guild, CHAT_PROJECT.upper(), ow)
+    cid = dc.create_category(guild, project.upper(), ow)
     pc["categoryId"] = cid
     save_config(cfg)
     return cid, bool(role)
@@ -539,7 +539,7 @@ def claude_argv(project: str, task: str, resume: bool = False, session_id: str =
 
 
 def chat_argv(project: str, task: str, session_id: str, resume: bool = False, from_id: str = "",
-              first: str = "") -> list[str]:
+              first: str = "", room_dir: "Path | None" = None) -> list[str]:
     """채팅 세션(실측 2026-10-01): 형 로그인 그대로 쓰되 --restricted 로 사용자 설정·메모리를 무시하고
     파일 도구를 폴더 안에 가둔다. 묻지 않고 거절 + 허용 목록(settings) + 허용 도구만(Bash 없음).
     받은 첨부는 상태 폴더 inbox 에 떨어지므로 그 폴더만 더한다.
@@ -558,10 +558,17 @@ def chat_argv(project: str, task: str, session_id: str, resume: bool = False, fr
              "--permission-mode", "dontAsk",
              "--tools", CHAT_TOOLS,
              "--add-dir", str(sdir / "inbox"),
-             "--append-system-prompt", CHAT_RULES,
+             "--append-system-prompt", CHAT_RULES + room_rules(room_dir),
              "--mcp-config", str(sdir / "mcp.json"),     # 마리나 도구(채팅: share_file, 로비: open_chat)
              "--settings", str(sdir / "settings.json"),
              "--disallowedTools", "AskUserQuestion"]
+    # 방에 둔 도구(메일·캘린더 등): --restricted 는 폴더의 .mcp.json 을 스스로 읽지 않는다(실측 2026-10-15 —
+    # 넘기지 않으면 조용히 빈 채로 뜬다). 가드가 이미 방 안에서 이 파일을 못 고치게 막으므로 형이 두는 설정이다
+    if "marina" in _room_mcp_names(room_dir):
+        raise SessionError(f"방 .mcp.json 이 'marina' 서버를 선언해서 띄우지 않아 — 세션의 marina 도구(share_file·progress)를 "
+                           f"덮어쓸 수 있어. 다른 이름으로 바꿔: {room_dir / '.mcp.json'}")
+    if room_dir is not None and (room_dir / ".mcp.json").is_file():
+        argv += ["--mcp-config", str(room_dir / ".mcp.json")]
     if first:
         argv += ["--", first]
     return argv
@@ -576,7 +583,7 @@ def transcript_path(cwd: Path, session_id: str) -> Path:
 def lobby_argv(project: str, task: str, session_id: str, resume: bool = False, dev: bool = False,
                first: str = "") -> list[str]:
     """로비: 내장 도구 없이 마리나 MCP(open_chat·list_chats)와 Discord 도구만."""
-    argv = chat_argv(project, task, session_id, resume=resume, first=first)
+    argv = chat_argv(project, task, session_id, resume=resume, first=first)   # 로비는 방 도구를 안 받는다
     argv[argv.index("--tools") + 1] = ""
     argv[argv.index("--append-system-prompt") + 1] = DEV_LOBBY_RULES if dev else LOBBY_RULES
     return argv
@@ -637,7 +644,8 @@ def session_argv_simple(s: dict[str, Any], resume: bool = False, first: str = ""
             return lobby_argv(str(s["project"]), str(s["task"]), sid, resume=resume and has,
                               dev=s.get("kind") == "dev-lobby", first=first)
         return chat_argv(str(s["project"]), str(s["task"]), sid, resume=resume and has,
-                         from_id="" if has else str(s.get("forkedFrom") or ""), first=first)
+                         from_id="" if has else str(s.get("forkedFrom") or ""), first=first,
+                         room_dir=Path(str(s["root"])))
     return claude_argv(str(s["project"]), str(s["task"]), resume=resume, first=first)       # 보통 개발 세션: --continue
 
 
@@ -1474,6 +1482,9 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
                         else ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__take_attachment"]),
             # 다음 기동 때 실행될 수 있는 폴더 안 설정 파일은 못 쓰게(리뷰 I2). '//' = 절대 경로
             "deny": [f"Edit(/{real}/{f})" for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md")]}
+        if not lobby:      # 로비는 방 도구를 안 받는다 — dev-lobby 의 chat_root(inbox)는 Discord 첨부라 외부 입력이 권한 목록에 닿으면 안 된다
+            # 와일드카드가 dontAsk 에서 통한다는 건 실측(2026-10-15, 더미 서버: allow 비면 거절, mcp__x__* · mcp__x 둘 다 통과)
+            settings["permissions"]["allow"] += [f"mcp__{n}__*" for n in room_mcp_servers(chat_root)]
         settings["hooks"]["PreToolUse"] = [{"matcher": f"{_REPLY_TOOL}|WebFetch|Write|Edit|Read|Glob|Grep",
                                             "hooks": [{"type": "command", "command": guard, "timeout": 15}]}]
     # 작업 중 표시: 도구를 쓸 때마다 채널에 '입력 중…'(8초에 한 번) — 👀 만으론 진행 여부를 알 수 없다(형 요청)
@@ -1664,6 +1675,84 @@ def ensure_trusted(folder: Path) -> None:
 
 def chat_home() -> Path:
     return marina_home() / "chat"
+
+
+def chat_project_items() -> "list[dict[str, Any]] | None":
+    """projects.json 에서 "profile": "chat" 을 단 항목들. 읽지 못하면 None — 호출자가 방향을 정한다."""
+    try:
+        data = json.loads((marina_home() / "projects.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    items = data.get("projects") if isinstance(data, dict) else None
+    return [i for i in items or [] if isinstance(i, dict) and i.get("profile") == "chat"]
+
+
+def is_chat_project(project: str) -> bool:
+    """채팅 프로젝트 = 기본 'chat', 또는 projects.json 항목에 "profile": "chat" 을 단 것(비서 방 등)."""
+    if project == CHAT_PROJECT:
+        return True
+    return any(str(i.get("id")) == project for i in chat_project_items() or [])
+
+
+def chat_folder(project: str) -> Path:
+    """이 채팅 프로젝트의 방 폴더. 기본 'chat' 은 ~/.marina/chat, 그 밖은 projects.json 의 root 다 —
+    방마다 쌓인 결과물과 방에 둔 도구(.mcp.json)를 섞지 않으려고 프로젝트로 가른다.
+    .git 이 있는 root(코드 레포)는 거절한다 — profile 한 줄로 레포 전체가 dontAsk 세션의 쓰기 범위가 되지 않게."""
+    if project == CHAT_PROJECT:
+        return chat_home()
+    root = project_root(project)
+    if (root / ".git").exists():
+        raise SessionError(f"{project} 의 root 는 git 레포라 채팅 방 폴더로 쓸 수 없어 — 대화 전용 폴더를 따로 지정해: {root}")
+    return root
+
+
+def chat_roots() -> "list[str] | None":
+    """모든 채팅 프로젝트의 방 폴더(realpath). /view 가 방 간 자료 유출을 막는 기준이다.
+    projects.json 을 못 읽으면 **None** — 호출자는 막는 쪽으로 가야 한다. 이 가드는 싣는 것을
+    제한하기만 하므로 과하게 막혀도 안전하고, 덜 막히면 남의 방 사진이 공개 링크로 샌다."""
+    items = chat_project_items()
+    if items is None:
+        return None
+    out = [os.path.realpath(str(chat_home()))]
+    for i in items:
+        if i.get("root"):
+            out.append(os.path.realpath(os.path.expanduser(str(i["root"]))))
+    # 만들어진 방의 기록도 합친다 — 기준이 '지금의 projects.json' 뿐이면, 나중에 root 를 옮기거나
+    # "profile": "chat" 한 줄을 지우는 것만으로 이미 있는 방의 공개 링크 가드가 조용히 풀린다
+    for sess in load_sessions():
+        if sess.get("kind") in CHAT_KINDS and sess.get("root"):
+            out.append(os.path.realpath(str(sess["root"])))
+    return out
+
+
+def room_rules(room_dir: "Path | None") -> str:
+    """방 폴더의 CLAUDE.md — 그 방만의 성격·금지선. --restricted 는 폴더의 CLAUDE.md 를 스스로 읽지
+    않으므로(실측 2026-10-15) 시스템 프롬프트에 직접 붙인다. 가드가 방 안에서 이 파일을 못 고치게 막고
+    있으니 형이 두는 설정이다. 너무 길면 자른다 — 방 규칙이 대화 자리를 다 먹지 않게."""
+    if room_dir is None:
+        return ""
+    try:
+        text = (room_dir / "CLAUDE.md").read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):       # ValueError = UnicodeDecodeError — 한 방의 파일이 start --all 을 멈추지 않게
+        return ""
+    return ("\n\n--- 이 방의 규칙 ---\n" + text[:8000]) if text else ""
+
+
+def _room_mcp_names(room_dir: "Path | None") -> list[str]:
+    if room_dir is None:
+        return []
+    try:
+        data = json.loads((room_dir / ".mcp.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    names = data.get("mcpServers") if isinstance(data, dict) else None
+    return [n for n in (names or {}) if isinstance(n, str)]
+
+
+def room_mcp_servers(room_dir: "Path | None") -> list[str]:
+    """방 .mcp.json 이 선언한 서버 이름들. 깨진 파일은 조용히 무시한다 — 방 기동을 막지 않으려고."""
+    # marina 는 세션 것이 진짜다 — 방이 같은 이름을 쓰면 승인까지 물려받으므로 뺀다(선언 자체는 chat_argv 가 거절)
+    return [n for n in _room_mcp_names(room_dir) if n != "marina"]
 
 
 def session_env(sdir: Path) -> dict[str, str]:
@@ -2515,10 +2604,10 @@ def preflight(cfg: dict[str, Any], dc: Discord, project: str, task: str,
     return {"root": root, "worktree": wt, "tmux": name, "stateDir": sdir, "channel": chan}
 
 
-def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = False) -> dict[str, Any]:
-    """워크트리 없는 채팅 세션. 모든 채팅 세션이 chat 폴더 하나(마리나 모바일 chat 방과 같은 곳)를 함께 쓴다 —
-    그동안 만든 파일을 어느 채널에서든 본다. from_id 를 주면 그 대화의 복사본으로 이어 간다."""
-    project = CHAT_PROJECT
+def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = False,
+                 project: str = CHAT_PROJECT) -> dict[str, Any]:
+    """워크트리 없는 채팅 세션. 한 채팅 프로젝트의 세션은 그 프로젝트 폴더 하나(기본 chat = 마리나 모바일 chat 방과
+    같은 곳)를 함께 쓴다 — 그동안 만든 파일을 어느 채널에서든 본다. from_id 를 주면 그 대화의 복사본으로 이어 간다."""
     if name.startswith("."):
         raise SessionError(f"채팅 이름은 '.' 으로 시작할 수 없어: {name!r}")
     if not lobby and name == LOBBY_TASK:
@@ -2531,7 +2620,7 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
                 raise ValueError
         except ValueError:
             raise SessionError(f"대화 ID 형식이 아니야(UUID): {from_id!r}")
-        if not transcript_path(chat_home(), from_id.lower()).is_file():
+        if not transcript_path(chat_folder(project), from_id.lower()).is_file():
             raise SessionError(f"chat 폴더의 대화가 아니야(기록 없음): {from_id}")
     cfg = load_config()
     if not isinstance(cfg["projects"].get(project), dict):
@@ -2540,7 +2629,7 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
     dc = Discord(read_token(cfg))
     tmux, sdir = tmux_name(project, name), state_dir(project, name)
     chan = LOBBY_CHANNEL if lobby else channel_name(name)
-    folder = chat_home()
+    folder = chat_folder(project)
     tf = token_file(cfg)
     if not tf.is_file():
         raise SessionError(f"토큰 파일이 없어: {tf}")
@@ -2560,7 +2649,7 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
         raise SessionError(f"Discord 채널이 이미 있어: #{chan}")
     folder.mkdir(parents=True, exist_ok=True)
     os.chmod(folder, 0o700)
-    ensure_trusted(chat_home())
+    ensure_trusted(folder)
     folder = Path(os.path.realpath(str(folder)))
     record = {"project": project, "task": name, "kind": "chat-lobby" if lobby else "chat", "root": str(folder),
               "tmux": tmux, "stateDir": str(sdir), "rcName": "", "sessionId": str(uuid.uuid4()),
@@ -2572,14 +2661,14 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
     channel_id = ""
     role_ok = True
     try:
-        cat, role_ok = ensure_chat_category(dc, cfg)
+        cat, role_ok = ensure_chat_category(dc, cfg, project)
         ensure_archive(dc, cfg, project, cat)
         channel_id = dc.create_text_channel(cfg["guildId"], chan, cat, LOBBY_TOPIC if lobby else title)
         write_state_dir(sdir, channel_id, cfg["projects"][project].get("allow") or [], tf)
         (sdir / "inbox").mkdir(exist_ok=True)
         write_settings(sdir, chat_root=folder, lobby=lobby, room=channel_id)
         argv = lobby_argv(project, name, record["sessionId"]) if lobby else \
-            chat_argv(project, name, record["sessionId"], from_id=from_id.lower())
+            chat_argv(project, name, record["sessionId"], from_id=from_id.lower(), room_dir=folder)
         tmux_start(tmux, folder, argv, chat_env(sdir), notify_ref=f"{project}/{name}")
     except Exception as exc:
         remove_state_dir(sdir)
@@ -2594,8 +2683,8 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
     items.append(record)
     save_sessions(items)
     warning = "" if role_ok else (
-        "Discord 에 'chat' 역할이 없어 CHAT 카테고리를 봇과 관리자만 볼 수 있어 — "
-        "역할을 만든 뒤 CHAT 카테고리 권한에 chat 역할(채널 보기·메시지 보내기·기록 보기)을 추가해")
+        f"Discord 에 '{project}' 역할이 없어 {project.upper()} 카테고리를 봇과 관리자만 볼 수 있어 — "
+        f"역할을 만든 뒤 {project.upper()} 카테고리 권한에 {project} 역할(채널 보기·메시지 보내기·기록 보기)을 추가해")
     try:   # 첫 안내 — 실패해도 방은 연다
         dc.send_message(channel_id, LOBBY_GUIDE if lobby else welcome_text(title or name, bool(from_id)))
     except SessionError as exc:
@@ -2929,7 +3018,7 @@ def lobby_tool(name: str, args: dict[str, Any]) -> str:
     sdir = os.environ.get("DISCORD_STATE_DIR") or ""
     me = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
     project = str((me or {}).get("project") or CHAT_PROJECT)
-    dev = project != CHAT_PROJECT
+    dev = not is_chat_project(project)
     if name == "list_chats":
         rows = [f"- {s.get('title') or s['task']} ({s['task']}): {link.format(s.get('channelId'))}"
                 for s in load_sessions() if s.get("project") == project and s.get("kind") not in LOBBY_KINDS]
@@ -2952,7 +3041,7 @@ def lobby_tool(name: str, args: dict[str, Any]) -> str:
             except SessionError:
                 pass
             return f"열었어: {title} → {r['url']}"
-        r = cmd_new_chat(slug, title=title)
+        r = cmd_new_chat(slug, title=title, project=project)
         return f"열었어: {title} → {r['url']}" + (f"\n(참고: {r['warning']})" if r.get("warning") else "")
     raise SessionError(f"없는 도구: {name}")
 
@@ -3393,8 +3482,8 @@ def reconcile_gone(now: float | None = None) -> list[str]:
 def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id: str = "",
             title: str = "", first: Any = "") -> dict[str, Any]:
     """first = 첫 지시 글, 또는 채널 ID 를 받아 글을 돌려주는 함수(채널을 만든 뒤 조립 — 세션이 자기 채널·메시지를 알게)."""
-    if project == CHAT_PROJECT:
-        return cmd_new_chat(task, from_id, title=title)
+    if is_chat_project(project):
+        return cmd_new_chat(task, from_id, title=title, project=project)
     if from_id:
         return cmd_adopt(project, task, from_id)
     cfg = load_config()
@@ -3528,7 +3617,7 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
                                room=str(s.get("channelId") or ""))
                 _drop_ack_reaction(sdir / "access.json")
             if chat:
-                ensure_trusted(chat_home())
+                ensure_trusted(root)
             cwd, argv = session_launch(s, resume=True, first=first)
             tmux_start(name, cwd, argv,
                        chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
@@ -3545,13 +3634,13 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
 
 
 def _remove_room_dir(s: dict[str, Any]) -> None:
-    """채팅 방을 지울 때 작업 폴더의 rooms/<channelId>/ 를 지운다. 숫자 id 이고, 링크가 아니며, realpath 가 chat_home()/rooms/<id> 일 때만."""
+    """채팅 방을 지울 때 작업 폴더의 rooms/<channelId>/ 를 지운다. 숫자 id 이고, 링크가 아니며, realpath 가 s["root"]/rooms/<id> 일 때만."""
     if s.get("kind") not in CHAT_KINDS:
         return
     cid = str(s.get("channelId") or "")
     if not re.fullmatch(r"\d{1,25}", cid):
         return
-    base = Path(os.path.realpath(str(chat_home() / "rooms")))
+    base = Path(os.path.realpath(str(Path(str(s.get("root") or "/nonexistent")) / "rooms")))
     d = base / cid
     if d.is_symlink() or not d.is_dir() or os.path.realpath(str(d)) != str(d):
         return
@@ -3852,14 +3941,15 @@ def main(argv: list[str] | None = None) -> int:
             pass
         return 0
     try:
-        if a.cmd == "lobby" and a.project and a.project != CHAT_PROJECT:
+        if a.cmd == "lobby" and a.project and not is_chat_project(a.project):
             r = cmd_dev_lobby(a.project)
             print(f"✓ 로비: #{DEV_LOBBY_CHANNEL} ({a.project})")
             print(f"  Discord: {r['url']}")
         elif a.cmd == "lobby":
-            if any(s.get("kind") == "chat-lobby" for s in load_sessions()):
+            lobby_project = a.project or CHAT_PROJECT
+            if any(s.get("kind") == "chat-lobby" and s.get("project") == lobby_project for s in load_sessions()):
                 raise SessionError("로비가 이미 있어 ('marina session ls' 로 확인)")
-            r = cmd_new_chat(LOBBY_TASK, lobby=True)
+            r = cmd_new_chat(LOBBY_TASK, lobby=True, project=lobby_project)
             print(f"✓ 로비: #{LOBBY_CHANNEL}")
             print(f"  Discord: {r['url']}")
             if r["warning"]:
@@ -3871,7 +3961,8 @@ def main(argv: list[str] | None = None) -> int:
             if r.get("kind") == "chat":
                 print(f"  폴더: {r['root']}")
                 if not r["warning"]:
-                    print("  CHAT 카테고리는 chat 역할에게만 보여 — 여기에 들일 사람에게 Discord 에서 chat 역할만 붙이면 돼")
+                    print(f"  {r['project'].upper()} 카테고리는 {r['project']} 역할에게만 보여 — "
+                          f"여기에 들일 사람에게 Discord 에서 {r['project']} 역할만 붙이면 돼")
             else:
                 print(f"  Remote Control: {r['rcName']}  (claude.ai/code · 모바일 앱)")
             print(f"  들여다보기: marina session attach {r['project']}/{r['task']}  (나오기: Ctrl-b d)")

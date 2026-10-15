@@ -229,14 +229,20 @@ def redact_log(text: str) -> str:
     return re.sub(r"/(v|t)/[A-Za-z0-9_-]{20,}", r"/\1/…", text)
 
 
+def _chat_roots() -> list[str]:
+    import marina_session as ms
+    return ms.chat_roots()
+
+
 def locate(root: str, token_rel: str, sub: str) -> Optional[Path]:
     """sub 가 비면 토큰 파일, 아니면 **토큰 파일과 같은 폴더 아래**의 파일. realpath 가 그 폴더 안이고 비밀 이름이 아니어야 한다."""
     if "\x00" in sub or os.path.isabs(sub) or ".." in Path(sub).parts:
         return None
     real_root = os.path.realpath(root)
     folder = os.path.realpath(os.path.join(real_root, os.path.dirname(token_rel)))
+    roots = _chat_roots()      # None = projects.json 을 못 읽었다 → 막는 쪽으로(아래 주석)
     if sub and folder == real_root and Path(sub).parts and Path(sub).parts[0].casefold() == "rooms" \
-            and real_root == os.path.realpath(str(_dir().parent / "chat")):
+            and (roots is None or real_root in roots):
         return None               # 채팅 폴더 맨 위 파일은 rooms/(방별 자료)를 못 싣는다 — 다른 방 사진이 공개 링크로 새지 않게. 방 폴더 안 파일은 그 폴더에 갇힌다
     real = os.path.realpath(os.path.join(real_root, token_rel) if not sub else os.path.join(folder, sub))
     if not os.path.isfile(real):

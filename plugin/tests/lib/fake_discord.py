@@ -69,6 +69,7 @@ class H(BaseHTTPRequestHandler):
             roles = [{"id": p[1], "name": "@everyone"}]
             if not (state / "no_chat_role").exists():
                 roles.append({"id": "R-chat", "name": "chat"})
+            roles.append({"id": "R-secretary", "name": "secretary"})
             self._send(200, roles); return
         self._send(404, {"message": "404"})
 
