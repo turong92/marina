@@ -52,6 +52,18 @@ def keys_for(questions: list[dict[str, Any]], answers: list[Any]) -> list[Any]:
     return keys
 
 
+def message_for(questions: list[dict[str, Any]], answers: list[Any]) -> str | None:
+    """미리보기(preview) 달린 질문 화면엔 'Type something' 칸이 없다(2.1.290~ 실측 — ↓N 이 'Chat about this' 에 떨어져
+    글이 버려졌다). 그런 질문에 글로 답했으면 셀렉터 대신 일반 메시지 한 줄로 보낸다. 아니면 None(셀렉터로)."""
+    if not any(isinstance(a, dict) and any(o.get("preview") for o in _opts(q)) for q, a in zip(questions, answers)):
+        return None
+    parts = []
+    for q, a in zip(questions, answers):
+        ans = " ".join(str(a.get("text") or "").split()) if isinstance(a, dict) else _answer_label(q, a)
+        parts.append(f"{' '.join(str(q.get('question') or '').split())} → {ans}")
+    return ("[질문 답] " + " / ".join(parts))[:2000]
+
+
 def _answer_label(q: dict[str, Any], a: Any) -> str:
     if isinstance(a, dict):
         return "✏️ " + str(a.get("text") or "")
@@ -221,6 +233,20 @@ def drive(tmux: str, channel: str, pause: float = 0.25) -> None:
     sd = Path(str((rec or {}).get("stateDir") or "/nonexistent"))
     st = _load(sd)
     if not st or any(a is None for a in st["answers"]):
+        return
+    msg = message_for(st["questions"], st["answers"])
+    if msg is not None:
+        if ms.tmux_alive(tmux):
+            ms.tmux_leave_mode(tmux)
+        if not _question_visible(_screen(tmux) if ms.tmux_alive(tmux) else "", st["questions"][0]):
+            done(sd, channel, "입력 못 했어 — 질문 화면이 안 보여. 터미널·앱에서 답해 줘")
+            return
+        ms._tmux("send-keys", "-t", tmux, "Escape")       # 질문을 닫으면 턴이 끝나고 입력창이 빈다
+        _wait_quiet(tmux, 3.0)
+        ms._tmux("send-keys", "-t", tmux, "-l", "--", msg)
+        time.sleep(0.6 if pause >= 0.25 else pause)   # 글과 Enter 가 붙으면 붙여넣기로 보고 Enter 를 먹는다(테스트는 pause 를 줄임)
+        ms._tmux("send-keys", "-t", tmux, "Enter")
+        done(sd, channel, "답함(글 — 메시지로 보냄)")
         return
     segs: list[list[Any]] = [[]]
     for k in keys_for(st["questions"], st["answers"]):

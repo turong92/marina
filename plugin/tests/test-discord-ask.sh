@@ -96,6 +96,25 @@ check(not sent, f"(리뷰 C2) 이 질문 문구가 안 보이면(권한 창 등)
 check(not (sd / "question.json").exists(), "(리뷰 I6) 포기하면 상태 지움")
 check(any(x["m"] == "PATCH" and "터미널" in json.dumps(x["b"], ensure_ascii=False) for x in log()), "포기했다고 메시지에 알림")
 
+# ── 미리보기 질문엔 'Type something' 칸이 없다(2.1.290~ 실측) → 글 답이면 Esc 로 닫고 글을 메시지로 ──
+QP = {"question": "모델 전환?", "header": "전환", "multiSelect": False,
+      "options": [{"label": "교체", "preview": "a"}, {"label": "병기", "preview": "b"}]}
+check(ask.message_for([QP, Q1], [{"text": "전환은 해야지\n근데"}, [1]]) == "[질문 답] 모델 전환? → 전환은 해야지 근데 / 방향? → B",
+      f"글 답 메시지: {ask.message_for([QP, Q1], [{'text': '전환은 해야지'}, [1]])}")
+check(ask.message_for([QP], [[0]]) is None and ask.message_for([Q1], [{"text": "x"}]) is None, "버튼 답·미리보기 없는 글 답은 셀렉터로")
+(sd / "question.json").write_text(json.dumps({"questions": [QP], "answers": [{"text": "전환은 해야지"}], "msg": "m-sent"}))
+subprocess.run(base + ["kill-session", "-t", rec["tmux"]], capture_output=True)
+subprocess.run(base + ["new-session", "-d", "-s", rec["tmux"], "sh", "-c",
+                       "printf '모델 전환?\\n❯ 1. 교체\\n  2. 병기\\n  Chat about this\\nEnter to select\\n'; exec cat -v"], check=True)
+time.sleep(0.5)
+sent.clear(); ms._tmux = lambda *a: (sent.append(a) if a[:1] == ("send-keys",) else None) or orig(*a)
+ask.drive(rec["tmux"], ch, pause=0.01)
+ms._tmux = orig
+keys = [a[3:] for a in sent]
+check(keys and keys[0] == ("Escape",) and ("Down",) not in keys and ("-l", "--", "[질문 답] 모델 전환? → 전환은 해야지") in keys
+      and keys[-1] == ("Enter",), f"미리보기+글: Esc → 메시지 입력 → Enter: {keys}")
+check(not (sd / "question.json").exists(), "보낸 뒤 상태 지움")
+
 # ── 앱·터미널에서 먼저 답함(PostToolUse) → 메시지 정리 ──
 ask.post_question(str(sd), ch, {"questions": [Q1]}, started=time.time())
 n = len(log())
