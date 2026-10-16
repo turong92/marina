@@ -1372,6 +1372,71 @@ def unanswered(transcript: Path) -> bool:
     return pending
 
 
+NUDGE_TEXT = ("[마리나] 방금 받은 Discord 메시지에 답장을 못 보내고 턴이 끝났어. "
+              "도구가 그때 아직 안 붙어 있었을 수 있어 — 다시 해 보고, 답은 Discord reply 로 보내 줘.")
+NUDGE_TRIES = 3
+
+
+def unanswered_mid(transcript: Path, channel: str) -> str:
+    """답장 없이 남은 마지막 Discord 지시의 message_id — 없으면 "".
+    `unanswered()` 와 달리 **태그 없는 글로 초기화되지 않는다** — 마리나가 넣은 깨우기·브리핑이
+    user 기록으로 끼어들어도 그 지시는 여전히 답을 못 받은 상태다(리뷰 I2: 그래서 재시도가 1회로 죽었다)."""
+    try:
+        lines = transcript.read_bytes()[-1_000_000:].decode("utf-8", "replace").splitlines()
+    except OSError:
+        return ""
+    pending = ""
+    for raw in lines:
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        c = (row.get("message") or {}).get("content")
+        if row.get("type") == "user":
+            texts = [c] if isinstance(c, str) else [str(b.get("text") or "") for b in c or []
+                                                    if isinstance(b, dict) and b.get("type") == "text"]
+            for m in _CHANNEL_TAG.finditer("\n".join(texts)):
+                if m.group(1) == channel:
+                    pending = m.group(2)
+        elif row.get("type") == "assistant" and isinstance(c, list):
+            if any(isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == _REPLY_TOOL for b in c):
+                pending = ""
+    return pending
+
+
+def nudge_unanswered(rec: dict[str, Any], transcript: "Path | None") -> bool:
+    """턴이 'Discord 지시 → 답장 없이 끝' 으로 끝났으면 그 지시를 한 번 더 깨운다.
+    2026-10-16 #daeun: MCP(캘린더·Discord)가 아직 붙는 중이라 reply 도구가 없어 "붙는 대로 할게요" 하고
+    턴이 끝났고, 아무도 다시 깨우지 않아 23분 뒤 다은이 재촉할 때까지 멈춰 있었다.
+    **한 지시에 세 번까지** — 시계로 세지 않는다(깨운 글 자체가 기록에 끼어들어 시계식 상한은 1회로 죽었다, 리뷰 I2).
+    다음 지시가 오면 그 id 로 다시 세 번. 재시작 이어받기가 방금 글을 넣었으면 비켜 준다(두 글이 겹치지 않게)."""
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    if rec.get("kind") not in CHAT_KINDS or not rec.get("tmux") or not transcript:
+        return False
+    mid = unanswered_mid(transcript, str(rec.get("channelId") or ""))
+    if not mid:
+        return False
+    try:
+        if time.time() - float((sd / "resume-at").read_text()) < 60:
+            return False                 # 재시작 이어받기(RESUME_TEXT)가 막 들어갔다
+    except (OSError, ValueError):
+        pass
+    try:
+        st = json.loads((sd / "nudge.json").read_text(encoding="utf-8"))
+        was, tries = str(st.get("mid") or ""), int(st.get("tries") or 0)
+    except (OSError, ValueError, TypeError, AttributeError):
+        was, tries = "", 0
+    tries = tries + 1 if was == mid else 1
+    if tries > NUDGE_TRIES:
+        return False
+    _write_json(sd / "nudge.json", {"mid": mid, "tries": tries})
+    import marina_discord_bot as mb
+    mb._spawn_type(str(rec["tmux"]), NUDGE_TEXT, str(rec.get("channelId") or ""), "")
+    return True
+
+
 def resume_unanswered(rec: dict[str, Any]) -> None:
     """턴 도중(받은 순간 뒤·턴 끝 전)에 끊긴 지 1시간 안이고, 기록이 답장 없이 끝났을 때만 이어받기를 건다(리뷰 I2).
     한 번 걸면 10분 안엔 다시 안 건다 — 연달아 재시작해도 두 번 입력되지 않게(리뷰 I3)."""
@@ -2248,6 +2313,8 @@ def hook_stop(payload: dict[str, Any]) -> None:
     finally:
         if lockf:
             lockf.close()
+    # 도구가 늦게 붙어 답장을 못 보낸 채 끝난 턴은 한 번 더 깨운다(2026-10-16 #daeun 23분 침묵)
+    nudge_unanswered(s, Path(str(payload.get("transcript_path") or "/nonexistent")))
     # 뒤에서 서브에이전트가 도는 동안엔 진행 줄이 올라가는 스레드(가장 최근 지시)만 열어 둔다 — 턴마다 닫히면 쌓이는 줄이 끊기고(형 2026-10-06),
     # 전부 열어 두면 에이전트를 계속 붙든 세션은 지난 지시 스레드가 끝없이 쌓인다(형 2026-10-07).
     # 최근 지시를 모르면(activity.json 에 mid 없음) 아무것도 접지 않는다. 다 끝난 뒤의 턴 끝엔 밀린 것까지 접는다

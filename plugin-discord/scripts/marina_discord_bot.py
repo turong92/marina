@@ -1988,10 +1988,10 @@ TERM_WATCH_EVERY = 5.0
 
 
 def typeable(text: str, channel: str = "") -> bool:
-    """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글, 이어받기 안내, 터미널 끝 안내(고정 문구 정확 일치),
+    """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글, 이어받기·다시 깨우기 안내, 터미널 끝 안내(고정 문구 정확 일치),
     화면 넘김 안내(고정 앞뒤 + 그 채널 상태 폴더 아래 term-last-<id>.txt 정확 경로 — channel 을 모르면 거절), 허용 명령만."""
     import marina_discord_wake as mw
-    if text in (TERM_DONE_TEXT, ms.RESUME_TEXT, mw.WAKE_LATE_TEXT):
+    if text in (TERM_DONE_TEXT, ms.RESUME_TEXT, ms.NUDGE_TEXT, mw.WAKE_LATE_TEXT):
         return True
     m = TERM_SHARE_RE.fullmatch(text)
     if m:
