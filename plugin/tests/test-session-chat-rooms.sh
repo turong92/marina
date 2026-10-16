@@ -107,6 +107,43 @@ try:
 except ms.SessionError:
     other_ok = False
 check(not other_ok, "share_file 남의 방 HTML 거절")
+# make_image·make_pdf 도 같은 울타리 — 올릴 이미지라고 남의 방 페이지를 찍어 주면 안 된다
+for tool in ("make_image", "make_pdf"):
+    try:
+        ms.chat_tool(tool, {"path": f"rooms/{rb}/p.html"}); other_ok = True
+    except ms.SessionError:
+        other_ok = False
+    check(not other_ok, f"{tool} 남의 방 HTML 거절")
+    try:
+        (root / "rooms" / ra / "m.txt").write_text("x")
+        ms.chat_tool(tool, {"path": f"rooms/{ra}/m.txt"}); html_only = False
+    except ms.SessionError as exc:
+        html_only = "HTML" in str(exc)
+    check(html_only, f"{tool} 은 HTML 만 받아야")
+# 내보낸 것도 그 방 폴더 안에 — 맨 위에 쌓으면 다른 방이 읽고, 같은 이름끼리 덮어쓴다(크롬은 안 쓴다)
+(root / "rooms" / ra / "mine.html").write_text("<h1>내 방</h1>")
+seen, _html, _pdf = {}, sh.export_html, sh.export_pdf
+sh.export_html = lambda page, sroot, outdir, **kw: (seen.__setitem__("img", outdir), ([outdir / "x.png"], ""))[1]
+sh.export_pdf = lambda page, sroot, outdir, **kw: (seen.__setitem__("pdf", outdir), (outdir / "x.pdf", ""))[1]
+try:
+    ms.chat_tool("make_image", {"path": f"rooms/{ra}/mine.html"})
+    ms.chat_tool("make_pdf", {"path": f"rooms/{ra}/mine.html"})
+    mine = root / "rooms" / ra
+    check(seen.get("img") == mine / "이미지" and seen.get("pdf") == mine / "인쇄본",
+          f"내보낸 결과물이 방 폴더 밖이다: {seen}")
+    # 개발 세션은 이 도구가 없다 — 목록에서 숨기는 것만으로는 이름으로 부르면 들어온다.
+    # 검사 순서가 바뀌어도 잡히게 도구 호출로 본다
+    _load = ms.load_sessions
+    ms.load_sessions = lambda: [dict(r, kind="dev") if r.get("stateDir") == a["stateDir"] else r for r in _load()]
+    try:
+        ms.chat_tool("make_image", {"path": f"rooms/{ra}/mine.html"}); dev_ok = True
+    except ms.SessionError:
+        dev_ok = False
+    finally:
+        ms.load_sessions = _load
+    check(not dev_ok, "개발 세션에서 make_image 가 거절되지 않는다")
+finally:
+    sh.export_html, sh.export_pdf = _html, _pdf
 srv = sh.RenderServer(root / "rooms" / ra)
 srv.start()
 import urllib.request

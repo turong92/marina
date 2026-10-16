@@ -13,6 +13,7 @@ import ipaddress
 import json
 import mimetypes
 import os
+import re
 import select
 import shutil
 import socket
@@ -68,6 +69,7 @@ class RenderServer:
         self.virtual = virtual or {}     # 파일 없이 내주는 가상 페이지(경로 → HTML) — md 미리보기용
         self.fit = os.path.realpath(os.path.join(self.root, fit)) if fit else ""
         self.height = 0
+        self.cuts: list[int] = []        # 페이지가 알려 주는 자를 수 있는 자리(섹션 경계)
         self.failed = False              # 미리보기 페이지가 "라이브러리를 못 불러왔다"고 알렸는가
         outer = self
 
@@ -85,9 +87,13 @@ class RenderServer:
                 host = u.netloc or self.headers.get("Host", "")
                 if host != f"127.0.0.1:{outer.port}":
                     return self._deny()
-                if u.path == "/__marina/h":                    # 페이지가 알려 주는 전체 높이
-                    v = urllib.parse.parse_qs(u.query).get("v", ["0"])[0]
+                if u.path == "/__marina/h":                    # 페이지가 알려 주는 전체 높이와 자를 수 있는 자리
+                    q = urllib.parse.parse_qs(u.query)
+                    v = q.get("v", ["0"])[0]
                     outer.height = max(outer.height, int(v)) if v.isdigit() else outer.height
+                    got = [int(c) for c in q.get("c", [""])[0].split(",") if c.isdigit()]
+                    if got:
+                        outer.cuts = got
                     self.send_response(204)
                     self.end_headers()
                     return
@@ -173,7 +179,8 @@ MAX_PX = 16000      # 크롬 캡처 한 장의 높이 한계(장치 픽셀, 대�
 WIDTH = 500         # 크롬 창 최소 폭이 500 — 더 좁히면 레이아웃(500)과 캡처 폭이 어긋나 오른쪽이 잘린다(실측)
 
 # 페이지에 붙이는 스크립트: ① PC 폭 페이지가 넘치면 폭에 맞게 축소 ② 전체 높이를 서버에 알림
-_FIT_SCRIPT = (b"\n<script>(function(){function fit(){var d=document.documentElement;d.style.zoom='';"
+_FIT_SCRIPT = (b"\n<script>(function(){var q=/[?&]__top=(\\d+)/.exec(location.search),top=q?+q[1]:0;"
+               b"function fit(){var d=document.documentElement;d.style.zoom='';d.style.marginTop='';"
                b"var w=Math.max(d.scrollWidth,document.body?document.body.scrollWidth:0),v=window.innerWidth;"
                b"if(w>v+2)d.style.zoom=(v/w).toFixed(3);"
                # scrollHeight 는 창 높이(1차 1400)보다 작아지지 않아 짧은 페이지에 빈 공간이 붙었다 → 내용 끝(요소들의 아래 끝 + body 아래 여백)
@@ -181,7 +188,16 @@ _FIT_SCRIPT = (b"\n<script>(function(){function fit(){var d=document.documentEle
                b"if(r.height>0&&r.bottom>e)e=r.bottom;}e+=window.scrollY+(parseFloat(getComputedStyle(b).marginBottom)||0)+"
                b"(parseFloat(getComputedStyle(b).paddingBottom)||0);}"
                b"var z=parseFloat(d.style.zoom)||1,h=Math.ceil(e>0?e:Math.max(d.scrollHeight,b?b.scrollHeight:0)*z);"   # 요소 좌표는 이미 축소된 값
-               b"new Image().src='/__marina/h?v='+h;}"
+               # 자를 수 있는 자리 = body 직계 자식의 아래 끝(= 섹션 경계). 긴 페이지를 의미 단위로 나눌 때 쓴다
+               # 단을 감싸는 겉 상자(body > div.wrap > section...)를 지나 진짜 단이 늘어선 곳까지 내려간다.
+               # 보이는 것만 센다 — 이 스크립트 자신도 body 의 자식이라 그냥 세면 겉 상자를 못 지나친다
+               b"function ks(n){var r=[],c=n?n.children:[];for(var i=0;i<c.length;i++){var q2=c[i].getBoundingClientRect();"
+               b"if(q2.height>0)r.push([c[i],Math.round(q2.bottom+window.scrollY)]);}return r;}"
+               b"var hs=b,kk=ks(hs);for(var k=0;k<3&&kk.length===1;k++){hs=kk[0][0];kk=ks(hs);}"
+               b"var cs=[];for(var j=0;j<kk.length&&j<400;j++)cs.push(kk[j][1]);"
+               b"new Image().src='/__marina/h?v='+h+'&c='+cs.join(',');"
+               # 한 조각 촬영: 그 자리가 창 맨 위에 오게 민다(zoom 이 걸렸으면 margin 도 같이 줄어드니 나눠 준다)
+               b"if(top)d.style.marginTop=(-top/z)+'px';}"
                b"window.addEventListener('load',fit);setTimeout(fit,1500);setTimeout(fit,3500);})();</script>\n")
 
 
@@ -194,7 +210,9 @@ def plan_shot(height: int) -> tuple[int, float, bool]:
 
 
 def _chrome_argv(chrome: str, port: int, profile: str, height: int, out: Path, url: str,
-                 scale: float = 2.0) -> list[str]:
+                 scale: float = 2.0, width: int = WIDTH, pdf: bool = False) -> list[str]:
+    # PDF 는 페이지의 @page 규격(A4·재단 여백)대로 나온다 — 창 크기로 자르는 그림과 다르다
+    tail = [f"--print-to-pdf={out}", "--no-pdf-header-footer"] if pdf else [f"--screenshot={out}"]
     return [chrome, "--headless=new", "--disable-gpu", "--no-first-run", "--no-default-browser-check",
             "--disable-background-networking", "--disable-component-update", "--disable-sync",
             "--disable-extensions", f"--user-data-dir={profile}",
@@ -203,19 +221,20 @@ def _chrome_argv(chrome: str, port: int, profile: str, height: int, out: Path, u
             "--webrtc-ip-handling-policy=disable_non_proxied_udp",
             "--use-mock-keychain", "--no-pings", "--disable-features=DnsOverHttps",
             f"--proxy-server=http://127.0.0.1:{port}", "--proxy-bypass-list=<-loopback>",
-            f"--window-size={WIDTH},{height}", "--hide-scrollbars", f"--force-device-scale-factor={scale:g}",
-            "--virtual-time-budget=4000", f"--screenshot={out}", url]
+            f"--window-size={width},{height}", "--hide-scrollbars", f"--force-device-scale-factor={scale:g}",
+            "--virtual-time-budget=4000", *tail, url]
 
 
-def _shot(chrome: str, port: int, height: int, out: Path, url: str, timeout: float, scale: float = 2.0) -> bool:
-    """크롬 한 번 = 스크린샷 한 장. 외부 연결(CONNECT)을 열어 두면 크롬이 다 쓴 뒤에도 안 끝난다(실측)
+def _shot(chrome: str, port: int, height: int, out: Path, url: str, timeout: float, scale: float = 2.0,
+          width: int = WIDTH, pdf: bool = False) -> bool:
+    """크롬 한 번 = 결과 파일 하나(그림 한 장, pdf 면 PDF 하나). 외부 연결(CONNECT)을 열어 두면 크롬이 다 쓴 뒤에도 안 끝난다(실측)
     → 파일 크기가 멈추면 끈다."""
     profile = tempfile.mkdtemp(prefix="marina-render-")
     if out.exists():
         out.unlink()
     try:
         try:
-            proc = subprocess.Popen(_chrome_argv(chrome, port, profile, height, out, url, scale),
+            proc = subprocess.Popen(_chrome_argv(chrome, port, profile, height, out, url, scale, width, pdf),
                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except OSError:
             return False
@@ -262,6 +281,112 @@ def render_html(page: Path, root: Path, outdir: Path, timeout: float = 45, block
         if not out.is_file() or out.stat().st_size == 0:
             return None, "렌더링 결과가 없어"
         return out, ("페이지가 너무 길어 앞부분만 미리보기로 보내 — 전체는 HTML 파일로 봐 줘" if cut else "")
+    finally:
+        srv.stop()
+
+
+# ── 올릴 이미지: 미리보기(폰 폭 확인용)와 달리 쇼핑몰·인쇄에 그대로 쓰는 제 크기 PNG
+UPLOAD_WIDTH = 860      # 네이버 스마트스토어 기준(만드는법/상세페이지.md). 쿠팡은 780
+UPLOAD_SLICE = 3000     # 한 장의 최대 높이 — 넘으면 섹션 경계에서 나눈다
+MIN_PART = 0.4          # 경계를 고를 때 이보다 이른 자리는 안 고른다 — 조각이 토막나지 않게
+MAX_PARTS = 12          # 이보다 많이 나뉘면 페이지를 나눠 만드는 게 맞다
+OVER = 0.1              # 최대 높이를 넘겨도 되는 만큼 — 섹션 경계에 맞추려고, 또 꼬리를 앞 장에 붙이려고
+TAIL = 0.1              # 끝에 이보다 짧게 남으면 한 장으로 치지 않고 앞 장에 붙인다(1px 꼬리 같은 것)
+MERGE = 0.4             # 그 꼬리를 붙일 때 허용하는 초과 — OVER 로 이미 늘어난 장 뒤에서도 붙을 수 있게
+
+
+def slice_plan(total: int, cuts: "list[int]", slice_h: int) -> list[tuple[int, int]]:
+    """전체 높이 → [(시작, 높이)]. slice_h 를 넘지 않게 자르되, 가능하면 cuts(섹션 경계)에 맞춘다."""
+    total, slice_h = max(int(total), 1), max(int(slice_h), 200)
+    pts = sorted({int(c) for c in cuts if 0 < int(c) < total})
+    out, pos = [], 0
+    while total - pos > slice_h:
+        # 조금 넘기더라도 경계에 맞추는 쪽이 낫다 — 딱 잘라 버리면 다음 장이 토막난다
+        lim, lo = pos + int(slice_h * (1 + OVER)), pos + int(slice_h * MIN_PART)
+        nxt = max((c for c in pts if lo < c <= lim), default=pos + slice_h)
+        out.append((pos, nxt - pos))
+        pos = nxt
+    out.append((pos, total - pos))
+    # 끝이 토막(1px 꼬리 같은 것)으로 남으면 앞 장에 붙인다 — 상한을 조금 넘겨도 한 장이 낫다
+    if len(out) > 1 and out[-1][1] <= slice_h * TAIL and out[-2][1] + out[-1][1] <= slice_h * (1 + MERGE):
+        (top, head), (_, tail) = out[-2], out[-1]
+        out[-2:] = [(top, head + tail)]
+    return out
+
+
+def export_html(page: Path, root: Path, outdir: Path, width: int = UPLOAD_WIDTH, slice_h: int = UPLOAD_SLICE,
+                timeout: float = 60, block: "tuple[str, ...]" = ()) -> tuple[list[Path], str]:
+    """page 를 올릴 수 있는 제 크기 PNG 로. 길면 섹션 경계에서 여러 장. (파일들, 안내) — 실패면 ([], 이유)."""
+    chrome = find_chrome()
+    if not chrome:
+        return [], "크롬을 찾지 못했어"
+    rel = os.path.relpath(os.path.realpath(str(page)), os.path.realpath(str(root)))
+    outdir.mkdir(parents=True, exist_ok=True)
+    stem = Path(rel).stem
+    srv = RenderServer(root, fit=rel, block=block)
+    srv.start()
+    try:
+        url = f"http://127.0.0.1:{srv.port}/" + urllib.parse.quote(rel)
+        tmpdir = tempfile.mkdtemp(prefix="marina-export-")                      # 결과 폴더의 같은 이름 파일을 건드리지 않게
+        try:
+            ok = _shot(chrome, srv.port, FIRST, Path(tmpdir) / "probe.png", url, timeout,  # 1차: 높이·경계 재기
+                       scale=1.0, width=width)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+        if not ok:
+            return [], "렌더링 결과가 없어"
+        for _ in range(20):          # 크롬은 그림을 다 쓰고 나서 높이를 알려 줄 때가 있다 — 조금 기다려 준다
+            if srv.height:
+                break
+            time.sleep(0.1)
+        if not srv.height:
+            return [], "페이지 높이를 재지 못했어"
+        plan = slice_plan(srv.height, srv.cuts, slice_h)
+        if len(plan) > MAX_PARTS:
+            return [], f"페이지가 너무 길어({srv.height}px, {len(plan)}장) — 내용을 나눠 만들어 줘"
+        files = []
+        for i, (top, height) in enumerate(plan, 1):
+            out = outdir / (f"{stem}.png" if len(plan) == 1 else f"{stem}-{i}.png")
+            if not _shot(chrome, srv.port, height, out, f"{url}?__top={top}", timeout, scale=1.0, width=width) \
+                    or not out.is_file() or out.stat().st_size == 0:
+                return [], f"{i}번째 장을 못 찍었어"              # 꼬리 빠진 채로 올리면 안 된다 — 다 되거나 아니거나
+            files.append(out)
+        # 지난번에 다르게 나뉘었던 조각만 치운다 — 이름이 비슷한 다른 페이지의 결과물(`상세-B.png`)까지 지우면 안 된다.
+        # 다 찍은 뒤에 지운다: 중간에 실패하면 옛 것이라도 남아 있어야 한다
+        keep, mine = {f.name for f in files}, re.compile(rf"{re.escape(stem)}(-\d+)?\.png")
+        for stale in outdir.glob(f"{stem}*.png"):
+            if stale.name not in keep and mine.fullmatch(stale.name):
+                try:
+                    stale.unlink()
+                except OSError:
+                    pass
+        tall = max(h for _, h in plan)
+        return files, (f"{len(files)}장으로 나눴어(제일 긴 장 {tall}px)" if len(files) > 1 else "")
+    finally:
+        srv.stop()
+
+
+PRINT_WIDTH = 1123       # 인쇄 경로의 창 폭(CSS px) = A4 가로 297mm — 폭 기준 미디어쿼리가 폰 폭으로 걸리지 않게
+
+
+def export_pdf(page: Path, root: Path, outdir: Path, timeout: float = 60,
+               block: "tuple[str, ...]" = ()) -> tuple["Path | None", str]:
+    """page 를 인쇄용 PDF 로. 페이지가 정한 @page 규격(A4·재단 여백)을 그대로 따른다 — 폭에 맞춰 줄이지 않는다
+    (리플렛은 줄어들면 못 쓴다). (파일, 안내) — 실패면 (None, 이유)."""
+    chrome = find_chrome()
+    if not chrome:
+        return None, "크롬을 찾지 못했어"
+    rel = os.path.relpath(os.path.realpath(str(page)), os.path.realpath(str(root)))
+    outdir.mkdir(parents=True, exist_ok=True)
+    out = outdir / f"{Path(rel).stem}.pdf"
+    srv = RenderServer(root, block=block)        # fit 주입 없음 — 화면용 축소는 인쇄를 망친다
+    srv.start()
+    try:
+        url = f"http://127.0.0.1:{srv.port}/" + urllib.parse.quote(rel)
+        if not _shot(chrome, srv.port, FIRST, out, url, timeout, scale=1.0, width=PRINT_WIDTH, pdf=True) \
+                or not out.is_file() or out.stat().st_size == 0:
+            return None, "PDF 를 만들지 못했어"
+        return out, ""
     finally:
         srv.stop()
 

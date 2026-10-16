@@ -1516,7 +1516,8 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
                      + [f"mcp__plugin_discord_discord__{t}" for t in
                         ("reply", "react", "edit_message", "fetch_messages", "download_attachment")]
                      + (["mcp__marina__open_chat", "mcp__marina__list_chats"] if lobby
-                        else ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__take_attachment"]),
+                        else ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__take_attachment",
+                              "mcp__marina__make_image", "mcp__marina__make_pdf"]),
             # 다음 기동 때 실행될 수 있는 폴더 안 설정 파일은 못 쓰게(리뷰 I2). '//' = 절대 경로
             "deny": [f"Edit(/{real}/{f})" for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md")]}
         if not lobby:      # 로비는 방 도구를 안 받는다 — dev-lobby 의 chat_root(inbox)는 Discord 첨부라 외부 입력이 권한 목록에 닿으면 안 된다
@@ -3039,6 +3040,84 @@ def _take_attachment(rec: dict[str, Any], args: dict[str, Any]) -> str:
             "다른 곳에 두면 미리보기·열어보기 링크에 사진이 안 실린다.")
 
 
+def _shared_target(args: dict[str, Any]) -> tuple[dict[str, Any], Path, Path, "tuple[str, ...]"]:
+    """공유·내보내기가 다룰 파일을 고른다 — (세션, 파일, 렌더 서버가 내줄 뿌리, 막을 폴더).
+    방 폴더 밖·설정 파일·다른 방 자료는 여기서 거른다."""
+    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
+    if not rec:
+        raise SessionError("이 세션의 기록을 찾지 못했어")
+    root = Path(os.path.realpath(str(rec["root"])))
+    raw = str(args.get("path") or "")
+    if not raw:
+        raise SessionError("path 가 필요해")
+    path = Path(os.path.realpath(raw if os.path.isabs(raw) else str(root / raw)))
+    if not str(path).startswith(str(root) + os.sep) or not path.is_file():
+        raise SessionError(f"이 폴더 안 파일만 공유할 수 있어: {raw}")
+    parts_cf = [x.casefold() for x in path.relative_to(root).parts]
+    if ".claude" in parts_cf or parts_cf[-1] in _CHAT_CONFIG_NAMES:
+        raise SessionError(f"설정 파일은 공유할 수 없어: {raw}")
+    serve_root, block = root, ()
+    if rec.get("kind") in CHAT_KINDS:
+        room = str(rec.get("channelId") or "")
+        if _room_violation(_rooms_segments(root, str(path)), room, False):
+            raise SessionError("다른 방 폴더의 파일은 공유할 수 없어 — 이 방 폴더(rooms/<이 방 id>/) 안 파일만")
+        mine = Path(os.path.realpath(str(root / "rooms" / room))) if room else None
+        if mine is not None and str(path).startswith(str(mine) + os.sep):
+            serve_root = mine                    # 방 폴더 안 페이지는 그 방 폴더만 내주는 렌더 서버로(다른 방 자료를 싣지 못하게)
+        else:
+            block = ("rooms",)                   # 맨 위 페이지는 rooms/ 를 못 싣는다
+    return rec, path, serve_root, block
+
+
+def _room_outdir(rec: dict[str, Any], name: str) -> Path:
+    """내보낸 것도 그 방 폴더 안에 둔다(rooms/<방 id>/<name>) — 맨 위에 쌓으면 다른 방이 읽고,
+    같은 이름 페이지끼리 덮어쓴다(리뷰 I1). 받은 첨부(take_attachment)와 같은 울타리."""
+    if rec.get("kind") != "chat" or not rec.get("root"):
+        raise SessionError("이 도구는 채팅방 전용이야")
+    room = str(rec.get("channelId") or "")
+    if not re.fullmatch(r"\d{1,25}", room):        # isdigit() 은 '²' 도 참 — 형제 코드(take_attachment)와 같은 잣대로
+        raise SessionError("이 방의 채널을 찾지 못했어")
+    return Path(os.path.realpath(str(rec["root"]))) / "rooms" / room / name
+
+
+def _make_pdf(args: dict[str, Any]) -> str:
+    """make_pdf — 인쇄용. 리플렛·제안서는 그림이 아니라 PDF 로 넘긴다(만드는법/리플렛.md)."""
+    import marina_share
+    rec, path, serve_root, block = _shared_target(args)
+    if path.suffix.lower() not in (".html", ".htm"):
+        raise SessionError("HTML 만 PDF 로 뽑을 수 있어")
+    out, why = marina_share.export_pdf(path, serve_root, _room_outdir(rec, "인쇄본"), block=block)
+    if not out:
+        raise SessionError(f"PDF 를 뽑지 못했어: {why}")
+    return f"인쇄용 PDF 야 — reply 의 files 로 첨부해:\n{out}"
+
+
+def _make_image(args: dict[str, Any]) -> str:
+    """make_image — HTML 을 쇼핑몰에 그대로 올릴 제 크기 PNG 로. 미리보기(폰 폭)와 쓰임이 다르다."""
+    import marina_share
+    rec, path, serve_root, block = _shared_target(args)
+    if path.suffix.lower() not in (".html", ".htm"):
+        raise SessionError("HTML 만 이미지로 뽑을 수 있어")
+    def num(key: str, default: int, lo: int, hi: int) -> int:
+        got = args.get(key)
+        try:
+            v = default if got is None or got == "" else int(got)      # 0 은 기본값이 아니라 범위 오류다(리뷰 S5)
+        except (TypeError, ValueError):
+            raise SessionError(f"{key} 는 숫자여야 해")
+        if not lo <= v <= hi:
+            raise SessionError(f"{key} 는 {lo}~{hi} 사이여야 해")
+        return v
+    width = num("width", marina_share.UPLOAD_WIDTH, 320, 2000)
+    slice_h = num("slice", marina_share.UPLOAD_SLICE, 600, 8000)
+    files, why = marina_share.export_html(path, serve_root, _room_outdir(rec, "이미지"),
+                                          width=width, slice_h=slice_h, block=block)
+    if not files:
+        raise SessionError(f"이미지를 뽑지 못했어: {why}")
+    return (f"올릴 수 있는 {width}px 이미지야 — reply 의 files 로 첨부해:\n" + "\n".join(str(f) for f in files)
+            + (f"\n{why}" if why else ""))
+
+
 _OPEN_CHAT_SCHEMA = {
     "type": "object",
     "properties": {"name": {"type": "string", "description": "채널 이름: 영문 소문자·숫자·하이픈 (예: wedding-prep)"},
@@ -3094,6 +3173,20 @@ _CHAT_TOOLS_MCP = [
      "inputSchema": {"type": "object",
                      "properties": {"path": {"type": "string", "description": "이 폴더 안 파일 경로(상대·절대)"},
                                     "title": {"type": "string", "description": "결과물 제목(자료실 표시용)"}},
+                     "required": ["path"]}},
+    {"name": "make_image",
+     "description": "다 만든 HTML 을 올릴 수 있는 제 크기 PNG 로 뽑는다(쇼핑몰 상세페이지·리플렛). 미리보기(폰 폭 확인용)와 달리 그대로 올리는 그림이다. "
+                    "길면 섹션 경계에서 여러 장으로 나눠 준다. 돌려받은 파일들을 reply 의 files 로 첨부해라.",
+     "inputSchema": {"type": "object",
+                     "properties": {"path": {"type": "string", "description": "이 방 폴더 안 HTML 경로"},
+                                    "width": {"type": "integer", "description": "가로 픽셀(기본 860 — 네이버 스마트스토어. 쿠팡은 780)"},
+                                    "slice": {"type": "integer", "description": "한 장의 최대 세로 픽셀(기본 3000)"}},
+                     "required": ["path"]}},
+    {"name": "make_pdf",
+     "description": "다 만든 HTML 을 인쇄용 PDF 로 뽑는다(리플렛·제안서). 페이지에 쓴 @page 규격(A4·재단 여백)을 그대로 지킨다. "
+                    "돌려받은 파일을 reply 의 files 로 첨부해라.",
+     "inputSchema": {"type": "object",
+                     "properties": {"path": {"type": "string", "description": "이 방 폴더 안 HTML 경로"}},
                      "required": ["path"]}},
     {"name": "take_attachment",
      "description": "Discord 로 받은 첨부(수신함)를 이 방 폴더(rooms/<방 id>/assets/)로 가져온다. HTML·문서에 넣을 사진은 먼저 이걸로 가져와라. "
@@ -3280,36 +3373,17 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         if not rec or not rec.get("channelId"):
             raise SessionError("이 세션의 기록을 찾지 못했어")
         return _progress(rec, args)
+    if name in ("make_image", "make_pdf"):
+        return _make_image(args) if name == "make_image" else _make_pdf(args)
     if name != "share_file":
         raise SessionError(f"없는 도구: {name}")
     import marina_share
-    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
-    rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
-    if not rec:
-        raise SessionError("이 세션의 기록을 찾지 못했어")
+    rec, path, serve_root, block = _shared_target(args)
     root = Path(os.path.realpath(str(rec["root"])))
-    raw = str(args.get("path") or "")
-    if not raw:
-        raise SessionError("path 가 필요해")
-    path = Path(os.path.realpath(raw if os.path.isabs(raw) else str(root / raw)))
-    if not str(path).startswith(str(root) + os.sep) or not path.is_file():
-        raise SessionError(f"이 폴더 안 파일만 공유할 수 있어: {raw}")
-    parts_cf = [x.casefold() for x in path.relative_to(root).parts]
-    if ".claude" in parts_cf or parts_cf[-1] in _CHAT_CONFIG_NAMES:
-        raise SessionError(f"설정 파일은 공유할 수 없어: {raw}")
-    serve_root, block = root, ()
-    if rec.get("kind") in CHAT_KINDS:
-        room = str(rec.get("channelId") or "")
-        if _room_violation(_rooms_segments(root, str(path)), room, False):
-            raise SessionError("다른 방 폴더의 파일은 공유할 수 없어 — 이 방 폴더(rooms/<이 방 id>/) 안 파일만")
-        mine = Path(os.path.realpath(str(root / "rooms" / room))) if room else None
-        if mine is not None and str(path).startswith(str(mine) + os.sep):
-            serve_root = mine                    # 방 폴더 안 페이지는 그 방 폴더만 내주는 렌더 서버로(다른 방 자료를 싣지 못하게)
-        else:
-            block = ("rooms",)                   # 맨 위 페이지는 rooms/ 를 못 싣는다
     files, notes = [path], []
     if path.suffix.lower() in (".html", ".htm"):
         # 개발 세션은 레포 밖(상태 폴더)에 — 워크트리에 두면 git add 로 커밋에 딸려 간다(리뷰)
+        # 채팅방 미리보기는 아직 방 폴더 밖(맨 위)이라 다른 방이 읽을 수 있다 — make_image·make_pdf 는 rooms/<방>/ 안으로 옮겼다(별건)
         outdir = root / "미리보기" if rec.get("kind") in CHAT_KINDS else _dev_preview_dir(rec)
         prev, why = marina_share.render_html(path, serve_root, outdir, block=block)
         if not prev:
@@ -3366,9 +3440,9 @@ def mcp_lobby(stdin: Any = None, stdout: Any = None) -> None:
 
 
 def chat_tools_for(rec: "dict[str, Any] | None") -> list[dict[str, Any]]:
-    """mcp-chat 의 도구 목록 — take_attachment 는 채팅방에만(개발 세션은 Bash 가 있다)."""
+    """mcp-chat 의 도구 목록 — take_attachment·make_image·make_pdf 는 채팅방에만(개발 세션은 Bash 가 있다)."""
     chat = bool(rec) and (rec or {}).get("kind") == "chat"
-    return [t for t in _CHAT_TOOLS_MCP if chat or t["name"] != "take_attachment"]
+    return [t for t in _CHAT_TOOLS_MCP if chat or t["name"] not in ("take_attachment", "make_image", "make_pdf")]
 
 
 def mcp_chat(stdin: Any = None, stdout: Any = None) -> None:
