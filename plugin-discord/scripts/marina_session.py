@@ -1841,6 +1841,35 @@ def inbound_messages(transcript: Path, channel_id: str) -> list[str]:
                     out.append(m.group(2))
     return out
 
+_SID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def sync_session_id(rec: dict[str, Any], payload: dict[str, Any]) -> str:
+    """/clear 를 치면 claude 는 새 대화 ID 로 갈아탄다 — 기록을 안 고치면 다음 start·wake 가
+    `--resume <옛 ID>` 로 /clear 전 대화를 되살린다. 2026-10-16 #daeun 이 그래서 아홉 시간 전
+    대화로 돌아가 그 시절 말투(존댓말)로 답하고, 그 사이 자기가 한 말을 '다른 대화'라고 불렀다.
+    훅 payload 의 transcript_path 가 지금 살아 있는 대화 ID 라 그걸로 맞춘다.
+    이 기록의 root 폴더에 놓인 전사만 받는다(다른 곳의 ID 로 덮지 않게).
+    채팅방만이 아니라 개발 세션도 맞춘다 — `--resume <옛 ID>` 는 어느 세션에서나 같은 사고가 된다."""
+    live = Path(str(payload.get("transcript_path") or ""))
+    if not _SID_RE.match(live.stem) or live.stem == str(rec.get("sessionId") or ""):
+        return ""
+    if live.parent != transcript_path(Path(str(rec.get("root") or "/nonexistent")), "x").parent:
+        return ""
+    # 방은 상태 폴더로 유일하게 가려진다 — 두 방이 한 폴더(root)를 쓰므로 project/task 는 폴백일 뿐(리뷰 I4)
+    items = load_sessions()
+    sd = str(rec.get("stateDir") or "")
+    hit = next((x for x in items if sd and x.get("stateDir") == sd), None) \
+        or next((x for x in items if x.get("project") == rec.get("project")
+                 and x.get("task") == rec.get("task")), None)
+    if hit is None:
+        return ""
+    hit["sessionId"] = live.stem
+    save_sessions(items)
+    rec["sessionId"] = live.stem
+    return live.stem
+
+
 def _hook_target(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any] | None:
     """상태 폴더로 찾고, 없으면 cwd 로 짐작 — 채팅 세션은 모두 같은 폴더라 짐작하지 않는다."""
     sdir = os.environ.get("DISCORD_STATE_DIR") or ""
@@ -2201,7 +2230,10 @@ def hook_stop(payload: dict[str, Any]) -> None:
     _ensure_daemon_quiet()
     items = load_sessions()
     s = _hook_target(payload, items)
-    if not s or not s.get("channelId"):
+    if not s:
+        return
+    sync_session_id(s, payload)      # /clear 뒤 갈아탄 대화 ID 를 기록에 맞춘다(다음 wake 가 옛 대화를 되살리지 않게)
+    if not s.get("channelId"):
         return
     dashboard_signal()
     ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), str(s["channelId"]))
