@@ -91,6 +91,14 @@ pane("● 답\n❯ [Pasted text #1 +3 lines]\n  ⏵⏵")
 check(mw._left_in_input("t", long) is True, "붙여넣기 표시로 남은 걸 못 잡음")
 pane("")
 check(mw._left_in_input("t", long) is True, "화면을 못 읽으면 갔다고 단정하지 않는다(애매하면 미확인)")
+# 실측 오탐(2026-10-16): 방금 보낸 글이 Claude Code 의 '다음 입력 추천'(흐린 글씨)으로 되비친다 — 내가 친 게 아니다
+pane("\u25cf \ub2f5\n\x1b[39m\u276f \x1b[2m" + long[:40] + "\x1b[0m\n" + "\u2500" * 20 + "\n  \u23f5\u23f5")
+check(mw._left_in_input("t", long) is False, "흐린 추천 글을 입력창에 남은 내 글로 봤다")
+pane("\u25cf \ub2f5\n\x1b[39m\u276f " + long[:40] + "\n" + "\u2500" * 20 + "\n  \u23f5\u23f5")
+check(mw._left_in_input("t", long) is True, "흐리지 않게 남은 진짜 글을 놓쳤다")
+# 접힌 긴 글은 흐리게 그려져도 남은 것이다
+pane("\u25cf \ub2f5\n\x1b[39m\u276f \x1b[2m[Pasted text #1 +3 lines]\x1b[0m\n" + "\u2500" * 20 + "\n  \u23f5\u23f5")
+check(mw._left_in_input("t", long) is True, "흐린 붙여넣기 표시를 추천으로 보고 넘겼다")
 # 입력창 아래 구분선 밑(상태줄·알림)에 글 조각이 있어도 입력창에 남은 게 아니다
 pane("❯ \n" + "─" * 20 + "\n  [마리나] marina 알림\n  ⏵⏵")
 check(mw._left_in_input("t", long) is False, "구분선 아래 줄을 입력창으로 읽었다")

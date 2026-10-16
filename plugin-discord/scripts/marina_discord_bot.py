@@ -2494,15 +2494,19 @@ def _restore_suggest(channel: str, msg: str, text: str) -> None:
 
 def input_holds(screen: str, text: str) -> "bool | None":
     """친 글이 입력창에 그대로 남았나 — 마지막 ❯ 줄부터 그 아래 구분선(─) 앞까지(줄바꿈으로 이어진 칸 포함)에 글 머리·꼬리나
-    붙여넣기 표시('[Pasted text')가 있으면 True. 입력창(❯)을 못 찾으면 None(모른다 — 호출자가 '갔다'고 단정하지 않는다)."""
+    붙여넣기 표시('[Pasted text')가 있으면 True. 입력창(❯)을 못 찾으면 None(모른다 — 호출자가 '갔다'고 단정하지 않는다).
+    흐린 글씨(ESC[2m = Claude Code 의 다음 입력 추천)는 내가 친 글이 아니다 — 빼고 본다. 방금 보낸 글이 추천으로 되비치면
+    안 들어갔다고 오해해 Enter 를 또 치고, say 는 '넣었는지 모르겠다'로 끝났다(2026-10-16 실측). 화면은 `-e` 로 받아야 한다."""
     lines = screen.splitlines()
-    idx = [i for i, ln in enumerate(lines) if "❯" in ln]
+    idx = [i for i, ln in enumerate(lines) if "❯" in _ANSI.sub("", ln)]
     if not idx:
         return None
     tail = lines[idx[-1]:]
-    end = next((i for i, ln in enumerate(tail) if i and ln.lstrip().startswith("─")), len(tail))   # 구분선 아래는 상태줄·알림
-    squeezed = "".join(ln.strip() for ln in tail[:end]).replace(" ", "")
-    return any(k in squeezed for k in (text[:12].replace(" ", ""), text[-12:].replace(" ", ""), "[Pastedtext"))
+    end = next((i for i, ln in enumerate(tail) if i and _ANSI.sub("", ln).lstrip().startswith("─")), len(tail))  # 구분선 아래는 상태줄
+    if "[Pastedtext" in "".join(_ANSI.sub("", ln).strip() for ln in tail[:end]).replace(" ", ""):
+        return True                                   # 접힌 긴 글은 흐리든 아니든 남아 있는 것
+    squeezed = "".join(_ANSI.sub("", _DIM.sub("", ln)).strip() for ln in tail[:end]).replace(" ", "")
+    return any(k in squeezed for k in (text[:12].replace(" ", ""), text[-12:].replace(" ", "")))
 
 
 def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, settle: float = 3.0,
@@ -2546,15 +2550,16 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                 ms._tmux("send-keys", "-t", tmux, "Enter")
                 typed = True
                 time.sleep(1.5)
-                after = ms._tmux("capture-pane", "-p", "-t", tmux).stdout or ""
+                after = ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or ""
                 for _ in range(3):                       # Enter 가 붙여넣기 줄바꿈으로 먹히면 글이 입력창에 남는다 — 남아 있는 동안 Enter 를 다시(최대 3번)
                     if input_holds(after, cmd) is not True:
                         break
                     ms._tmux("send-keys", "-t", tmux, "Enter")
                     _log(f"type {tmux}: 입력창에 남아 Enter 다시")
                     time.sleep(1.5)
-                    after = ms._tmux("capture-pane", "-p", "-t", tmux).stdout or ""
-                _log(f"type {tmux}: 입력함 {cmd[:60]!r} · 화면 끝: {' | '.join(after.rstrip().splitlines()[-6:])[:400]!r}")
+                    after = ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or ""
+                _log(f"type {tmux}: 입력함 {cmd[:60]!r} · 화면 끝: "
+                     f"{' | '.join(_ANSI.sub('', after).rstrip().splitlines()[-6:])[:400]!r}")
                 break
             time.sleep(poll)
         if not typed:

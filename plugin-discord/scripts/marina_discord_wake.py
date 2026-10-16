@@ -288,7 +288,7 @@ def _clean(message: str) -> str:
 def _left_in_input(tmux: str, text: str) -> bool:
     """친 글이 입력창에 그대로 남았나 — 마지막 ❯ 줄부터 끝까지(줄바꿈으로 이어진 칸 포함)에 글 머리·꼬리나 붙여넣기 표시가 있으면 True.
     입력창을 못 찾으면(화면을 못 읽음) 애매하니 True — '갔다' 고 단정하지 않는다(안 갔는데 갔다고 하는 쪽이 더 나쁘다)."""
-    return mb.input_holds(ms._tmux("capture-pane", "-p", "-t", tmux).stdout or "", text) is not False
+    return mb.input_holds(ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or "", text) is not False
 
 
 def say(ref: str, message: str, source: str = "say") -> str:
