@@ -37,14 +37,19 @@ class FakeDiscord:
     def __init__(self, token): pass
     def send_message(self, ch, text): sent.append(text)
 ms.Discord = FakeDiscord
-ms.find_session = lambda ref: {"channelId": "C1"}
-ms.read_token = lambda cfg: "t"
-ms.load_config = lambda: {"wake": False}
+used = []
+ms.find_session = lambda ref: {"channelId": "C1", "project": "proj"}
+ms.read_token_file = lambda p: (used.append(str(p)), "t")[1]
+ms.load_config = lambda: {"wake": False, "tokenFile": "/global.env",
+                          "projects": {"proj": {"tokenFile": "/proj.env"}}}
 ms.notify_exit("p/x", "1")
-ms.load_config = lambda: {}
+ms.load_config = lambda: {"tokenFile": "/global.env"}
 ms.notify_exit("p/x", "1")
 if "글을 쓰면" in sent[0] or "글을 쓰면 다시 켜져" not in sent[1]:
     print("FAIL: wake:false 문구", sent); sys.exit(1)
+# 꺼짐 알림도 그 방 봇으로 말한다(방마다 다른 봇) — 없으면 전역
+if used != ["/proj.env", "/global.env"]:
+    print("FAIL: 꺼짐 알림이 쓴 토큰 파일", used); sys.exit(1)
 PY
 PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 "$DSCRIPTS/marina_session.py" notify-exit nope/x 1 || fail "모르는 세션 알림이 실패 코드"
 echo "PASS test-session-exit-notice"
