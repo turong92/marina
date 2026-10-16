@@ -1608,6 +1608,12 @@ def chat_guard(root: Path, inbox: Path, payload: dict[str, Any], room: str = "")
             parts = [x.casefold() for x in Path(fp).parts]
             if ".claude" in parts or (parts and parts[-1] in _CHAT_CONFIG_NAMES):
                 return _deny(f"설정 파일은 만들거나 고칠 수 없어: {ti.get('file_path')}")
+        if tool != "Read" and fp:
+            # 두 번째 자물쇠 — 쓰기는 작업 폴더·받은 첨부(inbox) 안만. 실제 차단은 --restricted 몫이지만 가드도 폴더 밖 경로를 본다
+            # (예: ~/.marina/brief.json 에 지시를 심어 예약 브리핑으로 재생시키는 길). 상대 경로는 작업 폴더 기준.
+            abs_fp = fp if os.path.isabs(fp) else os.path.join(str(root), fp)
+            if not _inside(abs_fp, [os.path.realpath(str(root)), os.path.realpath(str(inbox))]):
+                return _deny(f"채팅 폴더 밖에는 쓸 수 없어: {ti.get('file_path')}")
         why = _room_violation(_rooms_segments(root, fp) if fp else None, room, False)
         return _deny(why) if why else None
     if tool in ("Glob", "Grep"):
@@ -1957,7 +1963,8 @@ def _newest_scripts(me: "Path | None" = None, home: "Path | None" = None) -> "Pa
 UPDATE_EVERY_S = 3600.0
 _DISCORD_PLUGIN = "marina-discord@marina-dev"
 _PREFLIGHT_MODULES = ("marina_session", "marina_discord_bot", "marina_discord_ask", "marina_share", "marina_discord_usage",
-                       "marina_discord_launchd", "marina_discord_wake", "marina_discord_idle")
+                       "marina_discord_launchd", "marina_discord_wake", "marina_discord_idle",
+                       "marina_discord_brief")
 
 
 def _claude_home() -> Path:
@@ -3833,6 +3840,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("daemon-ensure")
     sub.add_parser("daemon-uninstall")
     sub.add_parser("daemon-install", help="daemon-uninstall 로 끈 자동 기동을 다시 켠다")
+    p = sub.add_parser("say", help="채팅방에 사람이 말한 것처럼 글을 넣는다(꺼진 방은 띄우면서 첫 지시로)")
+    p.add_argument("ref")
+    p.add_argument("text", nargs="+")
+    sub.add_parser("brief-install", help="~/.marina/brief.json 의 시각에 방에 글을 넣는 LaunchAgent(marina.brief) 설치 — 시각을 바꾸면 다시 실행")
+    sub.add_parser("brief-uninstall", help="예약 브리핑 LaunchAgent 해제")
+    sub.add_parser("brief-status", help="예약 브리핑 설정·등록 상태")
+    sub.add_parser("brief-run", help="(launchd 가 부른다) 오늘 몫을 보낸다 — 평일·하루 한 번")
     p = sub.add_parser("idle-check", help="방마다 유휴 내림 대상인지·아니면 왜(읽기만, 아무것도 안 내린다)")
     p.add_argument("--hours", type=float, default=None)
     p = sub.add_parser("view-setup", help="결과물 보기 서버를 Tailscale Funnel 로 공개하고 publicBase 를 저장")
@@ -4045,6 +4059,33 @@ def main(argv: list[str] | None = None) -> int:
             import marina_discord_bot
             marina_discord_bot.run_forever(stop=_daemon_stop_check)
             _daemon_handoff()
+        elif a.cmd == "say":
+            import marina_discord_wake as mw
+            os.environ["PATH"] = daemon_path() + ":" + os.environ.get("PATH", "")      # 띄우는 claude·tmux·git 을 찾게(wake CLI 와 같다)
+            how = mw.say(a.ref, " ".join(a.text))
+            s = find_session(a.ref)
+            what = {"started": "첫 지시로 줘서 방을 띄웠어", "delivered": "입력창에 넣었어",
+                    "typed": "입력창에 쳤지만 들어갔는지 확인하지 못했어(글이 입력창에 남아 있을 수 있어)"}[how]
+            print(f"✓ {s['project']}/{s['task']} 에 글을 {what}")
+        elif a.cmd in ("brief-install", "brief-uninstall", "brief-status", "brief-run"):
+            import marina_discord_brief as mbr
+            if a.cmd == "brief-install":
+                if mbr.load() is None:
+                    print(f"{mbr.config_path()} 가 없어 — 만들면 설치돼(ref·hour·minute·weekdays·message)")
+                    return 0
+                program = _launchd_program()
+                if not program:
+                    raise SessionError("설치본(마리나 플러그인)에서 실행해야 해 — 작업 트리를 가리키면 그 트리를 지우는 순간 브리핑이 죽어")
+                r = mbr.install(program[:-1] + ["brief-run"])
+                if r.startswith("failed"):
+                    raise SessionError("예약 브리핑 설치 실패 — " + r[7:])
+                print(mbr.describe())
+            elif a.cmd == "brief-uninstall":
+                print(mbr.uninstall())
+            elif a.cmd == "brief-status":
+                print(mbr.describe())
+            else:
+                print(mbr.run())
         elif a.cmd == "daemon-ensure":
             print(ensure_daemon())
         elif a.cmd == "idle-check":

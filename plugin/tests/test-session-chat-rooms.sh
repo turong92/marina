@@ -57,6 +57,18 @@ check(denied(guard("Read", file_path=str(root / "rooms" / ra / "sneak" / "secret
 for tool in ("Write", "Edit"):
     check(denied(guard(tool, file_path=str(root / "rooms" / rb / "x.html"))), f"남의 방 {tool}")
     check(not denied(guard(tool, file_path=str(root / "rooms" / ra / "x.html"))), f"내 방 {tool}")
+# 두 번째 자물쇠: Write/Edit 은 작업 폴더·inbox 밖 경로면 거절(실제 차단은 --restricted 몫)
+outside = root.parent / "outside-target.json"
+for tool in ("Write", "Edit"):
+    check(denied(guard(tool, file_path=str(outside))), f"{tool}: 작업 폴더 밖 경로")
+    check(denied(guard(tool, file_path=str(Path.home() / ".marina" / "brief.json"))), f"{tool}: ~/.marina/brief.json")
+    check(denied(guard(tool, file_path="../escape.json")), f"{tool}: 상대 경로로 폴더 밖")
+    check(denied(guard(tool, file_path=str(root / "rooms" / ra / ".." / ".." / ".." / "escape.json"))), f"{tool}: .. 로 폴더 밖")
+    check(not denied(guard(tool, file_path=str(inbox / "x.txt"))), f"{tool}: inbox 안은 된다")
+    check(not denied(guard(tool, file_path="rooms/" + ra + "/rel.html")), f"{tool}: 내 방 상대 경로는 된다")
+os.symlink(tmp, root / "linkout")
+check(denied(guard("Write", file_path=str(root / "linkout" / "x.json"))), "Write: 폴더 안 심볼릭 링크로 밖")
+check(not denied(guard("Read", file_path=str(outside))), "Read 는 이 가드의 대상이 아니다(동작 불변)")
 check(denied(guard("Read", file_path=str(root / "rooms"))), "rooms 자체")
 check(denied(guard("Read", room="", file_path=str(root / "rooms" / ra / "mine.txt"))), "방을 모르면 rooms 는 전부 거절")
 # Glob/Grep

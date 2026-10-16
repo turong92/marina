@@ -268,6 +268,63 @@ def _wake_locked(rec: dict[str, Any], cfg: dict[str, Any], sd: Path, message: st
     return "failed:" + why
 
 
+# 출처를 그대로 적는다 — 형이 직접 말한 것처럼 꾸미지 않는다(개발 세션·서브에이전트도 say 를 부를 수 있어 거기 섞인 외부 입력이
+# 형 명의로 착지하면 안 된다). 비서가 '사람이 방에서 직접 한 말이 아니다' 를 알아야 방 규칙의 사람-직접-말한-것 구분이 쓰인다.
+SAY_NOTES = {
+    "brief": "[마리나] 예약된 지시야 — marina.brief 가 정해 둔 시각에 넣은 글이고, 사람이 방에서 직접 한 말이 아니야. "
+             "아래를 처리하고 결과를 Discord reply 로 이 채널(chat_id={ch})에 보내 줘: {text}",
+    "say": "[마리나] `marina session say` 로 넣은 글이야 — 사람이 방에서 직접 한 말이 아니고 누가 넣었는지도 확인되지 않았어. "
+           "아래를 처리하고 결과를 Discord reply 로 이 채널(chat_id={ch})에 보내 줘: {text}",
+}
+SAY_CHECK_TRIES, SAY_CHECK_GAP = 8, 1.0     # Enter 직후엔 화면이 아직 안 바뀌었을 수 있다(실측: 전달됐는데 한 번 보고 미확인) — 최대 ~8초만 다시 본다
+SAY_MAX = 1500          # /skill 인자 상한(marina_discord_bot)과 같다
+
+
+def _clean(message: str) -> str:
+    """한 줄(입력창에선 줄바꿈이 전송) + 인쇄 가능한 글자만(ESC·Ctrl-C 같은 제어문자는 TUI 에서 키 입력이다) + 길이 상한."""
+    return "".join(c for c in " ".join(str(message).split()) if c.isprintable())[:SAY_MAX]
+
+
+def _left_in_input(tmux: str, text: str) -> bool:
+    """친 글이 입력창에 그대로 남았나 — 마지막 ❯ 줄부터 끝까지(줄바꿈으로 이어진 칸 포함)에 글 머리·꼬리나 붙여넣기 표시가 있으면 True.
+    입력창을 못 찾으면(화면을 못 읽음) 애매하니 True — '갔다' 고 단정하지 않는다(안 갔는데 갔다고 하는 쪽이 더 나쁘다)."""
+    return mb.input_holds(ms._tmux("capture-pane", "-p", "-t", tmux).stdout or "", text) is not False
+
+
+def say(ref: str, message: str, source: str = "say") -> str:
+    """`marina session say` — 그 채팅방에 글을 넣는다(출처는 SAY_NOTES 대로 밝힌다). 꺼진 방은 wake 와 같은 길(방 잠금 + start_with_launch_env)로
+    띄우며 첫 지시로, 떠 있는 방은 쉬는 순간 입력창에 친다(run_slash).
+    started(첫 지시로 줌) | delivered(쳤고 입력창이 비었음을 확인) | typed(쳤지만 글이 입력창에 남아 있음), 못 하면 SessionError."""
+    rec = ms.find_session(ref)
+    name = f"{rec.get('project')}/{rec.get('task')}"
+    if rec.get("kind") != "chat":
+        raise ms.SessionError(f"{name} 은 채팅방이 아니야 — say 는 채팅방 전용이야")
+    text = SAY_NOTES[source].format(ch=rec["channelId"], text=_clean(message))
+    sd, tmux = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("tmux") or "")
+    if not sd.is_dir():
+        raise ms.SessionError(f"{name}: 상태 폴더가 없어")
+    with ms.room_lock(sd) as got:
+        if not got:
+            raise ms.SessionError(f"{name}: 다른 쪽이 이 방을 켜거나 내리는 중이야 — 잠시 뒤에 다시")
+        if not ms.tmux_alive(tmux):
+            started, failed = _start_with_launch_env(name, sd, text)
+            if started:
+                _save_woke(sd, at=time.time(), ok=True, delivered=[])
+                return "started"
+            if not ms.tmux_alive(tmux):
+                raise ms.SessionError(f"{name}: 방을 못 띄웠어 — {(failed[0] if failed else '알 수 없는 이유')[:200]}")
+    # 이미 떠 있다 — 잠금은 놓고(쉬는 순간을 기다리는 동안 재시작·깨우기를 막지 않게) 입력창에 친다
+    if not mb.run_slash(tmux, text, str(rec["channelId"]), "", timeout=mb.type_timeout(text)):
+        raise ms.SessionError(f"{name}: 입력창에 못 쳤어(계속 바쁘거나 꺼짐)")
+    # 한 번이라도 입력창이 비어 보이면 들어간 것. 끝까지 남아 있으면(또는 화면을 못 읽어 애매하면) 확인 못 한 쪽 — 들어갔다고 지어내지 않는다
+    for i in range(SAY_CHECK_TRIES):
+        if not _left_in_input(tmux, text):
+            return "delivered"
+        if i + 1 < SAY_CHECK_TRIES:
+            time.sleep(SAY_CHECK_GAP)
+    return "typed"
+
+
 def wake_settle(channel: str, started: float, wait: bool = True) -> str:
     """깨어나는 동안(첫 지시를 모은 뒤 ~ 플러그인 접속 전) 온 글은 아무도 못 받는다 — 한 번 보고, 있으면 고정 문구로 읽게 한다."""
     if wait:

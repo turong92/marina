@@ -2492,6 +2492,19 @@ def _restore_suggest(channel: str, msg: str, text: str) -> None:
     ms._write_json(Path(str(rec["stateDir"])) / "suggest.json", {"text": text, "msg": str(msg)})
 
 
+def input_holds(screen: str, text: str) -> "bool | None":
+    """친 글이 입력창에 그대로 남았나 — 마지막 ❯ 줄부터 그 아래 구분선(─) 앞까지(줄바꿈으로 이어진 칸 포함)에 글 머리·꼬리나
+    붙여넣기 표시('[Pasted text')가 있으면 True. 입력창(❯)을 못 찾으면 None(모른다 — 호출자가 '갔다'고 단정하지 않는다)."""
+    lines = screen.splitlines()
+    idx = [i for i, ln in enumerate(lines) if "❯" in ln]
+    if not idx:
+        return None
+    tail = lines[idx[-1]:]
+    end = next((i for i, ln in enumerate(tail) if i and ln.lstrip().startswith("─")), len(tail))   # 구분선 아래는 상태줄·알림
+    squeezed = "".join(ln.strip() for ln in tail[:end]).replace(" ", "")
+    return any(k in squeezed for k in (text[:12].replace(" ", ""), text[-12:].replace(" ", ""), "[Pastedtext"))
+
+
 def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, settle: float = 3.0,
               timeout: float = 1800.0) -> bool:
     """Discord 로 온 /compact·/model X·/effort X: 세션이 쉬고 입력창이 정말 비었을 때만 직접 친다(허용 목록은 훅이 거른다).
@@ -2534,11 +2547,13 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                 typed = True
                 time.sleep(1.5)
                 after = ms._tmux("capture-pane", "-p", "-t", tmux).stdout or ""
-                box = [ln for ln in after.splitlines() if "❯" in ln]
-                head = cmd[:12]
-                if box and head in box[-1]:              # 아직 입력창에 남아 있다 — Enter 한 번 더
+                for _ in range(3):                       # Enter 가 붙여넣기 줄바꿈으로 먹히면 글이 입력창에 남는다 — 남아 있는 동안 Enter 를 다시(최대 3번)
+                    if input_holds(after, cmd) is not True:
+                        break
                     ms._tmux("send-keys", "-t", tmux, "Enter")
                     _log(f"type {tmux}: 입력창에 남아 Enter 다시")
+                    time.sleep(1.5)
+                    after = ms._tmux("capture-pane", "-p", "-t", tmux).stdout or ""
                 _log(f"type {tmux}: 입력함 {cmd[:60]!r} · 화면 끝: {' | '.join(after.rstrip().splitlines()[-6:])[:400]!r}")
                 break
             time.sleep(poll)
