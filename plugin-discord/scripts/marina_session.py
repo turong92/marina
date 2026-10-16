@@ -203,12 +203,15 @@ def project_config(cfg: dict[str, Any], project: str) -> dict[str, Any]:
     return pc
 
 
-def token_file(cfg: dict[str, Any]) -> Path:
+def token_file(cfg: dict[str, Any], project: str = "") -> Path:
+    """세션이 말할 때 쓰는 봇 토큰 파일 — 프로젝트에 tokenFile 이 있으면 그것, 없으면 전역."""
+    pc = cfg.get("projects", {}).get(project) if project else None
+    if isinstance(pc, dict) and pc.get("tokenFile"):
+        return Path(str(pc["tokenFile"])).expanduser()
     return Path(str(cfg["tokenFile"])).expanduser()
 
 
-def read_token(cfg: dict[str, Any]) -> str:
-    p = token_file(cfg)
+def read_token_file(p: Path) -> str:
     try:
         text = p.read_text(encoding="utf-8")
     except OSError:
@@ -219,6 +222,40 @@ def read_token(cfg: dict[str, Any]) -> str:
             if tok:
                 return tok
     raise SessionError(f"{p} 에 DISCORD_BOT_TOKEN= 줄이 없어")
+
+
+def read_token(cfg: dict[str, Any]) -> str:
+    """마리나 봇·채널 관리용 — 항상 전역 토큰. 세션이 말할 토큰은 token_file(cfg, project)."""
+    return read_token_file(token_file(cfg))
+
+
+def project_token_file(cfg: dict[str, Any], project: str) -> Path:
+    """세션이 말할 토큰 파일 — 읽히는지 보고, 전역과 다른 프로젝트 토큰이면 Discord 가 받아 주는지도 한 번 본다
+    (오타·만료 토큰이면 방은 멀쩡히 만들어지고 세션만 벙어리가 된다)."""
+    tf = token_file(cfg, project)
+    tok = read_token_file(tf)
+    if tf != token_file(cfg):
+        try:
+            Discord(tok)._req("GET", "/users/@me")
+        except DiscordError as exc:
+            if exc.code == 401:
+                raise SessionError(f"'{project}' 프로젝트 봇 토큰을 Discord 가 거부했어(401): {tf}")
+            raise
+    return tf
+
+
+def relink_token(sdir: Path, cfg: dict[str, Any], project: str) -> None:
+    """재시작 때 상태 폴더의 .env 를 지금 설정의 토큰으로 다시 건다. 바뀌었을 때만 한 줄 남긴다."""
+    want = token_file(cfg, project)
+    if not want.is_file():
+        return                                   # 파일이 없으면 있던 것을 그대로 둔다(벙어리로 만들지 않는다)
+    env = sdir / ".env"
+    if env.is_symlink() and Path(os.readlink(env)) == want:
+        return
+    if env.is_symlink() or env.exists():
+        env.unlink()
+    env.symlink_to(want)
+    print(f"{project}: 세션 봇 토큰을 {want} 로 바꿨다", file=sys.stderr)
 
 
 def project_root(project: str) -> Path:
@@ -2490,7 +2527,7 @@ def notify_exit(ref: str, code: str) -> None:
         return
     cfg = load_config()
     again = " · 여기에 글을 쓰면 다시 켜져" if cfg.get("wake", True) is not False else ""   # marina_discord_wake 를 import 하지 않는다(알림 경로를 가볍게)
-    Discord(read_token(cfg)).send_message(
+    Discord(read_token_file(token_file(cfg, str(s.get("project") or "")))).send_message(
         str(s["channelId"]), f"⚠ 세션이 꺼졌어 (종료 코드 {code}) — 다시 켜기: `marina session start {ref}`{again}")
 
 
@@ -2585,9 +2622,7 @@ def preflight(cfg: dict[str, Any], dc: Discord, project: str, task: str,
     """아무것도 만들기 전에 전부 본다 — 하나라도 걸리면 SessionError. existing = 옮겨 올 대화의 기존 폴더."""
     pc = project_config(cfg, project)
     root = project_root(project)
-    tf = token_file(cfg)
-    if not tf.is_file():
-        raise SessionError(f"토큰 파일이 없어: {tf}")
+    tf = project_token_file(cfg, project)     # 프로젝트 토큰이면 전역으로 되돌아가지 않고 분명히 실패한다
     if not _tmux_exe():
         raise SessionError("'tmux' 를 찾지 못했어 (brew install tmux)")
     if not shutil.which("claude"):
@@ -2637,9 +2672,7 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
     tmux, sdir = tmux_name(project, name), state_dir(project, name)
     chan = LOBBY_CHANNEL if lobby else channel_name(name)
     folder = chat_folder(project)
-    tf = token_file(cfg)
-    if not tf.is_file():
-        raise SessionError(f"토큰 파일이 없어: {tf}")
+    tf = project_token_file(cfg, project)     # 프로젝트 토큰이면 전역으로 되돌아가지 않고 분명히 실패한다
     if not _tmux_exe():
         raise SessionError("'tmux' 를 찾지 못했어 (brew install tmux)")
     if not shutil.which("claude"):
@@ -2693,7 +2726,10 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
         f"Discord 에 '{project}' 역할이 없어 {project.upper()} 카테고리를 봇과 관리자만 볼 수 있어 — "
         f"역할을 만든 뒤 {project.upper()} 카테고리 권한에 {project} 역할(채널 보기·메시지 보내기·기록 보기)을 추가해")
     try:   # 첫 안내 — 실패해도 방은 연다
-        dc.send_message(channel_id, LOBBY_GUIDE if lobby else welcome_text(title or name, bool(from_id)))
+        if lobby:
+            dc.send_message(channel_id, LOBBY_GUIDE)
+        else:      # 방에서 처음 보는 글 — 세션과 같은 봇 명의로
+            Discord(read_token_file(tf)).send_message(channel_id, welcome_text(title or name, bool(from_id)))
     except SessionError as exc:
         warning = (warning + " / " if warning else "") + f"안내 메시지 실패: {exc}"
     return dict(record, url=f"https://discord.com/channels/{cfg['guildId']}/{channel_id}", warning=warning)
@@ -2720,9 +2756,7 @@ def cmd_dev_lobby(project: str) -> dict[str, Any]:
     dc = Discord(read_token(cfg))
     tmux, sdir = tmux_name(project, task), state_dir(project, task)
     root = sdir / "home"                      # 레포 루트에서 띄우면 레포 설정·훅·CLAUDE.md 가 섞일 수 있다(리뷰) → 빈 폴더
-    tf = token_file(cfg)
-    if not tf.is_file():
-        raise SessionError(f"토큰 파일이 없어: {tf}")
+    tf = project_token_file(cfg, project)     # 프로젝트 토큰이면 전역으로 되돌아가지 않고 분명히 실패한다
     if tmux_alive(tmux) or sdir.exists():
         raise SessionError(f"로비 흔적이 남아 있어: {tmux} / {sdir}")
     root.mkdir(parents=True)
@@ -3147,7 +3181,7 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
     if not text:
         raise SessionError("text 가 비었어")
     cfg = load_config()
-    dc = Discord(read_token(cfg))
+    dc = Discord(read_token_file(token_file(cfg, str(rec.get("project") or ""))))   # 세션 자신이 부르는 도구 — 세션과 같은 봇
     tf = Path(str(rec["stateDir"])) / "threads.json"
     try:
         threads = json.loads(tf.read_text(encoding="utf-8"))
@@ -3504,7 +3538,7 @@ def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id
         cat = ensure_category(dc, cfg, project)
         ensure_archive(dc, cfg, project, cat)
         channel_id = dc.create_text_channel(cfg["guildId"], plan["channel"], cat, title)
-        write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg))
+        write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg, project))
         write_settings(sdir)
         if callable(first):
             try:
@@ -3564,7 +3598,7 @@ def cmd_adopt(project: str, task: str, from_id: str) -> dict[str, Any]:
         cat = ensure_category(dc, cfg, project)
         ensure_archive(dc, cfg, project, cat)
         channel_id = dc.create_text_channel(cfg["guildId"], plan["channel"], cat)
-        write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg))
+        write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg, project))
         write_settings(sdir)
         tmux_start(plan["tmux"], here, claude_argv(project, task, session_id=record["sessionId"], from_id=from_id),
                    session_env(sdir), notify_ref=f"{project}/{task}")
@@ -3623,6 +3657,10 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
                 write_settings(sdir, chat_root=guard if chat else None, lobby=s.get("kind") in LOBBY_KINDS,
                                room=str(s.get("channelId") or ""))
                 _drop_ack_reaction(sdir / "access.json")
+                try:                              # 설정에서 바꾼 봇이 재시작으로 따라온다 — 실패해도 재시작은 막지 않는다
+                    relink_token(sdir, load_config(), str(s.get("project") or ""))
+                except Exception:
+                    pass
             if chat:
                 ensure_trusted(root)
             cwd, argv = session_launch(s, resume=True, first=first)

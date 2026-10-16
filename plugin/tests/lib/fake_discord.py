@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """테스트용 가짜 Discord REST — marina session 이 쓰는 호출만(채널·메시지·반응·역할·봇 자신).
 사용: python3 fake_discord.py <dir>  → <dir>/port 에 포트를 쓰고, 받은 요청을 <dir>/log.jsonl 에 남긴다.
-스위치: <dir>/fail_post 가 '403' 이면 POST 를 403 으로, '429once' 면 첫 POST 만 429. <dir>/no_chat_role 이면 chat 역할 없음."""
+스위치: <dir>/fail_post 가 '403' 이면 POST 를 403 으로, '429once' 면 첫 POST 만 429. <dir>/no_chat_role 이면 chat 역할 없음.
+<dir>/extra_tokens 에 적힌 토큰(공백 구분)도 통과 — 프로젝트별 봇 테스트용."""
 import json
 import sys
 import threading
@@ -33,7 +34,8 @@ class H(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _auth(self):
-        if self.headers.get("Authorization") != TOKEN:
+        extra = (state / "extra_tokens").read_text().split() if (state / "extra_tokens").exists() else []
+        if self.headers.get("Authorization") not in [TOKEN] + ["Bot " + t for t in extra]:
             self._send(401, {"message": "401: Unauthorized"})
             return False
         return True
@@ -92,7 +94,7 @@ class H(BaseHTTPRequestHandler):
                                           "size": len(part.get_payload(decode=True) or b"")})
         else:
             body = json.loads(raw or b"{}") if raw else {}
-        log({"m": "POST", "p": self.path, "b": body})
+        log({"m": "POST", "p": self.path, "b": body, "a": self.headers.get("Authorization")})
         if not self._auth():
             return
         fp = state / "fail_post"
