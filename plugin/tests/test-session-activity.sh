@@ -141,6 +141,21 @@ with open(tr, "a") as fh:
 act("Read", {"file_path": "/a/y.py"})
 dels = [x["p"] for x in log()[before:] if x["m"] == "DELETE"]
 check(any("/messages/7002/reactions/%F0%9F%94%A7" in p for p in dels), f"끼어든 뒤 이전 지시(7002)의 🔧 뗌: {dels}")
+# 턴 끝 훅이 떼지 못하고 지나간 턴이 있으면(2026-10-17 #daeun) 그 지시엔 표시가 남는데,
+# 그 뒤엔 새 지시가 마지막이라 아무도 옛 지시를 다시 안 본다 — '달았던 적'(ever)을 남겨 다음 턴 끝이 치운다.
+# 이모지 이름으로 짐작하지 않으니 세션이 react 로 단 반응은 안 건드린다
+ms._write_json(sd / "activity.json", {"mid": "7009", "marked": {}, "ever": {"7008": ["🛑", "💬"]}})
+n = len(log()); ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
+dels = [x["p"] for x in log()[n:] if x["m"] == "DELETE"]
+check(any("/messages/7008/reactions/%F0%9F%9B%91" in d for d in dels), f"밀린 🛑 을 안 뗐다: {dels}")
+check(any("/messages/7008/reactions/%F0%9F%92%AC" in d for d in dels), f"밀린 💬 을 안 뗐다: {dels}")
+check(not any(x["m"] == "GET" and "/messages/7008" in x["p"] for x in log()[n:]), "반응을 보려고 메시지를 읽었다(필요 없다)")
+check((ms._activity_state(sd).get("ever") or {}) == {}, f"뗀 뒤에도 ever 가 남았다: {ms._activity_state(sd)}")
+# 달 때 ever 에 적힌다(다음 턴 끝이 치울 수 있게)
+act("Bash", {"command": "git log"}, gap=0.0)
+ever = (ms._activity_state(sd).get("ever") or {}).get("7003") or []
+check("🔧" in ever and "🛑" in ever, f"달았던 적이 안 적혔다: {ever}")
+
 # (리뷰 6) 연결 오류가 나도 훅은 끝까지 가고 표시는 앞으로 간다
 os.environ["MARINA_DISCORD_API"] = "http://127.0.0.1:9"
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})

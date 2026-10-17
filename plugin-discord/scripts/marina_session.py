@@ -286,6 +286,7 @@ def load_sessions() -> list[dict[str, Any]]:
     return [s for s in items if isinstance(s, dict)] if isinstance(items, list) else []
 
 
+
 def save_sessions(items: list[dict[str, Any]]) -> None:
     p = sessions_path()
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -2300,8 +2301,9 @@ def hook_stop(payload: dict[str, Any]) -> None:
     sync_session_id(s, payload)      # /clear 뒤 갈아탄 대화 ID 를 기록에 맞춘다(다음 wake 가 옛 대화를 되살리지 않게)
     if not s.get("channelId"):
         return
+    tr = Path(str(payload.get("transcript_path") or "/nonexistent"))
     dashboard_signal()
-    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), str(s["channelId"]))
+    ids = inbound_messages(tr, str(s["channelId"]))
     sd = Path(str(s.get("stateDir") or "/nonexistent"))
     cfg = load_config()
     dc = Discord(read_token(cfg))
@@ -2314,7 +2316,7 @@ def hook_stop(payload: dict[str, Any]) -> None:
         if lockf:
             lockf.close()
     # 도구가 늦게 붙어 답장을 못 보낸 채 끝난 턴은 한 번 더 깨운다(2026-10-16 #daeun 23분 침묵)
-    nudge_unanswered(s, Path(str(payload.get("transcript_path") or "/nonexistent")))
+    nudge_unanswered(s, tr)
     # 뒤에서 서브에이전트가 도는 동안엔 진행 줄이 올라가는 스레드(가장 최근 지시)만 열어 둔다 — 턴마다 닫히면 쌓이는 줄이 끊기고(형 2026-10-06),
     # 전부 열어 두면 에이전트를 계속 붙든 세션은 지난 지시 스레드가 끝없이 쌓인다(형 2026-10-07).
     # 최근 지시를 모르면(activity.json 에 mid 없음) 아무것도 접지 않는다. 다 끝난 뒤의 턴 끝엔 밀린 것까지 접는다
@@ -2507,26 +2509,37 @@ def _mark(dc: "Discord", ch: str, st: dict[str, Any], mid: str, emoji: str) -> N
     except SessionError:
         return
     marked.setdefault(mid, []).append(emoji)
+    ever = st.setdefault("ever", {}).setdefault(mid, [])      # 턴 끝이 못 떼고 지나간 것도 다음 턴 끝이 치우게
+    if emoji not in ever:
+        ever.append(emoji)
 
 
-def _unmark(dc: "Discord", ch: str, st: dict[str, Any], mid: str, emoji: str) -> None:
+def _unmark(dc: "Discord", ch: str, st: dict[str, Any], mid: str, emoji: str, ever: bool = False) -> None:
+    """ever=True 면 장부에 '지금 달려 있다'고 안 적혀 있어도 뗀다(밀린 것 치우기 — 없으면 Discord 가 조용히 넘긴다)."""
     marked = st.setdefault("marked", {})
-    if emoji not in marked.get(mid, []):
+    if emoji not in marked.get(mid, []) and not ever:
         return
     try:
         dc.remove_reaction(ch, mid, emoji)
     except SessionError:
         pass
-    marked[mid].remove(emoji)
-    if not marked[mid]:
+    if emoji in marked.get(mid, []):
+        marked[mid].remove(emoji)
+    if mid in marked and not marked[mid]:
         marked.pop(mid)
 
 
 def clear_marks(dc: "Discord", ch: str, st: dict[str, Any]) -> None:
-    for mid, emojis in list((st.get("marked") or {}).items()):
-        for e in list(emojis):
-            _unmark(dc, ch, st, mid, e)
+    """진행 표시를 뗀다 — 지금 달려 있다고 적힌 것(`marked`)뿐 아니라 **이 지시에 한 번이라도 달았던 것**(`ever`)까지.
+    턴 끝 훅이 떼기 전에 빠져나간 턴이 있으면 그 지시엔 표시가 남는데, 그 뒤엔 새 지시가 마지막이 되어
+    아무도 옛 지시를 다시 보지 않는다(2026-10-17 #daeun 에 🛑·💬 가 남았다). `ever` 는 성공적으로 뗀 뒤에만
+    비우므로 다음 턴 끝이 밀린 것까지 치운다. 이모지 이름으로 짐작하지 않으니 세션이 `react` 로 단 반응은 안 건드린다."""
+    everything = st.get("ever") or {}
+    for mid in list({**(st.get("marked") or {}), **everything}):
+        for e in list(dict.fromkeys(list((st.get("marked") or {}).get(mid) or []) + list(everything.get(mid) or []))):
+            _unmark(dc, ch, st, mid, e, ever=True)
     st["marked"] = {}
+    st["ever"] = {}
     st.pop("emoji", None)
 
 
