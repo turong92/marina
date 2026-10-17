@@ -41,6 +41,8 @@ check(cfg["projects"]["proj"].get("archiveChannelId"), "프로젝트 자료실 I
 calls = sorted((p for p in out.iterdir() if (p / "argv").exists()), key=lambda p: p.stat().st_mtime)
 argv = [a.decode() for a in (calls[-1] / "argv").read_bytes().split(b"\0")[:-1]]
 check(argv[argv.index("--tools") + 1] == "" and "--restricted" in argv, "로비는 도구 없는 제한 세션")
+check(argv[argv.index("--remote-control") + 1] == "proj/lobby",
+      "개발 로비도 폰·앱에서 붙어 새 작업을 열 수 있게 원격 조작을 연다")
 check("작업" in argv[argv.index("--append-system-prompt") + 1], "개발 로비 규칙")
 sd = Path(lob["stateDir"])
 acc = json.loads((sd / "access.json").read_text())

@@ -79,6 +79,8 @@ for flag in ("--restricted", "--channels"):
     check(flag in argv, f"{flag} 없음")
 check(argv[argv.index("--permission-mode") + 1] == "dontAsk", "묻지 않고 거절")
 check(argv[argv.index("--tools") + 1] == "WebSearch,WebFetch,Read,Write,Edit,Glob,Grep", "허용 도구(Bash 없음)")
+check(argv[argv.index("--remote-control") + 1] == "chat/shopping",
+      f"방도 앱에서 붙을 수 있게 원격 조작을 연다(돌고 있는 세션에 붙으므로 디스코드와 안 싸운다): {argv}")
 check(argv[argv.index("--add-dir") + 1] == str(sd / "inbox"), "받은 첨부를 읽게 inbox 만 추가")
 # 방에 둔 .mcp.json — --restricted 는 폴더의 .mcp.json 을 스스로 읽지 않는다(실측 2026-10-15),
 # 그래서 있을 때만 --mcp-config 로 한 번 더 넘긴다. 메일·캘린더 같은 방 전용 도구가 여기로 붙는다
@@ -111,7 +113,6 @@ lb = ms.lobby_argv("chat", "shopping", sid)   # 로비는 방을 고르는 세�
 check(not any(Path(a).resolve() == room_mcp for a in lb if a.endswith(".mcp.json")), f"로비엔 방 도구 안 붙임: {lb}")
 room_mcp.unlink()
 ms.write_settings(sd, chat_root=folder, room=rec["channelId"])
-check("--remote-control" not in argv, "채팅 세션은 원격 제어를 안 연다")
 check((calls[-1] / "cwd").read_text().strip() == str(folder.resolve()), "cwd = 채팅 폴더")
 env = dict(l.split("=", 1) for l in (calls[-1] / "env").read_text().splitlines() if "=" in l)
 check(env.get("ENABLE_CLAUDEAI_MCP_SERVERS") == "false", "커넥터 끔")

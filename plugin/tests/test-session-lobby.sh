@@ -36,6 +36,8 @@ check(guide and "방 열어줘" in guide[0]["b"]["content"], f"로비 사용법 
 calls = sorted((p for p in out.iterdir() if (p / "argv").exists()), key=lambda p: p.stat().st_mtime)
 argv = [a.decode() for a in (calls[-1] / "argv").read_bytes().split(b"\0")[:-1]]
 check(argv == ms.lobby_argv("chat", "lobby", lob["sessionId"])[1:], f"로비 인자: {argv}")
+check(argv[argv.index("--remote-control") + 1] == "chat/lobby",
+      "로비도 폰·앱에서 붙어 방을 열 수 있게 원격 조작을 연다(방과 같은 길)")
 check(argv[argv.index("--tools") + 1] == "", "로비는 내장 도구 없음")
 check("--restricted" in argv and argv[argv.index("--permission-mode") + 1] == "dontAsk", "제한 모드")
 sd = Path(lob["stateDir"])

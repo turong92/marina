@@ -60,6 +60,8 @@ CHAT_RULES = (
     "이 세션은 Discord 채널에 연결된 일상 도우미다. 상대는 개발자가 아니고 Discord 만 본다.\n"
     "- 할 수 있는 일: 웹 검색·웹 페이지 읽기, 이 폴더 안에서 파일 만들기·고치기.\n"
     "- 답·질문·결과는 반드시 discord reply 도구로, 쉬운 말로 보낸다. 질문은 번호 선택지 텍스트로 묻는다.\n"
+    "- 단 Discord 메시지로 들어온 지시가 아니면(앱·터미널에서 직접 들어온 말) 그 자리에서 답하고 방에는 아무것도 보내지 않는다 "
+    "— 방 사람은 묻지도 않은 답을 받게 된다.\n"
     "- 오래 걸리는 부탁은 단계마다 progress 도구(message_id = 부탁 메시지 ID)로 진행 상황을 남기고, 결과는 reply 로 보낸다.\n"
     "- 글 위주 결과(리서치·후보 비교·목록)는 파일 대신 Discord 서식 메시지로 바로 답한다: 제목은 **굵게**, "
     "목록·인용 사용. Discord 는 표를 못 그리니 표 대신 항목별 카드(이름 줄 + 들여쓴 세부 줄)로 쓴다. "
@@ -609,6 +611,10 @@ def chat_argv(project: str, task: str, session_id: str, resume: bool = False, fr
     else:
         argv += ["--session-id", session_id]
     argv += ["--channels", PLUGIN, "--restricted",
+             # 앱(claude.ai/code·모바일)에서 **돌고 있는 이 세션에 붙는** 길 — 대화를 두 번 열지 않으니
+             # 디스코드와 같이 써도 안 싸운다(형 2026-10-17: "위치나 디바이스에 따라 편하게").
+             # 개발 세션은 처음부터 이걸 쓰고 있었다. 방은 형 계정에만 보인다(방 사람은 못 들어온다)
+             "--remote-control", rc_name(project, task),
              "--permission-mode", "dontAsk",
              "--tools", CHAT_TOOLS,
              "--add-dir", str(sdir / "inbox"),
@@ -2620,6 +2626,10 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
     if _stopped_after(sd, at):      # 턴이 끝나기 전에 떠난 훅이 늦게 도착했다 — 끝난 지시에 다시 달지 않는다(실사용)
         return
     prompt = payload.get("hook_event_name") == "UserPromptSubmit"
+    # 앱(원격 조작)·터미널에서 직접 들어온 턴은 방에 아무 표시도 하지 않는다 — 그러지 않으면 아무도 말 안 걸었는데
+    # '입력 중…' 이 뜨고, 지난 지시에 🛑·도구 이모지가 다시 달린다(방 사람에겐 비서가 혼자 움직이는 것으로 보인다)
+    if not prompt and _turn_from_terminal(Path(str(payload.get("transcript_path") or "/nonexistent")), ch):
+        return
     if prompt:
         clear_suggest(sd, ch, Discord(read_token(load_config())))    # 새 지시 — 지난 추천 버튼은 바로 뗀다
         if (sd / "question.json").exists():                          # 취소돼 PostToolUse 가 안 온 질문도 정리(리뷰 C2)
@@ -2870,7 +2880,7 @@ def cmd_new_chat(name: str, from_id: str = "", title: str = "", lobby: bool = Fa
     ensure_trusted(folder)
     folder = Path(os.path.realpath(str(folder)))
     record = {"project": project, "task": name, "kind": "chat-lobby" if lobby else "chat", "root": str(folder),
-              "tmux": tmux, "stateDir": str(sdir), "rcName": "", "sessionId": str(uuid.uuid4()),
+              "tmux": tmux, "stateDir": str(sdir), "rcName": rc_name(project, name), "sessionId": str(uuid.uuid4()),
               "createdAt": int(time.time())}
     if title:
         record["title"] = title
@@ -2942,7 +2952,7 @@ def cmd_dev_lobby(project: str) -> dict[str, Any]:
     root = Path(os.path.realpath(str(root)))
     ensure_trusted(root)          # 새 폴더는 신뢰 확인창에서 멈추고 그동안 플러그인이 안 뜬다(실측)
     record = {"project": project, "task": task, "kind": "dev-lobby", "root": str(root), "tmux": tmux,
-              "stateDir": str(sdir), "rcName": "", "sessionId": str(uuid.uuid4()), "createdAt": int(time.time())}
+              "stateDir": str(sdir), "rcName": rc_name(project, task), "sessionId": str(uuid.uuid4()), "createdAt": int(time.time())}
     channel_id = ""
     try:
         cat = ensure_category(dc, cfg, project)

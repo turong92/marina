@@ -156,6 +156,15 @@ act("Bash", {"command": "git log"}, gap=0.0)
 ever = (ms._activity_state(sd).get("ever") or {}).get("7003") or []
 check("🔧" in ever and "🛑" in ever, f"달았던 적이 안 적혔다: {ever}")
 
+# 앱(원격 조작)·터미널에서 직접 들어온 턴은 방에 아무 표시도 하지 않는다 — 아무도 말 안 걸었는데
+# '입력 중…' 이 뜨고 지난 지시에 반응이 다시 달리면 방 사람에겐 비서가 혼자 움직이는 것으로 보인다
+with open(tr, "a") as fh:
+    fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": "앱에서 형이 직접 친 말"}}) + "\n")
+ms._write_json(sd / "activity.json", {})
+n = len(log()); act("Read", {"file_path": "/a/z.py"})
+after = log()[n:]
+check(not after, f"앱·터미널 턴인데 방에 표시했다: {[x['p'] for x in after]}")
+
 # (리뷰 6) 연결 오류가 나도 훅은 끝까지 가고 표시는 앞으로 간다
 os.environ["MARINA_DISCORD_API"] = "http://127.0.0.1:9"
 ms.hook_stop({"cwd": rec["root"], "transcript_path": str(tr)})
