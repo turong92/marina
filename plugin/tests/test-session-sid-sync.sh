@@ -51,6 +51,13 @@ check(ms.sync_session_id(dict(rec), {"transcript_path": str(live)}) == new, "잔
 got = [x["sessionId"] for x in ms.load_sessions() if x["task"] == "daeun"]
 check(got == [other, new], f"상태 폴더가 다른 잔재를 고쳤다: {got}")
 
+# 개발 세션은 맞추지 않는다 — --continue·옮긴 대화 규칙이 따로고, 매 턴 끝에 sessions.json 을
+# 다시 쓰면 다른 세션의 load_sessions 가 반쯤 쓰인 파일을 읽는다(2026-10-17 진행 표시 안 떼짐)
+reset()
+ms.save_sessions([dict(rec, kind=None), dict(twin)])
+check(ms.sync_session_id(dict(rec, kind=None), {"transcript_path": str(live)}) == "", "개발 세션 기록을 고쳤다")
+check(sid("daeun") == old, f"개발 세션인데 기록이 바뀌었다: {sid('daeun')}")
+
 # 다른 폴더의 전사·대화 ID 가 아닌 이름은 받지 않는다
 reset()
 elsewhere = ms.transcript_path(tmp / "other-room", new)

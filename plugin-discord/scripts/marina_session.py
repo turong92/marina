@@ -189,7 +189,7 @@ def load_config() -> dict[str, Any]:
 
 def save_config(cfg: dict[str, Any]) -> None:
     p = config_path()
-    tmp = p.with_suffix(".tmp")
+    tmp = p.with_name(f".{p.name}.{os.getpid()}")      # 여럿이 한 tmp 를 쓰면 반쯤 쓴 파일이 rename 된다
     tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, p)
 
@@ -277,20 +277,36 @@ def sessions_path() -> Path:
 
 
 def load_sessions() -> list[dict[str, Any]]:
-    """깨졌거나 없으면 빈 목록 — 데몬 경로(idle_verdict)에서 예외를 내면 안 된다."""
+    """깨졌거나 없으면 빈 목록 — 데몬 경로(idle_verdict)에서 예외를 내면 안 된다.
+    다만 **파일이 있는데 파싱이 안 되면** 사본을 남긴다: 빈 목록을 받은 쪽은 세션을 못 찾고 조용히 지나가거나
+    (턴 끝 훅이 진행 표시를 안 뗀다) 기록 전체를 덮어쓸 수 있는데, 지금까지는 그런 일이 있었는지조차 알 수 없었다."""
     try:
         data = json.loads(sessions_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
+        _keep_bad_sessions()
         return []
     items = data.get("sessions") if isinstance(data, dict) else None
     return [s for s in items if isinstance(s, dict)] if isinstance(items, list) else []
 
 
+def _keep_bad_sessions() -> None:
+    """못 읽은 sessions.json 의 사본 — 있고 비어 있지 않을 때만, 하루 한 번까지."""
+    try:
+        p = sessions_path()
+        raw = p.read_bytes()
+        if not raw.strip():
+            return
+        bad = p.with_name(f"{p.name}.bad-{time.strftime('%Y%m%d')}")
+        if not bad.exists():
+            bad.write_bytes(raw)
+    except OSError:
+        pass
+
 
 def save_sessions(items: list[dict[str, Any]]) -> None:
     p = sessions_path()
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
+    tmp = p.with_name(f".{p.name}.{os.getpid()}")      # 여럿이 한 tmp 를 쓰면 반쯤 쓴 파일이 rename 된다(_write_json 과 같은 결)
     tmp.write_text(json.dumps({"sessions": items}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     os.replace(tmp, p)
 
@@ -1916,7 +1932,13 @@ def sync_session_id(rec: dict[str, Any], payload: dict[str, Any]) -> str:
     대화로 돌아가 그 시절 말투(존댓말)로 답하고, 그 사이 자기가 한 말을 '다른 대화'라고 불렀다.
     훅 payload 의 transcript_path 가 지금 살아 있는 대화 ID 라 그걸로 맞춘다.
     이 기록의 root 폴더에 놓인 전사만 받는다(다른 곳의 ID 로 덮지 않게).
-    채팅방만이 아니라 개발 세션도 맞춘다 — `--resume <옛 ID>` 는 어느 세션에서나 같은 사고가 된다."""
+    **채팅방만** 맞춘다 — 개발 세션은 기록에 ID 가 없으면 `--continue`(폴더의 최근 대화)로 이어서
+    기록의 ID 와 지금 도는 전사가 정상적으로 다를 수 있고, 거기까지 매 턴 끝에 고치면 이 맥의 세션 열몇 개가
+    sessions.json 을 끊임없이 다시 쓴다. (2026-10-17 에 진행 표시가 안 떼진 사고가 있었고 그 동시 쓰기를
+    의심하지만 확정하지 못했다 — 그래서 load_sessions 가 깨진 파일을 만나면 사본을 남긴다.)
+    개발 세션의 `/clear` 는 그대로 남은 문제다 — 매 턴 끝이 아니라 start·wake 때 한 번 맞추는 쪽이 맞다."""
+    if rec.get("kind") not in CHAT_KINDS:
+        return ""
     live = Path(str(payload.get("transcript_path") or ""))
     if not _SID_RE.match(live.stem) or live.stem == str(rec.get("sessionId") or ""):
         return ""
