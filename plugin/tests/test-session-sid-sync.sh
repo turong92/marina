@@ -3,11 +3,12 @@
 # 기록이 옛 ID 를 들고 있으면 다음 wake 가 `--resume <옛 ID>` 로 /clear 전 대화를 되살린다
 # (#daeun 이 아홉 시간 전 말투로 답하고, 그 사이 자기가 한 말을 '다른 대화'라고 부른 사고).
 # 턴 끝 훅이 살아 있는 ID 로 기록을 맞춰야 한다. 두 방이 한 폴더를 쓰므로 상태 폴더로 가린다.
+# 개발 세션은 턴마다가 아니라 띄울 때 한 번 맞춘다(폴더의 지금 대화로 — 문턱을 높게 둔다).
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/session_fixture.sh"
 PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$TMPROOT" <<'PY'
-import sys
+import json, os, sys
 from pathlib import Path
 import marina_session as ms
 
@@ -67,6 +68,64 @@ check(ms.sync_session_id(dict(rec), {"transcript_path": str(live.parent / "notau
       "대화 ID 가 아닌 이름을 받았다")
 check(ms.sync_session_id(dict(rec), {}) == "", "transcript_path 가 없는데 뭔가 했다")
 check(sid("daeun") == old, f"받지 말아야 할 것들이 기록을 바꿨다: {sid('daeun')}")
+
+# ── 개발 세션은 띄울 때 한 번 맞춘다(워크트리 하나에 세션 하나라 폴더의 지금 대화로 가린다)
+wt = tmp / "worktree"; wt.mkdir()
+dev = {"project": "proj", "task": "feat", "root": str(wt),
+       "stateDir": str(tmp / "sd-dev"), "sessionId": old}
+def put(name, cwd, mtime):
+    f = ms.transcript_path(wt, name)
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps({"type": "user", "cwd": cwd}) + "\n", encoding="utf-8")
+    os.utime(f, (mtime, mtime))
+    return f
+
+ms.save_sessions([dict(dev)])
+put(old, str(wt), 1000)
+check(ms.adopt_live_session_id(dict(dev)) == "", "폴더에 자기 기록만인데 갈아탔다")
+
+put(new, str(wt), 2000)                       # /clear 로 생긴 새 대화
+d = dict(dev)
+check(ms.adopt_live_session_id(d) == new, "/clear 로 갈아탄 대화를 못 받았다")
+check(next(x["sessionId"] for x in ms.load_sessions() if x["task"] == "feat") == new, "기록이 안 바뀌었다")
+
+# 남이 그 폴더에서 띄운 대화(cwd 가 다르다)는 받지 않는다
+ms.save_sessions([dict(dev)])
+put(other, "/somewhere/else", 3000)
+check(ms.adopt_live_session_id(dict(dev)) == "", "cwd 가 다른 대화를 집었다")
+
+# 기록된 대화가 더 새롭거나 시각이 같으면 받지 않는다
+for t, why in ((4000, "기록된 대화가 더 새로운데"), (3000, "시각이 같은데")):
+    ms.save_sessions([dict(dev)]); put(old, str(wt), t)
+    check(ms.adopt_live_session_id(dict(dev)) == "", f"{why} 갈아탔다")
+
+# 기록된 전사가 아직 없으면 집지 않는다 — 포크 사본은 첫 메시지 때 생긴다.
+# 집으면 폴더의 최신(= 포크 원본)을 --resume 해서 형이 열고 있을 수 있는 대화에 끼어든다(리뷰 C1)
+ms.transcript_path(wt, old).unlink()
+ms.save_sessions([dict(dev)])
+check(ms.adopt_live_session_id(dict(dev)) == "", "기록된 전사가 없는데 폴더의 최신을 집었다")
+
+# 원본 대화(forkedFrom)는 사본보다 최신이어도 집지 않는다
+put(old, str(wt), 1000); put(other, str(wt), 5000)
+ms.save_sessions([dict(dev, forkedFrom=other)])
+check(ms.adopt_live_session_id(dict(dev, forkedFrom=other)) == "", "포크 원본을 집었다")
+
+# 프로젝트 메인 체크아웃이 root 면 건너뛴다(사람이 손으로 띄운 대화가 쌓이는 폴더다)
+main = tmp / "main"; main.mkdir()
+ms._write_json(ms.marina_home() / "projects.json", {"projects": [{"id": "proj", "root": str(main)}]})
+mdev = {"project": "proj", "task": "mainwork", "root": str(main),
+        "stateDir": str(tmp / "sd-main"), "sessionId": old}
+ms.save_sessions([dict(mdev)])
+f = ms.transcript_path(main, old); f.parent.mkdir(parents=True, exist_ok=True)
+f.write_text(json.dumps({"type": "user", "cwd": str(main)}) + "\n", encoding="utf-8")
+os.utime(f, (1000, 1000))
+g = ms.transcript_path(main, new)
+g.write_text(json.dumps({"type": "user", "cwd": str(main)}) + "\n", encoding="utf-8")
+os.utime(g, (2000, 2000))
+check(ms.adopt_live_session_id(dict(mdev)) == "", "메인 체크아웃 폴더에서 남의 대화를 집었다")
+
+# 채팅방은 이 길로 짐작하지 않는다(한 폴더를 여러 방이 쓴다) — 턴 끝 훅이 맡는다
+check(ms.adopt_live_session_id(dict(rec)) == "", "채팅방을 폴더의 최신 기록으로 짐작했다")
 
 print("\n".join("FAIL: " + m for m in fail))
 sys.exit(1 if fail else 0)

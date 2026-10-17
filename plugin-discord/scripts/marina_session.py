@@ -1944,7 +1944,12 @@ def sync_session_id(rec: dict[str, Any], payload: dict[str, Any]) -> str:
         return ""
     if live.parent != transcript_path(Path(str(rec.get("root") or "/nonexistent")), "x").parent:
         return ""
-    # 방은 상태 폴더로 유일하게 가려진다 — 두 방이 한 폴더(root)를 쓰므로 project/task 는 폴백일 뿐(리뷰 I4)
+    return _record_session_id(rec, live.stem)
+
+
+def _record_session_id(rec: dict[str, Any], sid: str) -> str:
+    """기록의 대화 ID 를 바꿔 적는다. 방은 상태 폴더로 유일하게 가려진다 —
+    두 방이 한 폴더(root)를 쓰므로 project/task 는 폴백일 뿐(리뷰 I4)."""
     items = load_sessions()
     sd = str(rec.get("stateDir") or "")
     hit = next((x for x in items if sd and x.get("stateDir") == sd), None) \
@@ -1952,10 +1957,48 @@ def sync_session_id(rec: dict[str, Any], payload: dict[str, Any]) -> str:
                  and x.get("task") == rec.get("task")), None)
     if hit is None:
         return ""
-    hit["sessionId"] = live.stem
+    hit["sessionId"] = sid
     save_sessions(items)
-    rec["sessionId"] = live.stem
-    return live.stem
+    rec["sessionId"] = sid
+    return sid
+
+
+def adopt_live_session_id(rec: dict[str, Any]) -> str:
+    """**띄우기 전에 한 번**: 기록의 대화 ID 가 `/clear` 로 버려진 것이면 그 폴더의 지금 대화로 맞춘다.
+    안 그러면 `/clear` 뒤에 끈 세션을 다시 켤 때 `--resume <옛 ID>` 로 지운 대화가 되살아난다
+    (2026-10-16 #daeun 에서 같은 일이 있었다 — 아홉 시간 전 대화로 돌아가 그 시절 말투로 답했다).
+    채팅방은 한 폴더(root)를 여러 방이 써서 '폴더의 최신 기록'으로 짐작할 수 없고 턴 끝 훅(`sync_session_id`)이 맡는다.
+
+    **기록에 대화 ID 가 적힌 개발 세션만** 발화한다 — 즉 실제 모집단은 `adopt`(옮겨 온 대화)로 만든 세션이다
+    (보통 개발 세션은 `--continue` 라 이 사고가 없다). 그래서 짐작의 문턱을 높게 둔다(리뷰 C1·I1):
+    - 기록된 전사가 **있을** 때만 — `/clear` 상황엔 옛 전사가 반드시 있다. 없는데 집으면 포크 원본을 가로챈다
+    - 원본 대화(`forkedFrom`)는 집지 않는다 — 사본이 아직 없으면 그게 폴더의 최신이고, 형이 열고 있을 수 있다
+    - 프로젝트 메인 체크아웃이 root 인 세션은 건너뛴다 — 그 폴더엔 사람이 손으로 띄운 대화가 쌓인다
+    - 대화 ID 꼴이고, 기록된 것보다 새롭고, 그 기록의 `cwd` 가 이 세션의 폴더일 때만
+    (최신이 남의 것이면 다음 후보로 내려가지 않는다 — 짐작하지 않는 쪽이라 `/clear` 전 대화가 남을 수 있다)"""
+    if rec.get("kind") in CHAT_KINDS or not rec.get("sessionId"):
+        return ""
+    root = Path(str(rec.get("root") or ""))
+    try:
+        if os.path.realpath(str(root)) == str(project_root(str(rec.get("project") or ""))):
+            return ""
+    except SessionError:
+        pass
+    mine = transcript_path(root, str(rec["sessionId"]))
+    try:
+        if not mine.is_file():
+            return ""
+        cands = [f for f in mine.parent.glob("*.jsonl") if f.is_file()]
+        newest = max(cands, key=lambda f: f.stat().st_mtime) if cands else mine
+        if newest == mine or mine.stat().st_mtime >= newest.stat().st_mtime:
+            return ""
+    except OSError:
+        return ""
+    if not _SID_RE.match(newest.stem) or newest.stem == str(rec.get("forkedFrom") or ""):
+        return ""
+    if conversation_home(newest) != os.path.realpath(str(root)):
+        return ""
+    return _record_session_id(rec, newest.stem)
 
 
 def _hook_target(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -3871,6 +3914,8 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
                     pass
             if chat:
                 ensure_trusted(root)
+            else:
+                adopt_live_session_id(s)      # /clear 로 갈아탄 대화면 지금 것으로 — 지운 대화를 되살리지 않게
             cwd, argv = session_launch(s, resume=True, first=first)
             tmux_start(name, cwd, argv,
                        chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
