@@ -247,6 +247,8 @@ check(mb.bot_command(cfgd)["env"].get("MARINA_DISCORD_BOTPROC") == "1" if mb.bot
 check(ms._daemon_env().get("MARINA_DISCORD_BOTPROC") == "1", "nohup 데몬 환경에 표식")
 os.environ["MARINA_DISCORD_BOTPROC"] = "1"
 os.environ["PATH"] = "/usr/bin:/bin"
+for k in ("JAVA_HOME", "SDKMAN_DIR"):   # 돌리는 사람 셸의 값이 새어들면 '되돌리면 없다' 를 검사할 수 없다
+    os.environ.pop(k, None)
 ms.load_sessions_orig = ms.load_sessions
 ms.load_sessions = lambda: [{"project": "proj", "kind": "dev-lobby", "channelId": "C1", "task": "lobby"}]
 mb._allowed = lambda *a, **k: True; mb._dc = lambda cfg: None
