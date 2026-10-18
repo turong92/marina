@@ -185,7 +185,7 @@ client.on(Events.InteractionCreate, async (it) => {
     return;
   }
   if (!it.isChatInputCommand()) return;
-  if (!["compact", "model", "effort", "stop", "skill"].includes(it.commandName)) return;
+  if (!["compact", "model", "effort", "stop", "skill", "account"].includes(it.commandName)) return;
   await it.deferReply().catch(() => {});        // 공개 — "○○님이 /skill 을 사용함" 밑 이 답에 ⚙️ → ✅/⚠️ 가 붙는다
   const reply = await it.fetchReply().catch(() => null);
   const ch = await sessionChannel(it);

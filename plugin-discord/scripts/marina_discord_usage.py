@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import os
 import subprocess
 import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
@@ -451,3 +452,86 @@ def context_percent(transcript: Path) -> Optional[float]:
         return agent_usage_from_path(Path(transcript), "claude").get("contextPercent")
     except Exception:
         return None
+
+
+# ── 토큰 계정(setup-token) 사용량 — 그 토큰엔 user:profile 권한이 없어 /api/oauth/usage 가 403(실측 2026-10-18).
+# 대신 아주 작은 요청 한 번의 응답 헤더(anthropic-ratelimit-unified-5h/7d-utilization, 0~1)를 읽는다. 계정마다 파일 캐시 10분.
+_TOKEN_TTL_S = float(os.environ.get("MARINA_TOKEN_USAGE_TTL", "600"))
+_TOKEN_RETRY_S = 120.0
+_PROBE_URL = "https://api.anthropic.com/v1/messages"
+_HEADER_WINDOWS = (("fiveHour", "5시간", "5h"), ("weekly", "주간", "7d"))
+
+
+def windows_from_headers(headers: Any) -> list[dict[str, Any]]:
+    """응답 헤더 → [{key,label,usedPercent,…}] (5시간·주간). 없거나 깨진 값은 건너뛴다."""
+    h = {str(k).lower(): v for k, v in dict(headers or {}).items()}
+    out = []
+    for key, label, tag in _HEADER_WINDOWS:
+        try:
+            used = float(h[f"anthropic-ratelimit-unified-{tag}-utilization"]) * 100.0
+        except (KeyError, TypeError, ValueError):
+            continue
+        reset = h.get(f"anthropic-ratelimit-unified-{tag}-reset")
+        try:
+            reset = int(float(reset)) if reset is not None else None     # epoch 초 문자열
+        except (TypeError, ValueError):
+            pass
+        w = _usage_window(key, label, round(used, 1), reset)
+        if w:
+            out.append(w)
+    return out
+
+
+def _probe(token: str) -> list[dict[str, Any]] | None:
+    body = json.dumps({"model": "claude-haiku-5-5", "max_tokens": 1,
+                       "system": "You are Claude Code, Anthropic's official CLI for Claude.",
+                       "messages": [{"role": "user", "content": "."}]}).encode("utf-8")
+    req = urllib.request.Request(_PROBE_URL, data=body, method="POST", headers={
+        "Authorization": f"Bearer {token}", "anthropic-beta": "oauth-2025-04-20", "anthropic-version": "2023-06-01",
+        "content-type": "application/json", "User-Agent": USAGE_UA})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return windows_from_headers(resp.headers)
+    except urllib.error.HTTPError as exc:          # 한도 초과(429)도 헤더는 온다
+        if exc.code in (401, 403):
+            raise _AuthFailed() from None
+        try:
+            return windows_from_headers(exc.headers) or None
+        except Exception:
+            return None
+    except Exception:
+        return None                                # 토큰이 실린 예외 메시지를 로그로 내보내지 않는다
+
+
+class _AuthFailed(Exception):
+    """토큰이 폐기·만료됐다 — 옛 % 를 계속 보이지 않고 '확인 필요'로."""
+
+
+def token_windows(name: str, token_file: Path, cache_dir: Path) -> list[dict[str, Any]]:
+    """토큰 계정 하나의 5시간·주간 창. 캐시(cache_dir/<name>.usage.json)가 신선하면 그것, 아니면 한 번 찍는다. 실패하면 마지막 값."""
+    cache = cache_dir / f"{name}.usage.json"
+    try:
+        c = json.loads(cache.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        c = {}
+    c = c if isinstance(c, dict) else {}
+    now = time.time()
+    if now - float(c.get("at") or 0) < _TOKEN_TTL_S or now - float(c.get("failedAt") or 0) < _TOKEN_RETRY_S:
+        return list(c.get("windows") or [])
+    try:
+        token = token_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return []
+    try:
+        got = _probe(token) if token else None
+    except _AuthFailed:
+        got, c = None, {"windows": [], "error": "auth"}
+    if got is not None:
+        c = {"at": now, "windows": got}
+    else:       # 실패: 마지막 값은 두되 '측정 시각'은 그대로 — 잠시 뒤 다시 찍는다(매 tick 찍지 않게)
+        c = dict(c, failedAt=now)
+    try:
+        cache.write_text(json.dumps(c), encoding="utf-8")
+    except OSError:
+        pass
+    return list(c.get("windows") or [])

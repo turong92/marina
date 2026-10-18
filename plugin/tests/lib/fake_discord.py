@@ -65,6 +65,10 @@ class H(BaseHTTPRequestHandler):
                 self._send(404, {"message": "Unknown Message"}); return
             hit = next((m for m in seeded.get(p[1], []) if m["id"] == p[3]), None)
             self._send(200, hit or {"id": p[3]}); return
+        if len(p) == 2 and p[0] == "channels":
+            with lock:
+                ch = channels.get(p[1])
+            self._send(200, ch) if ch else self._send(404, {"message": "Unknown Channel"}); return
         if p == ["users", "@me"]:
             self._send(200, {"id": "BOT1", "bot": True}); return
         if len(p) == 3 and p[0] == "guilds" and p[2] == "roles":

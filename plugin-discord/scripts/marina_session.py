@@ -734,10 +734,24 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
         # 알림은 떼어 보내 셸이 바로 끝나게 한다("기동 직후 죽음"을 tmux_alive 가 놓치지 않게).
         # nohup 은 셸 종료 시 tmux 의 HUP 과 경쟁해 같이 죽었다(실측) — 부모가 먼저 HUP 를 무시하고 띄운다.
         run = ["/bin/sh", "-c", f'"$@"; code=$?; trap "" HUP; {notify} "$code" >/dev/null 2>&1 </dev/null &', "sh"] + run
+    tok = env_extra.get(ACCOUNT_TOKEN_ENV)
+    if tok:
+        # 토큰은 셸이 파일에서 읽어 claude 의 env 로만 — tmux 명령줄·argv 에 안 남는다(같은 사용자의 `ps eww` 에는 보인다).
+        # Claude Code 는 Bash 도구의 env 에서 이 변수를 뺀다(실측 2026-10-18). 파일이 비었으면 export 하지 않는다(= a 로 뜬다)
+        run = ["/bin/sh", "-c", f'if [ -s "${ACCOUNT_TOKEN_ENV}" ]; then CLAUDE_CODE_OAUTH_TOKEN="$(cat "${ACCOUNT_TOKEN_ENV}")"; '
+               f'export CLAUDE_CODE_OAUTH_TOKEN; fi; unset {ACCOUNT_TOKEN_ENV}; exec "$@"', "sh"] + run
     cmd = shlex.join(clean_env_prefix(env_extra) + run)
     r = _tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), cmd)
     if r.returncode != 0:
         raise SessionError(f"tmux 실행 실패: {(r.stderr or r.stdout).strip()}")
+    sdir = env_extra.get("DISCORD_STATE_DIR") or ""
+    if sdir and Path(sdir).is_dir():
+        try:
+            (Path(sdir) / "account-running").write_text(
+                (Path(tok).stem if tok and Path(tok).is_file() and Path(tok).stat().st_size > 0 else ACCOUNT_DEFAULT) + "\n",
+                encoding="utf-8")
+        except OSError:
+            pass
     dashboard_signal()
     time.sleep(float(os.environ.get("MARINA_SESSION_BOOT_WAIT") or 2.0))
     if not tmux_alive(name):
@@ -1888,12 +1902,112 @@ def room_mcp_servers(room_dir: "Path | None") -> list[str]:
 
 
 def session_env(sdir: Path) -> dict[str, str]:
-    """claude 는 깨끗한 env 로 뜨므로, 훅·알림이 마리나 상태를 찾을 변수를 넣어 준다."""
+    """claude 는 깨끗한 env 로 뜨므로, 훅·알림이 마리나 상태를 찾을 변수를 넣어 준다.
+    방 계정이 토큰 계정이면 토큰 **파일 경로**만 넣는다 — tmux_start 의 셸이 읽어 CLAUDE_CODE_OAUTH_TOKEN 으로 넘긴다."""
     env = {"DISCORD_STATE_DIR": str(sdir), "MARINA_HOME": str(marina_home())}
     for k in ("MARINA_DISCORD_API", "MARINA_CHANNELS_DIR"):
         if os.environ.get(k):
             env[k] = os.environ[k]
+    tok = account_token_file(account_of(sdir))
+    if tok is not None:
+        env[ACCOUNT_TOKEN_ENV] = str(tok)
     return env
+
+
+# ── 구독 계정(2026-10-18) — 'a' = 키체인 로그인, 그 밖 = accounts/<이름>.token(claude setup-token). 설정 폴더는 하나 ──
+ACCOUNT_DEFAULT = "a"
+ACCOUNT_TOKEN_ENV = "MARINA_ACCOUNT_TOKEN_FILE"
+_ACCOUNT_NAME = re.compile(r"^[a-z0-9]{1,16}$")
+
+
+def accounts_dir() -> Path:
+    return marina_home() / "accounts"
+
+
+def accounts() -> list[str]:
+    """쓸 수 있는 계정: a + 토큰 파일이 있는 이름들."""
+    names = sorted(f.stem for f in accounts_dir().glob("*.token") if _ACCOUNT_NAME.match(f.stem) and f.stem != ACCOUNT_DEFAULT)
+    return [ACCOUNT_DEFAULT] + names
+
+
+def account_token_file(name: str) -> "Path | None":
+    """토큰 계정이면 그 파일, a·토큰이 없는 이름이면 None(→ 키체인 로그인 = a 로 뜬다)."""
+    if name == ACCOUNT_DEFAULT or not _ACCOUNT_NAME.match(name or ""):
+        return None
+    f = accounts_dir() / f"{name}.token"
+    try:
+        return f if f.is_file() and f.stat().st_size > 0 else None
+    except OSError:
+        return None
+
+
+def _read_name(f: Path) -> str:
+    try:
+        v = f.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    return v if _ACCOUNT_NAME.match(v) else ""
+
+
+def default_account() -> str:
+    return _read_name(accounts_dir() / "default") or ACCOUNT_DEFAULT
+
+
+def _project_accounts() -> dict[str, str]:
+    try:
+        d = json.loads((accounts_dir() / "projects.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in d.items() if _ACCOUNT_NAME.match(str(v))} if isinstance(d, dict) else {}
+
+
+def project_account(project: str) -> str:
+    return _project_accounts().get(project, "")
+
+
+def set_project_account(project: str, name: str) -> None:
+    d = _project_accounts()
+    d[project] = _check_account(name)
+    accounts_dir().mkdir(parents=True, exist_ok=True)
+    _write_json(accounts_dir() / "projects.json", d)
+
+
+def _project_of(sdir: Path) -> str:
+    try:
+        return next((str(r.get("project") or "") for r in load_sessions() if str(r.get("stateDir") or "") == str(sdir)), "")
+    except Exception:
+        return ""
+
+
+def account_of(sdir: "Path | None") -> str:
+    """방 지정(<상태 폴더>/account) → 프로젝트 기본(accounts/projects.json) → 전체 기본(accounts/default) → a."""
+    if not sdir:
+        return default_account()
+    return _read_name(Path(sdir) / "account") or project_account(_project_of(Path(sdir))) or default_account()
+
+
+def _check_account(name: str) -> str:
+    if name not in accounts():
+        raise SessionError(f"없는 계정이야: {name} (있는 것: {', '.join(accounts())})")
+    return name
+
+
+def set_account(sdir: Path, name: str) -> None:
+    (Path(sdir) / "account").write_text(_check_account(name) + "\n", encoding="utf-8")
+
+
+def clear_account(sdir: Path) -> None:
+    (Path(sdir) / "account").unlink(missing_ok=True)
+
+
+def set_default_account(name: str) -> None:
+    accounts_dir().mkdir(parents=True, exist_ok=True)
+    (accounts_dir() / "default").write_text(_check_account(name) + "\n", encoding="utf-8")
+
+
+def running_account(sdir: "Path | None") -> str:
+    """지금 떠 있는 세션이 실제로 쓰는 계정(띄울 때 적은 것). 기록이 없으면 a."""
+    return (_read_name(Path(sdir) / "account-running") if sdir else "") or ACCOUNT_DEFAULT
 
 
 def inbound_messages(transcript: Path, channel_id: str) -> list[str]:
@@ -3113,7 +3227,9 @@ def new_task_first_prompt(text: str, who: str = "형", channel: str = "", mid: s
 
 
 def chat_env(sdir: Path) -> dict[str, str]:
-    return dict(session_env(sdir), ENABLE_CLAUDEAI_MCP_SERVERS="false")   # 형의 claude.ai 커넥터 끔
+    env = dict(session_env(sdir), ENABLE_CLAUDEAI_MCP_SERVERS="false")   # 형의 claude.ai 커넥터 끔
+    env.pop(ACCOUNT_TOKEN_ENV, None)      # 채팅방·로비는 늘 a — /account 는 개발 방에만(형이 바꾸는 기본 계정이 비서 방까지 옮기지 않게)
+    return env
 
 
 TAKE_MAX_FILE = 20 * 1024 * 1024          # 첨부 한 개 — 열어보기 서버 상한(marina_view.MAX_BYTES)과 같다(넘으면 페이지에 못 싣는다, 테스트가 강제)

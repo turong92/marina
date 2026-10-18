@@ -94,6 +94,66 @@ def claude_usage() -> list[dict[str, Any]]:
 _usage_cache: dict[str, Any] = {"at": 0.0, "val": []}
 
 
+def _row_account(rec: dict[str, Any], alive: bool) -> str:
+    """방 줄 계정 — 떠 있으면 실제로 띄운 계정, 잠들었으면 다음에 깨어날 계정(토큰이 없으면 a 로 뜨니 a)."""
+    if rec.get("kind") in ms.CHAT_KINDS:
+        return ms.ACCOUNT_DEFAULT
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    if alive:
+        return ms.running_account(sd)
+    n = ms.account_of(sd)
+    return n if ms.account_token_file(n) is not None else ms.ACCOUNT_DEFAULT
+
+
+_TOPIC_ACCOUNT = re.compile(r"^🔑 [A-Z0-9]+ · ")
+
+
+def account_tick() -> None:
+    """방이 실제로 다른 계정으로 뜨면(account-running 이 account-shown 과 다르면) 채널에 한 줄 알리고
+    채널 주제 앞에 '🔑 B · ' 를 붙인다(A 는 표시 없음 — 기본이라 조용히). 실패하면 다음 tick 에 다시."""
+    dc = None
+    for rec in ms.load_sessions():
+        kind = str(rec.get("kind") or "")
+        if kind in ms.CHAT_KINDS or kind.endswith("lobby") or not rec.get("channelId"):
+            continue
+        sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+        if not sd.is_dir() or not ms.tmux_alive(str(rec.get("tmux") or "")):
+            continue
+        cur = ms.running_account(sd)
+        try:
+            prev = (sd / "account-shown").read_text(encoding="utf-8").strip() or ms.ACCOUNT_DEFAULT
+        except OSError:
+            prev = ms.ACCOUNT_DEFAULT
+        if cur == prev:
+            continue
+        ch = str(rec["channelId"])
+        try:
+            dc = dc or _dc(ms.load_config())
+            topic = str((dc._req("GET", f"/channels/{ch}") or {}).get("topic") or "")
+            rest = _TOPIC_ACCOUNT.sub("", topic)
+            dc._req("PATCH", f"/channels/{ch}", {"topic": ((f"🔑 {cur.upper()} · " if cur != ms.ACCOUNT_DEFAULT else "") + rest)[:1024]})
+            dc._req("POST", f"/channels/{ch}/messages", {"content": f"🔑 이 방은 이제 **{cur.upper()} 계정**으로 떠 있어",
+                                                          "allowed_mentions": {"parse": []}})
+        except ms.SessionError as exc:
+            _log(f"account_tick {ch}: {type(exc).__name__}")
+            continue
+        (sd / "account-shown").write_text(cur + "\n", encoding="utf-8")
+
+
+def account_usage() -> dict[str, list[dict[str, Any]]]:
+    """토큰 계정(a 말고)마다 5시간·주간 창 — 응답 헤더로 읽고 10분 캐시(marina_discord_usage.token_windows)."""
+    out: dict[str, list[dict[str, Any]]] = {}
+    try:
+        import marina_discord_usage
+        for n in ms.accounts()[1:]:
+            f = ms.account_token_file(n)
+            if f is not None:
+                out[n] = marina_discord_usage.token_windows(n, f, ms.accounts_dir())
+    except Exception as exc:
+        _log(f"account_usage failed: {type(exc).__name__}")
+    return out
+
+
 def _usage() -> list[dict[str, Any]]:
     now = time.time()
     if now - _usage_cache["at"] > USAGE_TTL:
@@ -383,7 +443,8 @@ def snapshot(full: bool = True) -> dict[str, Any]:
                      "ctx": _ctx_percent(rec) if alive and full else None,
                      "tasks": live_tasks(rec) if alive and full else [],
                      "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists(),
-                     "permission": alive and full and _pane_permission(str(rec.get("tmux") or ""))})
+                     "permission": alive and full and _pane_permission(str(rec.get("tmux") or "")),
+                     "account": _row_account(rec, alive)})
     if not full:
         # 뒤에서 도는 일(셸·팀 에이전트)도 '바쁨'으로 쳐서 #상태를 30초마다 — 끝나면 바로 보이게(입력 중 표시는 busy·도는 에이전트만)
         return {"sessions": rows, "anyBusy": any(r["busy"] or r["bg"] for r in rows)}
@@ -404,7 +465,7 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         stats = sys_stats()
     except Exception:
         stats = {}
-    return {**stats, "usage": use, "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
+    return {**stats, "usage": use, "accountUsage": account_usage(), "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
             "anyBusy": any(r["busy"] for r in rows)}
 
 
@@ -427,7 +488,8 @@ def _row(r: dict[str, Any], proj_w: int) -> str:
     ctx = f"{round(c)}%" if isinstance(c, (int, float)) else "-"
     proj = r["ref"].split("/", 1)[0]
     warn = " ⚠" if isinstance(c, (int, float)) and c >= 70 else ""
-    return f"`{ctx:>4}  {proj:<{proj_w}}` <#{r['channelId']}>{warn}"
+    acct = f" [{str(r['account']).upper()}]" if r.get("account") and r.get("account") != ms.ACCOUNT_DEFAULT else ""
+    return f"`{ctx:>4}  {proj:<{proj_w}}` <#{r['channelId']}>{acct}{warn}"
 
 
 VIEW_PREFIX = "marina-view:"
@@ -501,9 +563,18 @@ def _view_button(r: dict[str, Any]) -> dict[str, Any]:
 def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     """#상태 메시지(Components V2). 섹션: 작업 중(줄마다 정지 버튼) · 대기 · 잠듦(글을 쓰면 깨어남) · 꺼짐. 같으면 고쳐 쓰지 않는다.
     디스크·부하·시각은 꼬리말로 따로 — 매번 바뀌는 값이 비교를 흔들지 않게."""
-    use = [f"{w.get('label')} `{_bar(float(w.get('usedPercent') or 0))}` {round(float(w.get('usedPercent') or 0))}%"
-           for w in snap["usage"] if w.get("key") in ("fiveHour", "weekly")]
-    out: list[dict[str, Any]] = [_text("### 사용량\n" + ("  ·  ".join(use) or "알 수 없음"))]
+    def line(ws: list[dict[str, Any]], tag: str = "") -> str:
+        # 리셋 시각은 Discord 시간 표시(<t:…:R> — 보는 사람 언어로 'N시간 후', 저절로 줄어든다)
+        use = [f"{tag}{w.get('label')} `{_bar(float(w.get('usedPercent') or 0))}` {round(float(w.get('usedPercent') or 0))}%"
+               + (f" ↻ <t:{int(w['resetsAt'])}:R>" if isinstance(w.get("resetsAt"), (int, float)) and w["resetsAt"] > 0 else "")
+               for w in ws if w.get("key") in ("fiveHour", "weekly")]
+        return "  ·  ".join(use) or (tag + "알 수 없음")
+    others = snap.get("accountUsage") or {}
+    if others:      # 계정이 둘 이상이면 계정마다 한 줄(A = 키체인 로그인)
+        body = "\n".join([line(snap["usage"], "A ")] + [line(ws, f"{n.upper()} ") for n, ws in sorted(others.items())])
+    else:
+        body = line(snap["usage"])
+    out: list[dict[str, Any]] = [_text("### 사용량\n" + body)]
     rows = sorted(snap["sessions"], key=lambda r: (r["ref"].split("/", 1)[0], r["ref"]))
     proj_w = max([len(r["ref"].split("/", 1)[0]) for r in rows] + [4])
     rows = [dict(r, busy=True, emoji="❓") if r.get("asking") and not r["busy"] else r for r in rows]   # 답 기다리는 질문
@@ -720,8 +791,16 @@ def meter_tick(meters: dict[str, dict[str, Any]]) -> None:
     cfg = ms.load_config()
     dc = _dc(cfg)
     usage = {x.get("key"): x for x in claude_usage()}
+    others = account_usage()
+    plan = [(key, ("A " if others else "") + label) for key, label in METERS]      # 계정이 둘 이상이면 계정 이름을 붙인다
+    for n, ws in sorted(others.items()):
+        by = {x.get("key"): x for x in ws}
+        for key, label in METERS:
+            if key in by:
+                usage[f"{n}:{key}"] = by[key]
+            plan.append((f"{n}:{key}", f"{n.upper()} {label}"))
     saved = _load_state()
-    for pos, (key, label) in enumerate(METERS):
+    for pos, (key, label) in enumerate(plan):
         st = meters.setdefault(key, {})
         if not st:
             st.update(saved.get(key) or {})
@@ -1151,6 +1230,50 @@ def list_skills(rec: dict[str, Any], query: str = "") -> list[str]:
     return sorted(hits, key=lambda n: (not n.lower().startswith(q), n))[:25]
 
 
+def slash_commands() -> list[dict[str, Any]]:
+    """등록할 길드 명령 — /account 선택지는 지금 있는 계정(새 토큰을 넣으면 봇이 다시 뜰 때 반영)."""
+    return SLASH_COMMANDS + [{"name": "account", "description": "이 방 구독 계정 바꾸기(쉬는 순간 같은 대화로 다시 띄움)", "type": 1,
+                              "options": [{"type": 3, "name": "name", "description": "계정", "required": True,
+                                           "choices": [{"name": n.upper(), "value": n} for n in ms.accounts()]},
+                                          {"type": 3, "name": "args", "description": "어디에", "required": False,
+                                           "choices": [{"name": "이 방", "value": "room"},
+                                                       {"name": "이 프로젝트 전체(따로 안 정한 방이 다음에 뜰 때)", "value": "project"},
+                                                       {"name": "기본값(따로 안 정한 방이 다음에 뜰 때)", "value": "default"}]}]}]
+
+
+def _spawn_account_restart(ref: str) -> None:
+    """안전 재시작을 뒤에서 — 쉬고 뒤에서 도는 일이 없을 때 같은 대화로 다시 띄운다(marina session restart 와 같은 판정)."""
+    log = ms.marina_home() / "account-restart.log"
+    with open(log, "a") as fh:
+        subprocess.Popen([sys.executable, str(Path(ms.__file__).resolve()), "restart", ref],
+                         stdin=subprocess.DEVNULL, stdout=fh, stderr=fh, start_new_session=True)
+
+
+def account_cmd(rec: dict[str, Any], name: str, scope: str = "") -> str:
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    try:
+        if scope == "project":
+            ms.set_project_account(str(rec.get("project") or ""), name)
+            return (f"🔑 {rec.get('project')} 프로젝트 계정 = {name.upper()} — 따로 정하지 않은 방이 다음에 뜰 때부터"
+                    "(지금 떠 있는 방은 그대로, 바로 바꾸려면 그 방에서 /account)")
+        if scope == "default":
+            ms.set_default_account(name)
+            return f"🔑 기본 계정 = {name.upper()} — 따로 정하지 않은 방이 다음에 깨어날 때부터(지금 떠 있는 방은 그대로)"
+        ms.set_account(sd, name)
+    except ms.SessionError as exc:
+        return str(exc)
+    if not ms.tmux_alive(str(rec.get("tmux") or "")):
+        return f"🔑 이 방 계정 = {name.upper()} — 다음에 깨어날 때 {name.upper()} 로 떠"
+    if ms.running_account(sd) == name:
+        return f"🔑 이 방은 이미 {name.upper()} 로 떠 있어"
+    if restart_status():
+        return (f"🔑 이 방 계정 = {name.upper()} — 그런데 다른 재시작 대기가 돌고 있어 지금은 못 걸어. "
+                "그게 끝난 뒤 /account 를 한 번 더 쳐 줘(아니면 다음에 깨어날 때 바뀐다)")
+    _spawn_account_restart(f"{rec.get('project')}/{rec.get('task')}")
+    return (f"🔑 이 방 계정 = {name.upper()} — 지금 일이 끝나고 쉬면(서브에이전트·셸까지 끝나면) 같은 대화로 다시 띄울게. "
+            "바꾼 뒤 첫 턴은 캐시가 없어 문맥을 한 번 다시 읽어")
+
+
 def slash(channel: str, user: str, name: str, value: str = "", args: str = "", message: str = "") -> str:
     """Discord 슬래시 명령. 기본 명령은 쉬는 순간 입력창에 그대로, 스킬은 '[Discord 슬래시]' 를 붙여(Claude 가 Skill 도구로)."""
     rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
@@ -1158,6 +1281,10 @@ def slash(channel: str, user: str, name: str, value: str = "", args: str = "", m
         return "이 채널은 세션 명령을 안 받아"
     if not _allowed(rec, channel, user, _dc(ms.load_config())):
         return "쓸 권한이 없어"
+    if name == "account":
+        if args.strip() in ("default", "project") and str(user) not in owner_ids(ms.load_config()):
+            return "기본·프로젝트 계정은 형만 바꿀 수 있어"
+        return account_cmd(rec, value.strip(), args.strip())
     if not ms.tmux_alive(str(rec.get("tmux") or "")):
         return SLEEPING_TEXT
     if name == "stop":
@@ -2875,6 +3002,10 @@ class Loop:
                 self.live = agent_words_tick(self.words, now)
             except Exception as exc:
                 _log(f"agent_words failed: {exc!r}")
+            try:
+                account_tick()
+            except Exception as exc:
+                _log(f"account_tick failed: {type(exc).__name__}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
@@ -2993,7 +3124,7 @@ def main(argv: list[str]) -> int:
         print(json.dumps(list_skills(rec, a.query) if rec and rec.get("kind") not in ms.CHAT_KINDS else [], ensure_ascii=False))
         return 0
     if a.cmd == "commands":
-        print(json.dumps(SLASH_COMMANDS, ensure_ascii=False))
+        print(json.dumps(slash_commands(), ensure_ascii=False))
         return 0
     if a.cmd == "say":
         try:
