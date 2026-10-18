@@ -125,8 +125,9 @@ check("↻ <t:1792315200:R>" in top and top.count("↻") == 1, f"리셋 시각(�
 snap["accountUsage"] = {}
 top = json.dumps(mb.render(snap)[0], ensure_ascii=False)
 check("A 5시간" not in top and "5시간" in top, f"계정 하나면 예전 그대로: {top}")
-check("[B]" in mb._row({"ref": "proj/feat/a", "account": "b", "busy": False, "alive": True, "channelId": "1"}, 4)
-      and "[" not in mb._row({"ref": "proj/feat/a", "account": "a", "busy": False, "alive": True, "channelId": "1"}, 4), "방 줄: b 만 [B]")
+rb = mb._row({"ref": "proj/feat/a", "account": "b", "busy": False, "alive": True, "channelId": "1"}, 4)
+ra = mb._row({"ref": "proj/feat/a", "account": "a", "busy": False, "alive": True, "channelId": "1"}, 4)
+check("B  proj" in rb and "A  proj" in ra and rb.index("<#") == ra.index("<#"), f"방 줄: 모든 줄에 계정 칸(정렬 유지): {rb} / {ra}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

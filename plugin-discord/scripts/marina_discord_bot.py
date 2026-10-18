@@ -488,8 +488,9 @@ def _row(r: dict[str, Any], proj_w: int) -> str:
     ctx = f"{round(c)}%" if isinstance(c, (int, float)) else "-"
     proj = r["ref"].split("/", 1)[0]
     warn = " ⚠" if isinstance(c, (int, float)) and c >= 70 else ""
-    acct = f" [{str(r['account']).upper()}]" if r.get("account") and r.get("account") != ms.ACCOUNT_DEFAULT else ""
-    return f"`{ctx:>4}  {proj:<{proj_w}}` <#{r['channelId']}>{acct}{warn}"
+    # 계정이 둘 이상이면 모든 줄에 계정 칸(고정폭 안 — 세로 줄이 맞게)
+    acct = f"{str(r.get('account') or ms.ACCOUNT_DEFAULT).upper()}  " if len(ms.accounts()) > 1 else ""
+    return f"`{ctx:>4}  {acct}{proj:<{proj_w}}` <#{r['channelId']}>{warn}"
 
 
 VIEW_PREFIX = "marina-view:"
