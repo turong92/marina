@@ -988,7 +988,7 @@ def interrupt(channel: str, user: str, message: str) -> str:
         if not busy:
             return "지금 쉬고 있어"
         tr = _session_transcript(rec)
-        ids = ms.inbound_messages(tr, str(channel)) if tr else []
+        ids = ms.inbound_messages(tr, ms.room_chans(rec)) if tr else []
         mid = ids[-1] if ids else ""
         mark = sd / "interrupted"
         try:
@@ -1002,6 +1002,8 @@ def interrupt(channel: str, user: str, message: str) -> str:
         if sd.is_dir():
             mark.write_text(f"{mid} {time.time()}\n")
         # Esc 로 끝난 턴엔 Stop 훅이 안 돈다 — 턴 끝과 같은 정리(달아 둔 표시 전부 떼기·끝 표시 전진)를 여기서(리뷰 B-I2)
+        # 멈춤 표시를 달 채널 — 스레드 지시였으면 그 스레드(_clear_locked 가 장부를 비우기 전에 읽는다)
+        och = str((ms._activity_state(sd).get("chans") or {}).get(mid) or channel) if mid else str(channel)
         ms._clear_locked(rec, sd, dc, ids)
         clear_perms(sd, str(channel))                 # 기다리던 권한 요청 버튼도
         if (sd / "question.json").exists():          # 질문 중에 멈췄으면 그 질문 메시지도 정리
@@ -1009,7 +1011,7 @@ def interrupt(channel: str, user: str, message: str) -> str:
             marina_discord_ask.done(sd, str(channel), "멈춤")
         if mid:
             try:
-                dc.add_reaction(str(channel), mid, "⏹️")
+                dc.add_reaction(och, mid, "⏹️")
             except ms.SessionError:
                 pass
     finally:

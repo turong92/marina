@@ -3,6 +3,7 @@
 #  - 같은 지시면 같은 스레드에 이어 쓴다(상태 폴더 threads.json), 알림 없이(flags 4096), 멘션 알림 없음
 #  - 스레드 권한이 없으면 실패 대신 안내(채널에 edit 방식으로 하라고)
 #  - 개발·채팅 세션 모두 허용 목록에 있다
+# open_thread(name) — 사람과 한 주제를 이어 가는 스레드를 이름 붙여 만든다(진행 스레드와 별개, 머리 메시지 없음)
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/session_fixture.sh"
@@ -26,6 +27,8 @@ for ref in ("proj/feat/p", "chat/room"):
     rec = ms.find_session(ref)
     st = json.loads((Path(rec["stateDir"]) / "settings.json").read_text())
     check("mcp__marina__progress" in st["permissions"]["allow"], f"{ref}: progress 허용")
+    check(("mcp__marina__open_thread" in st["permissions"]["allow"]) == ref.startswith("chat/"),
+          f"{ref}: open_thread 는 대화방에만 허용")
 rec = ms.find_session("proj/feat/p")
 os.environ["DISCORD_STATE_DIR"] = rec["stateDir"]
 names = [t["name"] for t in ms._CHAT_TOOLS_MCP]
@@ -122,6 +125,48 @@ for _ in range(50):          # 훅은 떼어 낸 프로세스가 보낸다 — �
 time.sleep(0.5)
 typing = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{rec['channelId']}/typing"]
 check(len(typing) == 1, f"연달아 불러도 한 번(8초 간격): {len(typing)}")
+# open_thread — 이름 붙인 주제 스레드(머리 메시지 없음). 대화방 전용이고 progress 의 threads.json 과 섞이지 않는다
+check("open_thread" in names, f"도구 목록: {names}")
+try:
+    ms.chat_tool("open_thread", {"name": "개발방"}); check(False, "개발 세션은 거부")
+except ms.SessionError as exc:
+    check("대화방" in str(exc), f"개발 세션 거부 문구: {exc}")
+room = ms.find_session("chat/room")
+os.environ["DISCORD_STATE_DIR"] = room["stateDir"]
+rch = f"/channels/{room['channelId']}/threads"
+out = ms.chat_tool("open_thread", {"name": "  cellabo  패키지 "})
+mk = [x for x in log() if x["m"] == "POST" and x["p"] == rch]
+check(len(mk) == 1, f"채널에 스레드 하나: {mk}")
+check(mk and mk[0]["b"].get("name") == "cellabo 패키지", f"이름은 공백만 다듬어 그대로: {mk}")
+check(mk and mk[0]["b"].get("type") == 11, f"공개 스레드: {mk}")
+check(mk and mk[0]["b"].get("auto_archive_duration") == 10080, f"7일 열어 둔다(진행 스레드의 60분과 다름): {mk}")
+check(str(ms.load_config()["guildId"]) in out and "chat_id" in out, f"링크·쓰는 법 안내: {out}")
+check(not (Path(room["stateDir"]) / "threads.json").exists(),
+      "주제 스레드는 진행 스레드 장부(threads.json)를 만들지 않는다")
+threads = ms.room_threads(room["stateDir"])
+check([v.get("name") for v in threads.values()] == ["cellabo 패키지"], f"방 스레드 장부에 적힌다: {threads}")
+# 봇은 스레드를 지울 수 없다 — 같은 이름을 또 부르면 만들지 않고 그 id 를 돌려준다
+again = ms.chat_tool("open_thread", {"name": "cellabo 패키지"})
+check(len([x for x in log() if x["m"] == "POST" and x["p"] == rch]) == 1, "같은 이름이면 또 만들지 않는다")
+check(list(threads)[0] in again and "이미 있어" in again, f"있는 스레드를 돌려준다: {again}")
+for bad in ({}, {"name": "   "}, {"name": "a" * 91}, {"name": "@everyone"}, {"name": "a<b>c"}, {"name": "보\u200b이지\u200b않는"}):
+    try:
+        r = ms.chat_tool("open_thread", bad)
+        check(bad.get("name", "").startswith("보"), f"잘못된 이름 통과: {bad} → {r}")
+    except ms.SessionError:
+        pass
+posts = [x for x in log() if x["m"] == "POST" and x["p"] == rch]
+check(posts[-1]["b"].get("name") == "보이지않는", f"보이지 않는 문자는 지운다: {posts[-1]}")
+ms.chat_tool("open_thread", {"name": "두 줄\n이름"})
+last = [x for x in log() if x["m"] == "POST" and x["p"] == rch][-1]["b"].get("name")
+check(last == "두 줄 이름", f"줄바꿈은 공백으로: {last!r}")
+(fd / "no_threads").write_text("1")
+try:
+    ms.chat_tool("open_thread", {"name": "권한없음"}); check(False, "403 이면 실패해야")
+except ms.SessionError as exc:
+    check("권한" in str(exc), f"403 안내: {exc}")
+(fd / "no_threads").unlink()
+os.environ["DISCORD_STATE_DIR"] = rec["stateDir"]
 (fd / "no_threads").write_text("1")
 msg = ms.chat_tool("progress", {"message_id": "9003", "text": "x"})
 check("권한" in msg and "edit_message" in msg, f"권한 없을 때 안내: {msg}")

@@ -62,7 +62,10 @@ CHAT_RULES = (
     "- 답·질문·결과는 반드시 discord reply 도구로, 쉬운 말로 보낸다. 질문은 번호 선택지 텍스트로 묻는다.\n"
     "- 단 Discord 메시지로 들어온 지시가 아니면(앱·터미널에서 직접 들어온 말) 그 자리에서 답하고 방에는 아무것도 보내지 않는다 "
     "— 방 사람은 묻지도 않은 답을 받게 된다.\n"
-    "- 오래 걸리는 부탁은 단계마다 progress 도구(message_id = 부탁 메시지 ID)로 진행 상황을 남기고, 결과는 reply 로 보낸다.\n"
+    "- 스레드에서 들어온 말은 그 스레드에서만 답한다(reply 의 chat_id = 받은 글의 chat_id). 방 채널로 옮겨 적지 않는다. "
+    "한 주제를 길게 이어 갈 자리가 필요하면 open_thread 로 이름 붙인 스레드를 열어라.\n"
+    "- 오래 걸리는 부탁은 단계마다 progress 도구(message_id = 부탁 메시지 ID)로 진행 상황을 남기고, 결과는 reply 로 보낸다. "
+    "스레드에서 온 부탁은 progress 를 쓰지 않고 그 스레드에 한 줄 보낸다.\n"
     "- 글 위주 결과(리서치·후보 비교·목록)는 파일 대신 Discord 서식 메시지로 바로 답한다: 제목은 **굵게**, "
     "목록·인용 사용. Discord 는 표를 못 그리니 표 대신 항목별 카드(이름 줄 + 들여쓴 세부 줄)로 쓴다. "
     "길면 메시지를 나눠 보낸다.\n"
@@ -1054,6 +1057,83 @@ def remove_state_dir(path: Path) -> None:
 
 _CHANNEL_TAG = re.compile(r'<channel source=\\?"plugin:discord:discord\\?" chat_id=\\?"(\d+)\\?" message_id=\\?"([^"\\]+)')
 
+ROOM_THREADS = "room-threads.json"      # 이 방 채널 밑에 열린 스레드 id 들
+ROOM_THREADS_KEEP = 50                  # 이름 있는 것·없는 것 각각 이만큼(이름 있는 = open_thread 가 만든 주제 스레드)
+ROOM_THREAD_TOUCH_S = 300.0             # 글이 올 때 '마지막 활동' 갱신은 이 간격으로만(글마다 파일을 다시 쓰지 않게)
+
+
+def room_threads(sd: Any) -> dict[str, dict[str, Any]]:
+    """스레드 id → {name, at} — **마지막 활동이 늦은 것이 뒤**. Discord 스레드는 그 자체가 채널이라
+    거기서 온 글의 chat_id 는 방 채널과 다르다 — 이 장부가 없으면 훅·깨우기가 그 글을 '이 방 지시'로 못 본다."""
+    try:
+        d = json.loads((Path(str(sd)) / ROOM_THREADS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    rows = [(str(k), v) for k, v in d.items() if str(k).isdigit() and isinstance(v, dict)]
+    rows.sort(key=lambda kv: float(kv[1].get("at") or 0))      # 훑는 순서가 '발견순' 이면 매일 쓰는 방이 밀려난다(리뷰 I-A)
+    return dict(rows)
+
+
+def room_thread_ids(sd: Any) -> list[str]:
+    return list(room_threads(sd))
+
+
+def _trim_room_threads(d: dict[str, Any]) -> dict[str, Any]:
+    """이름 있는 것(주제 스레드 = 중복 생성을 막는 열쇠)과 없는 것(단순 라우팅)을 따로 센다 —
+    한 통에 넣으면 답글 50개에 'cellabo' 가 밀려나 지울 수 없는 중복 스레드가 생긴다(리뷰 I-A)."""
+    named = [kv for kv in d.items() if str((kv[1] or {}).get("name") or "")]
+    plain = [kv for kv in d.items() if not str((kv[1] or {}).get("name") or "")]
+    return dict(named[-ROOM_THREADS_KEEP:] + plain[-ROOM_THREADS_KEEP:])
+
+
+def remember_room_thread(sd: Any, tid: str, name: str = "") -> None:
+    """스레드를 방 장부에 적는다 — 만들 때(open_thread)와 글이 들어올 때(봇→wake·훅 입양) 둘 다.
+    쓰기 실패는 삼킨다 — 부르는 쪽(깨우기·도구)이 이것 때문에 죽으면 안 된다(리뷰 I-D·I-E)."""
+    if not str(tid).isdigit():
+        return
+    f = Path(str(sd)) / ROOM_THREADS
+    d: dict[str, Any] = dict(room_threads(sd))      # 걸러·정렬된 것 위에서 — raw 를 쓰면 dict 아닌 값에 터진다(리뷰 I-4)
+    cur = d.get(str(tid))
+    if cur is not None and not name and time.time() - float(cur.get("at") or 0) < ROOM_THREAD_TOUCH_S:
+        return                      # 방금 적은 스레드 — 글마다 파일을 다시 쓰지 않는다
+    d.pop(str(tid), None)
+    d[str(tid)] = {"name": name or str((cur or {}).get("name") or ""), "at": time.time()}
+    try:
+        _write_json(f, _trim_room_threads(d))
+    except OSError:
+        pass
+
+
+def forget_room_threads(sd: Any, tids: Any, keep_named: bool = True) -> list[str]:
+    """지워진 스레드를 장부에서 뺀다(한 번에 모아서) — 안 빼면 훑을 자리를 영구히 먹는다(리뷰 I-B·S-3).
+    `keep_named` 면 **이름 있는 주제 스레드는 남긴다**: 404 한 번으로 멱등성 열쇠를 버리면 다음 open_thread 가
+    지울 수 없는 중복 스레드를 만든다(리뷰 I-3). 주제 스레드의 생존 확인은 _open_thread 가 만들기 직전에 한다."""
+    d = room_threads(sd)
+    gone = [t for t in {str(x) for x in tids}
+            if t in d and not (keep_named and str((d[t] or {}).get("name") or ""))]
+    if not gone:
+        return []
+    for t in gone:
+        d.pop(t, None)
+    try:
+        _write_json(Path(str(sd)) / ROOM_THREADS, d)
+    except OSError:
+        return []
+    return gone
+
+
+def room_chans(rec: dict[str, Any]) -> set[str]:
+    """이 방으로 보는 채널들 = 방 채널 + 그 밑 스레드들."""
+    return {str(rec.get("channelId") or "")} | set(room_thread_ids(str(rec.get("stateDir") or "/nonexistent")))
+
+
+def _chans(channel: Any) -> set[str]:
+    """채널 하나(문자열)도, 여러 개(집합·목록)도 받는다."""
+    return {str(channel)} if isinstance(channel, str) else {str(c) for c in channel}
+
+
 
 SLASH_ALLOWED = ("/compact",)
 _SLASH_ARG = re.compile(r"/(model|effort) [A-Za-z0-9._\[\]-]{1,40}")   # 인자 한 단어 필수(없으면 선택 창이 떠 막힌다)
@@ -1069,9 +1149,11 @@ def slash_allowed(cmd: str) -> bool:
 _CHANNEL_MSG = re.compile(r'<channel source=\\?"plugin:discord:discord\\?" chat_id=\\?"(\d+)\\?" message_id=\\?"([^"\\]+)[^>]*>(.*?)</channel>', re.S)
 
 
-def slash_command(prompt: str, channel: str | None = None) -> "tuple[str, str] | None":
-    """Discord 로 온 메시지가 정확히 허용된 명령(/compact)이면 (메시지 ID, 명령). 글자로 와서 Claude 는 실행할 수 없다."""
-    hits = [m for m in _CHANNEL_MSG.finditer(prompt or "") if channel is None or m.group(1) == channel]
+def slash_command(prompt: str, channel: Any = None) -> "tuple[str, str] | None":
+    """Discord 로 온 메시지가 정확히 허용된 명령(/compact)이면 (메시지 ID, 명령). 글자로 와서 Claude 는 실행할 수 없다.
+    channel 은 하나(문자열)도, 방+스레드(집합)도 받는다."""
+    chans = None if channel is None else _chans(channel)
+    hits = [m for m in _CHANNEL_MSG.finditer(prompt or "") if chans is None or m.group(1) in chans]
     if not hits:
         return None
     body = hits[-1].group(3).strip()
@@ -1188,9 +1270,11 @@ def hook_reply_to(payload: dict[str, Any]) -> "dict[str, Any] | None":
     inp = payload.get("tool_input") or {}
     if not s or s.get("kind") in CHAT_KINDS or payload.get("tool_name") != _REPLY_TOOL or not isinstance(inp, dict):
         return None
-    if inp.get("reply_to") or str(inp.get("chat_id") or "") != str(s["channelId"]):
+    chat = str(inp.get("chat_id") or "")
+    if inp.get("reply_to") or chat not in room_chans(s):
         return None
-    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), str(s["channelId"]))
+    # 그 채널(스레드면 그 스레드)에서 온 마지막 지시로 — 방 채널 글을 스레드 답장에 달면 Discord 가 거절한다
+    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), chat)
     if not ids:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
@@ -1260,7 +1344,7 @@ def _spawn_suggest(tmux: str, ch: str, msg: str) -> None:
 PERM_WAIT = 300.0
 
 
-def _turn_from_terminal(transcript: Path, ch: str) -> bool:
+def _turn_from_terminal(transcript: Path, ch: Any) -> bool:
     """이번 턴을 연 입력이 터미널에서 직접 친 말인가(Discord 메시지·백그라운드 알림이 아님) — 그땐 터미널 권한 창이 맞다."""
     try:
         lines = transcript.read_bytes()[-1_000_000:].decode("utf-8", "replace").splitlines()
@@ -1279,7 +1363,8 @@ def _turn_from_terminal(transcript: Path, ch: str) -> bool:
         if not texts:
             continue                     # 도구 결과 — 더 위로
         t = "\n".join(texts)
-        return not any(m.group(1) == ch for m in _CHANNEL_TAG.finditer(t)) and "<task-notification>" not in t
+        chans = _chans(ch)
+        return not any(m.group(1) in chans for m in _CHANNEL_TAG.finditer(t)) and "<task-notification>" not in t
     return False
 
 
@@ -1293,7 +1378,7 @@ def hook_permission(payload: dict[str, Any], wait: float = PERM_WAIT, poll: floa
     if not s or s.get("kind") in CHAT_KINDS or tool in ("AskUserQuestion", "ExitPlanMode", ""):
         return None
     sd, ch = Path(str(s["stateDir"])), str(s["channelId"])
-    if _turn_from_terminal(Path(str(payload.get("transcript_path") or "/nonexistent")), ch):
+    if _turn_from_terminal(Path(str(payload.get("transcript_path") or "/nonexistent")), room_chans(s)):
         return None
     _, label, what = tool_activity(tool, payload.get("tool_input") or {})
     token = uuid.uuid4().hex[:12]
@@ -1410,11 +1495,12 @@ def unanswered(transcript: Path) -> bool:
 
 
 NUDGE_TEXT = ("[마리나] 방금 받은 Discord 메시지에 답장을 못 보내고 턴이 끝났어. "
-              "도구가 그때 아직 안 붙어 있었을 수 있어 — 다시 해 보고, 답은 Discord reply 로 보내 줘.")
+              "도구가 그때 아직 안 붙어 있었을 수 있어 — 다시 해 보고, 답은 Discord reply 로 보내 줘. "
+              "답할 글이 방 채널인지 스레드인지 헷갈리면 받은 글의 chat_id 를 확인하고 그 chat_id 로 보내.")
 NUDGE_TRIES = 3
 
 
-def unanswered_mid(transcript: Path, channel: str) -> str:
+def unanswered_mid(transcript: Path, channel: Any) -> str:
     """답장 없이 남은 마지막 Discord 지시의 message_id — 없으면 "".
     `unanswered()` 와 달리 **태그 없는 글로 초기화되지 않는다** — 마리나가 넣은 깨우기·브리핑이
     user 기록으로 끼어들어도 그 지시는 여전히 답을 못 받은 상태다(리뷰 I2: 그래서 재시도가 1회로 죽었다)."""
@@ -1422,7 +1508,8 @@ def unanswered_mid(transcript: Path, channel: str) -> str:
         lines = transcript.read_bytes()[-1_000_000:].decode("utf-8", "replace").splitlines()
     except OSError:
         return ""
-    pending = ""
+    pend: dict[str, str] = {}       # chat_id → 아직 답 없는 그 채널의 마지막 지시
+    chans = _chans(channel)
     for raw in lines:
         try:
             row = json.loads(raw)
@@ -1435,12 +1522,19 @@ def unanswered_mid(transcript: Path, channel: str) -> str:
             texts = [c] if isinstance(c, str) else [str(b.get("text") or "") for b in c or []
                                                     if isinstance(b, dict) and b.get("type") == "text"]
             for m in _CHANNEL_TAG.finditer("\n".join(texts)):
-                if m.group(1) == channel:
-                    pending = m.group(2)
+                if m.group(1) in chans:
+                    pend[m.group(1)] = m.group(2)
         elif row.get("type") == "assistant" and isinstance(c, list):
-            if any(isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == _REPLY_TOOL for b in c):
-                pending = ""
-    return pending
+            for b in c:
+                if not (isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == _REPLY_TOOL):
+                    continue
+                inp = b.get("input") if isinstance(b.get("input"), dict) else {}
+                cid = str((inp or {}).get("chat_id") or "")
+                if cid:
+                    pend.pop(cid, None)      # 답한 채널만 — 스레드에 답했다고 방의 미답이 지워지면 안 된다
+                else:
+                    pend.clear()
+    return list(pend.values())[-1] if pend else ""
 
 
 def nudge_unanswered(rec: dict[str, Any], transcript: "Path | None") -> bool:
@@ -1452,7 +1546,7 @@ def nudge_unanswered(rec: dict[str, Any], transcript: "Path | None") -> bool:
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))
     if rec.get("kind") not in CHAT_KINDS or not rec.get("tmux") or not transcript:
         return False
-    mid = unanswered_mid(transcript, str(rec.get("channelId") or ""))
+    mid = unanswered_mid(transcript, room_chans(rec))
     if not mid:
         return False
     try:
@@ -1619,7 +1713,7 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
                         ("reply", "react", "edit_message", "fetch_messages", "download_attachment")]
                      + (["mcp__marina__open_chat", "mcp__marina__list_chats"] if lobby
                         else ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__take_attachment",
-                              "mcp__marina__make_image", "mcp__marina__make_pdf"]),
+                              "mcp__marina__make_image", "mcp__marina__make_pdf", "mcp__marina__open_thread"]),
             # 다음 기동 때 실행될 수 있는 폴더 안 설정 파일은 못 쓰게(리뷰 I2). '//' = 절대 경로
             "deny": [f"Edit(/{real}/{f})" for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md")]}
         if not lobby:      # 로비는 방 도구를 안 받는다 — dev-lobby 의 chat_root(inbox)는 Discord 첨부라 외부 입력이 권한 목록에 닿으면 안 된다
@@ -2010,15 +2104,18 @@ def running_account(sdir: "Path | None") -> str:
     return (_read_name(Path(sdir) / "account-running") if sdir else "") or ACCOUNT_DEFAULT
 
 
-def inbound_messages(transcript: Path, channel_id: str) -> list[str]:
-    """세션 기록 끝 2MB 에서 Claude 가 **실제로 읽은** 이 채널 메시지 ID 들(순서대로, 중복 제거).
+def inbound_pairs(transcript: Path, channel_id: Any) -> list[tuple[str, str]]:
+    """(메시지 ID, 그 글이 온 chat_id) 쌍 — 스레드 글은 chat_id 가 방 채널이 아니라 그 스레드다.
+    반응을 그 글이 있는 채널에 달아야 하므로 짝으로 돌려준다. 그 밖은 inbound_messages 와 같다.
     읽은 것 = user 기록(턴을 연 메시지) · attachment queued_command(처리 중 끼어든 메시지).
     queue-operation(도착만 함, 아직 안 읽음)은 세지 않는다 — 안 읽은 메시지를 읽은 것으로 표시하지 않게(실측 2026-10-01)."""
     try:
         data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
     except OSError:
         return []
-    out: list[str] = []
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    chans = _chans(channel_id)
     for raw in data.splitlines():
         try:
             row = json.loads(raw)
@@ -2039,9 +2136,15 @@ def inbound_messages(transcript: Path, channel_id: str) -> list[str]:
                 texts.append(str(att.get("prompt") or ""))
         for text in texts:
             for m in _CHANNEL_TAG.finditer(text):
-                if m.group(1) == channel_id and m.group(2) not in out:
-                    out.append(m.group(2))
+                if m.group(1) in chans and m.group(2) not in seen:
+                    seen.add(m.group(2))
+                    out.append((m.group(2), m.group(1)))
     return out
+
+
+def inbound_messages(transcript: Path, channel_id: Any) -> list[str]:
+    """Claude 가 실제로 읽은 이 방 메시지 ID 들(순서대로, 중복 제거). 채널 하나도, 방+스레드 집합도 받는다."""
+    return [mid for mid, _ in inbound_pairs(transcript, channel_id)]
 
 _SID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -2488,7 +2591,7 @@ def hook_stop(payload: dict[str, Any]) -> None:
         return
     tr = Path(str(payload.get("transcript_path") or "/nonexistent"))
     dashboard_signal()
-    ids = inbound_messages(tr, str(s["channelId"]))
+    ids = inbound_messages(tr, room_chans(s))
     sd = Path(str(s.get("stateDir") or "/nonexistent"))
     cfg = load_config()
     dc = Discord(read_token(cfg))
@@ -2694,6 +2797,7 @@ def _mark(dc: "Discord", ch: str, st: dict[str, Any], mid: str, emoji: str) -> N
     except SessionError:
         return
     marked.setdefault(mid, []).append(emoji)
+    st.setdefault("chans", {})[mid] = str(ch)                 # 스레드 글이면 그 스레드 — 뗄 때 짐작하지 않게
     ever = st.setdefault("ever", {}).setdefault(mid, [])      # 턴 끝이 못 떼고 지나간 것도 다음 턴 끝이 치우게
     if emoji not in ever:
         ever.append(emoji)
@@ -2715,16 +2819,18 @@ def _unmark(dc: "Discord", ch: str, st: dict[str, Any], mid: str, emoji: str, ev
 
 
 def clear_marks(dc: "Discord", ch: str, st: dict[str, Any]) -> None:
-    """진행 표시를 뗀다 — 지금 달려 있다고 적힌 것(`marked`)뿐 아니라 **이 지시에 한 번이라도 달았던 것**(`ever`)까지.
+    """진행 표시를 뗀다(달았던 채널에서 — 스레드 글이면 그 스레드) — 지금 달려 있다고 적힌 것(`marked`)뿐 아니라 **이 지시에 한 번이라도 달았던 것**(`ever`)까지.
     턴 끝 훅이 떼기 전에 빠져나간 턴이 있으면 그 지시엔 표시가 남는데, 그 뒤엔 새 지시가 마지막이 되어
     아무도 옛 지시를 다시 보지 않는다(2026-10-17 #daeun 에 🛑·💬 가 남았다). `ever` 는 성공적으로 뗀 뒤에만
     비우므로 다음 턴 끝이 밀린 것까지 치운다. 이모지 이름으로 짐작하지 않으니 세션이 `react` 로 단 반응은 안 건드린다."""
     everything = st.get("ever") or {}
+    chans = st.get("chans") or {}
     for mid in list({**(st.get("marked") or {}), **everything}):
         for e in list(dict.fromkeys(list((st.get("marked") or {}).get(mid) or []) + list(everything.get(mid) or []))):
-            _unmark(dc, ch, st, mid, e, ever=True)
+            _unmark(dc, str(chans.get(mid) or ch), st, mid, e, ever=True)
     st["marked"] = {}
     st["ever"] = {}
+    st["chans"] = {}
     st.pop("emoji", None)
 
 
@@ -2735,6 +2841,32 @@ def _stopped_after(sd: Path, at: float) -> bool:
         return False
 
 
+_THREAD_TYPES = (10, 11, 12)        # 공지·공개·비공개 스레드
+ADOPT_PER_TURN = 1                  # 한 턴에 물어보는 모르는 채널 수 — 훅 예산(10초)을 지킨다
+
+
+def adopt_prompt_threads(rec: dict[str, Any], sd: Path, prompt: str, chans: set[str]) -> set[str]:
+    """넘겨받은 글에 모르는 chat_id 가 있으면 Discord 에 물어 **이 방 채널의 자식 스레드인 것만** 장부에 적는다.
+    사람이 방에서 직접 만든 스레드는 봇이 장부에 적기 전에 훅이 먼저 돌 수 있어 첫 글에 표시가 안 붙었다(리뷰 I-C).
+    태그의 chat_id 를 그냥 믿으면 안 된다 — 방 사람이 메시지 본문에 가짜 <channel …> 을 적어 넣으면
+    마리나가 엉뚱한 채널에 반응·'입력 중…' 을 쏘게 된다. 그래서 부모를 Discord 에 확인한다."""
+    ch = str(rec.get("channelId") or "")
+    # 가장 최근 태그부터 — 사전순으로 고르면 방 사람이 본문에 적은 가짜 chat_id("1","2")가 앞서서
+    # 진짜 새 스레드가 창 밖으로 밀린다(리뷰 I-2)
+    order = list(dict.fromkeys(m.group(1) for m in _CHANNEL_TAG.finditer(prompt or "")))
+    unknown = [c for c in reversed(order) if c not in chans][:ADOPT_PER_TURN]
+    got: set[str] = set()
+    for cid in unknown:
+        try:
+            info = Discord(read_token(load_config()))._req("GET", f"/channels/{cid}")
+        except SessionError:
+            continue
+        if str(info.get("parent_id") or "") == ch and int(info.get("type") or 0) in _THREAD_TYPES:
+            remember_room_thread(sd, cid)
+            got.add(str(cid))
+    return got
+
+
 def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, ch: str, min_gap: float) -> None:
     at = float(payload.get("_at") or time.time())
     if _stopped_after(sd, at):      # 턴이 끝나기 전에 떠난 훅이 늦게 도착했다 — 끝난 지시에 다시 달지 않는다(실사용)
@@ -2742,19 +2874,34 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
     prompt = payload.get("hook_event_name") == "UserPromptSubmit"
     # 앱(원격 조작)·터미널에서 직접 들어온 턴은 방에 아무 표시도 하지 않는다 — 그러지 않으면 아무도 말 안 걸었는데
     # '입력 중…' 이 뜨고, 지난 지시에 🛑·도구 이모지가 다시 달린다(방 사람에겐 비서가 혼자 움직이는 것으로 보인다)
-    if not prompt and _turn_from_terminal(Path(str(payload.get("transcript_path") or "/nonexistent")), ch):
+    if not prompt and _turn_from_terminal(Path(str(payload.get("transcript_path") or "/nonexistent")), room_chans(s)):
         return
     if prompt:
         clear_suggest(sd, ch, Discord(read_token(load_config())))    # 새 지시 — 지난 추천 버튼은 바로 뗀다
         if (sd / "question.json").exists():                          # 취소돼 PostToolUse 가 안 온 질문도 정리(리뷰 C2)
             import marina_discord_ask
             marina_discord_ask.done(sd, ch, "지나간 질문")
-    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), ch)
+    chans = room_chans(s)
+    tr = Path(str(payload.get("transcript_path") or "/nonexistent"))
+    pairs = inbound_pairs(tr, chans)
     if prompt:      # 막 받은 메시지는 아직 기록에 없을 수 있다 — 넘겨받은 글에서 직접 읽는다
-        tagged = [m.group(2) for m in _CHANNEL_TAG.finditer(str(payload.get("prompt") or "")) if m.group(1) == ch]
-        if not tagged or slash_command(str(payload.get("prompt") or ""), ch):
+        text = str(payload.get("prompt") or "")
+        def tags() -> list[tuple[str, str]]:
+            return [(m.group(2), m.group(1)) for m in _CHANNEL_TAG.finditer(text) if m.group(1) in chans]
+        tagged = tags()
+        if not tagged:
+            # 이 방 글이 하나도 없다 — 사람이 방에서 직접 만든 스레드의 첫 글일 수 있다(봇이 장부에 적기 전).
+            # 아는 글이 있을 때는 묻지 않는다: 훅 예산(10초)을 모르는 채널 확인에 뺏기면 그 턴 표시가 다 사라진다(리뷰 I-1)
+            new = adopt_prompt_threads(s, sd, text, chans)
+            if new:
+                chans |= new
+                pairs, tagged = inbound_pairs(tr, chans), tags()
+        if not tagged or slash_command(text, chans):
             return      # 터미널에서 친 말(옛 메시지에 표시 안 함, 리뷰 B-M3) · /compact(마리나가 🗜️ 로 따로 표시)
-        ids += [m for m in tagged if m not in ids]
+        known = {m for m, _ in pairs}
+        pairs += [t for t in dict.fromkeys(tagged) if t[0] not in known]
+    ids = [m for m, _ in pairs]
+    where = dict(pairs)            # 메시지 → 그 글이 있는 채널(스레드면 그 스레드). 반응은 거기에 단다
     mid = ids[-1] if ids else ""
     st = _activity_state(sd)
     stamp = sd / "activity-at"
@@ -2765,8 +2912,11 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
         pass
     stamp.touch()
     dc = Discord(read_token(load_config()))
+
+    def cof(m: str) -> str:      # 그 글이 있는 채널 — 이번 턴에 읽은 것, 없으면 지난번에 적어 둔 것
+        return str(where.get(m) or (st.get("chans") or {}).get(m) or ch)
     try:
-        dc._req("POST", f"/channels/{ch}/typing")
+        dc._req("POST", f"/channels/{cof(mid) if mid else ch}/typing")
     except SessionError:
         pass
     if not mid:
@@ -2781,21 +2931,21 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
     if st.get("mid") != mid:
         old = str(st.get("mid") or "")
         if old:        # 끼어든 새 지시 — 이전 지시는 '받음'(👀)으로 돌리고, 정지 버튼은 지금 지시에만(리뷰 3·B-I1)
-            _unmark(dc, ch, st, old, str(st.get("emoji") or ""))
-            _unmark(dc, ch, st, old, "🛑")
+            _unmark(dc, cof(old), st, old, str(st.get("emoji") or ""))
+            _unmark(dc, cof(old), st, old, "🛑")
             if old in fresh:
-                _mark(dc, ch, st, old, "👀")
+                _mark(dc, cof(old), st, old, "👀")
         for m in fresh[:-1]:                        # 한 번에 읽은 앞 메시지들도 '받음'
             if not (st.get("marked") or {}).get(m):
-                _mark(dc, ch, st, m, "👀")
+                _mark(dc, cof(m), st, m, "👀")
         st.update(mid=mid, since=time.time())
         st.pop("emoji", None)
         dashboard_signal()
-    _mark(dc, ch, st, mid, "🛑")                    # 누르면 봇이 이 세션에 Esc(봇 1단계). 턴 끝에 뗀다
+    _mark(dc, cof(mid), st, mid, "🛑")             # 누르면 봇이 이 세션에 Esc(봇 1단계). 턴 끝에 뗀다
     if st.get("emoji") != emoji:
-        _mark(dc, ch, st, mid, emoji)
+        _mark(dc, cof(mid), st, mid, emoji)
         for o in {str(st.get("emoji") or ""), "👀"} - {"", emoji}:
-            _unmark(dc, ch, st, mid, o)
+            _unmark(dc, cof(mid), st, mid, o)
         st["emoji"] = emoji
     try:
         tid = json.loads((sd / "threads.json").read_text(encoding="utf-8")).get(mid)
@@ -3505,6 +3655,13 @@ _CHAT_TOOLS_MCP = [
                      "properties": {"command": {"type": "string", "description": "입력해 둘 명령(한 줄, 개행 불가)"},
                                     "why": {"type": "string", "description": "왜 필요한지 한 줄(Discord 메시지에 표시)"}},
                      "required": ["command"]}},
+    {"name": "open_thread",
+     "description": "이 방에 이름 붙인 주제 스레드를 만든다(예: 'cellabo'). 한 주제를 길게 이어 갈 때 — 방이 섞이지 않는다. "
+                    "돌려받은 스레드 ID 를 reply 의 chat_id 로 쓰면 그 스레드에 글이 간다. 스레드에서 상대가 하는 말도 이 방으로 들어온다. "
+                    "중간 진행 보고(progress)와는 다른 것이다.",
+     "inputSchema": {"type": "object",
+                     "properties": {"name": {"type": "string", "description": "스레드 이름(90자 이내)"}},
+                     "required": ["name"]}},
     {"name": "progress",
      "description": "아직 안 끝난 작업의 중간 보고를 지시 메시지의 스레드에 남긴다(알림 없이). 같은 message_id 면 같은 스레드에 이어 쓴다. "
                     "최종 결과는 스레드가 아니라 채널에 reply 로 보낸다.",
@@ -3594,6 +3751,9 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
             if exc.code == 403:
                 return ("스레드를 만들 권한이 없어(봇 역할에 '공개 스레드 만들기' 필요) — "
                         "이번엔 채널에 진행 메시지 하나를 reply 로 보내고 edit_message 로 갱신해")
+            if exc.code == 404:
+                return ("그 메시지에는 스레드를 달 수 없어(스레드에서 온 글이거나 지워진 글) — "
+                        "진행 상황은 그 글이 온 곳에 reply 로 한 줄 보내면 돼")
             raise
         threads[mid] = tid
         tf.write_text(json.dumps(dict(list(threads.items())[-50:]), ensure_ascii=False) + "\n", encoding="utf-8")
@@ -3615,6 +3775,50 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
     except (OSError, ValueError, TypeError):
         pass
     return f"스레드에 남겼어(thread {tid}). 끝나면 결과는 채널에 reply 로."
+
+
+TOPIC_ARCHIVE_MINS = 10080      # 주제 스레드는 7일 열어 둔다(진행 스레드의 60분과 다르다 — 사람이 이어서 말하는 곳)
+
+
+def _open_thread(rec: dict[str, Any], args: dict[str, Any]) -> str:
+    """이 방에 이름 붙인 주제 스레드를 만든다. 진행 스레드(_progress)와 달리 머리 메시지가 없고 접히지 않는다."""
+    if rec.get("kind") not in CHAT_KINDS:
+        raise SessionError("open_thread 는 대화방 전용이야")
+    flat = re.sub(r"\s+", " ", str(args.get("name") or ""))      # 줄바꿈·탭은 공백으로(Cc 라서 먼저 지우면 단어가 붙는다)
+    name = "".join(c for c in flat if unicodedata.category(c) not in ("Cc", "Cf")).strip()
+    if not name:
+        raise SessionError("스레드 이름이 필요해")
+    if len(name) > 90:
+        raise SessionError("스레드 이름은 90자까지야")
+    if re.search(r"[<>@`]", name):                      # 줄바꿈은 위에서 이미 공백으로 바뀐다
+        raise SessionError("스레드 이름에 @ < > ` 는 쓸 수 없어")
+    cfg = load_config()
+    sd = str(rec.get("stateDir") or "/nonexistent")
+    link = f"https://discord.com/channels/{cfg['guildId']}/"
+    dc = Discord(read_token_file(token_file(cfg, str(rec.get("project") or ""))))   # 세션 자신이 부르는 도구 — 세션과 같은 봇
+    same = [t for t, v in room_threads(sd).items() if str(v.get("name") or "") == name]
+    if same:      # 봇은 스레드를 지울 수 없다(Manage Threads 없음) — 같은 이름을 또 만들면 영구히 쌓인다
+        try:      # 사람이 손으로 지웠을 수도 있다 — 그때만 장부에서 빼고 새로 만든다(리뷰 I-3·S7)
+            dc._req("GET", f"/channels/{same[-1]}")
+            return (f"'{name}' 스레드는 이미 있어 (id {same[-1]})\n{link}{same[-1]}\n"
+                    "reply 의 chat_id 를 이 id 로 보내면 돼.")
+        except DiscordError as exc:
+            if exc.code != 404:
+                raise
+            forget_room_threads(sd, same, keep_named=False)
+    try:
+        tid = str(dc._req("POST", f"/channels/{rec['channelId']}/threads",
+                          {"name": name, "type": 11, "auto_archive_duration": TOPIC_ARCHIVE_MINS})["id"])
+    except DiscordError as exc:
+        if exc.code == 403:
+            raise SessionError("스레드를 만들 권한이 없어 — 봇 역할에 '공개 스레드 만들기'가 필요해") from None
+        raise
+    remember_room_thread(sd, tid, name)      # 훅·깨우기가 이 스레드 글을 이 방 지시로 보게(쓰기 실패는 안 터진다 —
+                                             # 여기서 터지면 세션이 방금 만든 id 를 잃고 또 만든다, 리뷰 I-E)
+    return (f"'{name}' 스레드를 열었어 (id {tid})\n{link}{tid}\n"
+            "이 주제 글은 reply 의 chat_id 를 이 스레드 id 로 보내. 스레드에서 상대가 하는 말도 이 방 세션으로 들어온다. "
+            f"한 번 만든 스레드는 지울 수 없으니 같은 주제면 이 id 를 계속 써라. "
+            f"{TOPIC_ARCHIVE_MINS // 1440}일 동안 아무 말이 없으면 Discord 가 접는데, 그땐 방에 쓰거나 글을 보내면 다시 열린다.")
 
 
 def _ask_terminal(rec: dict[str, Any], args: dict[str, Any]) -> str:
@@ -3670,6 +3874,12 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         if not rec:
             raise SessionError("이 세션의 기록을 찾지 못했어")
         return _take_attachment(rec, args)
+    if name == "open_thread":
+        sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+        rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
+        if not rec or not rec.get("channelId"):
+            raise SessionError("이 세션의 기록을 찾지 못했어")
+        return _open_thread(rec, args)
     if name == "progress":
         sdir = os.environ.get("DISCORD_STATE_DIR") or ""
         rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
@@ -3725,7 +3935,9 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         big = [f for f in files if f.stat().st_size > 10 * 1024 * 1024]
         # 원래 대화로 바로 가는 링크 — 지금 답하고 있는 지시 메시지(답은 그 바로 아래에 달린다). 형 2026-10-06
         mid = str(_activity_state(Path(str(rec.get("stateDir") or "/nonexistent"))).get("mid") or "")
-        origin = (f" · [원문 보기](<https://discord.com/channels/{cfg['guildId']}/{rec.get('channelId')}/{mid}>)"
+        och = str((_activity_state(Path(str(rec.get("stateDir") or "/nonexistent"))).get("chans") or {}).get(mid)
+                  or rec.get("channelId") or "")      # 스레드 글이면 그 스레드 — 방 채널로 쓰면 죽은 링크가 된다
+        origin = (f" · [원문 보기](<https://discord.com/channels/{cfg['guildId']}/{och}/{mid}>)"
                   if re.fullmatch(r"\d{5,25}", mid) else "")
         try:
             marina_share.upload_message(Discord(read_token(cfg)).base, read_token(cfg), arch,

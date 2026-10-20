@@ -100,7 +100,7 @@ def seen_ids(rec: dict[str, Any]) -> set[str]:
 
 def base_id(rec: dict[str, Any]) -> str:
     tr = mb._session_transcript(rec)
-    ids = [i for i in (ms.inbound_messages(tr, str(rec["channelId"])) if tr else []) if i.isdigit()]
+    ids = [i for i in (ms.inbound_messages(tr, ms.room_chans(rec)) if tr else []) if i.isdigit()]
     cands = [int(i) for i in ids[-1:]]
     b = str(_woke(rec).get("baseId") or "")
     if b.isdigit():
@@ -121,7 +121,19 @@ def missed(rec: dict[str, Any], dc: Any, since: float, trigger: str = "", thread
     if allow is None:
         return [], 0
     ch, seen, base = str(rec["channelId"]), seen_ids(rec), base_id(rec)
-    rows = dc.get_messages(ch, base) if base else []
+    rows = [dict(r, channel_id=str(r.get("channel_id") or ch)) for r in dc.get_messages(ch, base)] if base else []
+    sd = str(rec.get("stateDir") or "/nonexistent")
+    if base:        # 스레드는 그 자체가 채널이라 부모 조회에 안 나온다 — 마지막 활동이 늦은 것부터 몇 개를 같이 본다
+        tids = ([str(thread)] if str(thread or "").isdigit() else [])
+        tids += [t for t in reversed(ms.room_thread_ids(sd)) if t not in tids][:WAKE_THREADS_MAX]
+        dead = []
+        for t in tids:
+            try:
+                rows += [dict(r, channel_id=str(r.get("channel_id") or t)) for r in dc.get_messages(t, base)]
+            except ms.SessionError as exc:
+                if isinstance(exc, ms.DiscordError) and exc.code == 404:
+                    dead.append(t)                    # 지워진 스레드가 훑을 자리를 영구히 먹지 않게(리뷰 I-B)
+        ms.forget_room_threads(sd, dead)              # 한 번에 — 이름 있는 주제 스레드는 남긴다(리뷰 I-3·S-3)
     if trigger and not any(str(r.get("id")) == str(trigger) for r in rows):
         one = dc.get_message(thread or ch, trigger)
         if one.get("author"):
@@ -164,6 +176,7 @@ def wake_prompt(msgs: list[dict[str, Any]], older: int = 0, unanswered: bool = F
             "fetch_messages 로 읽고 답해 줘. 답은 Discord reply 로.".format(len(msgs), last["id"], last.get("channel_id") or "")) + tail
 
 
+WAKE_THREADS_MAX = 3              # 깨울 때 같이 훑는 방 스레드 수(최근 것부터) — 조회 수를 묶는다
 WAKE_EMOJI = "⏰"
 WAKE_SETTLE_S = 45.0           # 깨운 뒤 이만큼 지나 한 번 본다(플러그인이 접속할 시간, 스펙 §10-6)
 WAKE_LATE_AGE_S = 15.0         # 이보다 갓 온 글은 플러그인이 아직 받을 수 있다
@@ -192,6 +205,8 @@ def wake(channel: str, user: str = "", message: str = "", thread: str = "", sinc
     rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
     if not rec:
         return "ignored:unknown"
+    if str(thread or "").isdigit():      # 켜져 있어도(= 아래에서 alive 로 빠져도) 적는다 — 훅이 이 글을 이 방 지시로 보게
+        ms.remember_room_thread(str(rec.get("stateDir") or "/nonexistent"), str(thread))
     try:
         cfg = ms.load_config()
     except ms.SessionError:
@@ -326,7 +341,8 @@ def say(ref: str, message: str, source: str = "say") -> str:
 
 
 def wake_settle(channel: str, started: float, wait: bool = True) -> str:
-    """깨어나는 동안(첫 지시를 모은 뒤 ~ 플러그인 접속 전) 온 글은 아무도 못 받는다 — 한 번 보고, 있으면 고정 문구로 읽게 한다."""
+    """깨어나는 동안(첫 지시를 모은 뒤 ~ 플러그인 접속 전) 온 글은 아무도 못 받는다 — 한 번 보고, 있으면 고정 문구로 읽게 한다.
+    missed() 가 방 스레드까지 훑으므로 스레드에 연달아 쓴 글도 여기서 잡힌다."""
     if wait:
         time.sleep(max(0.0, float(started) + WAKE_SETTLE_S - time.time()))
     rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)

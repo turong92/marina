@@ -66,9 +66,14 @@ class H(BaseHTTPRequestHandler):
             hit = next((m for m in seeded.get(p[1], []) if m["id"] == p[3]), None)
             self._send(200, hit or {"id": p[3]}); return
         if len(p) == 2 and p[0] == "channels":
+            cf = state / "channels.json"            # {채널ID: {...}} — 스레드의 parent_id 를 테스트가 심는다
+            try:
+                seeded_ch = json.loads(cf.read_text())
+            except (OSError, ValueError):
+                seeded_ch = {}
             with lock:
-                ch = channels.get(p[1])
-            self._send(200, ch) if ch else self._send(404, {"message": "Unknown Channel"}); return
+                ch = seeded_ch.get(p[1]) or channels.get(p[1])
+            self._send(200, dict(ch)) if ch else self._send(404, {"message": "Unknown Channel"}); return
         if p == ["users", "@me"]:
             self._send(200, {"id": "BOT1", "bot": True}); return
         if len(p) == 3 and p[0] == "guilds" and p[2] == "roles":
@@ -116,6 +121,14 @@ class H(BaseHTTPRequestHandler):
                     self._send(400, {"message": "A thread has already been created for this message", "code": 160004}); return
                 next_id[0] += 1
                 ch = {"id": str(next_id[0]), "name": body.get("name"), "type": 11, "parent_id": p[1], "from_msg": p[3]}
+                channels[ch["id"]] = ch
+            self._send(201, ch); return
+        if len(p) == 3 and p[0] == "channels" and p[2] == "threads":      # 머리 메시지 없는 주제 스레드(open_thread)
+            if (state / "no_threads").exists():
+                self._send(403, {"message": "Missing Permissions"}); return
+            with lock:
+                next_id[0] += 1
+                ch = {"id": str(next_id[0]), "name": body.get("name"), "type": body.get("type", 11), "parent_id": p[1]}
                 channels[ch["id"]] = ch
             self._send(201, ch); return
         if len(p) == 3 and p[0] == "channels" and p[2] == "typing":
