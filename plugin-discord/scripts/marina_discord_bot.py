@@ -2877,7 +2877,8 @@ def _open_new_task(project: str, text: str, name: str, dc: ms.Discord, codex: bo
 
     slug = ms.unique_slug(project, ms.suggest_slug(text))
     with ms.launch_env_scope(None):        # 새 세션도 사람의 환경(로그인 셸)으로 — 봇의 짧은 PATH 로 뜨지 않게
-        r = ms.cmd_new(project, slug, ms.extract_base(project, text), start=False, title=ms.task_title(text), first=first, codex=codex)
+        extra = {"codex": True} if codex else {}     # 클로드 경로는 예전 호출 그대로
+        r = ms.cmd_new(project, slug, ms.extract_base(project, text), start=False, title=ms.task_title(text), first=first, **extra)
     return f"열었어: <#{r['channelId']}>"
 
 
