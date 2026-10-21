@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # 분리 D: marina-discord 는 marina 강제 자동 업데이트 대상이 아니다 → discord 데몬이 스스로(형 결정: discord 도 자동)
 #  - 1시간마다, 설치본으로 돌 때만. 깔기 전에 새 코드가 데몬 파이썬으로 import 되는지 검사 — 실패한 버전은 다시 안 깐다
+#  - 단 '파이썬을 못 띄웠다' 같은 환경 탓 실패는 영구 거부가 아니다(2026-10-19: homebrew 가 python 을 바꿔 깔던
+#    순간 검사가 실패해 그 버전이 사흘간 skip:rejected 로 묻혔다)
 set -euo pipefail
 . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)/lib/harness.sh"
 PYTHONPATH="$DSCRIPTS" python3 - "$MARINA_HOME" <<'PY'
@@ -25,6 +27,17 @@ check(["plugin", "update", "marina-discord@marina-dev"] not in runs, "거절한 
 runs.clear()
 check(ms.self_update_tick(1000.0 + 7400, installed=True, run=run, preflight=ok, new_sha=lambda: "s3") == "skip:rejected" and \
       ["plugin", "update", "marina-discord@marina-dev"] not in runs, "한 번 거절한 버전은 다시 시도 안 함")
+# 환경 탓 실패 — 거부 목록에 넣지 않고 다음 판에 다시 해 본다
+runs.clear()
+envfail = lambda d: (False, ms.PREFLIGHT_ENV + "[Errno 2] No such file or directory: 'python3.14'")
+check(ms.self_update_tick(1000.0 + 11000, installed=True, run=run, preflight=envfail, new_sha=lambda: "s4") == "failed:preflight-env",
+      "환경 탓이면 rejected 가 아니다")
+check(["plugin", "update", "marina-discord@marina-dev"] not in runs, "그 판엔 설치하지 않는다")
+st = json.loads((Path(sys.argv[1]) / "discord-update.json").read_text())
+check("s4" not in (st.get("rejected") or []), f"거부 목록에 넣지 않는다: {st}")
+runs.clear()
+check(ms.self_update_tick(1000.0 + 15000, installed=True, run=run, preflight=ok, new_sha=lambda: "s4") == "updated" and \
+      ["plugin", "update", "marina-discord@marina-dev"] in runs, "다음 판에 같은 버전을 다시 깐다")
 import os
 os.environ["MARINA_AUTO_UPDATE"] = "0"
 check(ms.self_update_tick(1000.0 + 20000, installed=True, run=run, preflight=ok, new_sha=lambda: "s9") == "off", "MARINA_AUTO_UPDATE=0 이면 끔")

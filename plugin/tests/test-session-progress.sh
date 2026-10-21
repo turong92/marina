@@ -134,6 +134,10 @@ except ms.SessionError as exc:
 room = ms.find_session("chat/room")
 os.environ["DISCORD_STATE_DIR"] = room["stateDir"]
 rch = f"/channels/{room['channelId']}/threads"
+ap = Path(room["stateDir"]) / "access.json"      # 방 사람(채널 플러그인이 쓰는 꼴) — 스레드에 넣어 줄 대상
+acc = json.loads(ap.read_text())
+acc["groups"][str(room["channelId"])]["allowFrom"] = ["111", "222"]
+ap.write_text(json.dumps(acc, ensure_ascii=False))
 out = ms.chat_tool("open_thread", {"name": "  cellabo  패키지 "})
 mk = [x for x in log() if x["m"] == "POST" and x["p"] == rch]
 check(len(mk) == 1, f"채널에 스레드 하나: {mk}")
@@ -141,14 +145,41 @@ check(mk and mk[0]["b"].get("name") == "cellabo 패키지", f"이름은 공백�
 check(mk and mk[0]["b"].get("type") == 11, f"공개 스레드: {mk}")
 check(mk and mk[0]["b"].get("auto_archive_duration") == 10080, f"7일 열어 둔다(진행 스레드의 60분과 다름): {mk}")
 check(str(ms.load_config()["guildId"]) in out and "chat_id" in out, f"링크·쓰는 법 안내: {out}")
+tid_new = list(ms.room_threads(room["stateDir"]))[-1]      # 방금 만든 스레드
 check(not (Path(room["stateDir"]) / "threads.json").exists(),
       "주제 스레드는 진행 스레드 장부(threads.json)를 만들지 않는다")
+# 디스코드 스레드는 들어가 있는 사람 사이드바에만 뜬다 — 방 사람을 넣어 준다
+joined = [x["p"] for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]]
+check(joined and all(p.startswith(f"/channels/{tid_new}/thread-members/") for p in joined),
+      f"만든 스레드에 방 사람을 넣는다: {joined}")
+check([p.rsplit("/", 1)[-1] for p in joined] == ms.room_people(room["stateDir"], room["channelId"]) == ["111", "222"],
+      f"넣는 사람 = 이 채널 허용 목록: {joined}")
+check(f"{len(joined)}명" in out, f"몇 명 들어갔는지 알려 준다: {out}")
 threads = ms.room_threads(room["stateDir"])
 check([v.get("name") for v in threads.values()] == ["cellabo 패키지"], f"방 스레드 장부에 적힌다: {threads}")
 # 봇은 스레드를 지울 수 없다 — 같은 이름을 또 부르면 만들지 않고 그 id 를 돌려준다
+n = len([x for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]])
 again = ms.chat_tool("open_thread", {"name": "cellabo 패키지"})
 check(len([x for x in log() if x["m"] == "POST" and x["p"] == rch]) == 1, "같은 이름이면 또 만들지 않는다")
 check(list(threads)[0] in again and "이미 있어" in again, f"있는 스레드를 돌려준다: {again}")
+# 먼저 만들어 둔 스레드도 멤버를 채운다 — 안 그러면 사이드바에 안 뜨는 걸 고칠 길이 없다(리뷰 I-1)
+redo = [x["p"] for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]][n:]
+check(len(redo) == 2 and all(f"/channels/{tid_new}/thread-members/" in p for p in redo),
+      f"'이미 있어' 경로도 멤버를 다시 넣는다: {redo}")
+check("명이 들어가 있어" in again, f"몇 명 들어가 있는지 알려 준다: {again}")
+# 넣어야 할 사람이 있는데 전부 실패하면 조용히 넘기지 않는다
+(fd / "no_join").write_text("1")
+fail_out = ms.chat_tool("open_thread", {"name": "cellabo 패키지"})
+check("넣지 못했어" in fail_out and "스레드 목록" in fail_out, f"못 넣었으면 알려 준다: {fail_out}")
+(fd / "no_join").unlink()
+# 허용 목록이 비면(= 채널을 보는 모두) 아무도 안 넣고, 그래도 어떻게 열지 알려 준다
+acc["groups"][str(room["channelId"])]["allowFrom"] = []
+ap.write_text(json.dumps(acc, ensure_ascii=False))
+check(ms.room_people(room["stateDir"], room["channelId"]) == [], "빈 허용 목록이면 넣을 사람을 모른다")
+none_out = ms.chat_tool("open_thread", {"name": "cellabo 패키지"})
+check("스레드 목록" in none_out and "명이 들어가" not in none_out, f"그래도 여는 법을 알려 준다: {none_out}")
+acc["groups"][str(room["channelId"])]["allowFrom"] = ["111", "222"]
+ap.write_text(json.dumps(acc, ensure_ascii=False))
 for bad in ({}, {"name": "   "}, {"name": "a" * 91}, {"name": "@everyone"}, {"name": "a<b>c"}, {"name": "보\u200b이지\u200b않는"}):
     try:
         r = ms.chat_tool("open_thread", bad)

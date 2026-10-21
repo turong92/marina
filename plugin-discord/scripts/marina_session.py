@@ -1124,6 +1124,24 @@ def forget_room_threads(sd: Any, tids: Any, keep_named: bool = True) -> list[str
     return gone
 
 
+ROOM_PEOPLE_MAX = 5                 # 스레드에 넣어 줄 사람 수 — 한 명마다 호출 하나라 묶는다
+
+
+def room_people(sd: Any, channel: str) -> list[str]:
+    """이 채널 글을 받도록 허용된 사람들 — 채널 플러그인의 access.json `groups[이 채널].allowFrom`.
+    `marina_discord_wake.allow_list()` 와 같은 자리를 같은 규칙으로 읽는다(리뷰 I-2: 모든 group 을 긁으면
+    같은 프로젝트의 다른 방 사람까지 들어간다). 이 값은 discord.json 의 프로젝트 `allow` 사본이고
+    채널을 **볼 수 있는지**는 역할이 정하므로, 역할이 없는 사람은 넣어도 실패한다.
+    빈 목록이면 '채널을 보는 모두' 라서 명단을 알 수 없다 — 추측하지 않고 빈 목록을 돌려준다."""
+    try:
+        g = json.loads((Path(str(sd)) / "access.json").read_text(encoding="utf-8"))["groups"][str(channel)]
+    except (OSError, ValueError, KeyError, TypeError):
+        return []
+    if not isinstance(g, dict):
+        return []
+    return list(dict.fromkeys(str(a) for a in (g.get("allowFrom") or []) if str(a).isdigit()))[:ROOM_PEOPLE_MAX]
+
+
 def room_chans(rec: dict[str, Any]) -> set[str]:
     """이 방으로 보는 채널들 = 방 채널 + 그 밑 스레드들."""
     return {str(rec.get("channelId") or "")} | set(room_thread_ids(str(rec.get("stateDir") or "/nonexistent")))
@@ -2406,16 +2424,24 @@ def _run_claude(argv: list[str]) -> tuple[int, str]:
         return 1, str(exc)
 
 
+PREFLIGHT_ENV = "env: "      # 이 말머리가 붙은 실패는 환경 탓 — 그 버전을 영구 거부하지 않는다
+                             # (본체의 marina_selfupdate.UNAVAILABLE 과 같은 장치. 플러그인 경계 때문에
+                             #  import 하지 않고 따로 뒀다 — 셋째가 생기지 않게 둘을 같이 볼 것)
+
+
 def _preflight(scripts: Path) -> tuple[bool, str]:
-    """새 코드가 데몬 파이썬(sys.executable)으로 import 되는지 — 격리 홈에서. 깨진 버전을 깔지 않는다(3.9 사고 교훈)."""
+    """새 코드가 데몬 파이썬(sys.executable)으로 import 되는지 — 격리 홈에서. 깨진 버전을 깔지 않는다(3.9 사고 교훈).
+    단 **파이썬 자체를 못 띄운 것은 코드 탓이 아니다** — homebrew 가 python 을 바꿔 깔던 순간
+    sys.executable 이 없어 이 검사가 실패했고, 그 버전이 영구 거부 목록에 박혀 사흘간 아무것도 안 깔렸다
+    (2026-10-19, 계정 기능 8bbfa52). 그런 실패는 PREFLIGHT_ENV 를 붙여 다음 판에 다시 해 보게 한다."""
     import tempfile
     code = "import sys; sys.path.insert(0, sys.argv[1])\n" + "".join(f"import {m}\n" for m in _PREFLIGHT_MODULES)
     with tempfile.TemporaryDirectory() as tmp:
         try:
             r = subprocess.run([sys.executable, "-c", code, str(scripts)], capture_output=True, text=True, timeout=60,
                                env={"HOME": tmp, "MARINA_HOME": tmp, "PATH": "/usr/bin:/bin"})
-        except (OSError, subprocess.SubprocessError) as exc:
-            return False, str(exc)
+        except Exception as exc:                        # 형제(marina_selfupdate._preflight_one)와 같은 범위 —
+            return False, PREFLIGHT_ENV + str(exc)      # 파이썬을 못 띄웠다·시간이 지났다 = 코드 문제가 아니다
     return r.returncode == 0, (r.stderr or "")[-400:]
 
 
@@ -2480,9 +2506,12 @@ def _self_update_locked(st: dict[str, Any], sf: Path, now: float, run, preflight
     else:
         ok, why = preflight(_marketplace_scripts())
         if not ok:
-            st["rejected"] = ((st.get("rejected") or []) + [sha])[-20:]
+            if why.startswith(PREFLIGHT_ENV):           # 환경 탓이면 거부 목록에 넣지 않는다 — 다음 판에 다시
+                out, why = "failed:preflight-env", why[len(PREFLIGHT_ENV):]
+            else:
+                st["rejected"] = ((st.get("rejected") or []) + [sha])[-20:]
+                out = "rejected"
             st["lastError"] = why
-            out = "rejected"
         else:
             rc, msg = run(["claude", "plugin", "update", _DISCORD_PLUGIN])
             if rc != 0:
@@ -3780,6 +3809,27 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
 TOPIC_ARCHIVE_MINS = 10080      # 주제 스레드는 7일 열어 둔다(진행 스레드의 60분과 다르다 — 사람이 이어서 말하는 곳)
 
 
+def _join_thread(dc: "Discord", sd: Any, channel: str, tid: str) -> str:
+    """방 사람을 스레드에 넣고 안내 한 줄을 돌려준다. Discord 스레드는 **들어가 있는 사람의** 사이드바에만
+    뜬다 — 넣어 주지 않으면 방 사람이 채널 옆 스레드 목록을 뒤져야 찾는다(형 2026-10-21: "왜 왼쪽 채널 밑에
+    안 나와?"). `PUT …/thread-members/{uid}` 는 멱등이라 이미 있는 스레드에 다시 불러도 안전하다
+    (리뷰 I-1: 그래서 '이미 있어' 경로도 이걸 부른다 — 안 그러면 먼저 만든 스레드는 복구할 길이 없다)."""
+    people = room_people(sd, channel)
+    joined = 0
+    for uid in people:
+        try:
+            dc._req("PUT", f"/channels/{tid}/thread-members/{uid}")
+            joined += 1
+        except SessionError:
+            pass                    # 역할이 없어 채널을 못 보는 사람 등 — 개별 실패는 넘어간다
+    if joined:
+        return f"방 사람 {joined}명이 들어가 있어(사이드바에 보인다). "
+    if people:
+        return ("방 사람을 스레드에 넣지 못했어 — 사이드바엔 안 보일 수 있으니 "
+                "채널 이름 옆 스레드 목록에서 열라고 알려 줘. ")
+    return "사이드바엔 안 보일 수 있어 — 채널 이름 옆 스레드 목록에서 열라고 알려 줘. "
+
+
 def _open_thread(rec: dict[str, Any], args: dict[str, Any]) -> str:
     """이 방에 이름 붙인 주제 스레드를 만든다. 진행 스레드(_progress)와 달리 머리 메시지가 없고 접히지 않는다."""
     if rec.get("kind") not in CHAT_KINDS:
@@ -3800,8 +3850,9 @@ def _open_thread(rec: dict[str, Any], args: dict[str, Any]) -> str:
     if same:      # 봇은 스레드를 지울 수 없다(Manage Threads 없음) — 같은 이름을 또 만들면 영구히 쌓인다
         try:      # 사람이 손으로 지웠을 수도 있다 — 그때만 장부에서 빼고 새로 만든다(리뷰 I-3·S7)
             dc._req("GET", f"/channels/{same[-1]}")
+            note = _join_thread(dc, sd, str(rec["channelId"]), same[-1])   # 먼저 만든 스레드도 멤버를 채운다
             return (f"'{name}' 스레드는 이미 있어 (id {same[-1]})\n{link}{same[-1]}\n"
-                    "reply 의 chat_id 를 이 id 로 보내면 돼.")
+                    + note + "reply 의 chat_id 를 이 id 로 보내면 돼.")
         except DiscordError as exc:
             if exc.code != 404:
                 raise
@@ -3815,9 +3866,10 @@ def _open_thread(rec: dict[str, Any], args: dict[str, Any]) -> str:
         raise
     remember_room_thread(sd, tid, name)      # 훅·깨우기가 이 스레드 글을 이 방 지시로 보게(쓰기 실패는 안 터진다 —
                                              # 여기서 터지면 세션이 방금 만든 id 를 잃고 또 만든다, 리뷰 I-E)
+    note = _join_thread(dc, sd, str(rec["channelId"]), tid)
     return (f"'{name}' 스레드를 열었어 (id {tid})\n{link}{tid}\n"
             "이 주제 글은 reply 의 chat_id 를 이 스레드 id 로 보내. 스레드에서 상대가 하는 말도 이 방 세션으로 들어온다. "
-            f"한 번 만든 스레드는 지울 수 없으니 같은 주제면 이 id 를 계속 써라. "
+            + note + "한 번 만든 스레드는 지울 수 없으니 같은 주제면 이 id 를 계속 써라. "
             f"{TOPIC_ARCHIVE_MINS // 1440}일 동안 아무 말이 없으면 Discord 가 접는데, 그땐 방에 쓰거나 글을 보내면 다시 열린다.")
 
 

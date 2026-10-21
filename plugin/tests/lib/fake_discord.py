@@ -182,6 +182,8 @@ class H(BaseHTTPRequestHandler):
         gone = (state / "gone").read_text().split() if (state / "gone").exists() else []
         if any(f"/messages/{g}/" in self.path for g in gone):
             self._send(404, {"message": "Unknown Message"}); return   # 사용자가 지운 메시지
+        if "/thread-members/" in self.path and (state / "no_join").exists():
+            self._send(403, {"message": "Missing Access"}); return    # 역할이 없어 채널을 못 보는 사람
         self._send(204)
 
 srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
