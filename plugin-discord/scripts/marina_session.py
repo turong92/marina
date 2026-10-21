@@ -4011,8 +4011,20 @@ def _dev_preview_dir(rec: dict[str, Any]) -> Path:
     return marina_home() / "share-previews" / f"{rec.get('project')}-{rec.get('task')}"
 
 
+def _codex_tool_names() -> "frozenset[str]":
+    import marina_codex
+    return marina_codex.DISCORD_TOOL_NAMES
+
+
 def chat_tool(name: str, args: dict[str, Any]) -> str:
     """채팅·개발 세션 MCP 도구. 실패는 SessionError."""
+    if name in _codex_tool_names():
+        sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+        rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
+        if not is_codex(rec):
+            raise SessionError(f"없는 도구: {name}")
+        import marina_codex
+        return marina_codex.discord_tool(rec, name, args)
     if name == "ask_terminal":
         sdir = os.environ.get("DISCORD_STATE_DIR") or ""
         rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
@@ -4108,7 +4120,11 @@ def mcp_lobby(stdin: Any = None, stdout: Any = None) -> None:
 def chat_tools_for(rec: "dict[str, Any] | None") -> list[dict[str, Any]]:
     """mcp-chat 의 도구 목록 — take_attachment·make_image·make_pdf 는 채팅방에만(개발 세션은 Bash 가 있다)."""
     chat = bool(rec) and (rec or {}).get("kind") == "chat"
-    return [t for t in _CHAT_TOOLS_MCP if chat or t["name"] not in ("take_attachment", "make_image", "make_pdf")]
+    tools = [t for t in _CHAT_TOOLS_MCP if chat or t["name"] not in ("take_attachment", "make_image", "make_pdf")]
+    if is_codex(rec):          # 코덱스 방엔 공식 Discord 플러그인이 없다 — 답·반응·고치기·이력·첨부 받기를 이 서버가 맡는다
+        import marina_codex
+        tools += marina_codex.DISCORD_TOOLS
+    return tools
 
 
 def mcp_chat(stdin: Any = None, stdout: Any = None) -> None:

@@ -45,6 +45,15 @@ class H(BaseHTTPRequestHandler):
 
     def do_GET(self):
         log({"m": "GET", "p": self.path})
+        p0 = self._parts()
+        if len(p0) == 2 and p0[0] == "attachments":      # CDN 모사 — 인증 없음. <dir>/attachments/<이름> 을 그대로 돌려준다
+            f = state / "attachments" / p0[1]
+            data = f.read_bytes() if f.is_file() else b""
+            self.send_response(200 if f.is_file() else 404)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if not self._auth():
             return
         from urllib.parse import urlsplit, parse_qs
@@ -175,7 +184,8 @@ class H(BaseHTTPRequestHandler):
         fb = (state / "forbid").read_text().split() if (state / "forbid").exists() else []
         if self._parts()[:2] in (["channels", f] for f in fb):
             self._send(403, {"message": "Missing Access", "code": 50001}); return
-        self._send(200, {"id": self._parts()[-1], "thread_metadata": {"archived": bool(body.get("archived"))}})
+        self._send(200, {"id": self._parts()[-1], "content": body.get("content"),
+                         "thread_metadata": {"archived": bool(body.get("archived"))}})
 
     def do_PUT(self):
         log({"m": "PUT", "p": self.path})

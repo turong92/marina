@@ -9,12 +9,16 @@ import json
 import os
 import re
 import time
-from datetime import datetime
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import marina_discord_usage as du
 import marina_session as ms
+import marina_share
 
 KIND = "codex"
 DEFAULT_CATEGORY = "chat-bot"
@@ -293,3 +297,209 @@ def rate_windows(recs: "list[dict[str, Any]]", account: str, now: "float | None"
         if win:
             out.append(win)
     return out
+
+
+# ── 아웃바운드(Task 3) — marina MCP 에 더하는 Discord 도구 5개. 공식 플러그인(server.ts)의 안전장치를 옮겼다 ──
+
+MAX_CHUNK = 2000
+MAX_ATTACH = 25 * 1024 * 1024
+MAX_FILES = 10
+
+_CHAT = {"chat_id": {"type": "string"}}
+DISCORD_TOOLS: "list[dict[str, Any]]" = [
+    {"name": "reply",
+     "description": "Discord 에 답한다. chat_id 는 받은 메시지 태그의 것. reply_to(message_id)로 지시에 답으로 달고, "
+                    "files(절대 경로)로 이미지·파일을 첨부한다(10개·파일당 25MB). 2000자를 넘으면 나눠 보낸다.",
+     "inputSchema": {"type": "object", "properties": {
+         **_CHAT, "text": {"type": "string"},
+         "reply_to": {"type": "string", "description": "답으로 달 메시지 ID — 받은 <channel> 태그의 message_id. 비우면 마지막 지시로 채운다."},
+         "files": {"type": "array", "items": {"type": "string"}, "description": "첨부할 절대 경로(최대 10개, 25MB씩)."}},
+         "required": ["chat_id", "text"]}},
+    {"name": "react",
+     "description": "Discord 메시지에 이모지 반응을 단다. 유니코드 이모지는 그대로, 커스텀 이모지는 <:name:id> 형태로.",
+     "inputSchema": {"type": "object", "properties": {**_CHAT, "message_id": {"type": "string"}, "emoji": {"type": "string"}},
+                     "required": ["chat_id", "message_id", "emoji"]}},
+    {"name": "edit_message",
+     "description": "봇이 보낸 메시지를 고친다. 중간 진행 갱신에 쓴다. 고침은 알림이 가지 않으니 긴 작업이 끝나면 새 reply 를 보낸다.",
+     "inputSchema": {"type": "object", "properties": {**_CHAT, "message_id": {"type": "string"}, "text": {"type": "string"}},
+                     "required": ["chat_id", "message_id", "text"]}},
+    {"name": "fetch_messages",
+     "description": "채널의 최근 메시지를 오래된 것부터 메시지 ID 와 함께 가져온다. 봇은 검색을 못 하니 거슬러 볼 때 쓴다.",
+     "inputSchema": {"type": "object", "properties": {"channel": {"type": "string"},
+                                                      "limit": {"type": "number", "description": "최대 개수(기본 20, 상한 100)."}},
+                     "required": ["channel"]}},
+    {"name": "download_attachment",
+     "description": "메시지의 첨부를 방 상태 폴더 inbox 로 받는다(fetch_messages 에서 +Natt 로 보인 것). 읽을 수 있는 파일 경로를 돌려준다.",
+     "inputSchema": {"type": "object", "properties": {**_CHAT, "message_id": {"type": "string"}},
+                     "required": ["chat_id", "message_id"]}},
+]
+DISCORD_TOOL_NAMES = frozenset(t["name"] for t in DISCORD_TOOLS)
+
+
+def _chunks(text: str, limit: int = MAX_CHUNK) -> list[str]:
+    return [text[i:i + limit] for i in range(0, len(text), limit)] or [""]
+
+
+def _gate(dc: "ms.Discord", sd: Path, chat_id: str) -> None:
+    """채널 문지기 — 이 방(access.json.groups)이거나 그 스레드(부모가 groups)일 때만."""
+    if not re.fullmatch(r"\d{1,25}", chat_id or ""):
+        raise ms.SessionError(f"허용 목록에 없는 채널이야: {chat_id!r}")
+    try:
+        groups = json.loads((sd / "access.json").read_text(encoding="utf-8")).get("groups") or {}
+    except (OSError, ValueError):
+        groups = {}
+    if chat_id in groups:
+        return
+    try:
+        info = dc._req("GET", f"/channels/{chat_id}") or {}
+    except ms.SessionError:
+        info = {}
+    if info.get("type") in (10, 11, 12) and str(info.get("parent_id") or "") in groups:
+        return
+    raise ms.SessionError(f"허용 목록에 없는 채널이야: {chat_id}")
+
+
+def _assert_sendable(f: str, sd: Path) -> None:
+    """방 상태 폴더 안 파일(토큰 링크 .env 포함)은 보내지 않는다 — inbox 만 예외. 글자 그대로의 경로와 realpath 둘 다 본다
+    (.env 는 토큰 파일로의 심볼릭 링크라 realpath 만 보면 상태 폴더 밖으로 나가 통과한다)."""
+    state = os.path.realpath(str(sd))
+    inbox = state + os.sep + "inbox" + os.sep
+    real = os.path.realpath(f)
+    for cand in (real, os.path.abspath(f)):
+        if (cand == state or cand.startswith(state + os.sep)) and not cand.startswith(inbox):
+            raise ms.SessionError(f"채널 상태 폴더 안 파일은 못 보내: {f}")
+    if real == os.path.realpath(str(sd / ".env")):
+        raise ms.SessionError(f"채널 상태(토큰) 파일은 못 보내: {f}")
+
+
+def _check_files(files: Any, sd: Path) -> list[Path]:
+    if not isinstance(files, list):
+        files = []
+    if len(files) > MAX_FILES:
+        raise ms.SessionError(f"첨부는 메시지당 최대 {MAX_FILES}개야")
+    out = []
+    for f in files:
+        _assert_sendable(str(f), sd)
+        p = Path(str(f))
+        try:
+            size = p.stat().st_size
+        except OSError:
+            raise ms.SessionError(f"첨부 파일이 없어: {f}")
+        if not p.is_file():
+            raise ms.SessionError(f"첨부는 파일만 돼: {f}")
+        if size > MAX_ATTACH:
+            raise ms.SessionError(f"파일이 너무 커: {f} ({size / 1024 / 1024:.1f}MB, 최대 25MB)")
+        out.append(p)
+    return out
+
+
+def _default_reply_to(rec: dict[str, Any], chat_id: str) -> str:
+    """reply_to 가 비면 이 방의 마지막 받은 지시로 — 답 = 끝 표시(클로드 방의 hook_reply_to 와 같은 효과)."""
+    ro = rollout_of(rec)
+    ids = inbound_ids(ro, chat_id) if ro else []
+    return ids[-1] if ids else ""
+
+
+def _reply(rec: dict[str, Any], dc: "ms.Discord", token: str, args: dict[str, Any]) -> str:
+    sd = Path(str(rec["stateDir"]))
+    chat_id, text = str(args.get("chat_id") or ""), str(args.get("text") or "")
+    _gate(dc, sd, chat_id)
+    files = _check_files(args.get("files"), sd)
+    reply_to = str(args.get("reply_to") or "") or _default_reply_to(rec, chat_id)
+    chunks = _chunks(text)
+    ids: list[str] = []
+    try:
+        for i, part in enumerate(chunks):
+            ref = reply_to if i == 0 else ""
+            if i == 0 and files:
+                sent = marina_share.upload_message(dc.base, token, chat_id, part, files, reply_to=ref)
+            else:
+                body: dict[str, Any] = {"content": part, "allowed_mentions": {"parse": []}}
+                if ref:
+                    body["message_reference"] = {"message_id": ref, "fail_if_not_exists": False}
+                sent = dc._req("POST", f"/channels/{chat_id}/messages", body)
+            ids.append(str((sent or {}).get("id") or ""))
+    except (ms.SessionError, urllib.error.URLError, OSError) as exc:
+        raise ms.SessionError(f"reply 가 {len(chunks)}조각 중 {len(ids)}조각을 보낸 뒤 실패: {exc}")
+    if reply_to:
+        ms._write_json(sd / "replied.json", {"mid": reply_to, "at": time.time()})
+    return f"sent (id: {ids[0]})" if len(ids) == 1 else f"sent {len(ids)} parts (ids: {', '.join(ids)})"
+
+
+def _iso(stamp: Any) -> str:
+    try:
+        d = datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return str(stamp)
+    return d.strftime("%Y-%m-%dT%H:%M:%S.") + f"{d.microsecond // 1000:03d}Z"
+
+
+def _fetch(dc: "ms.Discord", sd: Path, args: dict[str, Any]) -> str:
+    channel = str(args.get("channel") or "")
+    _gate(dc, sd, channel)
+    try:
+        limit = max(1, min(int(args.get("limit") or 20), 100))
+    except (TypeError, ValueError):
+        limit = 20
+    rows = dc._req("GET", f"/channels/{channel}/messages?limit={limit}") or []
+    if not rows:
+        return "(no messages)"
+    me = dc.me()
+    out = []
+    for m in reversed(rows):              # Discord 는 최신이 먼저 — 오래된 것부터
+        who = "me" if (m.get("author") or {}).get("id") == me else (m.get("author") or {}).get("username", "?")
+        atts = f" +{len(m['attachments'])}att" if m.get("attachments") else ""
+        body = re.sub(r"[\r\n]+", " ⏎ ", str(m.get("content") or ""))      # 여러 줄이 이웃 줄을 위조하지 못하게
+        out.append(f"[{_iso(m.get('timestamp'))}] {who}: {body}  (id: {m.get('id')}{atts})")
+    return "\n".join(out)
+
+
+def _safe_att_name(att: dict[str, Any]) -> str:
+    return re.sub(r"[\[\]\r\n;]", "_", str(att.get("filename") or att.get("id") or ""))
+
+
+def _download(dc: "ms.Discord", sd: Path, args: dict[str, Any]) -> str:
+    chat_id, mid = str(args.get("chat_id") or ""), str(args.get("message_id") or "")
+    _gate(dc, sd, chat_id)
+    if not re.fullmatch(r"\d{1,25}", mid):
+        raise ms.SessionError("message_id 는 숫자 ID 여야 해")
+    atts = (dc._req("GET", f"/channels/{chat_id}/messages/{mid}") or {}).get("attachments") or []
+    if not atts:
+        return "message has no attachments"
+    inbox = sd / "inbox"
+    inbox.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for att in atts:
+        size = int(att.get("size") or 0)
+        if size > MAX_ATTACH:
+            raise ms.SessionError(f"첨부가 너무 커: {size / 1024 / 1024:.1f}MB, 최대 25MB")
+        ext = re.sub(r"[^a-zA-Z0-9]", "", str(att.get("filename") or "").rpartition(".")[2]) or "bin"
+        path = inbox / f"{int(time.time() * 1000)}-{att.get('id')}.{ext}"
+        with urllib.request.urlopen(urllib.request.Request(str(att.get("url")), headers={"User-Agent": "marina"}), timeout=60) as r:
+            path.write_bytes(r.read(MAX_ATTACH + 1))          # 토큰은 CDN 에 보내지 않는다
+        lines.append(f"  {path}  ({_safe_att_name(att)}, {att.get('content_type') or 'unknown'}, {size / 1024:.0f}KB)")
+    return f"downloaded {len(lines)} attachment(s):\n" + "\n".join(lines)
+
+
+def discord_tool(rec: dict[str, Any], name: str, args: dict[str, Any]) -> str:
+    """반환 문구는 server.ts 와 같은 모양. 거절·실패는 SessionError. 봇 토큰은 방 .env 링크의 것(방마다 다른 봇 규칙)."""
+    sd = Path(str(rec["stateDir"]))
+    token = ms.read_token_file(sd / ".env")
+    dc = ms.Discord(token)
+    if name == "reply":
+        return _reply(rec, dc, token, args)
+    if name == "fetch_messages":
+        return _fetch(dc, sd, args)
+    if name == "download_attachment":
+        return _download(dc, sd, args)
+    chat_id, mid = str(args.get("chat_id") or ""), str(args.get("message_id") or "")
+    _gate(dc, sd, chat_id)
+    if not re.fullmatch(r"\d{1,25}", mid):
+        raise ms.SessionError("message_id 는 숫자 ID 여야 해")
+    if name == "react":
+        dc.add_reaction(chat_id, mid, str(args.get("emoji") or ""))
+        return "reacted"
+    if name == "edit_message":
+        edited = dc._req("PATCH", f"/channels/{chat_id}/messages/{mid}", {"content": str(args.get("text") or "")})
+        return f"edited (id: {(edited or {}).get('id') or mid})"
+    raise ms.SessionError(f"없는 도구: {name}")

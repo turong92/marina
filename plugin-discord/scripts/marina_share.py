@@ -480,11 +480,13 @@ def render_md(page: Path, root: Path, outdir: Path, max_images: int = 4, timeout
 
 
 def upload_message(base: str, token: str, channel: str, content: str, files: list[Path],
-                   timeout: float = 60) -> dict[str, Any]:
-    """첨부가 있는 메시지(multipart). 멘션 알림은 만들지 않는다."""
+                   timeout: float = 60, reply_to: str = "") -> dict[str, Any]:
+    """첨부가 있는 메시지(multipart). 멘션 알림은 만들지 않는다. reply_to = 답장으로 달 메시지 ID."""
     boundary = uuid.uuid4().hex
     payload = {"content": content, "allowed_mentions": {"parse": []},
                "attachments": [{"id": i, "filename": f.name} for i, f in enumerate(files)]}
+    if reply_to:
+        payload["message_reference"] = {"message_id": reply_to, "fail_if_not_exists": False}
     parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="payload_json"\r\n'
              f'Content-Type: application/json\r\n\r\n'.encode() + json.dumps(payload).encode() + b"\r\n"]
     for i, f in enumerate(files):
