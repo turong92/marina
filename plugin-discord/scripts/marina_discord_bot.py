@@ -105,7 +105,7 @@ def _row_account(rec: dict[str, Any], alive: bool) -> str:
     return n if ms.account_token_file(n) is not None else ms.ACCOUNT_DEFAULT
 
 
-_TOPIC_ACCOUNT = re.compile(r"^🔑 [A-Z0-9]+ · ")
+_TOPIC_ACCOUNT = re.compile(r"^🔑 \S+ · ")
 
 
 def account_tick() -> None:
@@ -127,12 +127,14 @@ def account_tick() -> None:
         if cur == prev:
             continue
         ch = str(rec["channelId"])
+        codex = ms.is_codex(rec)
+        label = "코덱스" if codex else cur.upper()     # 코덱스 계정 이름(b)을 클로드 B 계정과 헷갈리지 않게
         try:
             dc = dc or _dc(ms.load_config())
             topic = str((dc._req("GET", f"/channels/{ch}") or {}).get("topic") or "")
             rest = _TOPIC_ACCOUNT.sub("", topic)
-            dc._req("PATCH", f"/channels/{ch}", {"topic": ((f"🔑 {cur.upper()} · " if cur != ms.ACCOUNT_DEFAULT else "") + rest)[:1024]})
-            dc._req("POST", f"/channels/{ch}/messages", {"content": f"🔑 이 방은 이제 **{cur.upper()} 계정**으로 떠 있어",
+            dc._req("PATCH", f"/channels/{ch}", {"topic": ((f"🔑 {label} · " if codex or cur != ms.ACCOUNT_DEFAULT else "") + rest)[:1024]})
+            dc._req("POST", f"/channels/{ch}/messages", {"content": f"🔑 이 방은 이제 **{label} 계정**으로 떠 있어",
                                                           "allowed_mentions": {"parse": []}})
         except ms.SessionError as exc:
             _log(f"account_tick {ch}: {type(exc).__name__}")
