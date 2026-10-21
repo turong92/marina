@@ -2843,7 +2843,8 @@ def new_from_text(project: str, user: str, text: str, channel: str, name: str = 
     try:
         cx = ms.load_config().get("codex")
         panel = cx.get("newPanel") if isinstance(cx, dict) else None
-        if isinstance(panel, dict) and str(panel.get("channelId")) == str(channel):
+        panel = panel if isinstance(panel, dict) else {}
+        if isinstance(cx, dict) and str(channel) in (str(panel.get("channelId")), str(cx.get("newChannelId"))):
             return _codex_new_from_text(project, user, text, name, panel)       # 코덱스 #새-작업 패널 — 로비 세션 없음
         lobby = next((s for s in ms.load_sessions() if s.get("project") == project and s.get("kind") == "dev-lobby"), None)
         if not lobby:

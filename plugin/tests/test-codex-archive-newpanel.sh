@@ -73,9 +73,9 @@ n = len(log()); ms.ensure_codex_hub()
 check(cfg()["codex"]["newChannelId"] != "888" and [x for x in log()[n:] if x["m"] == "POST" and x["b"].get("name") == "새-작업"], "채널이 지워졌으면 다시 만들고 패널도")
 c = cfg(); c["projects"]["other"] = {"categoryId": None, "allow": ["U1"]}; c["codex"]["projects"] = ["proj", "other", "ghost"]
 (mh / "discord.json").write_text(json.dumps(c)); n = len(log()); ms.ensure_codex_hub()
-btns = [b["custom_id"] for x in log()[n:] if x["m"] == "POST" for row in x["b"].get("components", []) for b in row["components"]]
-check(btns == ["marina-new:proj", "marina-new:other"], f"codex.projects 우선, 모르는 프로젝트는 뺀다: {btns}")
-c = cfg(); del c["codex"]["projects"]; c["codex"]["newPanel"]["messageId"] = "stale"; (mh / "discord.json").write_text(json.dumps(c))
+btns = [b["custom_id"] for x in log()[n:] if x["m"] in ("POST", "PATCH") for row in x["b"].get("components", []) for b in row["components"]]
+check(btns == ["marina-new:other", "marina-new:proj"], f"codex.projects 우선·정렬, 모르는 프로젝트는 뺀다: {btns}")
+c = cfg(); del c["codex"]["projects"]; c["codex"]["newPanel"]["messageId"] = "m-sent"; (mh / "discord.json").write_text(json.dumps(c))
 
 # ── 모달 제출 → 코덱스 방 ─────────────────────────────────────────────────────
 nch = cfg()["codex"]["newChannelId"]
@@ -105,6 +105,47 @@ check(rec and f'chat_id="{rec["channelId"]}"' in last and "[Discord 새 작업 �
 check(mb.panel_tick(0.0, mb.PANEL_EVERY) == mb.PANEL_EVERY, "간격 지나면 확인")
 check(len([x for x in log()[n:] if x["m"] == "POST" and "marina-new:proj" in json.dumps(x["b"]) and "components" in x["b"]]) >= 1, "틱이 코덱스 패널도 보장")
 (fd / "gone").unlink()
+
+# ── 리뷰 지적 회귀 ────────────────────────────────────────────────────────────
+# I1: 목록이 바뀌면 옛 패널 메시지를 PATCH(새로 쌓지 않는다)
+c = cfg(); c["codex"]["projects"] = ["proj", "other"]; (mh / "discord.json").write_text(json.dumps(c)); ms.ensure_codex_hub()
+c = cfg(); old_mid = c["codex"]["newPanel"]["messageId"]; nch = c["codex"]["newChannelId"]
+c["codex"]["projects"] = ["proj"]; (mh / "discord.json").write_text(json.dumps(c))
+n = len(log()); check(ms.ensure_codex_hub() is False, "목록이 바뀌어도 새로 올리지 않는다(고친다)")
+posts = [x for x in log()[n:] if x["m"] == "POST" and "components" in x["b"]]
+patches = [x for x in log()[n:] if x["m"] == "PATCH" and x["p"] == f"/channels/{nch}/messages/{old_mid}"]
+check(not posts and len(patches) == 1, f"옛 패널을 PATCH: posts={posts} patches={patches}")
+pb = [b["custom_id"] for row in (patches[0]["b"].get("components") if patches else []) for b in row["components"]]
+check(pb == ["marina-new:proj"], f"PATCH 버튼: {pb}")
+check(cfg()["codex"]["newPanel"]["projects"] == ["proj"] and cfg()["codex"]["newPanel"]["messageId"] == old_mid, "저장된 프로젝트 목록 갱신")
+# I2: 봇 틱은 카테고리가 Discord 에 없으면 아무것도 안 한다(재생성 금지)
+c = cfg(); c["codex"]["categoryId"] = "nocat"; (mh / "discord.json").write_text(json.dumps(c))
+n = len(log()); check(ms.ensure_codex_hub() is False and not [x for x in log()[n:] if x["m"] == "POST"], "카테고리 없으면 틱은 만들지 않는다")
+check(cfg()["codex"]["categoryId"] == "nocat", "카테고리 ID 그대로")
+c["codex"]["categoryId"] = cat; c["codex"]["projects"] = []; c["codex"]["archiveChannelId"] = "999"; c["codex"]["newChannelId"] = "888"
+(mh / "discord.json").write_text(json.dumps(c))
+n = len(log()); check(ms.ensure_codex_hub() is False and not [x for x in log()[n:] if x["m"] == "POST"], "프로젝트 목록이 비면 자료실·새-작업도 안 만든다")
+c = cfg(); c["codex"]["projects"] = ["proj"]; c["codex"]["archiveChannelId"] = arch; c["codex"]["newChannelId"] = nch; (mh / "discord.json").write_text(json.dumps(c))
+# M3: newPanel.channelId 가 어긋나도 newChannelId 에서 온 제출은 클로드 경로로 새지 않는다
+c = cfg(); c["codex"]["newPanel"]["channelId"] = "555"; (mh / "discord.json").write_text(json.dumps(c))
+out = mb.new_from_text("proj", "U2", "x", nch)
+check("권한" in out, f"newChannelId 제출은 코덱스 판정(권한 검사): {out}")
+c = cfg(); c["codex"]["newPanel"]["channelId"] = nch; (mh / "discord.json").write_text(json.dumps(c))
+# M2: 저장은 저장 직전 설정을 다시 읽어 그 키만 고친다
+orig_ctc, orig_pp = ms.Discord.create_text_channel, ms.Discord.post_panel
+def bump(key):
+    c = cfg(); c["projects"]["proj"][key] = 1; (mh / "discord.json").write_text(json.dumps(c))
+def ctc(self, *a, **k):
+    bump("racedA"); return orig_ctc(self, *a, **k)
+def pp(self, *a, **k):
+    bump("racedB"); return orig_pp(self, *a, **k)
+ms.Discord.create_text_channel, ms.Discord.post_panel = ctc, pp
+try:
+    c = cfg(); c["codex"]["newChannelId"] = "888"; (mh / "discord.json").write_text(json.dumps(c)); ms.ensure_codex_hub()
+finally:
+    ms.Discord.create_text_channel, ms.Discord.post_panel = orig_ctc, orig_pp
+pc = cfg()["projects"]["proj"]
+check(pc.get("racedA") == 1 and pc.get("racedB") == 1, f"끼어든 설정 변경을 덮지 않는다: {pc}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

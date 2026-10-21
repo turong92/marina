@@ -425,6 +425,9 @@ class Discord:
                       {"content": content, "components": components, "allowed_mentions": {"parse": []}})
         return str((r or {}).get("id") or "")
 
+    def edit_panel(self, cid: str, mid: str, content: str, components: list[dict[str, Any]]) -> None:
+        self._req("PATCH", f"/channels/{cid}/messages/{mid}", {"content": content, "components": components})
+
     def post_message(self, cid: str, content: str) -> str:
         """send_message 와 같되 메시지 ID 를 돌려준다."""
         r = self._req("POST", f"/channels/{cid}/messages", {"content": content, "allowed_mentions": {"parse": []}})
@@ -3435,34 +3438,51 @@ def codex_panel_projects(cfg: dict[str, Any]) -> list[str]:
     for p in want:
         if isinstance(p, str) and p in cfg["projects"] and p not in out:
             out.append(p)
-    return out[:CODEX_PANEL_MAX]
+    return sorted(out)[:CODEX_PANEL_MAX]
 
 
 def ensure_codex_hub() -> bool:
-    """chat-bot(코덱스) 카테고리의 #자료실과 #새-작업 버튼 패널(세션 없음)을 보장한다. 코덱스를 쓴 적 없으면(카테고리 없음) 아무것도 안 한다.
-    패널을 새로 올렸으면 True. 봇 틱이 부른다."""
+    """chat-bot(코덱스) 카테고리의 #자료실과 #새-작업 버튼 패널(세션 없음)을 보장한다. 봇 틱이 부른다.
+    카테고리가 Discord 에 실제로 없으면 아무것도 안 한다(다시 만드는 건 코덱스 방 만들기뿐). 프로젝트 목록이 비면 자료실·새-작업도 안 만든다.
+    패널을 새로 올렸으면 True(목록이 바뀐 옛 패널은 고치기만 해 False)."""
     import marina_codex
     cfg = load_config()
-    if not marina_codex.codex_cfg(cfg).get("categoryId"):
+    cat = str(marina_codex.codex_cfg(cfg).get("categoryId") or "")
+    if not cat:
         return False
     dc = Discord(read_token(cfg))
-    cat = ensure_codex_category(dc, cfg)
-    ensure_codex_archive(dc, cfg, cat)
+    guild = str(cfg["guildId"])
+    if not any(str(c.get("id")) == cat and c.get("type") == 4 for c in dc.list_channels(guild)):
+        return False
     projects = codex_panel_projects(cfg)
     if not projects:
         return False
+    ensure_codex_archive(dc, cfg, cat)
+
+    def codex_now() -> dict[str, Any]:         # 저장 직전 설정을 다시 읽어 그 키만 고친다
+        fresh = load_config()
+        fresh["codex"] = marina_codex.codex_cfg(fresh)
+        return fresh
+
     cc = cfg["codex"]
     ch = str(cc.get("newChannelId") or "")
-    if not (ch and ch in channel_ids(dc, str(cfg["guildId"]))):
-        ch = dc.create_text_channel(str(cfg["guildId"]), DEV_LOBBY_CHANNEL, cat, CODEX_NEW_TOPIC)
-        cc["newChannelId"] = ch
-        save_config(cfg)
+    if not (ch and ch in channel_ids(dc, guild)):
+        ch = dc.create_text_channel(guild, DEV_LOBBY_CHANNEL, cat, CODEX_NEW_TOPIC)
+        fresh = codex_now()
+        fresh["codex"]["newChannelId"] = ch
+        save_config(fresh)
     cur = cc.get("newPanel")
-    if isinstance(cur, dict) and cur.get("channelId") == ch and cur.get("projects") == projects and cur.get("messageId") and \
-            dc.message_exists(ch, str(cur["messageId"])):
-        return False
     rows = [{"type": 1, "components": [{"type": 2, "style": 1, "label": f"🛠 {p} 새 작업 (코덱스)"[:80], "custom_id": f"marina-new:{p}"}
                                         for p in projects[i:i + 5]]} for i in range(0, len(projects), 5)]
+    if isinstance(cur, dict) and cur.get("channelId") == ch and cur.get("messageId") and \
+            dc.message_exists(ch, str(cur["messageId"])):
+        if cur.get("projects") == projects:
+            return False
+        dc.edit_panel(ch, str(cur["messageId"]), CODEX_NEW_PANEL_TEXT, rows)        # 목록이 바뀌면 옛 패널을 고친다(쌓지 않는다)
+        fresh = codex_now()
+        fresh["codex"]["newPanel"] = {"channelId": ch, "messageId": str(cur["messageId"]), "projects": projects}
+        save_config(fresh)
+        return False
     mid = dc.post_panel(ch, CODEX_NEW_PANEL_TEXT, rows)
     if not mid:
         raise SessionError("패널 메시지 ID 를 못 받았어")
@@ -3470,10 +3490,9 @@ def ensure_codex_hub() -> bool:
         dc.pin(ch, mid)
     except SessionError:
         pass
-    cfg = load_config()
-    cc = cfg["codex"]
-    cc["newPanel"] = {"channelId": ch, "messageId": mid, "projects": projects}
-    save_config(cfg)
+    fresh = codex_now()
+    fresh["codex"]["newPanel"] = {"channelId": ch, "messageId": mid, "projects": projects}
+    save_config(fresh)
     return True
 
 
