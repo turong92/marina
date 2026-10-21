@@ -116,6 +116,17 @@ if hk:
         check(any(g.get("matcher") == "Bash" for g in parsed["PreToolUse"]), "Bash 매처(rm 가드)")
     except ImportError:
         pass
+# 5) 방 스레드 글도 방 글처럼 — inbound_pairs 가 (id, 스레드) 짝을, turn_from_terminal·unanswered_mid 가 방+스레드를 본다
+ms.remember_room_thread(str(sd), "9100")
+tro = T / "rollout-thread.jsonl"
+ttag = f'<channel source="plugin:discord:discord" chat_id="9100" message_id="7100" user="u">\n스레드\n</channel>'
+tro.write_text(ev("user_message", message=ttag) + "\n")
+chans = ms.room_chans(rec)
+check(mc.inbound_pairs(tro, chans) == [("7100", "9100")], f"스레드 글 짝: {mc.inbound_pairs(tro, chans)}")
+check(mc.inbound_pairs(tro, ch) == [], "방 채널만 보면 스레드 글은 안 보임")
+check(ms.inbound_pairs(tro, chans) == [("7100", "9100")], "ms.inbound_pairs 가 코덱스 rollout 에 위임")
+check(not mc.turn_from_terminal(tro, chans), "스레드 글로 연 턴은 터미널 입력이 아님")
+check(mc.unanswered_mid(rec, tro) == "7100", "스레드 지시도 답 전엔 미답")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

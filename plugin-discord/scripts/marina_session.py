@@ -2212,7 +2212,7 @@ def inbound_pairs(transcript: Path, channel_id: Any) -> list[tuple[str, str]]:
     코덱스 rollout(rollout-*.jsonl)이면 marina_codex.inbound_ids 로."""
     if transcript.name.startswith("rollout-"):
         import marina_codex
-        return marina_codex.inbound_ids(transcript, channel_id)
+        return marina_codex.inbound_pairs(transcript, channel_id)
     try:
         data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
     except OSError:

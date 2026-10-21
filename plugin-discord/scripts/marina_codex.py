@@ -136,12 +136,13 @@ def hook_start(payload: dict[str, Any]) -> None:
     ms.save_sessions(items)
 
 
-def turn_from_terminal(rollout: Path, channel: str) -> bool:
+def turn_from_terminal(rollout: Path, channel: Any) -> bool:
     """이번 턴을 연 입력이 터미널에서 직접 친 말인가 — rollout 의 마지막 user 메시지에 이 채널 태그가 없음."""
     for o in reversed(_objs(_tail_lines(rollout, BUSY_TAIL))):
         p = o.get("payload") if isinstance(o.get("payload"), dict) else {}
         if o.get("type") == "event_msg" and p.get("type") == "user_message":
-            return not any(m.group(1) == channel for m in ms._CHANNEL_TAG.finditer(json.dumps(str(p.get("message") or ""))))
+            chans = ms._chans(channel)
+            return not any(m.group(1) in chans for m in ms._CHANNEL_TAG.finditer(json.dumps(str(p.get("message") or ""))))
     return False
 
 
@@ -291,8 +292,9 @@ def turn_busy(rollout: Path, now: "float | None" = None, after: float = 0.0) -> 
 INBOUND_TAIL = 2 * 1024 * 1024
 
 
-def inbound_ids(rollout: Path, channel: str) -> list[str]:
-    """이 채널로 받은 지시의 message_id 들 — 순서대로, 중복 없이(한 글이 두 줄로 기록돼도 한 번)."""
+def inbound_pairs(rollout: Path, channel: Any) -> list[tuple[str, str]]:
+    """이 방(채널 하나, 또는 방+스레드 집합)으로 받은 지시의 (message_id, 그 글의 chat_id) — 순서대로, 중복 없이
+    (한 글이 두 줄로 기록돼도 한 번). 스레드 글은 chat_id 가 방 채널이 아니라 그 스레드다."""
     try:
         with rollout.open("rb") as fh:
             size = fh.seek(0, os.SEEK_END)
@@ -300,11 +302,18 @@ def inbound_ids(rollout: Path, channel: str) -> list[str]:
             text = fh.read().decode("utf-8", "ignore")
     except OSError:
         return []
-    out: list[str] = []
+    chans = ms._chans(channel)
+    out: list[tuple[str, str]] = []
+    seen: set[str] = set()
     for m in ms._CHANNEL_TAG.finditer(text):
-        if m.group(1) == channel and m.group(2) not in out:
-            out.append(m.group(2))
+        if m.group(1) in chans and m.group(2) not in seen:
+            seen.add(m.group(2))
+            out.append((m.group(2), m.group(1)))
     return out
+
+
+def inbound_ids(rollout: Path, channel: Any) -> list[str]:
+    return [mid for mid, _ in inbound_pairs(rollout, channel)]
 
 
 def window_label(minutes: int) -> "tuple[str, str]":
@@ -736,7 +745,7 @@ def selecting(tmux: str) -> bool:
 def unanswered_mid(rec: dict[str, Any], rollout: Path) -> str:
     """받은 지시 중 아직 reply 로 답하지 않은 마지막 것의 message_id, 없으면 "".
     답했다 = replied.json.mid 가 마지막 지시이거나 그 뒤. 목록에 없는 mid 는 숫자(스노우플레이크)면 크기로 비교한다."""
-    ids = inbound_ids(rollout, str(rec.get("channelId") or ""))
+    ids = inbound_ids(rollout, ms.room_chans(rec))
     if not ids:
         return ""
     last = ids[-1]
