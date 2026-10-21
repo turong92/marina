@@ -70,15 +70,15 @@ Claude 판정기(백그라운드 셸·에이전트·cron·Monitor)는 rollout �
 ## 동작 규칙
 
 ### 1. 띄우기
-- `codex_argv` = `codex [resume <sid>] -C <root> -a never -c check_for_update_on_startup=false -c <신뢰> -c <MCP> -c <시스템 프롬프트> [-c <훅>] [첫 지시]`. 정확한 키는 스파이크 S1·S4·S5·S6 값으로 확정한다.
+- `codex_argv` = `codex [resume <sid>] -C <root> -a never -c check_for_update_on_startup=false -c 'projects={"<root>"={trust_level="trusted"}}' --dangerously-bypass-hook-trust -c 'mcp_servers.marina={command=…,args=[…],env={DISCORD_STATE_DIR=…,MARINA_HOME=…}}' -c 'developer_instructions="…"' -c 'hooks={…}' [첫 지시]` (스파이크 S1·S4·S5·S6 로 확정 — 아래 "실측 결과"). `resume <sid>` 뒤에도 같은 옵션이 그대로 먹는다(S7). 트러스트는 점 경로(`projects."<root>".trust_level`) 말고 **표 형태**로 줘야 먹는다.
 - 시스템 프롬프트 = `CHANNEL_RULES`(30행대)와 같은 뜻의 코덱스판: "답은 `mcp__marina__reply` 로, chat_id 는 받은 태그의 것".
 - 띄운 뒤 `tmux_start` 의 생존 확인에 더해, 업데이트·신뢰 창 같은 막는 화면이 남아 있으면(S1 에서 문구 확보) 실패로 올린다 — 조용히 입력을 삼키는 방을 만들지 않는다.
 - env: `clean_env_prefix` 화이트리스트 + `DISCORD_STATE_DIR`·`MARINA_HOME`·`CODEX_HOME=~/.marina/accounts/codex-<계정>`.
 
 ### 2. 인바운드(떠 있을 때)
 - 봇은 지금처럼 모든 글에 `wake` 를 부른다. 코덱스 방이 살아 있으면 방 잠금(`room_lock`) 안에서 `missed()`(118)로 아직 안 넣은 글을 모아 `wake_prompt`(152)와 같은 `<channel …>` 태그 글로 만든다 — 태그가 같아야 `seen_ids`·진행 훅이 그대로 돈다.
-- 넣기: 붙여넣기(스파이크 S3 에서 고른 방식 — `paste-buffer -p` 우선) → 0.6초 → Enter. 바쁘면 Enter = steer(지금 턴에 끼워 넣기, Claude 방이 턴 중 받은 글을 바로 읽는 것과 같다).
-- **전달 확인 필수**(입력 유실 사고 이력, `marina_mobile.py:1828` 주석): rollout 이 넣기 전 크기 뒤로 그 글의 `message_id` 를 담을 때까지 최대 8초. 입력창에 글이 남아 있으면 Enter 를 다시(최대 3번, `run_slash` 2640 과 같은 규칙). 끝내 안 보이면 마지막 글에 ⚠️ 반응 + 로그, `delivered` 에 안 적는다 → 다음 글이 올 때 같이 다시 간다.
+- 넣기(S3 확정): `load-buffer` + `paste-buffer -p -d` → **0.6초 이상 기다린 뒤** 따로 `Enter`(글자와 Enter 를 한 번에 보내면 코덱스가 붙여넣기 묶음으로 보고 Enter 를 줄바꿈으로 삼킨다). 바쁠 때 Enter = steer: 화면에 `Messages to be submitted after next tool call` 로 대기하다가 **다음 도구 호출이 끝나는 때**(수십 초 걸릴 수 있다) 같은 턴에 user 메시지로 기록된다. 3천 자쯤 되는 글은 입력창에 `[Pasted Content N chars]` 로 접혀 보이지만 기록에는 전문이 들어간다.
+- **전달 확인 필수**(입력 유실 사고 이력, `marina_mobile.py:1828` 주석): rollout 이 넣기 전 크기 뒤로 그 글의 `message_id` 를 담을 때까지 최대 8초. **바쁜 중 넣은 글은 기록이 늦으므로**(S3) 화면의 `Messages to be submitted…` 목록에 그 `message_id` 가 보이면 "접수됨"으로 보고 기록 확인을 기다리지 않는다(`delivered` 에는 적는다). 입력창에 글이 남아 있으면 Enter 를 다시(최대 3번, `run_slash` 2640 과 같은 규칙). 끝내 안 보이면 마지막 글에 ⚠️ 반응 + 로그, `delivered` 에 안 적는다 → 다음 글이 올 때 같이 다시 간다.
 - 같은 글 두 번 넣기 금지: 방 잠금 + `woke.json.delivered` + rollout 의 `seen_ids`.
 
 ### 3. 아웃바운드 MCP(marina MCP 에 더하는 도구 5개)
@@ -94,18 +94,18 @@ Claude 판정기(백그라운드 셸·에이전트·cron·Monitor)는 rollout �
 ### 4. 훅
 - 쓰는 훅: SessionStart(sid 확보) · UserPromptSubmit(turn-at·👀) · PreToolUse(도구 이모지·입력 중, Bash rm 가드) · Stop(표시 떼기·stopped-at·답 못 한 지시 재촉).
 - **방 밖에선 아무것도 안 한다**: `DISCORD_STATE_DIR` 가 없거나 그 상태 폴더의 기록이 `kind=codex` 가 아니면 즉시 0 으로 끝낸다. 코덱스 훅에서는 `_hook_target`(2124)의 cwd 짐작을 절대 쓰지 않는다 — 데스크톱 코덱스가 클로드 방 워크트리에서 돌 때 그 방 표시를 건드리게 된다.
-- 등록 방식은 S6 결과로: ① `-c` 로 훅을 넣고 `--dangerously-bypass-hook-trust`(이 실행만, 전역 파일 무변경) — 추천 ② 안 되면 전역 `~/.codex/hooks.json` 에 추가 + `/hooks` 에서 한 번 신뢰 — 형 허락 필요(정해야 할 것 4).
+- 등록 방식(S6 확정): **① `-c 'hooks={…}'` 인라인 + `--dangerously-bypass-hook-trust`** — 이 실행에서만, 전역 파일 무변경. (`CODEX_HOOK_MODE="inline"`; 형 결정 4 의 전역 hooks.json 은 쓰지 않는다.) 전역 hooks.json 의 훅(GitKraken·marina 플러그인 등)은 그대로 같이 돈다. 훅이 환경변수를 물려받으므로 `DISCORD_STATE_DIR` 은 코덱스 프로세스 env 로 주면 된다(MCP 와 달리).
 - 훅 실패는 코덱스를 막지 않는다(`|| true`). 훅은 표시용이라 무거운 일은 떼어 낸 프로세스로(`hook-typing` 4337 과 같은 방식).
 
 ### 5. 세션 id
-- 코덱스는 미리 정할 수 없다. SessionStart 훅 payload 의 sid 를 `_record_session_id`(2070)로 적는다.
+- 코덱스는 미리 정할 수 없다. SessionStart 훅 payload 의 sid 를 `_record_session_id`(2070)로 적는다. **SessionStart 는 띄울 때가 아니라 그 대화의 첫 입력을 받을 때** 온다(S7: 새로 띄움·`/new`·resume 모두; `source` = `startup`|`resume`) — 첫 지시 전엔 sid 가 없는 게 정상이다. rollout 첫 줄(`session_meta`)은 **18KB 가 넘으므로** `discover_sid` 는 첫 줄을 통째로 읽어야 한다.
 - 훅이 없거나 놓쳤으면 띄운 뒤 30초 안에 rollout 을 찾는다: 띄운 시각 이후 만들어진 `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` 중 `session_meta.cwd == root` 이고 다른 방 기록에 없는 것 하나. 둘 이상이면 안 정한다(짐작 금지 — `adopt_live_session_id` 2086 과 같은 문턱).
 - `/new` 로 갈아타면 SessionStart 가 새 sid 를 주므로 그때 기록을 바꾼다. rollout 경로는 `rollout` 칸에 캐시하고, 파일이 없어지면 sid 로 다시 찾는다.
 
 ### 6. 상태 판정
 - 바쁨 = rollout 의 마지막 `task_started` 뒤에 `task_complete`·`turn_aborted` 가 없고 마지막 줄이 30분 안. 화면 판정(S2 의 작업 중 줄)은 보조 — 둘 중 하나라도 바쁨이면 바쁨.
 - ctx = `agent_usage_from_path(rollout, "codex")["contextPercent"]`.
-- 정지(🛑·[정지]) = Esc. Esc 로 끝난 턴에 Stop 훅이 오는지는 S9 로 확인하고, 안 오면 `interrupt` 가 지금처럼 직접 정리한다.
+- 정지(🛑·[정지]) = Esc. **Esc 로 끝난 턴엔 Stop 훅이 오지 않는다**(S9) — rollout 에는 `event_msg.turn_aborted`(reason `interrupted`)만 남는다. 그래서 `interrupt` 가 지금처럼 직접 진행 표시를 뗀다.
 - 쉬면 내리기·안전 재시작 = `_verdict`·`restart_blockers` 를 그대로 쓰되 입력창·선택 창 모양만 코덱스 것으로.
 
 ### 7. 카테고리별 #상태·숫자판
@@ -136,7 +136,37 @@ Claude 판정기(백그라운드 셸·에이전트·cron·Monitor)는 rollout �
 
 ## 실측 결과
 
-(스파이크가 채운다 — S1~S9 각각: 명령, 관찰, 정한 값)
+(2026-10-21, codex-cli 0.146.0, `CODEX_HOME=~/.marina/accounts/codex-b`, tmux 전용 소켓 `-L codex-spike` 200x50, `env -i` 로 띄움. 관찰 순서대로.)
+
+**공통 관찰(계획 밖):**
+- B 계정으로 **연달아 턴을 시작하면 `429 Too Many Requests`(exceeded retry limit) 가 자주 난다** — 앞 턴이 끝나고 약 1분 안에 다음 턴을 걸 때. 2분쯤 쉬면 통과. 방이 연속 글을 받을 때 "입력은 들어갔는데 모델이 429 로 포기"하는 모양이 된다(화면에 `■ exceeded retry limit, last status: 429 Too Many Requests`, rollout 에는 `task_started`→`task_complete` 만 남고 답 없음). 설계 결정이 필요한 위험이라 1차에선 방치하고 지휘 보고에 올린다.
+- 전역 hooks.json 에 훅 11개(GitKraken `gk ai hook run`, marina 플러그인 SessionStart 등)가 있어 훅 신뢰 확인 창이 뜬다 → `--dangerously-bypass-hook-trust` 는 **항상** 필요하다(우리 훅 유무와 무관).
+- `codex-b/config.toml`·`hooks.json` 은 `~/.codex/` 로의 심볼릭 링크다(고치지 않음). `codex-b/sessions` 도 링크라 rollout 은 B 계정도 `~/.codex/sessions/YYYY/MM/DD/` 에 쌓인다(훅 `transcript_path` 는 `$CODEX_HOME/sessions/…` 로 보이지만 같은 파일).
+- 스파이크 중 `codex exec` 한 번이 전역 `~/.codex/config.toml` 에 `[projects."<scratchpad>/codex-spike/w"] trust_level="trusted"` 한 항목을 스스로 적었다(19:08). 해가 없는 찌꺼기라 건드리지 않았다.
+
+**S1 첫 화면.** `codex -C <w> -a never` → ① 업데이트 창(`✨ Update available! 0.146.0 -> 0.163.0 … 1. Update now 2. Skip 3. Skip until next version  Press enter to continue`). `-c check_for_update_on_startup=false` 로 사라짐. ② 폴더 신뢰 창(`> You are in <dir>  Do you trust the contents of this directory? … 1. Yes, continue 2. No, quit  Press enter to continue`). `-c 'projects."<w>".trust_level="trusted"'` 는 **안 먹고**, `-c 'projects={"<w>"={trust_level="trusted"}}'` 가 먹는다. ③ 훅 신뢰 창(`Hooks need review  11 hooks are new or changed. … 2. Trust all and continue`) → `--dangerously-bypass-hook-trust` 로 사라짐(대신 `⚠ \`--dangerously-bypass-hook-trust\` is enabled…` 경고 한 줄). **정한 값:** `CODEX_TRUST_ARGS(root) = ["-c", 'projects={"<root>"={trust_level="trusted"}}']`, 항상 `-c check_for_update_on_startup=false --dangerously-bypass-hook-trust`. `PANE_BLOCKING = ["Update available", "Do you trust the contents of this directory", "Hooks need review"]`. 세 인자를 다 주면 막는 화면 없이 입력창이 바로 보인다(헤더 박스에 `permissions: YOLO mode` — 전역 sandbox 설정 + `-a never`).
+
+**S2 화면 모양(`capture-pane -p -e`).**
+- 입력창 = **마지막** `›`(U+203A) 줄: `ESC[1m›ESC[0m ` 뒤에 비었으면 흐린 안내문(`ESC[2m<안내문>ESC[0m` — 문구가 "Use /skills…"·"Find and fix a bug in @filename"·"Implement {feature}" 등 **매번 바뀐다**), 쳤으면 일반 글자. 지난 사용자 말 에코는 `ESC[1;2m› ` 또는 `ESC[1m› `(›뒤 공백이 굵기 안쪽)라 구분된다. 선택 창은 `› 1. …`(시안 SGR `ESC[38;5;6m›`)에 `Press enter to confirm or esc to go back`.
+- 일하는 줄 = `• Working (14s • esc to interrupt)`(글머리표가 `•`/`◦` 로 깜빡임, 뒤에 ` · 1 background terminal running · /ps to view · /stop to close` 가 붙기도 함). MCP 기동 중엔 `Starting MCP servers (4/5): sungwook (3s • esc to interrupt)` 도 같은 문구를 쓴다. 쉬는 중에도 백그라운드 터미널이 있으면 `1 background terminal running · …` 줄만 남는다(`esc to interrupt` 없음).
+- Esc 뒤: `■ Conversation interrupted - tell the model what to do differently. Something went wrong? Hit /feedback to report the issue.`
+- **정한 값(캡처 10장에 파이썬으로 확인):** `PANE_BUSY_RE = r"esc to interrupt"`(일할 때만 True), 입력창 줄(색 포함 캡처) `PANE_INPUT_RE = r"^\x1b\[1m›\x1b\[0m ?(.*)$"` 의 **마지막 일치**, 비었음 = 나머지가 비었거나 `\x1b[2m` 로 시작. 색 없는 캡처로는 `^› ` 마지막 줄 + 선택 창 `^\s*› \d+\. ` 가 아니어야 입력창.
+
+**S3 입력.** (a) `send-keys -l`(여러 줄 포함) + 0.6초 + Enter → rollout 에 user 메시지 한 개, 줄바꿈 보존. (b) `load-buffer` + `paste-buffer -p -d` + 0.6초 + Enter → 한 개, 빈 줄까지 보존. 둘 다 통과, **(b) 를 채택**(`input="paste"`). 글자와 Enter 를 한 `send-keys` 로 보내면 Enter 가 삼켜져 입력창에 글이 남는다(실측 1회). (c) 일하는 중 Enter → 화면 `Messages to be submitted after next tool call (press esc to interrupt and send immediately)` 아래 `↳ <글>` 로 대기, 다음 도구 호출이 끝나자(~55초 뒤) 같은 턴에 `response_item(role=user)` + `event_msg.user_message` 가 기록되고 답에 반영됨(새 `task_started` 없음). (d) Tab 은 429 에 막혀 판별 못 함 — 쓰지 않는다. 3307자 붙여넣기: 입력창엔 `[Pasted Content 3307 chars]` 로 접히고 기록에는 전문(끝 `</channel>` 까지)이 한 user 메시지로 들어간다.
+
+**S4 MCP.** `-c 'mcp_servers.marina={command="python3",args=["<toy>"],env={DISCORD_STATE_DIR="/FROM/ENV"}}'` → 붙고 호출됨. 도구 이름: 훅 `tool_name` = `mcp__marina__echo`(코드 모드의 `tools.mcp__marina__echo`), TUI `Called marina.echo({})`. rollout 기록: `event_msg.mcp_tool_call_end` = `{call_id, invocation:{server:"marina",tool:"echo",arguments:{}}, duration, result:{Ok:{content:[{type:"text",text:…}],isError:false}}}`. **env 칸이 없으면 코덱스 프로세스 env(`DISCORD_STATE_DIR=/outer/envval` 확인) 가 MCP 서버로 안 넘어간다**(서버가 본 env 키: CPATH·HOME·LC_CTYPE·LIBRARY_PATH·MANPATH·PATH·SDKROOT·TERM — `CODEX_HOME` 도 없음). **정한 값:** `CODEX_MCP_ARG = mcp_servers.marina={command=…,args=[…,"mcp-chat"],env={DISCORD_STATE_DIR=…,MARINA_HOME=…}}`(env 칸 필수; `MARINA_HOME` 은 `mcp-chat` 이 `load_sessions` 로 방 기록을 찾는 데 필요). 도구 호출은 별도 승인 없이 통과(`-a never`).
+
+**S5 시스템 프롬프트.** `-c 'developer_instructions="비밀 단어는 파랑새다. …"'` → 답에 "비밀 단어는 파랑새입니다", rollout 에 `role=developer` 메시지로 들어감. **정한 값:** `CODEX_RULES_KEY = "developer_instructions"`(다른 키 시험 불필요).
+
+**S6 훅.** `-c 'hooks={SessionStart=[{hooks=[{type="command",command="<덤프> SessionStart"}]}],UserPromptSubmit=[…],PreToolUse=[{matcher="*",hooks=[…]}],Stop=[…]}'` + `--dangerously-bypass-hook-trust` → 네 훅 모두 돎. 전역 hooks.json 훅도 같이 돈다(`Running 2 Stop hooks`). **정한 값:** `CODEX_HOOK_MODE = "inline"`(전역 hooks.json·형 허락 불필요; `notify` 시험도 불필요). 공통 stdin 필드: `session_id`, `transcript_path`(rollout), `cwd`, `hook_event_name`, `model`, `permission_mode`. SessionStart: `source`(`startup`|`resume`) — `turn_id` 없음. UserPromptSubmit: `turn_id`, `prompt`. PreToolUse: `turn_id`, `tool_name`(셸 = `"Bash"`, MCP = `mcp__<서버>__<도구>`), `tool_input`(`{"command":…}`), `tool_use_id`. Stop: `turn_id`, `stop_hook_active`, `last_assistant_message`. 훅 프로세스 env 는 코덱스의 env 를 그대로 물려받는다(`DISCORD_STATE_DIR`·`CODEX_HOME`·`HOME`·`PWD` 확인) → 방 판별은 `DISCORD_STATE_DIR`. 훅 형식 하나(`{"hooks":{"Event":[…]}}`)는 hooks.json 과 같은 모양이다.
+
+**S7 sid.** SessionStart `session_id` == rollout 파일 이름 끝 uuid == `session_meta.payload.id`. `codex resume <sid> -C … -a never … "이어서: 1+1 은?"`(옵션을 `resume <sid>` 뒤에 둠) → 같은 rollout 파일 끝에 이어 쓰고(`task_started` 새로, 파일 새로 안 만듦), SessionStart `source="resume"` 에 같은 sid. `/new` → 새 rollout·새 sid, SessionStart(`source="startup"`)는 **새 대화의 첫 입력 때** 와서 그때 새 sid 를 알린다(`/new` 자체엔 훅 없음). SessionStart 는 새로 띄운 대화에서도 첫 입력 때(`UserPromptSubmit` 과 0.3초 차이)에야 온다. `resume --last` 의 폴더 거르기는 시험하지 않음(sid 로만 resume 하므로 불필요).
+
+**S8 rate_limits.** 한 턴 뒤 `event_msg.token_count`: `"rate_limits":{"limit_id":"codex","limit_name":null,"primary":{"used_percent":9.0,"window_minutes":10080,"resets_at":1793082796},"secondary":null,"credits":{…},"plan_type":"unknown",…}` — B 계정은 **`primary` 하나(주간 10080분)만 있고 `secondary` 는 null**. `info.total_token_usage`·`model_context_window` 도 같은 줄에 있다. `task_started` = `{turn_id, started_at, model_context_window, collaboration_mode_kind}`, `task_complete` = `{turn_id, last_agent_message, started_at, completed_at, duration_ms, time_to_first_token_ms}`. `session_meta` 줄은 18KB 이상(`base_instructions` 포함).
+
+**S9 Esc.** 일하는 중 Esc → 화면 `■ Conversation interrupted…`, rollout 끝에 `event_msg.turn_aborted`(reason `interrupted`), **Stop 훅은 오지 않음**(새 덤프 0개). 하던 `sleep` 셸은 백그라운드 터미널로 남는다. **정한 값:** `interrupt` 가 진행 표시 정리를 직접 한다(§6).
+
+**스파이크가 만든 대화(전부 `codex archive` 처리):** 01a15dea-6b55-7ed3-bb4f-672e4a953103 · 01a15def-e6a4-7e73-81c4-aaba47c64dae · 01a15df0-acdc-7840-8d26-329b52f0c847 · 01a15df2-d580-7501-9faf-c984b7d47721 · 01a15df6-ad2d-74f3-a376-1093930d23a9 · 01a15dfd-1cc7-7cc0-8a92-33cae8fa7c82. (`codex exec --ephemeral` 두 번은 기록 없음.)
 
 ## 검증
 
