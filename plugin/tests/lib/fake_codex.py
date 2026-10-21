@@ -90,7 +90,8 @@ try:
                 if (ctl / "swallow").exists():
                     pass
                 elif (ctl / "busy").exists():
-                    queue.append(text.replace("\n", " "))
+                    # 실 TUI 처럼 대기 목록 미리보기는 첫 줄만, 긴 글은 접힌 표시로 — message_id 가 안 보일 수 있다
+                    queue.append(f"[Pasted Content {len(text)} chars]" if len(text) > 1000 else text.split("\n")[0])
                 else:
                     append_user(text)
             draw()

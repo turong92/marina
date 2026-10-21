@@ -598,9 +598,18 @@ def _screen(tmux: str) -> str:
     return ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or ""
 
 
-def confirm(rollout: "Path | None", offset: int, marker: str, tmux: str = "", timeout: "float | None" = None) -> bool:
-    """rollout 의 offset 뒤에 marker 가 나오면 True. 바쁠 때 넣은 글은 기록이 다음 도구 호출 뒤에야 생기므로
-    화면의 대기 목록에 marker 가 보여도 접수된 것으로 본다(S3). 입력창에 글이 남아 있으면 Enter 를 다시(최대 3번)."""
+def queued_count(screen: str) -> int:
+    """대기 목록(`Messages to be submitted…`)의 글 수 = `↳` 줄 수. 긴 글은 `[Pasted Content N chars]` 로 접히고
+    여러 줄 글은 첫 줄만 보일 수 있어, 접수 판정을 message_id 글자 매칭에 기대면 거짓 실패가 난다."""
+    if PANE_QUEUED not in screen:
+        return 0
+    return sum(1 for ln in screen.splitlines() if ln.lstrip().startswith("\u21b3"))
+
+
+def confirm(rollout: "Path | None", offset: int, marker: str, tmux: str = "", timeout: "float | None" = None,
+            queued_before: int = 0) -> bool:
+    """rollout 의 offset 뒤에 marker 가 나오면 True. 바쁠 때 넣은 글은 기록이 다음 도구 호출 뒤에야 생기므로(S3) 화면의
+    대기 목록 글 수가 넣기 전보다 늘고 입력창이 비었으면 접수된 것으로 본다(id 가 접혀 안 보여도). 입력창에 글이 남아 있으면 Enter 를 다시(최대 3번)."""
     wait = float(os.environ.get("MARINA_CODEX_CONFIRM_TIMEOUT") or 8.0) if timeout is None else timeout
     deadline, resent, last_enter = time.time() + wait, 0, time.time()
     while True:
@@ -614,7 +623,7 @@ def confirm(rollout: "Path | None", offset: int, marker: str, tmux: str = "", ti
                 pass
         if tmux:
             screen = _screen(tmux)
-            if PANE_QUEUED in screen and marker in screen:
+            if PANE_QUEUED in screen and (marker in screen or (queued_count(screen) > queued_before and not input_holds_text(screen))):
                 return True
             if resent < 3 and time.time() - last_enter >= 1.5 and input_holds_text(screen):
                 ms._tmux("send-keys", "-t", tmux, "Enter")
@@ -657,6 +666,7 @@ def deliver_missed(rec: dict[str, Any], cfg: dict[str, Any], message: str = "", 
         ro = rollout_of(rec)
         offset = ro.stat().st_size if ro else 0
         t0 = time.time()
+        queued_before = queued_count(_screen(name))
         type_text(name, text)
         if ro is None:                        # 첫 입력 전엔 rollout 을 모른다 — 새로 생긴 것 하나를 찾아 방 기록에 적는다
             deadline = t0 + 8.0
@@ -667,7 +677,7 @@ def deliver_missed(rec: dict[str, Any], cfg: dict[str, Any], message: str = "", 
                     time.sleep(0.3)
             if ro is not None:
                 ms._record_session_id(rec, sid)
-        if not confirm(ro, offset, lid, tmux=name):
+        if not confirm(ro, offset, lid, tmux=name, queued_before=queued_before):
             mb._log(f"codex deliver {rec.get('task')}: 전달 확인 실패 {lid}")
             try:
                 dc.add_reaction(lch, lid, "\u26a0\ufe0f")

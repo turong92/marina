@@ -120,6 +120,27 @@ check("Messages to be submitted" in screen and m6["id"] in screen, "화면 대�
 check(m6["id"] in woke().get("delivered", []), "delivered 에 m6")
 finish()
 PY
+# 4b) 바쁠 때 — 긴 글(접힘)·두 글 묶음(둘째 id 가 미리보기에 안 보임)도 접수로 보고, 다음 글 때 다시 넣지 않는다(두 번 실행 금지)
+run <<'PY'
+import os; exec(open(os.environ["TMPROOT"] + "/prelude.py").read())
+rows = json.loads((FD / "messages.json").read_text())[ch]
+m7 = msg(now + 1, "긴 글 " + "가나다라 " * 400)
+seed(*rows, m7)
+r = mw.wake(ch, "U1", m7["id"])
+check(r == "delivered", f"긴 글(접힘) 바쁠 때 결과: {r}")
+m8, m9 = msg(now + 2, "묶음 첫째\n둘째 줄"), msg(now + 3, "묶음 셋째")
+seed(*rows, m7, m8, m9)
+r = mw.wake(ch, "U1", m9["id"])
+check(r == "delivered", f"두 글 묶음 바쁠 때 결과: {r}")
+m10 = msg(now + 4, "다음 글")
+seed(*rows, m7, m8, m9, m10)
+r = mw.wake(ch, "U1", m10["id"])
+check(r == "delivered", f"m10 결과: {r}")
+screen = ms._tmux("capture-pane", "-p", "-t", rec["tmux"]).stdout
+check(mc.queued_count(screen) == 4, f"대기열 글 수 = 넣은 횟수(m6, m7, m8+m9, m10) — 중복 입력 없음: {mc.queued_count(screen)}")
+check(all(x["id"] in woke().get("delivered", []) for x in (m7, m8, m9, m10)), "모두 delivered")
+finish()
+PY
 rm -f "$TMPROOT/codex-ctl/busy"
 
 # 5) 허용 목록 밖 사용자 — 입력 0
