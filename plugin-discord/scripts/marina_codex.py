@@ -271,18 +271,19 @@ BUSY_TAIL = 300 * 1024
 BUSY_STALE_S = 1800.0
 
 
-def turn_busy(rollout: Path, now: "float | None" = None) -> bool:
+def turn_busy(rollout: Path, now: "float | None" = None, after: float = 0.0) -> bool:
     """마지막 턴 경계가 task_started(뒤에 task_complete·turn_aborted 없음)이고 마지막 줄이 30분 안이면 바쁨.
+    after > 0 이면 그 시각(이 tmux 가 뜬 때) 뒤에 시작한 턴만 친다 — 재시작으로 끊겨 rollout 에 열린 채 남은 옛 턴은 바쁨이 아니다.
     끝 300KB 안에 경계가 하나도 없으면(도구 출력이 아주 큰 긴 턴) 모른다 → False — 화면 판정(`esc to interrupt`)이 보조한다."""
     objs = _objs(_tail_lines(rollout, BUSY_TAIL))
     if not objs:
         return False
-    last = ""
+    last, began = "", 0.0
     for o in objs:
         p = o.get("payload") if isinstance(o.get("payload"), dict) else {}
         if o.get("type") == "event_msg" and p.get("type") in ("task_started", "task_complete", "turn_aborted"):
-            last = str(p["type"])
-    if last != "task_started":
+            last, began = str(p["type"]), _epoch(o.get("timestamp"))
+    if last != "task_started" or began < after:
         return False
     return (time.time() if now is None else now) - _epoch(objs[-1].get("timestamp")) <= BUSY_STALE_S
 
@@ -706,6 +707,14 @@ def _tail_screen(tmux: str, color: bool = False) -> str:
 def pane_busy(tmux: str) -> bool:
     """화면 아래쪽에 'esc to interrupt'(일하는 줄)가 있나. 지난 대화 내용에 같은 글이 있어도 틀리지 않게 끝 15줄만 본다."""
     return bool(PANE_BUSY_RE.search(_tail_screen(tmux)))
+
+
+_BG_TERMS = re.compile(r"(\d+) background terminals? running")
+
+
+def background_terminals(tmux: str) -> int:
+    """화면 끝에 `N background terminal(s) running`(S2) — 쉬는 중에도 남는다(Esc 로 끊긴 셸 포함, S9). 없으면 0."""
+    return max([int(m.group(1)) for m in _BG_TERMS.finditer(_tail_screen(tmux))] + [0])
 
 
 def input_empty(tmux: str) -> bool:

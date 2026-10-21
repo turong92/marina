@@ -187,8 +187,13 @@ def _room_busy(rec: dict[str, Any]) -> tuple[bool, bool]:
     if not ms.tmux_alive(name):
         return False, False
     import marina_codex
-    ro = marina_codex.rollout_of(rec)
-    return True, marina_codex.pane_busy(name) or bool(ro and marina_codex.turn_busy(ro))
+    try:      # 코덱스 쪽 예외(rollout 이 archive 로 옮겨지는 경합 등)가 snapshot 으로 올라가 클로드 #상태까지 깨뜨리지 않게
+        ro = marina_codex.rollout_of(rec)
+        # 이 tmux 가 뜬 뒤 시작한 턴만 친다 — 재시작으로 끊겨 열린 채 남은 옛 턴이 30분 바쁨으로 보이면 이어받기가 막힌다
+        return True, marina_codex.pane_busy(name) or bool(ro and marina_codex.turn_busy(ro, after=_session_born(name)))
+    except Exception as exc:
+        _log(f"codex busy {rec.get('task')}: {type(exc).__name__}: {exc}")
+        return True, False
 
 
 def _ctx_percent(rec: dict[str, Any]) -> float | None:
@@ -330,6 +335,11 @@ def _pane_shells(name: str) -> int:
     # 입력창 바로 위(턴 끝 줄 '… · 1 shell still running')부터 아래 상태 줄까지만 — 대화 본문의 같은 글자는 무시
     near = lines[max(0, box - 4):]
     return max([int(m.group(1)) for ln in near for m in _SHELLS.finditer(ln)] + [0])
+
+
+def marina_codex_terms(name: str) -> int:
+    import marina_codex
+    return marina_codex.background_terminals(name)
 
 
 def _session_born(name: str) -> float:
@@ -2355,7 +2365,7 @@ TURN_STALE = 1800.0              # 마지막 줄이 이보다 오래됐으면(Es
 _TURN_END = ("stop_hook_summary", "turn_duration")
 
 
-def _turn_in_progress(tr: Path | None) -> bool:
+def _turn_in_progress(tr: Path | None, after: float = 0.0) -> bool:
     """작업 기록으로 본 턴 진행 중 — 마지막 의미 있는 줄이 턴 끝 표시(system stop_hook_summary·turn_duration)나
     Esc 표시가 아니고 user(tool_result 포함)·assistant 면 진행 중. 그 줄이 30분 넘게 오래됐으면 아님.
     attachment·queue-operation·bridge_status 등은 건너뛴다. 읽기 실패는 예외로 올린다."""
@@ -2363,7 +2373,7 @@ def _turn_in_progress(tr: Path | None) -> bool:
         return False
     if tr.name.startswith("rollout-"):                # 코덱스 rollout — 열린 턴(task_started 뒤 끝 표시 없음)
         import marina_codex
-        return marina_codex.turn_busy(tr)
+        return marina_codex.turn_busy(tr, after=after)
     for raw in reversed(_tail_text(tr, 300_000).splitlines()):
         try:
             row = json.loads(raw)
@@ -2398,12 +2408,12 @@ def _restart_blockers(rec: dict[str, Any]) -> list[str]:
     turn = num("turn-at")
     if (turn > num("stopped-at") and time.time() - turn < 600) or _room_busy(rec)[1]:
         out.append("작업 중")
-    if _turn_in_progress(tr):                        # 화면·turn-at 이 놓친 긴 턴(2026-10-07 사고)
+    if _turn_in_progress(tr, _session_born(name) if ms.is_codex(rec) else 0.0):                        # 화면·turn-at 이 놓친 긴 턴(2026-10-07 사고)
         out.append("턴 진행 중")
     t = live_tasks(rec) if alive else []
     if t:
         out.append(f"백그라운드 {len(t)}")
-    shells = _pane_shells(name) if alive else 0     # 기록(끝 2MB)이 놓친 셸도 — 화면에 N shell 이 보이면 그것으로 막는다
+    shells = (marina_codex_terms(name) if ms.is_codex(rec) else _pane_shells(name)) if alive else 0     # 기록(끝 2MB)이 놓친 셸도 — 화면에 N shell 이 보이면 그것으로 막는다
     if shells > 0:
         out.append(f"백그라운드 셸 {shells}")
     if alive:

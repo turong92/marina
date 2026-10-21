@@ -47,6 +47,8 @@ def draw():
     out = ["\x1b[2J\x1b[H", "OpenAI Codex (fake)\r\n"]
     if (ctl / "busy").exists():
         out.append("◦ Working (3s • esc to interrupt)\r\n")
+    if (ctl / "bgterm").exists():      # 쉬는 중에도 남는 백그라운드 터미널 줄(S2)
+        out.append("  1 background terminal running · /ps to view · /stop to close\r\n")
     if queue:
         out.append("• Messages to be submitted after next tool call (press esc to interrupt and send immediately)\r\n")
         out += [f"  ↳ {q}\r\n" for q in queue]

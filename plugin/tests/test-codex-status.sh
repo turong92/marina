@@ -121,6 +121,35 @@ check(mc.unanswered_mid(rec, ro) == "", "replied.mid == 마지막 지시 → 없
 (sd / "replied.json").unlink()
 del os.environ["DISCORD_STATE_DIR"]
 
+# 3b) 백그라운드 터미널(쉬는 화면에도 남음)이 있으면 내리지 않는다 — Esc 로 끊긴 셸도 남는다(S9)
+(T / "codex-ctl" / "bgterm").touch(); redraw()
+check(wait_for(lambda: mc.background_terminals(tmux) == 1), "화면의 background terminal 수")
+os.utime(ro, (time.time() - 600, time.time() - 600))
+v = mi.verdict(rec, 0.0, time.time() + 5)
+check(any("백그라운드" in x for x in v), f"백그라운드 터미널이 있으면 막는다: {v}")
+(T / "codex-ctl" / "bgterm").unlink(); redraw()
+check(wait_for(lambda: mc.background_terminals(tmux) == 0), "터미널 줄이 사라짐")
+
+# 3c) 재시작으로 끊겨 열린 채 남은 옛 턴(이 tmux 가 뜨기 전에 시작)은 바쁨이 아니다
+born = mb._session_born(tmux)
+append(ro, json.dumps({"timestamp": iso(born - 100), "type": "event_msg", "payload": {"type": "task_started", "turn_id": "old"}}))
+check(mc.turn_busy(ro) is True, "(전제) 뜬 시각을 안 주면 열린 턴은 바쁨")
+check(mb._room_busy(rec_of("st")) == (True, False), f"뜨기 전 시작한 턴은 바쁨 아님: {mb._room_busy(rec_of('st'))}")
+check(not any("진행" in x or "작업 중" in x for x in mb.restart_blockers(rec_of("st"))), f"안전 재시작을 막지 않는다: {mb.restart_blockers(rec_of('st'))}")
+append(ro, ev("task_started", turn_id="new"))
+check(mb._room_busy(rec_of("st"))[1] is True, "뜬 뒤 시작한 열린 턴은 바쁨")
+append(ro, ev("task_complete", turn_id="new"))
+
+# 3d) 코덱스 쪽 예외가 snapshot 으로 올라가 클로드 #상태까지 깨뜨리지 않는다
+_orig = mc.rollout_of
+mc.rollout_of = lambda r: (_ for _ in ()).throw(OSError("archive 로 옮겨짐"))
+try:
+    rows = mb.snapshot(full=False)["sessions"]
+    check(any(r["channelId"] == str(ch) for r in rows), "코덱스 예외에도 snapshot 은 돈다")
+finally:
+    mc.rollout_of = _orig
+os.utime(ro, (time.time() - 600, time.time() - 600))
+
 # 4) 쉬면 내리기 — 입력창 빈 가짜 화면은 내려도 됨, 일하는 중이면 막는다
 (sd / "replied.json").write_text(json.dumps({"mid": "m1", "at": 1}))
 os.utime(ro, (time.time() - 600, time.time() - 600))      # 방금 움직인 기록은 재시작 막음 사유(30초)
