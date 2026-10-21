@@ -4141,6 +4141,8 @@ def chat_tools_for(rec: "dict[str, Any] | None") -> list[dict[str, Any]]:
 def mcp_chat(stdin: Any = None, stdout: Any = None) -> None:
     sdir = os.environ.get("DISCORD_STATE_DIR") or ""
     rec = next((x for x in load_sessions() if sdir and x.get("stateDir") == sdir), None)
+    if rec is None and os.environ.get("MARINA_ROOM_KIND") == "codex":
+        rec = {"kind": "codex"}      # 새로 만든 방은 서버가 뜰 때 기록이 아직 없다 — 띄운 쪽이 준 표식으로 도구 목록을 정한다(호출 땐 chat_tool 이 기록을 다시 본다)
     mcp_serve(chat_tools_for(rec), chat_tool, stdin, stdout)
 
 

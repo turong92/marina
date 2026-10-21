@@ -67,7 +67,7 @@ def trust_args(root: str) -> list[str]:
 
 def _mcp_env(sdir: Path) -> dict[str, str]:
     """MCP 서버는 코덱스 env 를 물려받지 않는다(S4) — 서버가 쓸 변수는 env 칸에 따로 적는다."""
-    env = {"DISCORD_STATE_DIR": str(sdir), "MARINA_HOME": str(ms.marina_home())}
+    env = {"DISCORD_STATE_DIR": str(sdir), "MARINA_HOME": str(ms.marina_home()), "MARINA_ROOM_KIND": KIND}
     for k in ("MARINA_DISCORD_API", "MARINA_CHANNELS_DIR", "MARINA_CODEX_SESSIONS"):
         if os.environ.get(k):
             env[k] = os.environ[k]
@@ -167,16 +167,22 @@ def codex_env(sdir: Path, account: str) -> dict[str, str]:
     return env
 
 
+_SELECTION = re.compile(r"^› \d+\. ")        # 막는 화면은 번호 선택지(› 1. Yes, continue …)다
+
+
 def boot_check(tmux: str, timeout: "float | None" = None) -> str:
     """막는 화면 문구가 보이면 그 문구, 입력창(›)이 먼저 보이거나 시간이 다 되면 ""."""
     wait = float(os.environ.get("MARINA_CODEX_BOOT_WAIT") or 8.0) if timeout is None else timeout
     deadline = time.time() + wait
     while True:
         screen = ms._tmux("capture-pane", "-p", "-t", tmux).stdout or ""
-        for phrase in PANE_BLOCKING:
-            if phrase in screen:
-                return phrase
-        if any(line.startswith("› ") for line in screen.splitlines()) or time.time() >= deadline:
+        prompts = [ln for ln in screen.splitlines() if ln.startswith("› ")]
+        live_input = bool(prompts) and not _SELECTION.match(prompts[-1])      # 마지막 › 가 번호 선택지가 아니면 평소 입력창
+        if not live_input:       # 입력창이 떠 있으면 문구는 resume 으로 다시 그려진 지난 대화일 뿐이다
+            for phrase in PANE_BLOCKING:
+                if phrase in screen:
+                    return phrase
+        if live_input or time.time() >= deadline:
             return ""
         time.sleep(0.3)
 

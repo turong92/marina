@@ -107,4 +107,16 @@ out="$(MARINA_SESSION_BOOT_WAIT=1 msess new proj feat/blk --codex --no-start 2>&
 echo "$out" | grep -q "Do you trust the contents" || fail "막는 화면 문구가 안내에 없음: $out"
 tmux -L "$MARINA_TMUX_SOCKET" has-session -t =proj-feat-blk 2>/dev/null && fail "막힌 tmux 가 남음"
 rm -f "$TMPROOT/codex-block"
+# 6) 입력창이 떠 있으면, 화면에 막는 문구가 (resume 으로 다시 그려진 지난 대화처럼) 남아 있어도 멀쩡한 방이다
+printf 'Update available in an old chat\n› Use /skills to list available skills\n' > "$TMPROOT/codex-block"
+out="$(MARINA_SESSION_BOOT_WAIT=1 msess new proj feat/hist --codex --no-start 2>&1)" || fail "입력창이 있는데 막힌 방으로 봤다: $out"
+tmux -L "$MARINA_TMUX_SOCKET" has-session -t =proj-feat-hist 2>/dev/null || fail "멀쩡한 방을 내렸다"
+rm -f "$TMPROOT/codex-block"
+
+# 7) 처음 new --codex 로 띄운 방의 mcp-chat 은 기록이 아직 없어도(표식 env 만으로) Discord 도구 다섯을 낸다
+mcp_env="$(PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 -c 'import marina_codex as mc; from pathlib import Path; print(mc._mcp_env(Path("/nowhere/sd"))["MARINA_ROOM_KIND"])')"
+[ "$mcp_env" = "codex" ] || fail "MCP env 칸에 방 종류 표식이 없다"
+names="$(printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}' \
+  | DISCORD_STATE_DIR=/nowhere/sd MARINA_ROOM_KIND=codex bash "$MARINA_SH" session mcp-chat | python3 -c 'import sys,json; print(" ".join(sorted(t["name"] for t in [json.loads(l) for l in sys.stdin][1]["result"]["tools"])))')"
+for n in reply react edit_message fetch_messages download_attachment; do case " $names " in *" $n "*) ;; *) fail "기록 없는 mcp-chat 에 $n 이 없다: $names";; esac; done
 echo "PASS test-codex-room-new"
