@@ -82,6 +82,11 @@ CHAT_RULES = (
 CHAT_LIMIT = 20
 LOBBY_KINDS = ("chat-lobby", "dev-lobby")
 CHAT_KINDS = ("chat",) + LOBBY_KINDS          # 제한 세션(--restricted)으로 뜨는 종류
+
+
+def is_codex(rec: "dict[str, Any] | None") -> bool:
+    """코덱스 방(kind "codex") — CHAT_KINDS 에는 넣지 않는다(개발 방 규칙을 따른다)."""
+    return bool(rec) and (rec or {}).get("kind") == "codex"
 DEV_LOBBY_CHANNEL = "새-작업"
 DEV_LOBBY_TOPIC = "새 작업(워크트리+채널)을 여는 곳 — \"○○ 작업 열어줘\" 라고 말하면 돼"
 DEV_LOBBY_GUIDE = (
@@ -466,6 +471,19 @@ def ensure_category(dc: Discord, cfg: dict[str, Any], project: str) -> str:
     return cid
 
 
+def ensure_codex_category(dc: Discord, cfg: dict[str, Any]) -> str:
+    """코덱스 방 카테고리(기본 chat-bot) ID. 저장된 ID 가 Discord 에 없으면 새로 만들고 discord.json 의 "codex" 에 적는다."""
+    import marina_codex
+    cc = marina_codex.codex_cfg(cfg)
+    cid = str(cc.get("categoryId") or "")
+    if cid and any(str(c.get("id")) == cid and c.get("type") == 4 for c in dc.list_channels(cfg["guildId"])):
+        return cid
+    cc["categoryId"] = dc.create_category(cfg["guildId"], cc["category"])
+    cfg["codex"] = cc
+    save_config(cfg)
+    return str(cc["categoryId"])
+
+
 _VIEW = 1 << 10
 _TALK = _VIEW | (1 << 11) | (1 << 16) | (1 << 15) | (1 << 14) | (1 << 6)   # 보기·쓰기·기록·첨부·링크·반응
 
@@ -717,6 +735,9 @@ def session_launch(s: dict[str, Any], resume: bool = False, first: str = "") -> 
     기록도 그 폴더 키로 옮겨 가고 --resume 은 거기서만 찾는다(리뷰 2). 기록이 아직 없을 때만 다시 fork."""
     root = Path(str(s.get("root") or ""))
     sid = str(s.get("sessionId") or "")
+    if is_codex(s):
+        import marina_codex
+        return root, marina_codex.codex_argv(s, resume, first)
     if s.get("kind") in CHAT_KINDS or not sid:
         return root, session_argv_simple(s, resume, first)
     tr = find_transcript(sid)
@@ -729,7 +750,9 @@ def session_launch(s: dict[str, Any], resume: bool = False, first: str = "") -> 
                              from_id=str(s.get("forkedFrom") or ""), first=first)
 
 
-def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str], notify_ref: str = "") -> None:
+def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str], notify_ref: str = "",
+               account: str = "") -> None:
+    """account = 코덱스 방의 계정 이름(account-running 에 적는다). 클로드 방은 토큰 파일 이름 / 기본 계정."""
     run = list(argv)
     if notify_ref:
         # claude 가 스스로 끝나면 채널에 알린다. kill-session(stop·rm)은 셸째 죽어 알리지 않는다.
@@ -751,14 +774,22 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
     if sdir and Path(sdir).is_dir():
         try:
             (Path(sdir) / "account-running").write_text(
-                (Path(tok).stem if tok and Path(tok).is_file() and Path(tok).stat().st_size > 0 else ACCOUNT_DEFAULT) + "\n",
+                (account or (Path(tok).stem if tok and Path(tok).is_file() and Path(tok).stat().st_size > 0 else ACCOUNT_DEFAULT)) + "\n",
                 encoding="utf-8")
         except OSError:
             pass
     dashboard_signal()
     time.sleep(float(os.environ.get("MARINA_SESSION_BOOT_WAIT") or 2.0))
     if not tmux_alive(name):
+        if argv and argv[0] == "codex":
+            raise SessionError(f"codex 가 바로 꺼졌어 — 직접 확인: cd {shlex.quote(str(cwd))} && codex")
         raise SessionError(f"claude 가 바로 꺼졌어 — 직접 확인: cd {shlex.quote(str(cwd))} && claude --channels {PLUGIN}")
+    if argv and argv[0] == "codex":
+        import marina_codex
+        phrase = marina_codex.boot_check(name)
+        if phrase:                 # 업데이트·신뢰 창 같은 막는 화면 — 입력을 조용히 삼키는 방을 만들지 않는다
+            tmux_stop(name)
+            raise SessionError(f"코덱스가 '{phrase}' 창에서 멈춰 있어")
     _save_launch_env(env_extra.get("DISCORD_STATE_DIR") or "")
 
 
@@ -2441,7 +2472,7 @@ UPDATE_EVERY_S = 3600.0
 _DISCORD_PLUGIN = "marina-discord@marina-dev"
 _PREFLIGHT_MODULES = ("marina_session", "marina_discord_bot", "marina_discord_ask", "marina_share", "marina_discord_usage",
                        "marina_discord_launchd", "marina_discord_wake", "marina_discord_idle",
-                       "marina_discord_brief")
+                       "marina_discord_brief", "marina_codex")
 
 
 def _claude_home() -> Path:
@@ -3137,14 +3168,22 @@ def marina_start(root: Path) -> str:
 # ── 명령 ─────────────────────────────────────────────────────────────────────
 
 def preflight(cfg: dict[str, Any], dc: Discord, project: str, task: str,
-              existing: Path | None = None) -> dict[str, Any]:
-    """아무것도 만들기 전에 전부 본다 — 하나라도 걸리면 SessionError. existing = 옮겨 올 대화의 기존 폴더."""
+              existing: Path | None = None, codex: bool = False) -> dict[str, Any]:
+    """아무것도 만들기 전에 전부 본다 — 하나라도 걸리면 SessionError. existing = 옮겨 올 대화의 기존 폴더.
+    codex = 코덱스 방: claude 대신 codex 와 계정 폴더(auth.json)를 보고, 채널 겹침은 chat-bot 카테고리에서 본다."""
     pc = project_config(cfg, project)
     root = project_root(project)
     tf = project_token_file(cfg, project)     # 프로젝트 토큰이면 전역으로 되돌아가지 않고 분명히 실패한다
     if not _tmux_exe():
         raise SessionError("'tmux' 를 찾지 못했어 (brew install tmux)")
-    if not shutil.which("claude"):
+    if codex:
+        import marina_codex
+        if not shutil.which("codex"):
+            raise SessionError("'codex' 를 찾지 못했어 (PATH 확인)")
+        auth = marina_codex.codex_home(marina_codex.codex_cfg(cfg)["account"]) / "auth.json"
+        if not auth.is_file() or auth.stat().st_size == 0:
+            raise SessionError(f"코덱스 계정 로그인이 없어: {auth} (CODEX_HOME={auth.parent} codex login)")
+    elif not shutil.which("claude"):
         raise SessionError("'claude' 를 찾지 못했어 (PATH 확인)")
     wt = existing or root / ".claude" / "worktrees" / worktree_dirname(task)
     name, sdir, chan = tmux_name(project, task), state_dir(project, task), channel_name(task)
@@ -3159,7 +3198,7 @@ def preflight(cfg: dict[str, Any], dc: Discord, project: str, task: str,
     if any(s.get("project") == project and s.get("task") == task for s in load_sessions()):
         raise SessionError(f"세션 기록이 이미 있어: {project}/{task}")
     dc.list_channels(cfg["guildId"])      # 토큰·서버 확인 — 워크트리를 만들기 전에(첫 실행에도)
-    cat = str(pc.get("categoryId") or "")
+    cat = str((marina_codex.codex_cfg(cfg) if codex else pc).get("categoryId") or "")
     if cat and find_text_channel(dc, cfg["guildId"], cat, chan):
         raise SessionError(f"Discord 채널이 이미 있어: #{chan}")
     return {"root": root, "worktree": wt, "tmux": name, "stateDir": sdir, "channel": chan}
@@ -4222,8 +4261,13 @@ def reconcile_gone(now: float | None = None) -> list[str]:
 
 
 def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id: str = "",
-            title: str = "", first: Any = "") -> dict[str, Any]:
-    """first = 첫 지시 글, 또는 채널 ID 를 받아 글을 돌려주는 함수(채널을 만든 뒤 조립 — 세션이 자기 채널·메시지를 알게)."""
+            title: str = "", first: Any = "", codex: bool = False) -> dict[str, Any]:
+    """first = 첫 지시 글, 또는 채널 ID 를 받아 글을 돌려주는 함수(채널을 만든 뒤 조립 — 세션이 자기 채널·메시지를 알게).
+    codex = 코덱스 방: 채널은 chat-bot 카테고리, tmux 안에서 claude 대신 codex."""
+    if codex:
+        if from_id or is_chat_project(project):
+            raise SessionError("--codex 는 개발 방(워크트리)만 — --from·채팅 프로젝트와 같이 못 써")
+        return _cmd_new_codex(project, task, base, start, title, first)
     if is_chat_project(project):
         return cmd_new_chat(task, from_id, title=title, project=project)
     if from_id:
@@ -4261,6 +4305,48 @@ def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id
               "createdAt": int(time.time())}
     if title:
         record["title"] = title
+    items = load_sessions()
+    items.append(record)
+    save_sessions(items)
+    lock_root(record)
+    return dict(record, url=f"https://discord.com/channels/{cfg['guildId']}/{channel_id}", warning=warning)
+
+
+def _cmd_new_codex(project: str, task: str, base: str, start: bool, title: str, first: Any) -> dict[str, Any]:
+    """코덱스 방 만들기 — cmd_new 와 같은 순서·같은 되돌리기. 달라지는 곳: 카테고리(chat-bot)·자료실 없음·claude 설정 파일 없음."""
+    import marina_codex
+    cfg = load_config()
+    dc = Discord(read_token(cfg))
+    plan = preflight(cfg, dc, project, task, codex=True)
+    account = marina_codex.codex_cfg(cfg)["account"]
+    wt = worktree_create(project, task, base)
+    warning = marina_start(wt) if start else ""
+    sdir: Path = plan["stateDir"]
+    record = {"project": project, "task": task, "root": str(wt), "kind": marina_codex.KIND, "codexAccount": account,
+              "tmux": plan["tmux"], "stateDir": str(sdir), "createdAt": int(time.time())}
+    if title:
+        record["title"] = title
+    channel_id = ""
+    try:
+        cat = ensure_codex_category(dc, cfg)
+        channel_id = dc.create_text_channel(cfg["guildId"], plan["channel"], cat, title)
+        write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg, project))
+        record["channelId"] = channel_id
+        if callable(first):
+            try:
+                first = first(channel_id)
+            except Exception:
+                first = ""
+        tmux_start(plan["tmux"], wt, marina_codex.codex_argv(record, first=first), marina_codex.codex_env(sdir, account),
+                   notify_ref=f"{project}/{task}", account=account)
+    except Exception as exc:
+        remove_state_dir(sdir)
+        if channel_id:
+            try:
+                dc.delete_channel(channel_id)
+            except SessionError:
+                pass
+        raise SessionError(f"{exc}\n워크트리는 남겨 뒀어: {wt} (필요 없으면 대시보드에서 삭제)")
     items = load_sessions()
     items.append(record)
     save_sessions(items)
@@ -4352,11 +4438,13 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
             continue
         try:
             sdir = Path(str(s.get("stateDir") or ""))
+            codex = is_codex(s)
             if s.get("stateDir") and sdir.is_dir():
-                # 업데이트로 바뀐 스크립트 경로를 다시 적는다
+                # 업데이트로 바뀐 스크립트 경로를 다시 적는다 — 코덱스 방은 설정 파일이 없고(훅·MCP 는 띄울 때 인자로) 건너뛴다
                 guard = sdir / "inbox" if s.get("kind") == "dev-lobby" else root
-                write_settings(sdir, chat_root=guard if chat else None, lobby=s.get("kind") in LOBBY_KINDS,
-                               room=str(s.get("channelId") or ""))
+                if not codex:
+                    write_settings(sdir, chat_root=guard if chat else None, lobby=s.get("kind") in LOBBY_KINDS,
+                                   room=str(s.get("channelId") or ""))
                 _drop_ack_reaction(sdir / "access.json")
                 try:                              # 설정에서 바꾼 봇이 재시작으로 따라온다 — 실패해도 재시작은 막지 않는다
                     relink_token(sdir, load_config(), str(s.get("project") or ""))
@@ -4364,14 +4452,19 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
                     pass
             if chat:
                 ensure_trusted(root)
-            else:
+            elif not codex:
                 adopt_live_session_id(s)      # /clear 로 갈아탄 대화면 지금 것으로 — 지운 대화를 되살리지 않게
             cwd, argv = session_launch(s, resume=True, first=first)
-            tmux_start(name, cwd, argv,
-                       chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
+            if codex:
+                import marina_codex
+                acct = str(s.get("codexAccount") or marina_codex.DEFAULT_ACCOUNT)
+                tmux_start(name, cwd, argv, marina_codex.codex_env(sdir, acct), notify_ref=label, account=acct)
+            else:
+                tmux_start(name, cwd, argv,
+                           chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
             lock_root(s)
             started.append(label)
-            if not first:                         # 첫 지시가 있으면 그것이 이어받기까지 맡는다(턴 하나)
+            if not first and not codex:           # 첫 지시가 있으면 그것이 이어받기까지 맡는다(턴 하나). 코덱스의 "답 못 한 지시"는 Task 4~6
                 try:
                     resume_unanswered(s)      # 재시작 전에 받고 못 답한 메시지가 있으면 이어서 답하게
                 except Exception:
@@ -4568,6 +4661,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--no-start", action="store_true")
     p.add_argument("--from", dest="from_id", default="", help="채팅 세션: 이어 갈 기존 대화 ID(복사본으로)")
     p.add_argument("--title", default="", help="채팅 세션: 한글 제목(채널 설명·첫 안내)")
+    p.add_argument("--codex", action="store_true", help="코덱스 방: chat-bot 카테고리 + tmux 안 codex(개발 방만)")
     sub.add_parser("lobby", help="카테고리에 로비를 연다(인자 없음 = CHAT #새-대화, 프로젝트 = #새-작업)") \
         .add_argument("project", nargs="?", default="")
     sub.add_parser("mcp-lobby")
@@ -4710,7 +4804,7 @@ def main(argv: list[str] | None = None) -> int:
             if r["warning"]:
                 print("  ⚠ " + r["warning"], file=sys.stderr)
         elif a.cmd == "new":
-            r = cmd_new(a.project, a.task, a.base, start=not a.no_start, from_id=a.from_id, title=a.title)
+            r = cmd_new(a.project, a.task, a.base, start=not a.no_start, from_id=a.from_id, title=a.title, codex=a.codex)
             print(f"✓ 세션: {r['project']}/{r['task']}")
             print(f"  Discord: {r['url']}")
             if r.get("kind") == "chat":
@@ -4718,7 +4812,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not r["warning"]:
                     print(f"  {r['project'].upper()} 카테고리는 {r['project']} 역할에게만 보여 — "
                           f"여기에 들일 사람에게 Discord 에서 {r['project']} 역할만 붙이면 돼")
-            else:
+            elif r.get("rcName"):
                 print(f"  Remote Control: {r['rcName']}  (claude.ai/code · 모바일 앱)")
             print(f"  들여다보기: marina session attach {r['project']}/{r['task']}  (나오기: Ctrl-b d)")
             if r["warning"]:

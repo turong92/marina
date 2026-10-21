@@ -13,6 +13,7 @@ export MARINA_CLAUDE_JSON="$TMPROOT/claude.json"       # 형의 ~/.claude.json(�
 export MARINA_CLAUDE_PROJECTS="$TMPROOT/claude-projects"  # 형의 ~/.claude/projects(대화 기록) 대신
 FD="$TMPROOT/fakediscord"; mkdir -p "$FD"
 FAKE_OUT="$TMPROOT/claude-calls"; mkdir -p "$FAKE_OUT"
+FAKE_CODEX_OUT="$TMPROOT/codex-calls"; mkdir -p "$FAKE_CODEX_OUT"
 FD_PID=""
 fixture_cleanup() {
   tmux -L "$MARINA_TMUX_SOCKET" kill-server 2>/dev/null || true
@@ -33,6 +34,19 @@ pwd -P > "\$d/cwd"
 exec sleep 300
 SH
 chmod +x "$TMPROOT/bin/claude"
+# 가짜 codex — 가짜 claude 와 같은 덤프(argv/env/cwd). $TMPROOT/codex-block 파일이 있으면 그 글을 막는 화면처럼 그리고,
+# 없으면 입력창 줄(›)을 그린다. $TMPROOT/codex-fail 이 있으면 바로 죽는다.
+cat > "$TMPROOT/bin/codex" <<SH
+#!/bin/sh
+d="$FAKE_CODEX_OUT/\$\$"; mkdir -p "\$d"
+printf '%s\0' "\$@" > "\$d/argv"
+env > "\$d/env"
+pwd -P > "\$d/cwd"
+[ -e "$TMPROOT/codex-fail" ] && exit 1
+if [ -e "$TMPROOT/codex-block" ]; then cat "$TMPROOT/codex-block"; else echo '› Use /skills to list available skills'; fi
+exec sleep 300
+SH
+chmod +x "$TMPROOT/bin/codex"
 # runtime(marina CLI) — discord 는 이 명령으로만 runtime 을 부른다(분리 B). 없는 경우는 MARINA_RUNTIME_BIN=none 으로 테스트
 printf '#!/usr/bin/env bash\nexec bash "%s" "$@"\n' "$MARINA_SH" > "$TMPROOT/bin/marina"; chmod +x "$TMPROOT/bin/marina"
 export MARINA_RUNTIME_BIN="$TMPROOT/bin/marina"
