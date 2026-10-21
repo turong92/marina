@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import time
 import urllib.error
 import urllib.parse
@@ -503,3 +504,115 @@ def discord_tool(rec: dict[str, Any], name: str, args: dict[str, Any]) -> str:
         edited = dc._req("PATCH", f"/channels/{chat_id}/messages/{mid}", {"content": str(args.get("text") or "")})
         return f"edited (id: {(edited or {}).get('id') or mid})"
     raise ms.SessionError(f"없는 도구: {name}")
+
+
+# ── 인바운드(Task 4) — 떠 있는 코덱스 방의 입력창에 글을 넣고 rollout 으로 전달을 확인한다 ──
+
+PANE_INPUT_RE = re.compile(r"^\x1b\[1m\u203a\x1b\[0m ?(.*)$")      # 입력창 = 마지막 ›(S2). 비었으면 흐린 안내문(ESC[2m…)
+PANE_QUEUED = "Messages to be submitted"                              # 바쁠 때 Enter 로 넣은 글의 대기 목록 머리(S3)
+DELIVERED_KEEP = 200
+
+
+def type_text(tmux: str, text: str) -> None:
+    """붙여넣기(브래킷 페이스트) → 대기 → Enter 따로. 한 번에 보내면 코덱스가 Enter 를 붙여넣기 묶음으로 보고 삼킨다(S3)."""
+    ms.tmux_leave_mode(tmux)
+    buf = f"marina-codex-{os.getpid()}"
+    subprocess.run(ms._tmux_base() + ["load-buffer", "-b", buf, "-"], input=text, text=True, capture_output=True)
+    ms._tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", tmux)
+    time.sleep(float(os.environ.get("MARINA_ENTER_DELAY") or 0.6))
+    ms._tmux("send-keys", "-t", tmux, "Enter")
+
+
+def input_holds_text(screen: str) -> bool:
+    """입력창(마지막 › 줄, -e 캡처)에 글이 남아 있나 — 흐린 안내문이거나 비었으면 False."""
+    for line in reversed(screen.splitlines()):
+        m = PANE_INPUT_RE.match(line)
+        if m:
+            rest = m.group(1)
+            return bool(rest.strip()) and not rest.startswith("\x1b[2m")
+    return False
+
+
+def _screen(tmux: str) -> str:
+    return ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or ""
+
+
+def confirm(rollout: "Path | None", offset: int, marker: str, tmux: str = "", timeout: "float | None" = None) -> bool:
+    """rollout 의 offset 뒤에 marker 가 나오면 True. 바쁠 때 넣은 글은 기록이 다음 도구 호출 뒤에야 생기므로
+    화면의 대기 목록에 marker 가 보여도 접수된 것으로 본다(S3). 입력창에 글이 남아 있으면 Enter 를 다시(최대 3번)."""
+    wait = float(os.environ.get("MARINA_CODEX_CONFIRM_TIMEOUT") or 8.0) if timeout is None else timeout
+    deadline, resent, last_enter = time.time() + wait, 0, time.time()
+    while True:
+        if rollout is not None:
+            try:
+                with rollout.open("rb") as fh:
+                    fh.seek(offset)
+                    if marker.encode() in fh.read():
+                        return True
+            except OSError:
+                pass
+        if tmux:
+            screen = _screen(tmux)
+            if PANE_QUEUED in screen and marker in screen:
+                return True
+            if resent < 3 and time.time() - last_enter >= 1.5 and input_holds_text(screen):
+                ms._tmux("send-keys", "-t", tmux, "Enter")
+                resent, last_enter = resent + 1, time.time()
+        if time.time() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
+def _taken_sids(rec: dict[str, Any]) -> "set[str]":
+    return {str(r.get("sessionId")) for r in ms.load_sessions() if r.get("sessionId") and r.get("stateDir") != rec.get("stateDir")}
+
+
+def deliver_missed(rec: dict[str, Any], cfg: dict[str, Any], message: str = "", thread: str = "") -> str:
+    """살아 있는 코덱스 방에 아직 안 넣은 글을 넣는다. nothing | delivered | failed:* | busy.
+    같은 글 두 번 넣기 금지 = 방 잠금 + woke.json.delivered + rollout 의 seen_ids."""
+    import marina_discord_bot as mb
+    import marina_discord_wake as mw
+    sd, name = Path(str(rec["stateDir"])), str(rec.get("tmux") or "")
+    with ms.room_lock(sd, wait=30.0) as got:
+        if not got:
+            return "busy"
+        if not ms.tmux_alive(name):
+            return mw._wake_locked(rec, cfg, sd, str(message or ""), str(thread or ""), None)
+        now = time.time()
+        since = (mw.snowflake_ts(message) if str(message).isdigit() else now) - mw.WAKE_RECENT_S
+        dc = mb._dc(cfg)
+        try:
+            msgs, _older = mw.missed(rec, dc, since, trigger=message, thread=thread)
+        except ms.SessionError as exc:
+            mb._log(f"codex deliver {rec.get('task')}: Discord 읽기 실패 {exc}")
+            return "failed:discord"
+        done = set(mw._woke(rec).get("delivered") or [])
+        msgs = [m for m in msgs if str(m["id"]) not in done]
+        if not msgs:
+            return "nothing"
+        last = msgs[-1]
+        lch, lid = str(last.get("channel_id") or rec["channelId"]), str(last["id"])
+        text = "\n".join(mw._tag(m, str(rec["channelId"])) for m in msgs)
+        ro = rollout_of(rec)
+        offset = ro.stat().st_size if ro else 0
+        t0 = time.time()
+        type_text(name, text)
+        if ro is None:                        # 첫 입력 전엔 rollout 을 모른다 — 새로 생긴 것 하나를 찾아 방 기록에 적는다
+            deadline = t0 + 8.0
+            while ro is None and time.time() < deadline:
+                sid = discover_sid(rec.get("root") or "", t0 - 60, _taken_sids(rec))
+                ro = find_rollout(sid) if sid else None
+                if ro is None:
+                    time.sleep(0.3)
+            if ro is not None:
+                ms._record_session_id(rec, sid)
+        if not confirm(ro, offset, lid, tmux=name):
+            mb._log(f"codex deliver {rec.get('task')}: 전달 확인 실패 {lid}")
+            try:
+                dc.add_reaction(lch, lid, "\u26a0\ufe0f")
+            except ms.SessionError:
+                pass
+            return "failed:unconfirmed"
+        keep = (list(done) + [str(m["id"]) for m in msgs])[-DELIVERED_KEEP:]
+        mw._save_woke(sd, at=now, ok=True, delivered=keep)
+        return "delivered"

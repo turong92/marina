@@ -218,6 +218,9 @@ def wake(channel: str, user: str = "", message: str = "", thread: str = "", sinc
         return "ignored:not-allowed"
     name = str(rec.get("tmux") or "")
     if ms.tmux_alive(name):
+        if ms.is_codex(rec):                 # 코덱스 방엔 채널 플러그인이 없다 — 입력창에 직접 넣는다
+            import marina_codex
+            return marina_codex.deliver_missed(rec, cfg, str(message or ""), str(thread or ""))
         return "alive"                       # 그 세션의 채널 플러그인이 직접 받는다
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))
     if not sd.is_dir():

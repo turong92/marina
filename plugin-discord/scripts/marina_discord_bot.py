@@ -855,6 +855,9 @@ def typing_tick(snap: dict[str, Any], ty: dict[str, float], now: float, agents: 
 # ── 🛑 정지 ─────────────────────────────────────────────────────────────────
 
 def _session_transcript(rec: dict[str, Any]) -> Path | None:
+    if ms.is_codex(rec):                       # 코덱스 방의 기록 = rollout
+        import marina_codex
+        return marina_codex.rollout_of(rec)
     sid = str(rec.get("sessionId") or "")
     if sid:
         return ms.find_transcript(sid)

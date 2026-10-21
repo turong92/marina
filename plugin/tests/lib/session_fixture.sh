@@ -13,7 +13,7 @@ export MARINA_CLAUDE_JSON="$TMPROOT/claude.json"       # 형의 ~/.claude.json(�
 export MARINA_CLAUDE_PROJECTS="$TMPROOT/claude-projects"  # 형의 ~/.claude/projects(대화 기록) 대신
 FD="$TMPROOT/fakediscord"; mkdir -p "$FD"
 FAKE_OUT="$TMPROOT/claude-calls"; mkdir -p "$FAKE_OUT"
-FAKE_CODEX_OUT="$TMPROOT/codex-calls"; mkdir -p "$FAKE_CODEX_OUT"
+FAKE_CODEX_OUT="$TMPROOT/codex-calls"; mkdir -p "$FAKE_CODEX_OUT" "$TMPROOT/codex-ctl"
 FD_PID=""
 fixture_cleanup() {
   tmux -L "$MARINA_TMUX_SOCKET" kill-server 2>/dev/null || true
@@ -35,7 +35,7 @@ exec sleep 300
 SH
 chmod +x "$TMPROOT/bin/claude"
 # 가짜 codex — 가짜 claude 와 같은 덤프(argv/env/cwd). $TMPROOT/codex-block 파일이 있으면 그 글을 막는 화면처럼 그리고,
-# 없으면 입력창 줄(›)을 그린다. $TMPROOT/codex-fail 이 있으면 바로 죽는다.
+# 없으면 입력창 줄(›)을 그린다. $TMPROOT/codex-fail 이 있으면 바로 죽는다. $TMPROOT/codex-tui 가 있으면 lib/fake_codex.py(가짜 TUI)로 넘어간다.
 cat > "$TMPROOT/bin/codex" <<SH
 #!/bin/sh
 d="$FAKE_CODEX_OUT/\$\$"; mkdir -p "\$d"
@@ -43,6 +43,7 @@ printf '%s\0' "\$@" > "\$d/argv"
 env > "\$d/env"
 pwd -P > "\$d/cwd"
 [ -e "$TMPROOT/codex-fail" ] && exit 1
+[ -e "$TMPROOT/codex-tui" ] && exec python3 "$FIX_HERE/fake_codex.py" "$TMPROOT/codex-ctl" "\$@"
 if [ -e "$TMPROOT/codex-block" ]; then cat "$TMPROOT/codex-block"; else echo '› Use /skills to list available skills'; fi
 exec sleep 300
 SH

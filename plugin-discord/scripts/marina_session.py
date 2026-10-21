@@ -2195,7 +2195,11 @@ def inbound_pairs(transcript: Path, channel_id: Any) -> list[tuple[str, str]]:
     """(메시지 ID, 그 글이 온 chat_id) 쌍 — 스레드 글은 chat_id 가 방 채널이 아니라 그 스레드다.
     반응을 그 글이 있는 채널에 달아야 하므로 짝으로 돌려준다. 그 밖은 inbound_messages 와 같다.
     읽은 것 = user 기록(턴을 연 메시지) · attachment queued_command(처리 중 끼어든 메시지).
-    queue-operation(도착만 함, 아직 안 읽음)은 세지 않는다 — 안 읽은 메시지를 읽은 것으로 표시하지 않게(실측 2026-10-01)."""
+    queue-operation(도착만 함, 아직 안 읽음)은 세지 않는다 — 안 읽은 메시지를 읽은 것으로 표시하지 않게(실측 2026-10-01).
+    코덱스 rollout(rollout-*.jsonl)이면 marina_codex.inbound_ids 로."""
+    if transcript.name.startswith("rollout-"):
+        import marina_codex
+        return marina_codex.inbound_ids(transcript, channel_id)
     try:
         data = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace")
     except OSError:
