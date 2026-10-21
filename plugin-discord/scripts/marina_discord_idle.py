@@ -130,9 +130,12 @@ def _verdict(rec: dict[str, Any], after: float, now: float, full: bool = True) -
         out.append("작업 폴더가 없음(내리면 못 깨운다)")
     if _attached(name):
         out.append("터미널로 보는 중")
-    if not mb._input_empty(name):
+    codex = ms.is_codex(rec)
+    if codex:
+        import marina_codex
+    if not (marina_codex.input_empty(name) if codex else mb._input_empty(name)):
         out.append("입력창이 비어 있지 않음")
-    if _selecting(name):
+    if (marina_codex.selecting(name) if codex else _selecting(name)):
         out.append("선택·계획 승인 창이 떠 있음")
     if out and not full:
         return out

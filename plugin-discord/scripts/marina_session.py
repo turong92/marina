@@ -1634,9 +1634,14 @@ def nudge_unanswered(rec: dict[str, Any], transcript: "Path | None") -> bool:
     **한 지시에 세 번까지** — 시계로 세지 않는다(깨운 글 자체가 기록에 끼어들어 시계식 상한은 1회로 죽었다, 리뷰 I2).
     다음 지시가 오면 그 id 로 다시 세 번. 재시작 이어받기가 방금 글을 넣었으면 비켜 준다(두 글이 겹치지 않게)."""
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))
-    if rec.get("kind") not in CHAT_KINDS or not rec.get("tmux") or not transcript:
+    codex = is_codex(rec)
+    if (rec.get("kind") not in CHAT_KINDS and not codex) or not rec.get("tmux") or not transcript:
         return False
-    mid = unanswered_mid(transcript, room_chans(rec))
+    if codex:
+        import marina_codex
+        mid = marina_codex.unanswered_mid(rec, transcript)      # 코덱스는 reply 도구 호출 대신 replied.json 으로 답했는지 본다
+    else:
+        mid = unanswered_mid(transcript, room_chans(rec))
     if not mid:
         return False
     try:
@@ -1671,8 +1676,13 @@ def resume_unanswered(rec: dict[str, Any]) -> None:
     if not (turn > num("stopped-at") and time.time() - turn < 3600) or time.time() - num("resume-at") < 600:
         return
     sid = str(rec.get("sessionId") or "")
-    tr = find_transcript(sid) if sid else None
-    if not tr or not unanswered(tr) or not rec.get("tmux"):
+    codex = is_codex(rec)
+    if codex:
+        import marina_codex
+        tr = marina_codex.rollout_of(rec)
+    else:
+        tr = find_transcript(sid) if sid else None
+    if not tr or not (marina_codex.unanswered_mid(rec, tr) if codex else unanswered(tr)) or not rec.get("tmux"):
         return
     (sd / "resume-at").write_text(f"{time.time()}\n")
     import marina_discord_bot as mb
@@ -2712,8 +2722,7 @@ def hook_stop(payload: dict[str, Any]) -> None:
         if lockf:
             lockf.close()
     # 도구가 늦게 붙어 답장을 못 보낸 채 끝난 턴은 한 번 더 깨운다(2026-10-16 #daeun 23분 침묵)
-    if not is_codex(s):          # 코덱스의 "답 못 한 지시" 재촉은 replied.json 기준으로 따로(Task 6)
-        nudge_unanswered(s, tr)
+    nudge_unanswered(s, tr)
     # 뒤에서 서브에이전트가 도는 동안엔 진행 줄이 올라가는 스레드(가장 최근 지시)만 열어 둔다 — 턴마다 닫히면 쌓이는 줄이 끊기고(형 2026-10-06),
     # 전부 열어 두면 에이전트를 계속 붙든 세션은 지난 지시 스레드가 끝없이 쌓인다(형 2026-10-07).
     # 최근 지시를 모르면(activity.json 에 mid 없음) 아무것도 접지 않는다. 다 끝난 뒤의 턴 끝엔 밀린 것까지 접는다
@@ -4484,6 +4493,7 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
             elif not codex:
                 adopt_live_session_id(s)      # /clear 로 갈아탄 대화면 지금 것으로 — 지운 대화를 되살리지 않게
             cwd, argv = session_launch(s, resume=True, first=first)
+            t_launch = time.time()
             if codex:
                 import marina_codex
                 acct = str(s.get("codexAccount") or marina_codex.DEFAULT_ACCOUNT)
@@ -4493,7 +4503,12 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
                            chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
             lock_root(s)
             started.append(label)
-            if not first and not codex:           # 첫 지시가 있으면 그것이 이어받기까지 맡는다(턴 하나). 코덱스의 "답 못 한 지시"는 Task 4~6
+            if codex and not s.get("sessionId"):      # 훅(SessionStart)이 놓쳤을 때를 위해 띄운 뒤 rollout 에서 sid 를 찾는다
+                try:
+                    marina_codex.adopt_after_start(s, t_launch)
+                except Exception:
+                    pass
+            if not first:           # 첫 지시가 있으면 그것이 이어받기까지 맡는다(턴 하나)
                 try:
                     resume_unanswered(s)      # 재시작 전에 받고 못 답한 메시지가 있으면 이어서 답하게
                 except Exception:

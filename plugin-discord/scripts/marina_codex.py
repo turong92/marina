@@ -10,6 +10,7 @@ import os
 import re
 import shlex
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.parse
@@ -687,3 +688,83 @@ def deliver_missed(rec: dict[str, Any], cfg: dict[str, Any], message: str = "", 
         keep = (list(done) + [str(m["id"]) for m in msgs])[-DELIVERED_KEEP:]
         mw._save_woke(sd, at=now, ok=True, delivered=keep)
         return "delivered"
+
+
+# ── 상태 판정(Task 6) — 화면(S2)과 rollout 을 함께 본다 ──
+
+PANE_BUSY_RE = re.compile(r"esc to interrupt")                       # 일할 때만 나오는 줄(S2)
+PANE_CONFIRM = "Press enter to confirm or esc to go back"            # 선택 창 하단 안내(S2)
+_PANE_SELECT = re.compile(r"^\s*› \d+\. ")
+PANE_TAIL = 15
+
+
+def _tail_screen(tmux: str, color: bool = False) -> str:
+    args = ("capture-pane", "-p", "-e", "-t", tmux) if color else ("capture-pane", "-p", "-t", tmux)
+    return "\n".join((ms._tmux(*args).stdout or "").rstrip().splitlines()[-PANE_TAIL:])
+
+
+def pane_busy(tmux: str) -> bool:
+    """화면 아래쪽에 'esc to interrupt'(일하는 줄)가 있나. 지난 대화 내용에 같은 글이 있어도 틀리지 않게 끝 15줄만 본다."""
+    return bool(PANE_BUSY_RE.search(_tail_screen(tmux)))
+
+
+def input_empty(tmux: str) -> bool:
+    """입력창(마지막 › 줄, -e 캡처)이 비었나 — 흐린 안내문은 빈 것. 입력창을 못 찾으면 False(모르면 비었다고 하지 않는다)."""
+    for line in reversed(_tail_screen(tmux, color=True).splitlines()):
+        m = PANE_INPUT_RE.match(line)
+        if m:
+            rest = m.group(1)
+            return not rest.strip() or rest.startswith("\x1b[2m")
+    return False
+
+
+def selecting(tmux: str) -> bool:
+    """막는 화면(업데이트·신뢰·훅 확인)이나 번호 선택 창이 떠 있나 — 누군가 답을 기다린다."""
+    tail = _tail_screen(tmux)
+    return any(p in tail for p in (*PANE_BLOCKING, PANE_CONFIRM)) or any(_PANE_SELECT.match(ln) for ln in tail.splitlines())
+
+
+def unanswered_mid(rec: dict[str, Any], rollout: Path) -> str:
+    """받은 지시 중 아직 reply 로 답하지 않은 마지막 것의 message_id, 없으면 "".
+    답했다 = replied.json.mid 가 마지막 지시이거나 그 뒤. 목록에 없는 mid 는 숫자(스노우플레이크)면 크기로 비교한다."""
+    ids = inbound_ids(rollout, str(rec.get("channelId") or ""))
+    if not ids:
+        return ""
+    last = ids[-1]
+    try:
+        replied = str(json.loads((Path(str(rec.get("stateDir") or "/nonexistent")) / "replied.json").read_text(encoding="utf-8")).get("mid") or "")
+    except (OSError, ValueError, AttributeError):
+        replied = ""
+    if not replied:
+        return last
+    if replied in ids:
+        return last if ids.index(replied) < len(ids) - 1 else ""
+    if replied.isdigit() and last.isdigit():
+        return last if int(last) > int(replied) else ""
+    return last
+
+
+def adopt_loop(state_dir: str, started: float) -> None:
+    """띄운 뒤 sid 를 아직 모르는 방의 rollout 을 찾는다(훅이 놓쳤을 때의 보조). 후보가 정확히 하나일 때만 기록한다."""
+    wait = float(os.environ.get("MARINA_CODEX_ADOPT_WAIT") or 30.0)
+    poll = float(os.environ.get("MARINA_CODEX_ADOPT_POLL") or 2.0)
+    end = time.time() + wait
+    while True:
+        rec = next((r for r in ms.load_sessions() if r.get("stateDir") == state_dir), None)
+        if rec is None or rec.get("sessionId"):
+            return
+        sid = discover_sid(rec.get("root") or "", started, _taken_sids(rec))
+        if sid:
+            ms._record_session_id(rec, sid)
+            return
+        if time.time() >= end:
+            return
+        time.sleep(poll)
+
+
+def adopt_after_start(rec: dict[str, Any], started: float) -> None:
+    """adopt_loop 를 떼어 낸 프로세스로(start 를 붙들지 않게)."""
+    code = "import sys; import marina_codex as m; m.adopt_loop(sys.argv[1], float(sys.argv[2]))"
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(p for p in sys.path if p))
+    subprocess.Popen([sys.executable, "-c", code, str(rec.get("stateDir") or ""), str(started)], env=env,
+                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)

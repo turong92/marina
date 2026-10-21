@@ -179,7 +179,26 @@ def _pane_busy(name: str) -> tuple[bool, bool]:
     return True, False
 
 
+def _room_busy(rec: dict[str, Any]) -> tuple[bool, bool]:
+    """(켜짐, 작업 중) — 코덱스 방은 화면(esc to interrupt) 또는 rollout 의 열린 턴 중 하나라도 바쁨이면 바쁨. 클로드 방은 `_pane_busy`."""
+    name = str(rec.get("tmux") or "")
+    if not ms.is_codex(rec):
+        return _pane_busy(name)
+    if not ms.tmux_alive(name):
+        return False, False
+    import marina_codex
+    ro = marina_codex.rollout_of(rec)
+    return True, marina_codex.pane_busy(name) or bool(ro and marina_codex.turn_busy(ro))
+
+
 def _ctx_percent(rec: dict[str, Any]) -> float | None:
+    if ms.is_codex(rec):
+        import marina_codex
+        ro = marina_codex.rollout_of(rec)
+        if not ro:
+            return None
+        import marina_discord_usage
+        return marina_discord_usage.context_percent(ro, "codex")
     path = _session_transcript(rec)      # sessionId 없는 새 방은 방 폴더의 가장 최근 기록으로
     if path and not rec.get("sessionId"):
         # 같은 폴더에서 사람이 연 다른 세션일 수 있다 — 이 세션이 뜨기 전에 끝난 기록은 이 방 것이 아니다
@@ -433,7 +452,7 @@ def snapshot(full: bool = True) -> dict[str, Any]:
     for rec in ms.load_sessions():
         if str(rec.get("kind") or "").endswith("lobby") or not rec.get("channelId"):
             continue
-        alive, busy = _pane_busy(str(rec.get("tmux") or ""))
+        alive, busy = _room_busy(rec)
         bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_pane_team(str(rec.get("tmux") or "")))
                         or (not busy and _has_recent_agents(rec)))
         act = ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent")))
@@ -987,7 +1006,7 @@ def interrupt(channel: str, user: str, message: str) -> str:
         return "멈출 권한이 없어"
     lockf = ms._wait_lock(sd / "activity.lock", timeout=3.0)
     try:
-        alive, busy = _pane_busy(str(rec.get("tmux") or ""))
+        alive, busy = _room_busy(rec)
         if not busy:
             return "지금 쉬고 있어"
         tr = _session_transcript(rec)
@@ -2304,6 +2323,9 @@ def _turn_in_progress(tr: Path | None) -> bool:
     attachment·queue-operation·bridge_status 등은 건너뛴다. 읽기 실패는 예외로 올린다."""
     if not tr:
         return False
+    if tr.name.startswith("rollout-"):                # 코덱스 rollout — 열린 턴(task_started 뒤 끝 표시 없음)
+        import marina_codex
+        return marina_codex.turn_busy(tr)
     for raw in reversed(_tail_text(tr, 300_000).splitlines()):
         try:
             row = json.loads(raw)
@@ -2336,7 +2358,7 @@ def _restart_blockers(rec: dict[str, Any]) -> list[str]:
     tr = _session_transcript(rec)
     # 턴 끝 기록은 Esc·API 오류로 끝난 턴엔 안 남는다 — 10분 지난 턴은 화면만 본다(리뷰 I1)
     turn = num("turn-at")
-    if (turn > num("stopped-at") and time.time() - turn < 600) or _pane_busy(name)[1]:
+    if (turn > num("stopped-at") and time.time() - turn < 600) or _room_busy(rec)[1]:
         out.append("작업 중")
     if _turn_in_progress(tr):                        # 화면·turn-at 이 놓친 긴 턴(2026-10-07 사고)
         out.append("턴 진행 중")
@@ -2661,6 +2683,10 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
         rec = next((x for x in ms.load_sessions() if str(x.get("channelId")) == str(channel)), {})
         sd = Path(str(rec.get("stateDir") or ms.marina_home()))
         lockf = open(sd / "slash.lock", "w")
+        codex = ms.is_codex(rec)          # 코덱스 방은 화면·입력창 판정만 코덱스 것(S2)
+        if codex:
+            import marina_codex
+
         while True:
             try:
                 fcntl.flock(lockf, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -2672,11 +2698,11 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
         time.sleep(settle)                   # Claude 가 '실행할게' 답하고 턴을 끝낼 틈
         typed = False
         while time.time() < end:
-            alive, busy = _pane_busy(tmux)
+            alive, busy = (_room_busy(rec) if codex else _pane_busy(tmux))
             if not alive:
                 return False
             ms.tmux_leave_mode(tmux)
-            if not busy and _input_empty(tmux):
+            if not busy and (marina_codex.input_empty(tmux) if codex else _input_empty(tmux)):
                 ms._tmux("send-keys", "-t", tmux, "-l", cmd)
                 # 글과 Enter 가 한꺼번에 들어가면 붙여넣기로 보고 Enter 를 줄바꿈으로 먹는다(실사용: '입력함' 인데 안 보내짐)
                 time.sleep(float(os.environ.get("MARINA_ENTER_DELAY") or 0.6))
@@ -2685,7 +2711,7 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                 time.sleep(1.5)
                 after = ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or ""
                 for _ in range(3):                       # Enter 가 붙여넣기 줄바꿈으로 먹히면 글이 입력창에 남는다 — 남아 있는 동안 Enter 를 다시(최대 3번)
-                    if input_holds(after, cmd) is not True:
+                    if (marina_codex.input_holds_text(after) if codex else input_holds(after, cmd)) is not True:
                         break
                     ms._tmux("send-keys", "-t", tmux, "Enter")
                     _log(f"type {tmux}: 입력창에 남아 Enter 다시")
@@ -2701,7 +2727,7 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
         seen, start = False, time.time()
         while time.time() < end:             # 명령이 돌기 시작했다가(짧으면 못 볼 수도) 끝날 때까지
             time.sleep(poll)
-            alive, busy = _pane_busy(tmux)
+            alive, busy = (_room_busy(rec) if codex else _pane_busy(tmux))
             if not alive:
                 return typed
             seen = seen or busy
