@@ -1433,6 +1433,9 @@ PERM_WAIT = 300.0
 
 def _turn_from_terminal(transcript: Path, ch: Any) -> bool:
     """이번 턴을 연 입력이 터미널에서 직접 친 말인가(Discord 메시지·백그라운드 알림이 아님) — 그땐 터미널 권한 창이 맞다."""
+    if transcript.name.startswith("rollout-"):
+        import marina_codex
+        return marina_codex.turn_from_terminal(transcript, ch)
     try:
         lines = transcript.read_bytes()[-1_000_000:].decode("utf-8", "replace").splitlines()
     except OSError:
@@ -1685,7 +1688,7 @@ def hook_prompt(payload: dict[str, Any]) -> "dict[str, Any] | None":
             (Path(str(s["stateDir"])) / "turn-at").write_text(f"{time.time()}\n")
         except OSError:
             pass
-    if not s or s.get("kind") in CHAT_KINDS:      # 채팅방(여자친구)엔 세션 명령을 열지 않는다
+    if not s or s.get("kind") in CHAT_KINDS or is_codex(s):      # 채팅방(여자친구)엔 세션 명령을 열지 않는다 · 코덱스 방은 슬래시 없음(1차 비목표)
         return None
     hit = slash_command(str(payload.get("prompt") or ""), str(s["channelId"]))
     if not hit:
@@ -2318,6 +2321,9 @@ def adopt_live_session_id(rec: dict[str, Any]) -> str:
 def _hook_target(payload: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any] | None:
     """상태 폴더로 찾고, 없으면 cwd 로 짐작 — 채팅 세션은 모두 같은 폴더라 짐작하지 않는다."""
     sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    import marina_codex
+    if marina_codex.is_codex_payload(payload):      # 코덱스 훅은 상태 폴더로만 — 데스크톱 코덱스가 클로드 방 워크트리에서 돌아도 그 방을 건드리지 않는다
+        return next((x for x in items if sdir and x.get("stateDir") == sdir and is_codex(x)), None)
     root = Path(str(payload.get("cwd") or "/nonexistent")).resolve()
     return next((x for x in items if sdir and x.get("stateDir") == sdir), None) \
         or next((x for x in items if x.get("kind") not in CHAT_KINDS and _same_root(x, root)), None)
@@ -2706,7 +2712,8 @@ def hook_stop(payload: dict[str, Any]) -> None:
         if lockf:
             lockf.close()
     # 도구가 늦게 붙어 답장을 못 보낸 채 끝난 턴은 한 번 더 깨운다(2026-10-16 #daeun 23분 침묵)
-    nudge_unanswered(s, tr)
+    if not is_codex(s):          # 코덱스의 "답 못 한 지시" 재촉은 replied.json 기준으로 따로(Task 6)
+        nudge_unanswered(s, tr)
     # 뒤에서 서브에이전트가 도는 동안엔 진행 줄이 올라가는 스레드(가장 최근 지시)만 열어 둔다 — 턴마다 닫히면 쌓이는 줄이 끊기고(형 2026-10-06),
     # 전부 열어 두면 에이전트를 계속 붙든 세션은 지난 지시 스레드가 끝없이 쌓인다(형 2026-10-07).
     # 최근 지시를 모르면(activity.json 에 mid 없음) 아무것도 접지 않는다. 다 끝난 뒤의 턴 끝엔 밀린 것까지 접는다
@@ -4720,6 +4727,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cancel", action="store_true", help="돌고 있는 재시작 대기를 끝낸다")
     p.add_argument("--force", action="store_true", help="막는 이유를 무시하고 바로 재시작(이름으로 준 세션만, --all 불가)")
     sub.add_parser("hook-stop")
+    sub.add_parser("hook-codex-start")
     sub.add_parser("hook-typing")
     sub.add_parser("hook-reply-to")
     sub.add_parser("hook-rm-guard")
@@ -4739,6 +4747,13 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "hook-stop":
         try:   # 훅은 어떤 실패에도 세션을 방해하지 않는다
             hook_stop(json.loads(sys.stdin.read() or "{}"))
+        except Exception:
+            pass
+        return 0
+    if a.cmd == "hook-codex-start":
+        try:
+            import marina_codex
+            marina_codex.hook_start(json.loads(sys.stdin.read() or "{}"))
         except Exception:
             pass
         return 0

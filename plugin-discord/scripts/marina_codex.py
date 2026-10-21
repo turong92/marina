@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 import urllib.error
@@ -84,9 +85,63 @@ def rules_args() -> list[str]:
     return ["-c", f"developer_instructions={_q(CODEX_RULES)}"]
 
 
+def _hook_cmd(*names: str) -> list[str]:
+    """훅 명령 하나씩 — 실패해도 코덱스를 막지 않는다(|| true)."""
+    return [" ".join(shlex.quote(a) for a in ms._hook_entry() + [n]) + " || true" for n in names]
+
+
 def hook_args(sdir: Path) -> list[str]:
-    """인라인 훅(-c hooks={…}) — 훅 하위명령은 Task 5 가 채운다."""
-    return []
+    """인라인 훅(`CODEX_HOOK_MODE="inline"`, S6): 이 실행에서만 돌고 전역 hooks.json 은 그대로다. 훅 신뢰 우회 플래그는 codex_argv 가 준다.
+    SessionStart(sid·rollout 확보) · UserPromptSubmit(turn-at·👀) · PreToolUse(도구 이모지, Bash 는 rm 가드) · Stop(표시 떼기).
+    방 밖에선 훅 진입점들이 아무것도 안 한다(DISCORD_STATE_DIR 로만 방을 찾는다)."""
+    def group(cmds: list[str], timeout: int, matcher: str = "") -> str:
+        hooks = ",".join(f'{{type="command",command={_q(c)},timeout={timeout}}}' for c in cmds)
+        return "{" + (f"matcher={_q(matcher)}," if matcher else "") + f"hooks=[{hooks}]" + "}"
+    events = {
+        "SessionStart": [group(_hook_cmd("hook-codex-start"), 10)],
+        "UserPromptSubmit": [group(_hook_cmd("hook-typing", "hook-prompt"), 10)],
+        "PreToolUse": [group(_hook_cmd("hook-typing"), 10, "*"), group(_hook_cmd("hook-rm-guard"), 10, "Bash")],
+        "Stop": [group(_hook_cmd("hook-stop"), 15)],
+    }
+    return ["-c", "hooks={" + ",".join(f"{k}=[{','.join(v)}]" for k, v in events.items()) + "}"]
+
+
+def room_from_env() -> "dict[str, Any] | None":
+    """DISCORD_STATE_DIR 의 방 기록이 kind=codex 일 때만. cwd 로 짐작하지 않는다 — 데스크톱 코덱스가 클로드 방 워크트리에서 돌 수 있다."""
+    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    rec = next((r for r in ms.load_sessions() if sdir and r.get("stateDir") == sdir), None)
+    return rec if ms.is_codex(rec) else None
+
+
+def is_codex_payload(payload: dict[str, Any]) -> bool:
+    """훅 payload 가 코덱스 것인가 — transcript_path 가 rollout-*.jsonl (클로드는 <uuid>.jsonl)."""
+    return Path(str(payload.get("transcript_path") or "")).name.startswith("rollout-")
+
+
+def hook_start(payload: dict[str, Any]) -> None:
+    """SessionStart: 대화 ID·rollout 경로를 방 기록에 적는다(`/new` 로 갈아타면 새 값으로)."""
+    rec = room_from_env()
+    sid = str(payload.get("session_id") or "")
+    if rec is None or not _SID.fullmatch(sid):
+        return
+    tp = str(payload.get("transcript_path") or "")
+    items = ms.load_sessions()
+    hit = next((x for x in items if x.get("stateDir") == rec.get("stateDir")), None)
+    if hit is None:
+        return
+    hit["sessionId"] = sid
+    if tp.endswith(".jsonl"):
+        hit["rollout"] = tp
+    ms.save_sessions(items)
+
+
+def turn_from_terminal(rollout: Path, channel: str) -> bool:
+    """이번 턴을 연 입력이 터미널에서 직접 친 말인가 — rollout 의 마지막 user 메시지에 이 채널 태그가 없음."""
+    for o in reversed(_objs(_tail_lines(rollout, BUSY_TAIL))):
+        p = o.get("payload") if isinstance(o.get("payload"), dict) else {}
+        if o.get("type") == "event_msg" and p.get("type") == "user_message":
+            return not any(m.group(1) == channel for m in ms._CHANNEL_TAG.finditer(json.dumps(str(p.get("message") or ""))))
+    return False
 
 
 def codex_argv(rec: dict[str, Any], resume: bool = False, first: str = "") -> list[str]:
