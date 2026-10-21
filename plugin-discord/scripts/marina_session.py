@@ -517,16 +517,27 @@ ARCHIVE_CHANNEL = "자료실"
 ARCHIVE_TOPIC = "대화방에서 받은 결과물을 모아 두는 곳 — 여기선 대화하지 않아. 검색 → 미디어/파일 탭으로 모아 보기"
 
 
-def ensure_archive(dc: Discord, cfg: dict[str, Any], project: str, category: str) -> str:
-    """카테고리의 #자료실(세션 없음, 봇이 결과물을 모아 올림). 지워졌으면 다시 만든다."""
-    pc = cfg["projects"][project]
-    cid = str(pc.get("archiveChannelId") or "")
+def _ensure_archive_in(dc: Discord, cfg: dict[str, Any], holder: dict[str, Any], category: str) -> str:
+    cid = str(holder.get("archiveChannelId") or "")
     if cid and cid in channel_ids(dc, str(cfg["guildId"])):
         return cid
     cid = dc.create_text_channel(str(cfg["guildId"]), ARCHIVE_CHANNEL, category, ARCHIVE_TOPIC)
-    pc["archiveChannelId"] = cid
+    holder["archiveChannelId"] = cid
     save_config(cfg)
     return cid
+
+
+def ensure_archive(dc: Discord, cfg: dict[str, Any], project: str, category: str) -> str:
+    """카테고리의 #자료실(세션 없음, 봇이 결과물을 모아 올림). 지워졌으면 다시 만든다."""
+    return _ensure_archive_in(dc, cfg, cfg["projects"][project], category)
+
+
+def ensure_codex_archive(dc: Discord, cfg: dict[str, Any], category: str) -> str:
+    """코덱스 카테고리(chat-bot)의 #자료실 — 설정 codex.archiveChannelId. 규칙은 ensure_archive 와 같다."""
+    import marina_codex
+    cc = marina_codex.codex_cfg(cfg)
+    cfg["codex"] = cc
+    return _ensure_archive_in(dc, cfg, cc, category)
 
 
 def find_text_channel(dc: Discord, guild: str, parent: str, name: str) -> str | None:
@@ -3378,6 +3389,8 @@ def cmd_dev_lobby(project: str) -> dict[str, Any]:
 
 # ── 새 작업 버튼(스펙 2026-10-05-new-task-button-design) ─────────────────────
 
+CODEX_NEW_TOPIC = "코덱스로 새 작업(워크트리+채널)을 여는 곳 — 버튼을 눌러. 여기선 대화하지 않아"
+CODEX_NEW_PANEL_TEXT = "🛠 **코덱스로 새 작업이 필요해?** 프로젝트 버튼을 누르고 뭘 할지 한 줄로 적어 줘 — 워크트리·채널·코덱스 세션을 열어 줄게."
 NEW_PANEL_TEXT = "🛠 **새 작업이 필요해?** 버튼을 누르고 뭘 할지 한 줄로 적어 줘 — 워크트리·채널·세션을 열어 줄게."
 
 
@@ -3405,6 +3418,61 @@ def ensure_new_panel(project: str) -> bool:
         pass                                  # pin 실패(권한·50개 제한)해도 패널은 쓸 수 있다
     cfg = load_config()                       # 올리는 사이 바뀐 설정을 덮지 않게 다시 읽어 그 키만 고친다
     project_config(cfg, project)["newPanel"] = {"channelId": ch, "messageId": mid}
+    save_config(cfg)
+    return True
+
+
+CODEX_PANEL_MAX = 25                       # 버튼 줄 5개 × 5개
+
+
+def codex_panel_projects(cfg: dict[str, Any]) -> list[str]:
+    """코덱스 #새-작업 버튼의 프로젝트: 설정 codex.projects, 없으면 지금 코덱스 방이 하나라도 있는 프로젝트. 설정에 없는 프로젝트는 뺀다."""
+    import marina_codex
+    want = marina_codex.codex_cfg(cfg).get("projects")
+    if not isinstance(want, list):
+        want = [s.get("project") for s in load_sessions() if is_codex(s)]
+    out: list[str] = []
+    for p in want:
+        if isinstance(p, str) and p in cfg["projects"] and p not in out:
+            out.append(p)
+    return out[:CODEX_PANEL_MAX]
+
+
+def ensure_codex_hub() -> bool:
+    """chat-bot(코덱스) 카테고리의 #자료실과 #새-작업 버튼 패널(세션 없음)을 보장한다. 코덱스를 쓴 적 없으면(카테고리 없음) 아무것도 안 한다.
+    패널을 새로 올렸으면 True. 봇 틱이 부른다."""
+    import marina_codex
+    cfg = load_config()
+    if not marina_codex.codex_cfg(cfg).get("categoryId"):
+        return False
+    dc = Discord(read_token(cfg))
+    cat = ensure_codex_category(dc, cfg)
+    ensure_codex_archive(dc, cfg, cat)
+    projects = codex_panel_projects(cfg)
+    if not projects:
+        return False
+    cc = cfg["codex"]
+    ch = str(cc.get("newChannelId") or "")
+    if not (ch and ch in channel_ids(dc, str(cfg["guildId"]))):
+        ch = dc.create_text_channel(str(cfg["guildId"]), DEV_LOBBY_CHANNEL, cat, CODEX_NEW_TOPIC)
+        cc["newChannelId"] = ch
+        save_config(cfg)
+    cur = cc.get("newPanel")
+    if isinstance(cur, dict) and cur.get("channelId") == ch and cur.get("projects") == projects and cur.get("messageId") and \
+            dc.message_exists(ch, str(cur["messageId"])):
+        return False
+    rows = [{"type": 1, "components": [{"type": 2, "style": 1, "label": f"🛠 {p} 새 작업 (코덱스)"[:80], "custom_id": f"marina-new:{p}"}
+                                        for p in projects[i:i + 5]]} for i in range(0, len(projects), 5)]
+    mid = dc.post_panel(ch, CODEX_NEW_PANEL_TEXT, rows)
+    if not mid:
+        raise SessionError("패널 메시지 ID 를 못 받았어")
+    try:
+        dc.pin(ch, mid)
+    except SessionError:
+        pass
+    cfg = load_config()
+    cc = cfg["codex"]
+    cc["newPanel"] = {"channelId": ch, "messageId": mid, "projects": projects}
     save_config(cfg)
     return True
 
@@ -4112,7 +4180,11 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
             except (ValueError, OSError) as exc:
                 notes.append(f"열어보기 링크를 만들지 못했어({exc}) — 첨부만 보내")
     title = str(args.get("title") or path.stem).replace("@", "").replace("\n", " ")[:80]
-    arch = str((cfg["projects"].get(str(rec.get("project"))) or {}).get("archiveChannelId") or "")
+    if is_codex(rec):
+        import marina_codex
+        arch = str(marina_codex.codex_cfg(cfg).get("archiveChannelId") or "")
+    else:
+        arch = str((cfg["projects"].get(str(rec.get("project"))) or {}).get("archiveChannelId") or "")
     if arch:
         room = str(rec.get("title") or rec.get("task")).replace("@", "")
         big = [f for f in files if f.stat().st_size > 10 * 1024 * 1024]
@@ -4351,7 +4423,7 @@ def cmd_new(project: str, task: str, base: str = "", start: bool = True, from_id
 
 
 def _cmd_new_codex(project: str, task: str, base: str, start: bool, title: str, first: Any) -> dict[str, Any]:
-    """코덱스 방 만들기 — cmd_new 와 같은 순서·같은 되돌리기. 달라지는 곳: 카테고리(chat-bot)·자료실 없음·claude 설정 파일 없음."""
+    """코덱스 방 만들기 — cmd_new 와 같은 순서·같은 되돌리기. 달라지는 곳: 카테고리·자료실(chat-bot 의 것)·claude 설정 파일 없음."""
     import marina_codex
     cfg = load_config()
     dc = Discord(read_token(cfg))
@@ -4367,6 +4439,7 @@ def _cmd_new_codex(project: str, task: str, base: str, start: bool, title: str, 
     channel_id = ""
     try:
         cat = ensure_codex_category(dc, cfg)
+        ensure_codex_archive(dc, cfg, cat)
         channel_id = dc.create_text_channel(cfg["guildId"], plan["channel"], cat, title)
         write_state_dir(sdir, channel_id, project_config(cfg, project).get("allow") or [], token_file(cfg, project))
         record["channelId"] = channel_id

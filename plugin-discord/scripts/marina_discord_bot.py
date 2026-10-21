@@ -2841,6 +2841,10 @@ def new_from_text(project: str, user: str, text: str, channel: str, name: str = 
     if not 1 <= len(text) <= 500:
         return "글은 1~500자로 적어 줘"
     try:
+        cx = ms.load_config().get("codex")
+        panel = cx.get("newPanel") if isinstance(cx, dict) else None
+        if isinstance(panel, dict) and str(panel.get("channelId")) == str(channel):
+            return _codex_new_from_text(project, user, text, name, panel)       # 코덱스 #새-작업 패널 — 로비 세션 없음
         lobby = next((s for s in ms.load_sessions() if s.get("project") == project and s.get("kind") == "dev-lobby"), None)
         if not lobby:
             return "이 프로젝트엔 로비가 없어"
@@ -2850,26 +2854,42 @@ def new_from_text(project: str, user: str, text: str, channel: str, name: str = 
         dc = _dc(cfg)
         if not _allowed(lobby, str(lobby.get("channelId")), user, dc):
             return "새 작업을 열 권한이 없어"
-        who = (name or "형").strip() or "형"
-
-        def first(ch: str) -> str:
-            """채널이 생긴 뒤·세션이 뜨기 전에 📝 를 올려 그 메시지 ID 를 첫 지시에 넣는다(세션이 자기 채널을 알게)."""
-            mid = ""
-            try:
-                mid = dc.post_message(ch, f"📝 {_plain(who)[:40]}: " + _plain(text)[:1800])
-            except ms.SessionError:
-                pass
-            return ms.new_task_first_prompt(text, who, ch, mid)
-
-        slug = ms.unique_slug(project, ms.suggest_slug(text))
-        with ms.launch_env_scope(None):        # 새 세션도 사람의 환경(로그인 셸)으로 — 봇의 짧은 PATH 로 뜨지 않게
-            r = ms.cmd_new(project, slug, ms.extract_base(project, text), start=False, title=ms.task_title(text), first=first)
-        return f"열었어: <#{r['channelId']}>"
+        return _open_new_task(project, text, name, dc, codex=False)
     except ms.SessionError as exc:
         return str(exc)[:1500]
     except Exception as exc:        # 예상 밖 오류의 원문은 Discord 에 안 보인다 — 로그에만
         _log(f"new-from-text {project} 실패: {exc!r}")
         return "못 열었어 — 마리나 로그를 확인해 줘"
+
+
+def _open_new_task(project: str, text: str, name: str, dc: ms.Discord, codex: bool) -> str:
+    who = (name or "형").strip() or "형"
+
+    def first(ch: str) -> str:
+        """채널이 생긴 뒤·세션이 뜨기 전에 📝 를 올려 그 메시지 ID 를 첫 지시에 넣는다(세션이 자기 채널을 알게)."""
+        mid = ""
+        try:
+            mid = dc.post_message(ch, f"📝 {_plain(who)[:40]}: " + _plain(text)[:1800])
+        except ms.SessionError:
+            pass
+        return ms.new_task_first_prompt(text, who, ch, mid)
+
+    slug = ms.unique_slug(project, ms.suggest_slug(text))
+    with ms.launch_env_scope(None):        # 새 세션도 사람의 환경(로그인 셸)으로 — 봇의 짧은 PATH 로 뜨지 않게
+        r = ms.cmd_new(project, slug, ms.extract_base(project, text), start=False, title=ms.task_title(text), first=first, codex=codex)
+    return f"열었어: <#{r['channelId']}>"
+
+
+def _codex_new_from_text(project: str, user: str, text: str, name: str, panel: dict[str, Any]) -> str:
+    """코덱스 #새-작업 패널의 모달 제출. 권한 = 그 프로젝트 allow(로비 세션이 없어 access.json 이 없다)."""
+    cfg = ms.load_config()
+    if project not in (panel.get("projects") or []) or not isinstance(cfg["projects"].get(project), dict):
+        return "이 패널의 프로젝트가 아니야"
+    dc = _dc(cfg)
+    allow = [str(a) for a in cfg["projects"][project].get("allow") or []]
+    if str(user) not in allow or str(user) == dc.me():
+        return "새 작업을 열 권한이 없어"
+    return _open_new_task(project, text, name, dc, codex=True)
 
 
 PANEL_EVERY = 600.0
@@ -2885,6 +2905,10 @@ def panel_tick(last: float, now: float) -> float:
                 ms.ensure_new_panel(str(s.get("project")))
             except Exception as exc:
                 _log(f"new panel {s.get('project')} 실패: {exc!r}")
+    try:
+        ms.ensure_codex_hub()
+    except Exception as exc:
+        _log(f"codex hub 실패: {exc!r}")
     return now
 
 
