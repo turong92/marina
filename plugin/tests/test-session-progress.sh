@@ -176,8 +176,57 @@ check("넣지 못했어" in fail_out and "스레드 목록" in fail_out, f"못 �
 acc["groups"][str(room["channelId"])]["allowFrom"] = []
 ap.write_text(json.dumps(acc, ensure_ascii=False))
 check(ms.room_people(room["stateDir"], room["channelId"]) == [], "빈 허용 목록이면 넣을 사람을 모른다")
+check(ms.recent_room_people(ms.Discord(ms.read_token(ms.load_config())), room["channelId"]) == [], "방에 글이 없으면 관측할 사람도 없다")
 none_out = ms.chat_tool("open_thread", {"name": "cellabo 패키지"})
 check("스레드 목록" in none_out and "명이 들어가" not in none_out, f"그래도 여는 법을 알려 준다: {none_out}")
+# 허용 목록이 비었으면 그 방에서 최근에 말한 사람(봇 제외)을 넣는다 — 역할 없는 서버 주인도 빠지지 않게
+(fd / "messages.json").write_text(json.dumps({str(room["channelId"]): [
+    {"id": "500", "author": {"id": "333", "username": "u", "bot": False}, "type": 0, "content": "a"},
+    {"id": "501", "author": {"id": "B1", "username": "bot", "bot": True}, "type": 0, "content": "b"},
+    {"id": "502", "author": {"id": "444", "username": "v", "bot": False}, "type": 0, "content": "c"}]}))
+check(ms.recent_room_people(ms.Discord(ms.read_token(ms.load_config())), room["channelId"]) == ["444", "333"], "봇을 빼고 최근 순")
+n = len([x for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]])
+obs_out = ms.chat_tool("open_thread", {"name": "cellabo 패키지"})
+obs = [x["p"].rsplit("/", 1)[-1] for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]][n:]
+check(obs == ["444", "333"] and "2명이 들어가 있어" in obs_out, f"관측한 사람을 넣는다: {obs} / {obs_out}")
+# 형이 실제로 밟은 조합 — 새 이름 + 빈 허용 목록(그때 멤버가 봇 1명뿐이었다)
+n = len([x for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]])
+fresh_out = ms.chat_tool("open_thread", {"name": "sidebar-test"})
+fresh = [x["p"].rsplit("/", 1)[-1] for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]][n:]
+check(fresh == ["444", "333"] and "2명이 들어가 있어" in fresh_out, f"새 스레드도 사람이 들어간다: {fresh}")
+# 이미 사람이 있는 스레드를 다시 열면 명단을 다시 붓지 않는다 — Leave Thread 를 누른 사람을 끌어오지 않게
+(fd / "channels.json").write_text(json.dumps({t: {"id": t, "type": 11, "parent_id": str(room["channelId"]),
+                                                  "member_count": 3} for t in ms.room_threads(room["stateDir"])}))
+n = len([x for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]])
+back = ms.chat_tool("open_thread", {"name": "sidebar-test"})
+check([x for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]][n:] == [] and "이미 사람이" in back,
+      f"이미 사람이 있으면 다시 넣지 않는다: {back}")
+(fd / "channels.json").unlink()
+(fd / "messages.json").unlink()
+# 허용 목록이 있는 방은 관측하지 않는다(= GET messages 조회가 아예 없다)
+acc["groups"][str(room["channelId"])]["allowFrom"] = ["111"]
+ap.write_text(json.dumps(acc, ensure_ascii=False))
+g = len([x for x in log() if x["m"] == "GET" and "/messages?" in x["p"]])
+ms.chat_tool("open_thread", {"name": "declared-only"})
+check(len([x for x in log() if x["m"] == "GET" and "/messages?" in x["p"]]) == g,
+      "허용 목록이 있으면 최근 글을 긁지 않는다")
+# 열어 달라고 한 사람은 반드시 넣는다 — 상한에 밀려 빠지면 안 된다(형 2026-10-21)
+(fd / "messages.json").write_text(json.dumps({str(room["channelId"]): [
+    {"id": "600", "author": {"id": "999", "username": "asker", "bot": False}, "type": 0, "content": "열어줘"}]}))
+ms._write_json(Path(room["stateDir"]) / "activity.json", {"mid": "600", "marked": {}, "ever": {}, "chans": {}})
+check(ms.asker_id(ms.Discord(ms.read_token(ms.load_config())), room["stateDir"], room["channelId"]) == "999",
+      "지금 지시한 사람을 Discord 에 물어 가린다")
+acc["groups"][str(room["channelId"])]["allowFrom"] = ["111", "222", "333", "444", "555"]   # 상한(5) 꽉 찬 방
+ap.write_text(json.dumps(acc, ensure_ascii=False))
+n = len([x for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]])
+ms.chat_tool("open_thread", {"name": "cellabo 패키지"})
+got = [x["p"].rsplit("/", 1)[-1] for x in log() if x["m"] == "PUT" and "/thread-members/" in x["p"]][n:]
+check(got[0] == "999" and len(got) == ms.ROOM_PEOPLE_MAX + 1,
+      f"지시한 사람은 명단 상한 밖에서 따로 넣는다(상한에 밀려 빠지면 안 되니까): {got}")
+ms._write_json(Path(room["stateDir"]) / "activity.json", {"mid": "", "marked": {}, "ever": {}, "chans": {}})
+(fd / "messages.json").unlink()
+acc["groups"][str(room["channelId"])]["allowFrom"] = ["111", "222"]
+ap.write_text(json.dumps(acc, ensure_ascii=False))
 acc["groups"][str(room["channelId"])]["allowFrom"] = ["111", "222"]
 ap.write_text(json.dumps(acc, ensure_ascii=False))
 for bad in ({}, {"name": "   "}, {"name": "a" * 91}, {"name": "@everyone"}, {"name": "a<b>c"}, {"name": "보\u200b이지\u200b않는"}):

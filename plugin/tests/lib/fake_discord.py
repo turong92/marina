@@ -57,8 +57,10 @@ class H(BaseHTTPRequestHandler):
             return
         if len(p) == 3 and p[0] == "channels" and p[2] == "messages":
             after = int((q.get("after") or ["0"])[0]); limit = int((q.get("limit") or ["50"])[0])
-            rows = sorted((m for m in seeded.get(p[1], []) if int(m["id"]) > after), key=lambda m: int(m["id"]))[:limit]
-            self._send(200, rows[::-1]); return     # Discord 처럼: after 에 가까운 것부터 limit 개를 최신이 먼저
+            rows = sorted((m for m in seeded.get(p[1], []) if int(m["id"]) > after), key=lambda m: int(m["id"]))
+            # Discord 처럼: after 가 있으면 그에 가까운 것부터, 없으면 **가장 최근** limit 개. 둘 다 최신이 먼저
+            rows = (rows[:limit] if after else rows[-limit:])[::-1]
+            self._send(200, rows); return
         if len(p) == 4 and p[0] == "channels" and p[2] == "messages":
             gone = (state / "gone").read_text().split() if (state / "gone").exists() else []
             if p[3] in gone:

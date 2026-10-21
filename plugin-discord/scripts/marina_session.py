@@ -1124,7 +1124,8 @@ def forget_room_threads(sd: Any, tids: Any, keep_named: bool = True) -> list[str
     return gone
 
 
-ROOM_PEOPLE_MAX = 5                 # 스레드에 넣어 줄 사람 수 — 한 명마다 호출 하나라 묶는다
+ROOM_PEOPLE_MAX = 5                 # 명단에서 넣어 줄 사람 수 — 한 명마다 호출 하나라 묶는다.
+                                    # 열어 달라고 한 사람은 이 상한 밖에서 따로 넣는다(빠지면 안 되니까)
 
 
 def room_people(sd: Any, channel: str) -> list[str]:
@@ -1132,7 +1133,7 @@ def room_people(sd: Any, channel: str) -> list[str]:
     `marina_discord_wake.allow_list()` 와 같은 자리를 같은 규칙으로 읽는다(리뷰 I-2: 모든 group 을 긁으면
     같은 프로젝트의 다른 방 사람까지 들어간다). 이 값은 discord.json 의 프로젝트 `allow` 사본이고
     채널을 **볼 수 있는지**는 역할이 정하므로, 역할이 없는 사람은 넣어도 실패한다.
-    빈 목록이면 '채널을 보는 모두' 라서 명단을 알 수 없다 — 추측하지 않고 빈 목록을 돌려준다."""
+    빈 목록이면 '채널을 보는 모두' 라서 이 파일엔 명단이 없다 — 부르는 쪽이 recent_room_people 로 넘어간다."""
     try:
         g = json.loads((Path(str(sd)) / "access.json").read_text(encoding="utf-8"))["groups"][str(channel)]
     except (OSError, ValueError, KeyError, TypeError):
@@ -1140,6 +1141,43 @@ def room_people(sd: Any, channel: str) -> list[str]:
     if not isinstance(g, dict):
         return []
     return list(dict.fromkeys(str(a) for a in (g.get("allowFrom") or []) if str(a).isdigit()))[:ROOM_PEOPLE_MAX]
+
+
+def asker_id(dc: "Discord", sd: Any, channel: str) -> str:
+    """지금 지시한 사람. **열어 달라고 한 사람은 반드시 넣어야 한다**(형 2026-10-21: "열면서 열어달라는
+    사람 스레드에 자동 추가 안 해줘?"). 전사 태그의 user_id 는 방 사람이 본문에 적어 넣을 수 있으니
+    믿지 않고, 지금 지시 메시지(activity.json 의 mid)를 Discord 에 물어 작성자를 받는다."""
+    st = _activity_state(Path(str(sd)))
+    mid = str(st.get("mid") or "")
+    if not mid.isdigit():
+        return ""
+    ch = str((st.get("chans") or {}).get(mid) or channel)
+    try:
+        a = (dc._req("GET", f"/channels/{ch}/messages/{mid}") or {}).get("author") or {}
+    except SessionError:
+        return ""
+    uid = str(a.get("id") or "")
+    return uid if uid.isdigit() and not a.get("bot") else ""
+
+
+def recent_room_people(dc: "Discord", channel: str, limit: int = 50) -> list[str]:
+    """그 방에서 최근에 말한 사람(봇 제외, 최근 순). 허용 목록이 비어 '채널을 보는 모두' 일 때
+    넣어 줄 사람을 **관측으로** 얻는다 — 역할로 가리면 역할 없는 서버 소유자(형)가 빠지고,
+    길드 멤버를 다 넣으면 큰 서버에서 과하다. 채널을 못 보는 사람은 Discord 가 PUT 을 막는다."""
+    try:
+        rows = dc._req("GET", f"/channels/{channel}/messages?limit={int(limit)}")
+    except SessionError:
+        return []
+    out: list[str] = []
+    for m in rows if isinstance(rows, list) else []:
+        if not isinstance(m, dict) or m.get("type") not in (0, 19) or m.get("webhook_id"):
+            continue                    # 사람이 쓴 글만 — marina_discord_wake._ok 와 같은 판정.
+                                        # 시스템 메시지(스레드 시작·서버 참여)의 author 도 사람이다
+        a = m.get("author") or {}
+        uid = str(a.get("id") or "")
+        if not a.get("bot") and uid.isdigit() and uid not in out:
+            out.append(uid)
+    return out[:ROOM_PEOPLE_MAX]
 
 
 def room_chans(rec: dict[str, Any]) -> set[str]:
@@ -3809,22 +3847,42 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
 TOPIC_ARCHIVE_MINS = 10080      # 주제 스레드는 7일 열어 둔다(진행 스레드의 60분과 다르다 — 사람이 이어서 말하는 곳)
 
 
-def _join_thread(dc: "Discord", sd: Any, channel: str, tid: str) -> str:
+def _put_members(dc: "Discord", tid: str, uids: list[str], tried: list[str]) -> int:
+    """스레드에 사람을 넣는다(넣은 수). 개별 실패는 넘어간다 — 역할이 없어 채널을 못 보는 사람 등."""
+    n = 0
+    for uid in uids:
+        if uid in tried:
+            continue
+        tried.append(uid)
+        try:
+            dc._req("PUT", f"/channels/{tid}/thread-members/{uid}")
+            n += 1
+        except SessionError:
+            pass
+    return n
+
+
+def _join_thread(dc: "Discord", sd: Any, channel: str, tid: str, members: int = 0) -> str:
     """방 사람을 스레드에 넣고 안내 한 줄을 돌려준다. Discord 스레드는 **들어가 있는 사람의** 사이드바에만
     뜬다 — 넣어 주지 않으면 방 사람이 채널 옆 스레드 목록을 뒤져야 찾는다(형 2026-10-21: "왜 왼쪽 채널 밑에
     안 나와?"). `PUT …/thread-members/{uid}` 는 멱등이라 이미 있는 스레드에 다시 불러도 안전하다
-    (리뷰 I-1: 그래서 '이미 있어' 경로도 이걸 부른다 — 안 그러면 먼저 만든 스레드는 복구할 길이 없다)."""
-    people = room_people(sd, channel)
-    joined = 0
-    for uid in people:
-        try:
-            dc._req("PUT", f"/channels/{tid}/thread-members/{uid}")
-            joined += 1
-        except SessionError:
-            pass                    # 역할이 없어 채널을 못 보는 사람 등 — 개별 실패는 넘어간다
+    (리뷰 I-1: 그래서 '이미 있어' 경로도 이걸 부른다 — 안 그러면 먼저 만든 스레드는 복구할 길이 없다).
+    `members` = 지금 스레드 멤버 수(아는 경우). 1(봇만)보다 많으면 **열어 달라고 한 사람만** 넣는다 —
+    Leave Thread 를 누른 사람을 부를 때마다 다시 끌어오지 않게(리뷰 S-1)."""
+    tried: list[str] = []
+    asker = asker_id(dc, sd, channel)
+    joined = _put_members(dc, tid, [asker] if asker else [], tried)      # 열어 달라고 한 사람은 늘 1순위
+    if members <= 1:
+        # 허용 목록이 있으면 그게 명시적 명단이다 — 관측(최근 발화자)은 그게 없거나,
+        # 낡아서 한 명도 못 넣었을 때만 쓴다(리뷰 S-3·S-6)
+        joined += _put_members(dc, tid, room_people(sd, channel), tried)
+        if joined == 0:
+            joined += _put_members(dc, tid, recent_room_people(dc, channel), tried)
     if joined:
         return f"방 사람 {joined}명이 들어가 있어(사이드바에 보인다). "
-    if people:
+    if members > 1:
+        return "이미 사람이 들어가 있어. "
+    if tried:
         return ("방 사람을 스레드에 넣지 못했어 — 사이드바엔 안 보일 수 있으니 "
                 "채널 이름 옆 스레드 목록에서 열라고 알려 줘. ")
     return "사이드바엔 안 보일 수 있어 — 채널 이름 옆 스레드 목록에서 열라고 알려 줘. "
@@ -3849,8 +3907,10 @@ def _open_thread(rec: dict[str, Any], args: dict[str, Any]) -> str:
     same = [t for t, v in room_threads(sd).items() if str(v.get("name") or "") == name]
     if same:      # 봇은 스레드를 지울 수 없다(Manage Threads 없음) — 같은 이름을 또 만들면 영구히 쌓인다
         try:      # 사람이 손으로 지웠을 수도 있다 — 그때만 장부에서 빼고 새로 만든다(리뷰 I-3·S7)
-            dc._req("GET", f"/channels/{same[-1]}")
-            note = _join_thread(dc, sd, str(rec["channelId"]), same[-1])   # 먼저 만든 스레드도 멤버를 채운다
+            info = dc._req("GET", f"/channels/{same[-1]}")
+            # 먼저 만든 스레드도 멤버를 채운다. 이미 사람이 있으면(member_count > 1) 지시자만 — 리뷰 S-1
+            note = _join_thread(dc, sd, str(rec["channelId"]), same[-1],
+                                int((info or {}).get("member_count") or 0))
             return (f"'{name}' 스레드는 이미 있어 (id {same[-1]})\n{link}{same[-1]}\n"
                     + note + "reply 의 chat_id 를 이 id 로 보내면 돼.")
         except DiscordError as exc:
