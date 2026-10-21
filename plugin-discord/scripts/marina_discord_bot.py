@@ -463,7 +463,7 @@ def snapshot(full: bool = True) -> dict[str, Any]:
                      "tasks": live_tasks(rec) if alive and full else [],
                      "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists(),
                      "permission": alive and full and _pane_permission(str(rec.get("tmux") or "")),
-                     "account": _row_account(rec, alive)})
+                     "account": _row_account(rec, alive), "codex": ms.is_codex(rec)})
     if not full:
         # 뒤에서 도는 일(셸·팀 에이전트)도 '바쁨'으로 쳐서 #상태를 30초마다 — 끝나면 바로 보이게(입력 중 표시는 busy·도는 에이전트만)
         return {"sessions": rows, "anyBusy": any(r["busy"] or r["bg"] for r in rows)}
@@ -740,7 +740,7 @@ def _dc(cfg: dict[str, Any]) -> ms.Discord:
     return ms.Discord(ms.read_token(cfg))
 
 
-def _owner_channel(dc: ms.Discord, cfg: dict[str, Any], name: str, kind: int, position: int = 0) -> str:
+def _owner_channel(dc: ms.Discord, cfg: dict[str, Any], name: str, kind: int, position: int = 0, parent: str = "") -> str:
     """@everyone 은 막고 형·봇만 연다(만들 때 덮어쓰기 — 봇에 역할 관리 권한이 없어도 된다)."""
     guild = str(cfg["guildId"])
     if kind == 4:   # 빈 카테고리 = 숫자판: 보이기만(눌러도 접히기만 — 음성 채널은 서버 주인이 들어가졌다)
@@ -751,17 +751,37 @@ def _owner_channel(dc: ms.Discord, cfg: dict[str, Any], name: str, kind: int, po
     ow = [{"id": guild, "type": 0, "allow": "0", "deny": str(ms._VIEW)},
           {"id": dc.me(), "type": 1, "allow": str(bot), "deny": "0"}]
     ow += [dict(owner, id=u, type=1) for u in owner_ids(cfg)]
-    r = dc._req("POST", f"/guilds/{guild}/channels",
-                {"name": name, "type": kind, "position": position, "permission_overwrites": ow})
+    body = {"name": name, "type": kind, "position": position, "permission_overwrites": ow}
+    if parent:
+        body["parent_id"] = parent
+    r = dc._req("POST", f"/guilds/{guild}/channels", body)
     return str(r["id"])
 
 
-def dashboard_tick(st: dict[str, Any], snap: dict[str, Any] | None = None) -> None:
+def board_snap(snap: dict[str, Any], codex: bool) -> dict[str, Any]:
+    """판 하나가 그릴 스냅샷 — 방을 codex 여부로 거르고, 코덱스 판은 사용량을 그 계정의 rollout rate_limits 로 바꾼다(스펙 §7)."""
+    rows = [r for r in snap["sessions"] if bool(r.get("codex")) == codex]
+    out = dict(snap, sessions=rows, anyBusy=any(r["busy"] for r in rows))
+    if codex:
+        import marina_codex
+        out.update(usage=marina_codex.rate_windows(ms.load_sessions(), marina_codex.codex_cfg(ms.load_config())["account"]),
+                   accountUsage={}, roleUsage=[])
+    return out
+
+
+def dashboard_tick(st: dict[str, Any], snap: dict[str, Any] | None = None, codex: bool = False) -> None:
     cfg = ms.load_config()
+    key, parent = "dashboard", ""
+    if codex:      # 코덱스 판 = chat-bot 카테고리 안의 #상태. 방을 한 번도 안 만들었으면(카테고리 id 없음) 할 일 없다
+        import marina_codex
+        parent = str(marina_codex.codex_cfg(cfg).get("categoryId") or "")
+        if not parent:
+            return
+        key = "codexDashboard"
     dc = _dc(cfg)
     if not st:
-        st.update(_load_state().get("dashboard") or {})
-    snap = snap or snapshot()
+        st.update(_load_state().get(key) or {})
+    snap = board_snap(snap or snapshot(), codex)
     comps = render(snap)
     body = json.dumps(comps, ensure_ascii=False, sort_keys=True)
     if body == st.get("body") and st.get("messageId"):
@@ -777,8 +797,8 @@ def dashboard_tick(st: dict[str, Any], snap: dict[str, Any] | None = None) -> No
     for _ in range(2):
         if not st.get("channelId"):
             st.clear()
-            st["channelId"] = _owner_channel(dc, cfg, DASHBOARD_NAME, 0)
-            _save_section("dashboard", dict(st))      # 다음 단계가 실패해도 채널을 또 만들지 않게(리뷰 M4)
+            st["channelId"] = _owner_channel(dc, cfg, DASHBOARD_NAME, 0, parent=parent)
+            _save_section(key, dict(st))      # 다음 단계가 실패해도 채널을 또 만들지 않게(리뷰 M4)
         try:
             if st.get("messageId"):
                 dc._req("PATCH", f"/channels/{st['channelId']}/messages/{st['messageId']}", msg)
@@ -800,10 +820,46 @@ def dashboard_tick(st: dict[str, Any], snap: dict[str, Any] | None = None) -> No
                     st.pop("channelId", None)
             else:
                 st.pop("channelId", None)
-    _save_section("dashboard", dict(st))
+    _save_section(key, dict(st))
 
 
 METERS = (("fiveHour", "5시간"), ("weekly", "주간"))
+
+
+def _meter_apply(dc: ms.Discord, cfg: dict[str, Any], meters: dict[str, dict[str, Any]], saved: dict[str, Any],
+                 key: str, label: str, w: "dict[str, Any] | None", pos: int) -> None:
+    """숫자판 하나(빈 카테고리 이름 `📊 라벨 N%`)를 맞춘다 — 클로드·코덱스 판이 같이 쓴다."""
+    st = meters.setdefault(key, {})
+    if not st:
+        st.update(saved.get(key) or {})
+    if st.get("channelId") and st.get("kind") != 4:
+        # 예전 음성 숫자판(서버 주인은 눌러서 들어가졌다) — 지우고 카테고리로 다시 만든다
+        try:
+            dc._req("DELETE", f"/channels/{st['channelId']}")
+        except ms.SessionError:
+            pass
+        st.clear()
+    if w is None:
+        return
+    name = f"📊 {label} {round(float(w.get('usedPercent') or 0))}%"
+    if st.get("channelId") and st.get("name") == name:
+        return
+    # 이름 변경은 10분 2회 제한 — 데몬을 연달아 재시작해도 넘지 않게 마지막 변경 시각을 저장해 둔다(리뷰 M5)
+    if st.get("channelId") and time.time() - float(st.get("renamedAt") or 0) < WEEKLY_EVERY:
+        return
+    if st.get("channelId"):
+        try:
+            dc._req("PATCH", f"/channels/{st['channelId']}", {"name": name})
+        except ms.DiscordError as exc:
+            if exc.code not in (403, 404):     # 지워졌거나 봇이 못 만지게 됐다 → 새로 만든다
+                raise
+            _log(f"{key} meter {st.get('channelId')} gone/forbidden ({exc.code}), recreating")
+            st.clear()
+    if not st.get("channelId"):
+        st.update(channelId=_owner_channel(dc, cfg, name, 4, pos), kind=4)
+        _save_section(key, dict(st, name=name, renamedAt=time.time()))   # 다음 단계가 실패해도 또 만들지 않게
+    st.update(name=name, renamedAt=time.time())
+    _save_section(key, dict(st))
 
 
 def meter_tick(meters: dict[str, dict[str, Any]]) -> None:
@@ -821,38 +877,20 @@ def meter_tick(meters: dict[str, dict[str, Any]]) -> None:
             plan.append((f"{n}:{key}", f"{n.upper()} {label}"))
     saved = _load_state()
     for pos, (key, label) in enumerate(plan):
-        st = meters.setdefault(key, {})
-        if not st:
-            st.update(saved.get(key) or {})
-        if st.get("channelId") and st.get("kind") != 4:
-            # 예전 음성 숫자판(서버 주인은 눌러서 들어가졌다) — 지우고 카테고리로 다시 만든다
-            try:
-                dc._req("DELETE", f"/channels/{st['channelId']}")
-            except ms.SessionError:
-                pass
-            st.clear()
-        w = usage.get(key)
-        if w is None:
-            continue
-        name = f"📊 {label} {round(float(w.get('usedPercent') or 0))}%"
-        if st.get("channelId") and st.get("name") == name:
-            continue
-        # 이름 변경은 10분 2회 제한 — 데몬을 연달아 재시작해도 넘지 않게 마지막 변경 시각을 저장해 둔다(리뷰 M5)
-        if st.get("channelId") and time.time() - float(st.get("renamedAt") or 0) < WEEKLY_EVERY:
-            continue
-        if st.get("channelId"):
-            try:
-                dc._req("PATCH", f"/channels/{st['channelId']}", {"name": name})
-            except ms.DiscordError as exc:
-                if exc.code not in (403, 404):     # 지워졌거나 봇이 못 만지게 됐다 → 새로 만든다
-                    raise
-                _log(f"{key} meter {st.get('channelId')} gone/forbidden ({exc.code}), recreating")
-                st.clear()
-        if not st.get("channelId"):
-            st.update(channelId=_owner_channel(dc, cfg, name, 4, pos), kind=4)
-            _save_section(key, dict(st, name=name, renamedAt=time.time()))   # 다음 단계가 실패해도 또 만들지 않게
-        st.update(name=name, renamedAt=time.time())
-        _save_section(key, dict(st))
+        _meter_apply(dc, cfg, meters, saved, key, label, usage.get(key), pos)
+
+
+def codex_meter_tick(meters: dict[str, dict[str, Any]]) -> None:
+    """코덱스 사용량 숫자판 — rollout 의 rate_limits 창마다 `📊 코덱스 주간 N%`. rollout 이 없으면(창 없음) 만들지 않는다."""
+    import marina_codex
+    cfg = ms.load_config()
+    windows = marina_codex.rate_windows(ms.load_sessions(), marina_codex.codex_cfg(cfg)["account"])
+    if not windows:
+        return
+    dc = _dc(cfg)
+    saved = _load_state()
+    for pos, w in enumerate(windows):
+        _meter_apply(dc, cfg, meters, saved, f"codex:{w['key']}", f"코덱스 {w['label']}", w, pos)
 
 
 def typing_tick(snap: dict[str, Any], ty: dict[str, float], now: float, agents: "set[str] | None" = None) -> None:
@@ -2848,7 +2886,9 @@ class Loop:
 
     def __init__(self) -> None:
         self.dash: dict[str, Any] = {}
+        self.codex_dash: dict[str, Any] = {}
         self.meters: dict[str, dict[str, Any]] = {}
+        self.codex_meters: dict[str, dict[str, Any]] = {}
         self.ty: dict[str, float] = {}
         self.words: dict[str, tuple[str, float]] = {}
         self.last_words = 0.0
@@ -3041,9 +3081,17 @@ class Loop:
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
+            try:
+                dashboard_tick(self.codex_dash, codex=True)      # 코덱스 판 — 실패해도 클로드 판은 이미 그렸다
+            except Exception as exc:
+                _log(f"codex dashboard failed: {type(exc).__name__}: {exc}")
         if now - self.last_weekly >= WEEKLY_EVERY:
             self.last_weekly = now
             meter_tick(self.meters)
+            try:
+                codex_meter_tick(self.codex_meters)
+            except Exception as exc:
+                _log(f"codex meter failed: {type(exc).__name__}: {exc}")
 
 
 def beat_path() -> Path:
