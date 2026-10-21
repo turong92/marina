@@ -447,9 +447,9 @@ def claude_windows() -> list[dict[str, Any]]:
         return []
 
 
-def context_percent(transcript: Path) -> Optional[float]:
+def context_percent(transcript: Path, source: str = "claude") -> Optional[float]:
     try:
-        return agent_usage_from_path(Path(transcript), "claude").get("contextPercent")
+        return agent_usage_from_path(Path(transcript), source).get("contextPercent")
     except Exception:
         return None
 
