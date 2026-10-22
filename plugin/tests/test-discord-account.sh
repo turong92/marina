@@ -51,8 +51,11 @@ ms.set_account(sd, "a"); check(ms.account_of(sd) == "a", "방 지정이 프로�
 # ── 띄우기: 토큰은 env 로만, 명령줄엔 안 남는다 ──
 started, failed = ms.cmd_start("proj/feat/a")
 check(started and not failed, f"시작: {started} {failed}")
-time.sleep(0.5)
-envs = [p.read_text() for p in out.glob("*/env")]
+for _ in range(50):                 # 가짜 claude 가 env 를 쓸 때까지(부하 때 0.5초로는 모자랐다)
+    envs = [p.read_text() for p in out.glob("*/env")]
+    if any("CLAUDE_CODE_OAUTH_TOKEN" in e for e in envs):
+        break
+    time.sleep(0.1)
 check(any("CLAUDE_CODE_OAUTH_TOKEN=sk-ant-oat-TEST-B" in e for e in envs), "claude 가 b 토큰을 env 로 받음")
 check(not any("MARINA_ACCOUNT_TOKEN_FILE" in e for e in envs), "파일 경로 변수는 claude 에 안 넘김")
 cmdline = ms._tmux("list-panes", "-a", "-F", "#{pane_start_command}").stdout or ""
