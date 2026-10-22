@@ -98,6 +98,56 @@ cmds = json.loads(json.dumps(mb.slash_commands()))
 acc = next((c for c in cmds if c["name"] == "account"), None)
 check(acc and [x["value"] for x in acc["options"][0]["choices"]] == ["a", "b"], f"/account 선택지 = 계정 목록: {acc}")
 
+# ── /account 재시작: 기다리지 않고 강제(2026-10-22 ovation/a2-1 — 30분 기다리다 조용히 포기해 한도 창에 멈춤) ──
+mb.owner_ids = lambda cfg: ["U1"]
+def posts(since):
+    return [(x["b"] or {}).get("content", "") for x in fdlog()[since:] if x["m"] == "POST" and "/messages" in x.get("p", x.get("path", "/messages"))]
+forced, state = [], {"busy": False, "limit": False, "blockers": [], "fail": False}
+mb.force_restart = lambda refs, log=None: (forced.append(list(refs)) or ([], ["✗ 방 잠금 — 지금 꺼져 있다"])) if state["fail"] else (forced.append(list(refs)) or (list(refs), []))
+mb.restart_blockers = lambda r: list(state["blockers"])
+mb._pane_limit = lambda name: state["limit"]
+def run(**kw):
+    n = len(fdlog()); t0 = time.time()
+    ok = mb.account_switch_restart("proj/feat/a", poll=0.05, **kw)
+    return ok, time.time() - t0, " | ".join(posts(n))
+# 1) 백그라운드 셸·에이전트가 있어도 기다리지 않고 바로, 끊은 것을 알린다
+state.update(busy=False, limit=False, blockers=["백그라운드 셸 2", "에이전트 1개 일하는 중"], fail=False)
+mb._room_busy = lambda rec: (True, False)
+forced.clear(); ok, dt, msg = run(grace=5.0)
+check(ok and forced == [["proj/feat/a"]] and dt < 1.0, f"뒤에서 도는 일은 안 기다리고 강제: ok={ok} dt={dt} {forced}")
+check("백그라운드 셸 2" in msg and "에이전트 1개" in msg and "기다리지 않" in msg and "✓" in msg, f"끊은 것·결과를 채널에: {msg}")
+# 2) 턴이 진행 중이면 끝나길 기다린다(끝나면 그때 재시작)
+calls = {"n": 0}
+def busy_then_idle(rec):
+    calls["n"] += 1
+    return True, calls["n"] < 4
+mb._room_busy = busy_then_idle
+state["blockers"] = []; forced.clear(); ok, dt, msg = run(grace=5.0)
+check(ok and forced and 0.1 < dt < 3.0 and "턴" in msg and "✓" in msg, f"진행 중 턴은 끝날 때까지: dt={dt} {msg}")
+# 3) 턴이 안 끝나면 grace 뒤 강제
+mb._room_busy = lambda rec: (True, True)
+forced.clear(); ok, dt, msg = run(grace=0.3)
+check(ok and forced and 0.25 < dt < 3.0 and "강제" in msg, f"grace 넘으면 강제: dt={dt} {msg}")
+# 4) 사용량 한도 창이면 바쁨으로 안 치고 바로
+state["limit"] = True
+forced.clear(); ok, dt, msg = run(grace=5.0)
+check(ok and forced and dt < 1.0 and "한도" in msg, f"한도 창은 바로: dt={dt} {msg}")
+state["limit"] = False
+# 5) 재시작 실패는 조용히 넘기지 않고 채널에 이유
+mb._room_busy = lambda rec: (True, False); state["fail"] = True
+ok, dt, msg = run(grace=5.0)
+check(not ok and "✗" in msg and "방 잠금" in msg, f"실패 사유를 채널에: {msg}")
+state["fail"] = False
+# 6) 슬래시 응답은 '쉬면'이 아니라 바로/최대 3분
+import subprocess as _sp
+spawned = []
+mb._spawn_account_restart = lambda ref: spawned.append(ref)
+ms.set_account(sd, "a")
+mb.restart_status = lambda *a, **k: None
+ms.running_account = lambda d: "b"
+r = mb.slash(ch, "U1", "account", "a", "")
+check(spawned == ["proj/feat/a"] and "3분" in r and "쉬면" not in r, f"슬래시 응답: {r}")
+
 # ── 사용량: 헤더 → 창 ──
 w = mu.windows_from_headers({"anthropic-ratelimit-unified-5h-utilization": "0.42", "anthropic-ratelimit-unified-5h-reset": "1792318200",
                              "anthropic-ratelimit-unified-7d-utilization": "0.1", "anthropic-ratelimit-unified-7d-reset": "1792864800"})

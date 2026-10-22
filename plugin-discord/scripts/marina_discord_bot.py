@@ -1317,10 +1317,10 @@ def slash_commands() -> list[dict[str, Any]]:
 
 
 def _spawn_account_restart(ref: str) -> None:
-    """안전 재시작을 뒤에서 — 쉬고 뒤에서 도는 일이 없을 때 같은 대화로 다시 띄운다(marina session restart 와 같은 판정)."""
+    """계정 바꿈 재시작을 뒤에서 — 진행 중 턴만 최대 3분 기다리고 나머지는 강제(account_switch_restart)."""
     log = ms.marina_home() / "account-restart.log"
     with open(log, "a") as fh:
-        subprocess.Popen([sys.executable, str(Path(ms.__file__).resolve()), "restart", ref],
+        subprocess.Popen([sys.executable, str(Path(ms.__file__).resolve()), "restart", ref, "--account-switch"],
                          stdin=subprocess.DEVNULL, stdout=fh, stderr=fh, start_new_session=True)
 
 
@@ -1345,7 +1345,7 @@ def account_cmd(rec: dict[str, Any], name: str, scope: str = "") -> str:
         return (f"🔑 이 방 계정 = {name.upper()} — 그런데 다른 재시작 대기가 돌고 있어 지금은 못 걸어. "
                 "그게 끝난 뒤 /account 를 한 번 더 쳐 줘(아니면 다음에 깨어날 때 바뀐다)")
     _spawn_account_restart(f"{rec.get('project')}/{rec.get('task')}")
-    return (f"🔑 이 방 계정 = {name.upper()} — 지금 일이 끝나고 쉬면(서브에이전트·셸까지 끝나면) 같은 대화로 다시 띄울게. "
+    return (f"🔑 이 방 계정 = {name.upper()} — 지금 턴이 끝나길 최대 3분만 기다리고(셸·대기·에이전트는 안 기다려) 같은 대화로 다시 띄울게. "
             "바꾼 뒤 첫 턴은 캐시가 없어 문맥을 한 번 다시 읽어")
 
 
@@ -2614,6 +2614,64 @@ def force_restart(refs: list[str], log: Any = None) -> tuple[list[str], list[str
         return done, failed
     finally:
         _release_restart_lock(lock)
+
+
+ACCOUNT_TURN_GRACE = 180.0
+_LIMIT_DIALOG = re.compile(r"Stop and wait for limit|Usage limit reached|hit your .{0,30}limit", re.I)
+
+
+def _pane_limit(name: str) -> bool:
+    """Claude Code 사용량 한도 선택 창('Stop and wait for limit to reset' 등)에 멈춰 있나 — 이건 바쁨이 아니라 먹통이다."""
+    if not name or not ms.tmux_alive(name):
+        return False
+    lines = (ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()[-25:]
+    return any(_LIMIT_DIALOG.search(l) for l in lines)
+
+
+def account_switch_restart(ref: str, grace: float = ACCOUNT_TURN_GRACE, poll: float = 5.0) -> bool:
+    """/account 로 계정이 바뀐 방을 다시 띄운다 — 뒤에서 도는 일(셸·대기 루프·에이전트)은 기다리지 않고 끊는다.
+    지금 턴이 진행 중(화면 스피너)일 때만 그 끝을 grace 초까지 기다리고, 넘기거나 한도 창이면 바로 강제 재시작.
+    방 채널에 기다리는 것·끊은 것·결과를 알린다(조용히 포기하는 경로 없음)."""
+    try:
+        rec = ms.find_session(ref)
+    except ms.SessionError as exc:
+        _log(f"account_switch_restart {ref}: {exc}")
+        return False
+    name = str(rec.get("tmux") or "")
+    ch = str(rec.get("channelId") or "")
+    def say(text: str) -> None:
+        if not ch:
+            return
+        try:
+            _dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", {"content": text[:1900], "allowed_mentions": {"parse": []}})
+        except ms.SessionError as exc:
+            _log(f"account_switch_restart say {ref}: {exc}")
+    alive = ms.tmux_alive(name)
+    note = ""
+    if alive and _pane_limit(name):
+        note = "사용량 한도 창에 멈춰 있어 바로 "
+    elif alive and _room_busy(rec)[1]:
+        say(f"🔑 계정을 바꾸려고 지금 턴이 끝나길 최대 {int(grace)}초 기다릴게(셸·대기·에이전트는 안 기다려)")
+        end = time.time() + grace
+        while time.time() < end and _room_busy(rec)[1] and not _pane_limit(name):
+            time.sleep(poll)
+        if _room_busy(rec)[1] and not _pane_limit(name):
+            note = f"{int(grace)}초가 지나도 턴이 안 끝나 강제로 "
+        else:
+            note = "턴이 끝나서 "
+    else:
+        note = "기다리지 않고 "
+        say("🔑 계정을 바꾸려고 기다리지 않고 바로 다시 띄울게")
+    cut = restart_blockers(rec) if alive else []
+    try:
+        _done, failed = force_restart([ref])
+    except Exception as exc:
+        _done, failed = [], [f"✗ {str(exc) or type(exc).__name__}"]
+    if failed:
+        say(f"🔑 계정 바꾸는 재시작 실패 — {'; '.join(failed)}")
+        return False
+    say(f"🔑 {note}다시 띄웠어 ✓" + (f" (끊은 것: {'·'.join(cut)})" if cut else ""))
+    return True
 
 
 def _drop_pending_prompts(rec: dict[str, Any]) -> None:

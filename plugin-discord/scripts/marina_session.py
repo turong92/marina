@@ -4835,6 +4835,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--status", action="store_true", help="돌고 있는 재시작 대기 현황")
     p.add_argument("--cancel", action="store_true", help="돌고 있는 재시작 대기를 끝낸다")
     p.add_argument("--force", action="store_true", help="막는 이유를 무시하고 바로 재시작(이름으로 준 세션만, --all 불가)")
+    p.add_argument("--account-switch", action="store_true", help="계정 바꿈 재시작: 진행 중 턴만 3분 기다리고 강제, 방 채널에 알림(/account 가 쓴다)")
     sub.add_parser("hook-stop")
     sub.add_parser("hook-codex-start")
     sub.add_parser("hook-typing")
@@ -5011,6 +5012,8 @@ def main(argv: list[str] | None = None) -> int:
                     print(f"⚠ 자기 세션({mine})은 빼고 한다 — 다른 곳에서 restart 해 줘", file=sys.stderr)
             if not refs:
                 raise SessionError("restart <작업…> 또는 restart --all")
+            if a.account_switch:
+                return 0 if all(mb.account_switch_restart(r) for r in refs) else 1
             if a.force:
                 done, failed = mb.force_restart(refs, log=print)
                 for x in failed:
