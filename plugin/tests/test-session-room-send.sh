@@ -42,6 +42,8 @@ def posts(ch):
         if o["m"] == "POST" and o["p"] == f"/channels/{ch}/messages":
             out.append((o.get("b") or {}).get("content", ""))
     return out
+def has_line(ch, head, tail):
+    return any(p.startswith(head) and p.endswith(tail) for p in posts(ch))
 def rollout(): return next(Path(os.environ["MARINA_CODEX_SESSIONS"]).glob("*/*/*/rollout-*.jsonl"))
 def user_msgs():
     out = []
@@ -88,7 +90,7 @@ check(m.startswith("[마리나 · proj/feat/a 방에서] 계약을 정했어. do
 check(m.rstrip().endswith('(답은: marina session room-send proj/feat/a "…")'), f"답하는 법 꼬리: {m!r}")
 check("\n" not in m.strip(), f"한 줄: {m!r}")
 ch = rec("proj/feat/cx")["channelId"]
-check("📨 proj/feat/a 방에서: 계약을 정했어. docs/handoff/x.md 를 읽어 줘" in posts(ch), f"대상 채널 한 줄: {posts(ch)}")
+check(has_line(ch, "📨 proj/feat/a 방에서: 계약을 정했어. docs/handoff/x.md 를 읽어 줘", "✓ 전달"), f"대상 채널 한 줄(결과 ✓ 전달): {posts(ch)}")
 finish()
 PY
 
@@ -156,7 +158,7 @@ for _ in $(seq 100); do has_first "$FAKE_OUT" "코덱스가 보내는 글" && br
 has_first "$FAKE_OUT" "[마리나 · proj/feat/cx 방에서] 코덱스가 보내는 글" "marina session room-send proj/feat/cx" || fail "클로드 첫 지시에 글·답하는 법이 안 들어감"
 run <<'PY'
 import os; exec(open(os.environ["TMPROOT"] + "/prelude.py").read())
-check("📨 proj/feat/cx 방에서: 코덱스가 보내는 글" in posts(rec("proj/feat/b")["channelId"]), "클로드 방 채널 한 줄")
+check(has_line(rec("proj/feat/b")["channelId"], "📨 proj/feat/cx 방에서: 코덱스가 보내는 글", "✓ 전달"), "클로드 방 채널 한 줄")
 finish()
 PY
 
@@ -175,7 +177,7 @@ t, cmd, ch, mid, kw = calls[0]
 check(t == rec("proj/feat/a")["tmux"] and ch == rec("proj/feat/a")["channelId"] and "\n" not in cmd, f"한 줄로 친다: {calls}")
 check(cmd.startswith("[마리나 · proj/feat/cx 방에서] 아래 줄 바꿈 있는 글") and 'marina session room-send proj/feat/cx "…"' in cmd, f"입력 글: {cmd!r}")
 check(kw.get("return_after_type") is True, f"치고 바로 돌아오지 않으면 보낸 쪽이 상대 턴이 끝날 때까지 묶인다: {kw}")
-check("📨 proj/feat/cx 방에서: 아래 줄 바꿈 있는 글" in posts(rec("proj/feat/a")["channelId"]), "채널 한 줄")
+check(has_line(rec("proj/feat/a")["channelId"], "📨 proj/feat/cx 방에서: 아래 줄 바꿈 있는 글", "✓ 전달"), "채널 한 줄")
 check(not spawned, "바로 쳤으면 대기열 없음")
 # 바쁨 — 제한 시간 안에 못 치면 쉬는 순간에 넣는 대기열(뒤에서 따로 친다)로 넘긴다
 calls.clear()
@@ -188,6 +190,100 @@ check(not mb.typeable("[마리나] 아무 글", spawned[0][2]), "허용 머리�
 mb.run_slash = lambda *a, **k: True
 mw._left_in_input = lambda tmux, text: True
 check(mw.room_send("proj/feat/a", "남는 글", sender_ref="proj/feat/cx") == "typed", "입력창에 남았는데 delivered")
+chA = rec("proj/feat/a")["channelId"]
+check(has_line(chA, "📨 proj/feat/cx 방에서: 바쁜 방에 보낸 글", "⏳ 대기열"), f"M6 대기열 표시: {posts(chA)}")
+check(has_line(chA, "📨 proj/feat/cx 방에서: 남는 글", "❔ 확인 못 함"), f"M6 확인 못 함 표시: {posts(chA)}")
+finish()
+PY
+
+# ── 리뷰 반영 회귀 ──
+run <<'PY'
+import os; exec(open(os.environ["TMPROOT"] + "/prelude.py").read())
+mw.SAY_CHECK_GAP = 0
+mw._left_in_input = lambda tmux, text: False
+recA = rec("proj/feat/a"); chA = recA["channelId"]; tmA = recA["tmux"]
+
+# I1: 기다리는 동안 방이 꺼졌으면 떼어 낸 프로세스를 띄우지 않고 실패로 보고
+spawned = []
+mb._spawn_type = lambda *a, **k: spawned.append(a)
+real_alive = ms.tmux_alive
+def run_slash_dies(*a, **k):
+    ms.tmux_alive = lambda t: False
+    return False
+mb.run_slash = run_slash_dies
+try:
+    mw.room_send("proj/feat/a", "꺼질 방", sender_ref="proj/feat/b")
+    check(False, "I1 방이 꺼졌는데 성공함")
+except ms.SessionError as exc:
+    check("꺼" in str(exc), f"I1 안내: {exc}")
+ms.tmux_alive = real_alive
+check(not spawned, f"I1 꺼진 방에 type 을 띄움: {spawned}")
+check(not any("꺼질 방" in p for p in posts(chA)), "I1 실패했는데 📨 가 남음")
+
+# I1: 떼어 낸 type 이 끝내 못 치면 대상 채널에 ⚠️
+mb.run_slash = lambda *a, **k: False
+n0 = len(posts(chA))
+text = mw.ROOM_SEND_PREFIX + "proj/feat/b 방에서] 못 친 글"
+mb.main(["type", tmA, text, chA, ""])
+new = posts(chA)[n0:]
+check(any("⚠️" in p and "못 친 글" in p for p in new), f"I1 type 실패 알림: {new}")
+# 성공하면 알림 없음
+mb.run_slash = lambda *a, **k: True
+n0 = len(posts(chA)); mb.main(["type", tmA, text, chA, ""])
+check(not any("⚠️" in p for p in posts(chA)[n0:]), "I1 성공했는데 ⚠️")
+
+# I2: 잠든 방을 깨우면 기동 중 온 글을 놓치지 않게 settle
+settles = []
+mw._spawn_settle = lambda ch, t: settles.append((ch, t))
+mw._start_with_launch_env = lambda name, sd, text: (["x"], [])
+ms.tmux_alive = lambda t: False
+how = mw.room_send("proj/feat/a", "깨우는 글", sender_ref="proj/feat/b")
+ms.tmux_alive = real_alive
+check(how == "started" and len(settles) == 1 and settles[0][0] == chA, f"I2 settle: {how} {settles}")
+
+# M5: 기동 중 예외도 SessionError 로
+def boom(*a): raise RuntimeError("터짐")
+mw._start_with_launch_env = boom
+ms.tmux_alive = lambda t: False
+try:
+    mw.room_send("proj/feat/a", "터지는 글", sender_ref="proj/feat/b")
+    check(False, "M5 예외가 안 감싸짐")
+except ms.SessionError as exc:
+    check("터짐" in str(exc), f"M5 안내: {exc}")
+except Exception as exc:
+    check(False, f"M5 SessionError 가 아님: {type(exc)}")
+ms.tmux_alive = real_alive
+
+# M1: 허용 목록 — kind 없음(클로드 개발) 또는 codex 만
+orig = ms.find_session
+for kind in ("dev-lobby", "mystery"):
+    ms.find_session = lambda ref, k=kind: dict(orig(ref), kind=k)
+    try:
+        mw.room_send("proj/feat/a", "안녕", sender_ref="proj/feat/b")
+        check(False, f"M1 {kind} 가 받음")
+    except ms.SessionError as exc:
+        check("개발 방이 아니야" in str(exc), f"M1 {kind}: {exc}")
+ms.find_session = orig
+
+# M2: 봇 type 이 채팅방·로비에는 room-send 머리말도 못 친다
+chat = rec("chat/shopping")
+check(not mb.typeable(mw.ROOM_SEND_PREFIX + "x 방에서] 글", chat["channelId"]), "M2 채팅방에 type 허용")
+check(not mb.typeable(mw.ROOM_SEND_PREFIX + "x 방에서] 글", "0000"), "M2 모르는 채널에 type 허용")
+check(mb.typeable(mw.ROOM_SEND_PREFIX + "x 방에서] 글", chA), "M2 개발 방은 허용")
+
+# I3: 규칙 문구 + 같은 (보낸→받는) 쌍 상한
+check("답하지 않는다" in ms.ROOM_SEND_RULE and "알림" in ms.ROOM_SEND_RULE, "I3 규칙에 알림·확인엔 답하지 않는다")
+mb.run_slash = lambda *a, **k: True
+for i in range(mw.ROOM_SEND_LIMIT):
+    mw.room_send("proj/feat/b", f"핑 {i}", sender_ref="proj/feat/a")
+try:
+    mw.room_send("proj/feat/b", "핑 넘침", sender_ref="proj/feat/a")
+    check(False, "I3 상한 넘었는데 성공")
+except ms.SessionError as exc:
+    check("핑퐁" in str(exc) and str(mw.ROOM_SEND_LIMIT) in str(exc), f"I3 안내: {exc}")
+check(not any("핑 넘침" in p for p in posts(rec("proj/feat/b")["channelId"])), "I3 거부됐는데 📨 가 남음")
+mw.room_send("proj/feat/a", "반대 방향은 별개", sender_ref="proj/feat/b")      # 쌍은 방향별
+mw.room_send("proj/feat/b", "터미널은 제한 없음", sender_ref="터미널")
 finish()
 PY
 

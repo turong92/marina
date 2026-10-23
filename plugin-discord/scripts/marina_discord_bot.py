@@ -2242,6 +2242,14 @@ TERM_DONE_LINE = "🖥️ 터미널 명령이 끝났어"
 TERM_WATCH_EVERY = 5.0
 
 
+def _room_send_lost(channel: str, text: str) -> None:
+    shown = text[:120] + ("…" if len(text) > 120 else "")
+    try:
+        _dc(ms.load_config()).send_message(channel, f"⚠️ 다른 방이 보낸 글을 끝내 입력창에 못 넣었어(방이 꺼졌거나 오래 바빴어): {shown}")
+    except ms.SessionError as exc:
+        _log(f"room-send 유실 알림 실패 {channel}: {exc}")
+
+
 def typeable(text: str, channel: str = "") -> bool:
     """`type` 하위명령이 입력창에 칠 수 있는 글 — 추천 버튼·슬래시 표시가 붙은 글, 이어받기·다시 깨우기 안내, 터미널 끝 안내(고정 문구 정확 일치),
     화면 넘김 안내(고정 앞뒤 + 그 채널 상태 폴더 아래 term-last-<id>.txt 정확 경로 — channel 을 모르면 거절), 허용 명령만."""
@@ -2252,7 +2260,10 @@ def typeable(text: str, channel: str = "") -> bool:
     if m:
         rec = next((x for x in ms.load_sessions() if channel and str(x.get("channelId")) == str(channel)), None)
         return bool(rec and rec.get("stateDir")) and os.path.dirname(m.group(1)) == str(rec["stateDir"])
-    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK, mw.ROOM_SEND_PREFIX))   # room-send 가 바빠서 넘긴 글
+    if text.startswith(mw.ROOM_SEND_PREFIX):       # room-send 가 바빠서 넘긴 글 — 개발 방(채팅방·로비 아님)에만
+        rec = next((x for x in ms.load_sessions() if channel and str(x.get("channelId")) == str(channel)), None)
+        return bool(rec) and rec.get("kind") not in ms.CHAT_KINDS
+    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK))
 
 
 RESTART_AGENT_FRESH = 1800.0     # 재시작 판정: 안 끝난 에이전트는 30분 조용해야 죽은 것으로 본다(긴 빌드·녹화로 5분 넘게 조용한 에이전트가 있었다, 2026-10-07 사고)
@@ -3371,6 +3382,9 @@ def main(argv: list[str]) -> int:
         if typeable(a.text, a.channel):
             typed = run_slash(a.tmux, a.text, a.channel, a.mid,
                               timeout=float(os.environ.get("MARINA_TYPE_TIMEOUT") or type_timeout(a.text)))
+            import marina_discord_wake as mw
+            if not typed and a.text.startswith(mw.ROOM_SEND_PREFIX):        # room-send 글이 끝내 안 들어갔다 — 조용히 사라지지 않게 대상 채널에 알린다
+                _room_send_lost(a.channel, a.text)
             if not typed and a.button:
                 _restore_suggest(a.channel, a.button, a.text[len(SUGGEST_MARK):] if a.text.startswith(SUGGEST_MARK) else a.text)
         return 0

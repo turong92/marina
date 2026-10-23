@@ -348,6 +348,9 @@ ROOM_SEND_MAX = 1200                  # 길고 오래 남을 내용은 레포 �
 ROOM_SEND_WAIT_S = 20.0               # 클로드 방이 쉬길 기다리는 최대 — 보낸 방의 도구 호출을 오래 잡지 않는다. 넘으면 대기열
 ROOM_SEND_MARK = "marina session room-send"      # 답하는 법 꼬리에 들어가는 명령 이름
 ROOM_SEND_PREVIEW = 300
+ROOM_SEND_LIMIT = 6                   # 같은 (보낸 방→받는 방) 쌍이 이 시간 안에 보낼 수 있는 횟수 — 핑퐁(서로 답하고 또 답하는 루프) 차단
+ROOM_SEND_WINDOW_S = 600.0
+ROOM_SEND_STATUS = {"started": "✓ 전달", "delivered": "✓ 전달", "queued": "⏳ 대기열", "typed": "❔ 확인 못 함"}
 
 
 def room_sender() -> str:
@@ -357,13 +360,35 @@ def room_sender() -> str:
     return f"{rec.get('project')}/{rec.get('task')}" if rec else "터미널"
 
 
-def _announce(rec: dict[str, Any], sender: str, body: str) -> None:
+def _rate_check(sd: Path, sender: str, record: bool) -> None:
+    """같은 보낸 방→받는 방 쌍의 최근 전송 횟수(받는 방 상태 폴더의 room-send.json). 터미널(사람)은 세지 않는다. record 면 한 번 더한다."""
+    if sender == "터미널":
+        return
+    path, now = sd / "room-send.json", time.time()
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        times = [float(t) for t in data.get(sender, [])]
+    except (OSError, ValueError, TypeError, AttributeError):
+        data, times = {}, []
+    times = [t for t in times if now - t < ROOM_SEND_WINDOW_S]
+    if not record:
+        if len(times) >= ROOM_SEND_LIMIT:
+            raise ms.SessionError(f"{sender} → 이 방으로 {int(ROOM_SEND_WINDOW_S // 60)}분 안에 {ROOM_SEND_LIMIT}번 보냈어 — 핑퐁이면 멈추고 "
+                                  "사람(형)에게 물어. 계속 필요하면 잠시 뒤에")
+        return
+    data = {k: v for k, v in data.items() if isinstance(v, list)}
+    data[sender] = times + [now]
+    ms._write_json(path, data)
+
+
+def _announce(rec: dict[str, Any], sender: str, body: str, how: str = "") -> None:
     """대상 방 채널에 한 줄 — 형이 방끼리 오가는 말을 본다. 이미 전달한 뒤라 실패해도 전달은 취소하지 않고 stderr 로 알린다."""
     shown = body[:ROOM_SEND_PREVIEW] + ("…" if len(body) > ROOM_SEND_PREVIEW else "")
+    status = ROOM_SEND_STATUS.get(how)
     try:
         cfg = ms.load_config()
         ms.Discord(ms.read_token_file(ms.token_file(cfg, str(rec.get("project") or "")))).send_message(
-            str(rec["channelId"]), f"📨 {sender} 방에서: {shown}")
+            str(rec["channelId"]), f"📨 {sender} 방에서: {shown}" + (f"  {status}" if status else ""))
     except ms.SessionError as exc:
         print(f"marina session: 전달은 했지만 채널에 한 줄을 못 남겼어 — {exc}", file=sys.stderr)
 
@@ -374,7 +399,7 @@ def room_send(ref: str, message: str, sender_ref: "str | None" = None) -> str:
     typed(쳤지만 입력창에 남아 있음), 못 하면 SessionError. 채팅방·비서·로비는 제한 세션이라 받지 않는다."""
     rec = ms.find_session(ref)
     name = f"{rec.get('project')}/{rec.get('task')}"
-    if rec.get("kind") in ms.CHAT_KINDS:
+    if rec.get("kind") and not ms.is_codex(rec):          # 허용 목록: kind 없음(클로드 개발 방) 또는 codex 만
         raise ms.SessionError(f"{name} 은 개발 방이 아니야 — room-send 는 개발 방(클로드·코덱스)끼리만 써")
     sender = room_sender() if sender_ref is None else sender_ref
     if sender == name:
@@ -394,10 +419,16 @@ def room_send(ref: str, message: str, sender_ref: "str | None" = None) -> str:
     with ms.room_lock(sd) as got:
         if not got:
             raise ms.SessionError(f"{name}: 다른 쪽이 이 방을 켜거나 내리는 중이야 — 잠시 뒤에 다시")
+        _rate_check(sd, sender, record=False)
         if not ms.tmux_alive(tmux):
-            started, failed = _start_with_launch_env(name, sd, text)
+            woke_at = time.time()
+            try:
+                started, failed = _start_with_launch_env(name, sd, text)
+            except Exception as exc:
+                started, failed = [], [f"{name}: {exc}"]
             if started:
-                _save_woke(sd, at=time.time(), ok=True, delivered=[])
+                _save_woke(sd, at=woke_at, ok=True, delivered=[])
+                _spawn_settle(str(rec["channelId"]), woke_at)        # 기동 중 Discord 로 온 글은 아무도 못 받는다 — _wake_locked 와 같이 한 번 더 본다
                 how = "started"
             elif not ms.tmux_alive(tmux):
                 raise ms.SessionError(f"{name}: 방을 못 띄웠어 — {(failed[0] if failed else '알 수 없는 이유')[:200]}")
@@ -422,9 +453,12 @@ def room_send(ref: str, message: str, sender_ref: "str | None" = None) -> str:
                     time.sleep(SAY_CHECK_GAP)
             how = how or "typed"
         else:
-            mb._spawn_type(tmux, text, str(rec["channelId"]), "")      # 계속 바쁘다 — 떼어 둔 프로세스가 쉬는 순간에 친다
+            if not ms.tmux_alive(tmux):          # 기다리는 사이 방이 꺼졌다 — 떼어 낼 곳이 없다
+                raise ms.SessionError(f"{name}: 기다리는 동안 방이 꺼졌어 — 글을 못 넣었어")
+            mb._spawn_type(tmux, text, str(rec["channelId"]), "")      # 계속 바쁘다 — 떼어 둔 프로세스가 쉬는 순간에 친다(끝내 못 치면 거기서 채널에 ⚠️)
             how = "queued"
-    _announce(rec, sender, body)
+    _rate_check(sd, sender, record=True)
+    _announce(rec, sender, body, how)
     return how
 
 
