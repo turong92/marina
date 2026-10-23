@@ -3275,6 +3275,10 @@ class Loop:
         return True
 
     def view(self, now: float) -> None:
+        with ms.tmux_tick_cache():        # 이 판에서 같은 tmux 조회는 한 번만(데몬 CPU 상시 20~40%, 2026-10-23)
+            self._view(now)
+
+    def _view(self, now: float) -> None:
         # 사라진 워크트리 정리·세션 잠금은 그리기보다 먼저 — #상태가 계속 실패해도 돌아야 한다(리뷰 M6)
         if now - self.last_reconcile >= RECONCILE_EVERY:
             self.last_reconcile = now

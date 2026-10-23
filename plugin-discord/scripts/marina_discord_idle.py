@@ -245,6 +245,7 @@ class Idler:
         with ms.room_lock(sd) as got:
             if not got:
                 return None                  # 깨우기·재시작이 이 방을 만지는 중
+            ms.tmux_tick_fresh()             # 판 캐시가 아닌 지금 화면으로(리뷰 I1)
             why = verdict(rec, after, now)   # 죽이기 직전 한 번 더 — 마지막 활동 시각도 여기서 다시 읽는다
             if why:
                 self.clear_since.pop(ref, None)

@@ -585,8 +585,42 @@ def _tmux_base() -> list[str]:
     return [exe, "-L", sock] if sock else [exe]
 
 
+_TICK = threading.local()
+_TICK_READS = ("has-session", "capture-pane", "display-message", "list-sessions")
+TICK_TTL = 1.5          # 한 판 안에서도 화면 변화를 기다리는 반복이 있다 — 오래 묵히지 않는다
+
+
+@contextlib.contextmanager
+def tmux_tick_cache() -> Any:
+    """데몬 한 판(4초) 동안 같은 tmux 조회는 한 번만. 판마다 tmux 가 100번 넘게 떠(실측 109 → 캐시 후 19)
+    데몬이 CPU 를 상시 20~40% 썼다(2026-10-23 loadlog). 스레드별이라 버튼 처리 등 다른 스레드엔 안 묻는다.
+    주의: 이 안에서 '바뀔 때까지 화면 다시 읽기' 폴링을 하지 말 것 — TTL 동안 같은 화면만 받는다(필요하면 tmux_tick_fresh)."""
+    prev = getattr(_TICK, "cache", None)
+    _TICK.cache = {}
+    try:
+        yield
+    finally:
+        _TICK.cache = prev
+
+
+def tmux_tick_fresh() -> None:
+    """되돌릴 수 없는 일(세션 죽이기 등) 직전 재확인은 새로 읽게 — 판 캐시를 비운다."""
+    cache = getattr(_TICK, "cache", None)
+    if cache is not None:
+        cache.clear()
+
+
 def _tmux(*args: str) -> subprocess.CompletedProcess:
-    return subprocess.run(_tmux_base() + list(args), capture_output=True, text=True)
+    cache = getattr(_TICK, "cache", None)
+    if cache is None:
+        return subprocess.run(_tmux_base() + list(args), capture_output=True, text=True)
+    if not args or args[0] not in _TICK_READS:
+        cache.clear()                    # 키 입력·종료가 끼면 이 판에 읽은 것은 버린다
+        return subprocess.run(_tmux_base() + list(args), capture_output=True, text=True)
+    hit = cache.get(args)
+    if hit is None or time.monotonic() - hit[0] > TICK_TTL:
+        hit = cache[args] = (time.monotonic(), subprocess.run(_tmux_base() + list(args), capture_output=True, text=True))
+    return hit[1]
 
 
 def tmux_leave_mode(name: str) -> None:
@@ -599,6 +633,9 @@ def tmux_leave_mode(name: str) -> None:
 def tmux_alive(name: str) -> bool:
     if not name or not _tmux_exe():
         return False
+    if getattr(_TICK, "cache", None) is not None:         # 판 안에선 세션 목록 한 번으로 전부 답한다
+        r = _tmux("list-sessions", "-F", "#{session_name}")
+        return r.returncode == 0 and name in r.stdout.splitlines()
     return _tmux("has-session", "-t", f"={name}").returncode == 0
 
 
