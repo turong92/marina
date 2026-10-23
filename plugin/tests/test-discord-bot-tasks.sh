@@ -123,6 +123,32 @@ lt = mb.live_tasks(rec)
 check(any(t["kind"] == "agent" and t["id"] == "wall-mockups-2" and "brief" in t["desc"] for t in lt), f"팀 에이전트도 🤖: {lt}")
 light = next(s for s in mb.snapshot(full=False)["sessions"] if s["ref"] == "proj/feat/a")
 check(light.get("bg") is True and mb.snapshot(full=False)["anyBusy"] is True, f"뒤에서 도는 일이 있으면 #상태 30초 갱신: {light}")
+# (실사용 2026-10-23) 🤖 숫자는 '지금 일하는' 에이전트만 — 멈춘 것(기록이 오래 안 움직임)·쉬는 것(idle)은 따로 보인다
+def team(*rows):
+    subprocess.run(base + ["kill-session", "-t", rec["tmux"]], capture_output=True)
+    body = "".join(f"  {r}\\n" for r in rows)
+    subprocess.run(base + ["new-session", "-d", "-s", rec["tmux"], "sh", "-c",
+                           f"printf '✻ Worked\\n────\\n❯ \\n────\\n  ⏵⏵ bypass · ← for agents\\n  ⏺ main\\n{body}'; exec cat"], check=True)
+    time.sleep(0.5)
+def sub_agent(aid, name, age):
+    (sub / f"agent-{aid}.jsonl").write_text("{}\n")
+    (sub / f"agent-{aid}.meta.json").write_text(json.dumps({"name": name}))
+    t0 = time.time() - age; os.utime(sub / f"agent-{aid}.jsonl", (t0, t0))
+sub_agent("zdev", "developer", 16 * 3600)
+sub_agent("zlive", "live-one", 5)
+team("◯ developer  Appending notes to r119-notes.md 1h 19m 11s · ↓ 14",
+     "◯ dev-chunk2  청킹 상한을 벤더별로 올린다 idle",
+     "◯ live-one  Reading files 5s")
+t = txt(mb.render(mb.snapshot()))
+check("🤖1" in t and "🤖3" not in t, f"🤖 숫자는 일하는 것만: {t}")
+check("💤 dev-chunk2 쉼" in t, f"쉬는 팀 에이전트는 흐리게 한 줄: {t}")
+check("⏸ developer · 멈춤 16h" in t, f"멈춘 에이전트는 '멈춘 지'로: {t}")
+check("1h 19m" not in t and "청킹 상한" not in t, f"일한 시간·옛 진행 문구는 안 보인다: {t}")
+team("◯ developer  Appending notes to r119-notes.md 1h 19m 11s · ↓ 14",
+     "◯ dev-chunk2  청킹 상한을 벤더별로 올린다 idle")
+t = txt(mb.render(mb.snapshot()))
+check("🤖" not in t.split("-#")[0] and f"<#{ch}>  ⏸" in t, f"본체도 쉬고 에이전트도 멈췄으면 줄 끝 ⏸: {t}")
+check("### ⏳ 백그라운드 0" not in t and "### ⏳ 백그라운드 1" not in t, f"일하는 게 없으면 백그라운드가 아니다: {t}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

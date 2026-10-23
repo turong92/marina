@@ -373,12 +373,54 @@ def _pane_team(name: str) -> list[dict[str, Any]]:
     return out
 
 
+AGENT_STALL = 600.0      # 에이전트 기록이 이만큼 안 움직이면 '일하는 중'이 아니라 '멈춤'(화면의 마지막 진행 문구는 그대로 남는다)
+_IDLE_WORD = re.compile(r"\bidle\s*$")
+
+
+def _mark_agents(tr: Path | None, tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """에이전트마다 state — work(일함) · rest(화면에 idle, 끝났거나 쉼) · stall(기록이 AGENT_STALL 넘게 안 움직임, age 초).
+    판정할 신호가 없으면(기록 파일을 못 찾음) 일하는 것으로 둔다 — 없는 걸 있다고 숨기지 않게."""
+    d = tr.parent / tr.stem / "subagents" if tr else None
+    names: dict[str, float] = {}
+    if d:
+        try:
+            for m in d.glob("agent-*.meta.json"):
+                try:
+                    nm = str((json.loads(m.read_text()) or {}).get("name") or "")
+                    names[nm] = max(names.get(nm, 0.0), m.with_name(m.name[:-len(".meta.json")] + ".jsonl").stat().st_mtime)
+                except (OSError, ValueError, AttributeError):
+                    pass
+        except OSError:
+            pass
+    now = time.time()
+    for t in tasks:
+        if t["kind"] != "agent":
+            continue
+        t["state"] = "work"
+        if t.get("pane") and _IDLE_WORD.search(t["desc"]):
+            t["state"] = "rest"
+            continue
+        mt = names.get(str(t.get("name") or t["id"]))
+        if mt is None and d and not t.get("pane"):
+            try:
+                mt = (d / f"agent-{t['id']}.jsonl").stat().st_mtime
+            except OSError:
+                pass
+        if mt is not None and now - mt > AGENT_STALL:
+            t["state"], t["age"] = "stall", now - mt
+    return tasks
+
+
+def _working(tasks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [t for t in tasks if t.get("state", "work") == "work"]
+
+
 def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
     """기록만 믿으면 틀린다 — 재시작으로 죽은 셸은 끝남 알림이 없다(실측). 셸은 화면의 'N shell' 수만큼(최근 것),
     에이전트는 지금 세션이 뜬 뒤 기록이 움직인 것만."""
     tr = _session_transcript(rec)
     if not tr:
-        return _pane_team(str(rec.get("tmux") or ""))
+        return _mark_agents(None, _pane_team(str(rec.get("tmux") or "")))
     started, done = _scan_tasks(tr)
     tasks = [t for i, t in started.items() if i not in done]
     n = _pane_shells(str(rec.get("tmux") or ""))
@@ -397,7 +439,7 @@ def live_tasks(rec: dict[str, Any]) -> list[dict[str, Any]]:
     out = [t for t in tasks if t["id"] in keep]
     seen = {t["id"] for t in out}
     out += [t for t in _recent_agents(tr, born) if t["id"] not in seen and t["id"] not in done]
-    return out + _pane_team(str(rec.get("tmux") or ""))
+    return _mark_agents(tr, out + _pane_team(str(rec.get("tmux") or "")))
 
 
 AGENT_FRESH = 300.0      # 빌드·긴 도구 호출로 몇 분 조용한 에이전트도 — 끝난 것은 끝남 알림으로 뺀다(리뷰 I2)
@@ -465,7 +507,7 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         if str(rec.get("kind") or "").endswith("lobby") or not rec.get("channelId"):
             continue
         alive, busy = _room_busy(rec)
-        bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_pane_team(str(rec.get("tmux") or "")))
+        bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_working(live_tasks(rec)))
                         or (not busy and _has_recent_agents(rec)))
         act = ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent")))
         rows.append({"ref": f"{rec.get('project')}/{rec.get('task')}", "channelId": str(rec["channelId"]),
@@ -532,9 +574,15 @@ def _count(cs: list[dict[str, Any]]) -> int:
 
 
 def _tasks_tag(r: dict[str, Any]) -> str:
-    t = r.get("tasks") or []
+    t = _working(r.get("tasks") or [])
     sh, ag = sum(x["kind"] == "shell" for x in t), sum(x["kind"] == "agent" for x in t)
-    return "  " + " ".join(([f"⏳{sh}"] if sh else []) + ([f"🤖{ag}"] if ag else [])) if t else ""
+    tag = "  " + " ".join(([f"⏳{sh}"] if sh else []) + ([f"🤖{ag}"] if ag else [])) if t else ""
+    # 본체는 쉬는데 에이전트가 멈춰 있으면 줄 끝에 ⏸ — 일하는 중으로 오해하지 않게
+    return tag + ("  ⏸" if not r.get("busy") and not t and any(x.get("state") == "stall" for x in r.get("tasks") or []) else "")
+
+
+def _ago(sec: float) -> str:
+    return f"{int(sec // 86400)}d" if sec >= 86400 else f"{int(sec // 3600)}h" if sec >= 3600 else f"{int(sec // 60)}m"
 
 
 def _agent_roles() -> dict[str, str]:
@@ -583,6 +631,11 @@ def _tasks_desc(r: dict[str, Any]) -> str:
     roles = _agent_roles() if any(x["kind"] == "agent" for x in t) else {}
     def one(x: dict[str, Any]) -> str:
         who = roles.get(x["id"], "") if x["kind"] == "agent" else ""
+        nm = _clean(str(x.get("name") or x["id"]))[:30]
+        if x.get("state") == "rest":
+            return f"💤 {nm} 쉼"
+        if x.get("state") == "stall":
+            return f"⏸ {nm} · 멈춤 {_ago(x['age'])}"
         return f"{'⏳' if x['kind'] == 'shell' else '🤖'} " + (who + " " if who else "") + _clean(x["desc"] or x["id"])[:50]
     d = " · ".join(one(x) for x in t[:4])
     return f"\n-# {d}" if d else ""
@@ -612,8 +665,8 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     rows = [dict(r, busy=True, emoji="❓") if r.get("asking") and not r["busy"] else r for r in rows]   # 답 기다리는 질문
     rows = [dict(r, busy=True, emoji="🔐") if r.get("permission") and not r["busy"] else r for r in rows]   # 터미널 권한 창
     busy = [r for r in rows if r["busy"]]
-    bg = [r for r in rows if r["alive"] and not r["busy"] and r.get("tasks")]
-    idle = [r for r in rows if r["alive"] and not r["busy"] and not r.get("tasks")]
+    bg = [r for r in rows if r["alive"] and not r["busy"] and _working(r.get("tasks") or [])]
+    idle = [r for r in rows if r["alive"] and not r["busy"] and not _working(r.get("tasks") or [])]
     asleep = [r for r in rows if not r["alive"] and r.get("wakeable")]
     off = [r for r in rows if not r["alive"] and not r.get("wakeable")]
     # 메시지당 구성요소 40개(중첩 포함) — 아래 백그라운드 머리·'외 N개'·대기·잠듦·꺼짐·꼬리말 몫(9)을 남기고 넘치면 '외 N개'(리뷰 I2)
@@ -642,7 +695,7 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
         out.append({"type": 14})
         out.append(_text(_role_block(snap["roleUsage"])))
     out.append({"type": 14})
-    out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) for r in idle)))
+    out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) + _tasks_tag(r) + _tasks_desc(r) for r in idle)))
     if asleep:
         out.append({"type": 14})
         out.append(_text(f"### 🌙 잠듦 {len(asleep)}\n-# 글을 쓰면 깨어나" + "".join("\n" + _row(r, proj_w) for r in asleep)))
