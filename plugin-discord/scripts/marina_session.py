@@ -1857,7 +1857,7 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
         q_hook = shlex.join(_hook_entry() + ["hook-question"]) + " || true"
         qd_hook = shlex.join(_hook_entry() + ["hook-question-done"]) + " || true"
         settings["hooks"]["PreToolUse"].append({"matcher": "AskUserQuestion",
-                                                "hooks": [{"type": "command", "command": q_hook, "timeout": 10}]})
+                                                "hooks": [{"type": "command", "command": q_hook, "timeout": 60}]})   # 과부하 땐 파이썬 기동만 10초를 넘겨 카드가 죽었다(2026-10-23) — 늦어도 질문 창이 조금 늦게 뜰 뿐
         settings["hooks"]["PostToolUse"] = [{"matcher": "AskUserQuestion",
                                              "hooks": [{"type": "command", "command": qd_hook, "timeout": 15}]}]
         # 권한 승인 버튼(봇 4): 채널에서 누를 때까지 기다린다 — 훅 제한은 기다림보다 넉넉히

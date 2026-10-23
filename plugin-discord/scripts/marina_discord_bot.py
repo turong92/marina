@@ -1550,6 +1550,73 @@ def _pane_perm_one(rec: dict[str, Any], names: "set[str] | None") -> None:
                                                     "title": title, "at": time.time()})
 
 
+PANE_ASK_GRACE = 45.0       # 질문 훅이 카드를 올릴 틈 — 그 뒤에도 없으면 봇이 대신 올린다
+PANE_MENU_ALERT = 180.0     # 모르는 선택창은 사람이 터미널을 보고 있을 수 있어 좀 더 기다린 뒤 알린다
+_MENU_MARK = re.compile(r"Enter to (select|confirm)|Esc to cancel")
+_MENU_SEEN: dict[str, dict[str, Any]] = {}      # tmux 이름 → {"since": 처음 본 시각, "done": 이번 창은 처리함}
+
+
+def pane_ask_tick(names: "set[str] | None" = None, now: "float | None" = None) -> None:
+    """(실사용 2026-10-23) 질문 훅이 과부하로 시간초과에 죽어 버튼이 안 가고 ovation 이 3시간 선택창에서 멈췄다.
+    화면에 선택창이 떠 있는데 질문 카드가 없으면: 답 안 된 AskUserQuestion 이면 카드를 대신 올리고, 모르는 창이면 알린다."""
+    now = time.time() if now is None else now
+    for rec in ms.load_sessions():
+        try:
+            _pane_ask_one(rec, names, now)
+        except Exception as exc:                      # 한 세션 오류가 나머지를 막지 않게
+            _log(f"pane_ask {rec.get('tmux')}: {exc!r}")
+
+
+def _pane_ask_one(rec: dict[str, Any], names: "set[str] | None", now: float) -> None:
+    import marina_discord_ask as ask
+    name, ch = str(rec.get("tmux") or ""), str(rec.get("channelId") or "")
+    if not name or not ch or not rec.get("stateDir") or ms.is_codex(rec) or (names is not None and name not in names):
+        return
+    if not ms.tmux_alive(name):
+        _MENU_SEEN.pop(name, None)
+        return
+    r = ms._tmux("capture-pane", "-p", "-t", f"={name}:")
+    if r.returncode != 0:
+        return
+    lines = (r.stdout or "").rstrip().splitlines()[-30:]
+    sep = max((i for i, l in enumerate(lines) if (t := l.strip()) and set(t) <= set("─━")), default=-1)
+    box = lines[sep + 1:]                             # 마지막 구분선 아래 = 지금 떠 있는 창(위의 지난 출력은 안 본다, 리뷰 I4)
+    if not _MENU_MARK.search("\n".join(lines[-4:])) or "Do you want to " in "\n".join(box[-12:]):   # 권한 창은 pane_perm 몫
+        _MENU_SEEN.pop(name, None)
+        return
+    screen = "\n".join(lines)
+    sig = hashlib.sha1("\n".join(l for l in box if not l.lstrip().startswith(("❯", "›"))).encode("utf-8", "replace")).hexdigest()[:16]
+    seen = _MENU_SEEN.get(name)
+    if not seen or seen["sig"] != sig:                # 다른 창이 이어서 떴으면 처음부터 다시 센다(리뷰 I3)
+        seen = _MENU_SEEN[name] = {"since": now, "done": False, "sig": sig}
+    if seen["done"] or now - seen["since"] < PANE_ASK_GRACE:
+        return
+    sd = Path(str(rec["stateDir"]))
+    st = ask._load(sd)
+    if st:
+        if st["questions"] and ask._question_visible(screen, st["questions"][0]):
+            return                                    # 훅 카드가 이 질문을 맡고 있다
+        ask.done(sd, ch, "지나간 질문")               # 끝 훅까지 죽어 남은 지난 카드 — 새 창을 막지 않게(리뷰 I2)
+    waited = now - seen["since"]
+    q = None if rec.get("kind") in ms.CHAT_KINDS else ask.pending_input(_session_transcript(rec))
+    if q and q.get("questions") and ask._question_visible(screen, q["questions"][0]):
+        ask.post_question(str(sd), ch, q, started=time.time())     # 방금 걷은 지난 카드의 done 시각보다 뒤
+        seen["done"] = True
+        _log(f"pane_ask {name}: 훅이 못 올린 질문 카드를 대신 올림")
+        return
+    if waited < PANE_MENU_ALERT:
+        return
+    head = f"⏸ **터미널 선택창에서 {int(waited // 60)}분째 멈춤** — 터미널에서 골라 줘"
+    if rec.get("kind") not in ms.CHAT_KINDS:          # 채팅방(다른 사람이 있는 방)엔 화면을 붙이지 않는다
+        tail = "\n".join(_clean(l)[:120] for l in lines[-12:] if l.strip()).replace("```", "\'\'\'")
+        head += f"\n```\n{tail[:1500]}\n```"
+    try:
+        _dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", {"content": head, "allowed_mentions": {"parse": []}})
+    except ms.SessionError:
+        return                                        # 다음 판에 다시
+    seen["done"] = True
+
+
 def _pane_answer(rec: dict[str, Any], sd: Path, token: str, d: dict[str, Any], allow: bool) -> str:
     f = sd / f"perm-{token}.json"
     ch, name = str(rec.get("channelId")), str(rec.get("tmux") or "")
@@ -3230,6 +3297,10 @@ class Loop:
             pane_perm_tick()
         except Exception as exc:
             _log(f"pane_perm failed: {exc!r}")
+        try:
+            pane_ask_tick(now=now)
+        except Exception as exc:
+            _log(f"pane_ask failed: {exc!r}")
         try:
             role_events_tick()
         except Exception as exc:

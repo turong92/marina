@@ -135,14 +135,48 @@ def post_question(sdir: str, ch: str, tool_input: dict[str, Any], started: float
     r = dc._req("POST", f"/channels/{ch}/messages", {"flags": 1 << 15, "components": render(ch, st),
                                                       "allowed_mentions": {"parse": []}})
     st["msg"] = str(r.get("id") or "")
-    if _done_after(sd, started):      # 올리는 사이 앱·터미널에서 이미 답했다 — 남기지 않는다(리뷰 I2)
+    lockf = ms._wait_lock(sd / "question.lock", timeout=5.0)
+    try:
+        cur = _load(sd)
+        # 올리는 사이 앱·터미널에서 이미 답했다(리뷰 I2) · 늦게 살아난 훅과 봇이 같은 질문을 둘 다 올렸다 — 늦은 쪽은 거둔다
+        dup = bool(cur and cur.get("msg") and cur["questions"][:1] == qs[:1])
+        if not (_done_after(sd, started) or dup):
+            ms._write_json(sd / STATE, st)
+    finally:
+        if lockf:
+            lockf.close()
+    if _done_after(sd, started) or dup:
         try:
-            dc._req("PATCH", f"/channels/{ch}/messages/{st['msg']}", {"components": render(ch, st, "답함")})
+            dc._req("PATCH", f"/channels/{ch}/messages/{st['msg']}", {"components": render(ch, st, "답함" if not dup else "중복 — 위 카드에서 골라 줘")})
         except ms.SessionError:
             pass
         return
-    ms._write_json(sd / STATE, st)
     ms.dashboard_signal()
+
+
+def pending_input(transcript: "Path | None") -> dict[str, Any] | None:
+    """기록에서 아직 답(tool_result)이 없는 마지막 AskUserQuestion 의 입력 — 훅이 못 올린 질문을 봇이 되살릴 때 쓴다."""
+    if not transcript:
+        return None
+    try:
+        lines = transcript.read_bytes()[-2_000_000:].decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    open_: dict[str, dict[str, Any]] = {}
+    for raw in lines:
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        c = (row.get("message") or {}).get("content") if isinstance(row, dict) else None
+        for b in c if isinstance(c, list) else []:
+            if not isinstance(b, dict):
+                continue
+            if b.get("type") == "tool_use" and b.get("name") == "AskUserQuestion" and isinstance(b.get("input"), dict):
+                open_[str(b.get("id"))] = b["input"]
+            elif b.get("type") == "tool_result":
+                open_.pop(str(b.get("tool_use_id")), None)
+    return list(open_.values())[-1] if open_ else None
 
 
 def _spawn_drive(tmux: str, channel: str) -> None:
