@@ -263,7 +263,9 @@ def _wake_locked(rec: dict[str, Any], cfg: dict[str, Any], sd: Path, message: st
         pass
     ref = f"{rec.get('project')}/{rec.get('task')}"
     try:
-        started, failed = _start_with_launch_env(ref, sd, wake_prompt(msgs, older, interrupted(rec, now)))
+        prompt = wake_prompt(msgs, older, interrupted(rec, now))
+        note = ms.idle_docker_note(sd) if rec.get("kind") not in ms.CHAT_KINDS else ""
+        started, failed = _start_with_launch_env(ref, sd, prompt + ("\n\n" + note if note else ""))
     except Exception as exc:
         started, failed = [], [f"{ref}: {exc}"]
     if started or ms.tmux_alive(name):        # 같은 순간 다른 쪽(restart 대기자·형)이 띄웠어도 실패가 아니다

@@ -4561,6 +4561,105 @@ def cmd_ls() -> list[dict[str, Any]]:
                  channel=None if ids is None else str(s.get("channelId")) in ids) for s in items]
 
 
+IDLE_DOCKER_FILE = "idle-docker.json"     # 쉰 방을 내리며 멈춘 이 방의 compose 프로젝트 — 방이 다시 뜰 때 켠다
+
+
+def _docker_exe() -> str:
+    """launchd 데몬은 PATH 가 짧다 — 흔한 자리도 본다."""
+    for p in (shutil.which("docker"), "/usr/local/bin/docker", "/opt/homebrew/bin/docker",
+              str(Path.home() / ".docker" / "bin" / "docker"), "/Applications/Docker.app/Contents/Resources/bin/docker",
+              str(Path.home() / ".orbstack" / "bin" / "docker")):
+        if p and Path(p).exists():
+            return p
+    return ""
+
+
+def _try_lock(path: Path, timeout: float) -> Any:
+    """잡으면 파일, 못 잡으면 None(_wait_lock 과 달리 못 잡고 진행하지 않는다)."""
+    import fcntl
+    try:
+        f = open(path, "w")
+    except OSError:
+        return None
+    end = time.time() + timeout
+    while True:
+        try:
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return f
+        except OSError:
+            if time.time() > end:
+                f.close()
+                return None
+            time.sleep(0.2)
+
+
+def _room_projects(exe: str, root: str) -> list[str]:
+    """이 워크트리(compose working_dir 라벨, realpath 비교)에서 떠 있는 compose 프로젝트들."""
+    r = subprocess.run([exe, "ps", "--format", '{{.Label "com.docker.compose.project"}}\t{{.Label "com.docker.compose.project.working_dir"}}'],
+                       capture_output=True, text=True, timeout=20)
+    if r.returncode != 0:
+        return []
+    want = os.path.realpath(root)
+    out: list[str] = []
+    for line in (r.stdout or "").splitlines():
+        proj, _, wd = line.partition("\t")
+        if proj and wd and os.path.realpath(wd) == want and proj not in out:
+            out.append(proj)
+    return out
+
+
+def _idle_projects(sd: Path) -> list[str]:
+    try:
+        return [str(p) for p in json.loads((sd / IDLE_DOCKER_FILE).read_text(encoding="utf-8")).get("projects") or []]
+    except (OSError, ValueError, AttributeError):
+        return []
+
+
+def stop_room_docker(rec: dict[str, Any], sd: Path) -> list[str]:
+    """(형 2026-10-23) 쉰 방을 내려도 그 방 도커는 떠 있었다(skeleton 10일). 그 워크트리의 compose 프로젝트를 멈추고 적어 둔다.
+    채팅방(공용 폴더)·같은 폴더를 쓰는 다른 방이 떠 있으면·그새 방이 다시 떴으면 건드리지 않는다.
+    한계: sessions.json 에 없는 claude(형이 터미널에서 직접 띄운 것)는 모른다. 원격 런타임 컨테이너는 이 맥 도커에 없어 빠진다."""
+    root, exe = str(rec.get("root") or ""), _docker_exe()
+    if not root or not exe or rec.get("kind") in CHAT_KINDS:
+        return []
+    lockf = _try_lock(sd / "docker.lock", 30.0)
+    if not lockf:
+        return []                            # 방이 뜨는 중 — 멈추지 않는다
+    try:
+        me = (rec.get("project"), rec.get("task"))
+        if any(tmux_alive(str(o.get("tmux") or "")) for o in load_sessions()
+               if os.path.realpath(str(o.get("root") or "")) == os.path.realpath(root)
+               and ((o.get("project"), o.get("task")) == me or o.get("kind") not in CHAT_KINDS)):
+            return []                        # 이 방이 그새 떴거나 같은 폴더 방이 떠 있다
+        projs = _room_projects(exe, root)
+        if not projs:
+            return []
+        keep = _idle_projects(sd)
+        _write_json(sd / IDLE_DOCKER_FILE, {"projects": keep + [p for p in projs if p not in keep], "at": time.time()})   # 먼저 적는다(합집합)
+        for p in projs:
+            subprocess.run([exe, "compose", "-p", p, "stop", "-t", "10"], capture_output=True, timeout=90)
+        return projs
+    except (OSError, subprocess.SubprocessError):
+        return []
+    finally:
+        lockf.close()
+
+
+def idle_docker_note(sd: Path) -> str:
+    """깨울 때 알려 줄 한 줄 — 도커는 자동으로 안 켠다(형 2026-10-23: 진짜 필요할 때만, 자원 아깝다). 한 번 알리면 기록을 지운다."""
+    projs = _idle_projects(sd)
+    if not projs:
+        return ""
+    try:
+        (sd / IDLE_DOCKER_FILE).unlink()
+    except OSError:
+        pass
+    names = ", ".join(projs)
+    return (f"[마리나] 쉬는 동안 이 방 도커(compose 프로젝트 {names})를 멈춰 뒀어. 자동으로 안 켠다 — "
+            f"DB·서버가 진짜 필요할 때만 켜(마리나가 관리하는 서비스는 `marina start <서비스>`, "
+            f"그 밖엔 `docker compose -p <프로젝트> start`). 필요 없으면 그대로 둬.")
+
+
 def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[str], list[str]]:
     targets = load_sessions() if all_ else [find_session(ref)]
     started: list[str] = []

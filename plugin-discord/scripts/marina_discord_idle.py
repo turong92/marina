@@ -7,6 +7,7 @@ import json
 import math
 import re
 import subprocess
+import threading
 import sys
 import time
 from pathlib import Path
@@ -262,8 +263,19 @@ class Idler:
             except Exception as exc:
                 mb._log(f"idle {ref}: 추천 버튼 지우기 실패 {exc!r}")
             mb._log("idle {}: {:.1f}시간 쉬어 내림(글이 오면 깨운다)".format(ref, idle_h))
+        threading.Thread(target=self._stop_docker, args=(rec, sd, ref), daemon=True).start()   # 컨테이너 멈춤은 수십 초 — 루프를 붙잡지 않게
         _spawn_wake(str(rec.get("channelId") or ""))      # 내리는 순간과 겹쳐 온 글이 있으면 바로 다시
         return ref
+
+
+    @staticmethod
+    def _stop_docker(rec: dict[str, Any], sd: Path, ref: str) -> None:
+        try:
+            names = ms.stop_room_docker(rec, sd)
+            if names:
+                mb._log(f"idle {ref}: 도커 {', '.join(names)} 멈춤(방이 다시 뜰 때 켠다)")
+        except Exception as exc:
+            mb._log(f"idle {ref}: 도커 멈추기 실패 {exc!r}")
 
 
 def daemon_started() -> "float | None":
