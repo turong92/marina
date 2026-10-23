@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
 import threading
@@ -140,7 +141,35 @@ def _verdict(rec: dict[str, Any], after: float, now: float, full: bool = True) -
         out.append("선택·계획 승인 창이 떠 있음")
     if out and not full:
         return out
-    return out + mb.restart_blockers(rec)
+    blockers = mb.restart_blockers(rec)
+    if blockers and _work_stale(rec, now, max(after, BACKGROUND_STALE)):
+        blockers = [b for b in blockers if not _BACKGROUND.match(b)]
+    return out + blockers
+
+
+BACKGROUND_STALE = 2 * 3600.0     # 백그라운드가 '일하는 중'이어도 대화·서브에이전트 기록이 이만큼 안 움직였으면 멈춘 것으로 본다
+_BACKGROUND = re.compile(r"^(백그라운드 \d+|백그라운드 셸 \d+|팀 에이전트 일하는 중|에이전트 \d+개 일하는 중)$")
+
+
+def _work_stale(rec: dict[str, Any], now: float, quiet: float = BACKGROUND_STALE) -> bool:
+    """(형 2026-10-23) 멈춘 서브에이전트(8시간 무기록)·남은 셸·쉬는 팀 에이전트가 '일하는 중'으로 잡혀 방이 며칠씩 안 잠들었다.
+    대화 기록·서브에이전트 기록·백그라운드 셸 출력(tasks/*.output)이 전부 quiet 넘게 안 움직였으면 쉬는 것으로 친다.
+    출력을 내는 빌드·요청 로그를 찍는 서버는 살아 있는 것으로 본다(리뷰 I2). 한계: 출력 없이 오래 도는 일은 멈춘 것으로 보인다.
+    코덱스 방은 기록 구조가 달라 건드리지 않는다(늘 막는 쪽)."""
+    tr = mb._session_transcript(rec)
+    if not tr or ms.is_codex(rec):
+        return False
+    try:
+        latest = tr.stat().st_mtime
+        sub = tr.with_suffix("") / "subagents"
+        files = list(sub.glob("*.jsonl")) if sub.is_dir() else []
+        base = Path(os.environ.get("MARINA_CLAUDE_TMP") or "/private/tmp")
+        files += list(base.glob(f"claude-*/{tr.parent.name}/{tr.stem}/tasks/*.output"))
+        for f in files:
+            latest = max(latest, f.stat().st_mtime)
+    except OSError:
+        return False
+    return now - latest >= quiet
 
 
 def verdict(rec: dict[str, Any], after: float, now: float, full: bool = True) -> list[str]:

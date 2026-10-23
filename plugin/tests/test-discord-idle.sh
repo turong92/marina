@@ -31,6 +31,7 @@ def prep(ref, sid):
 a, sda, tra = prep("proj/feat/a", "aaaaaaaa-0000-1111-2222-333344445555")
 b, sdb, trb = prep("proj/feat/b", "bbbbbbbb-0000-1111-2222-333344445555")
 mb.live_tasks = lambda r: []
+mi._work_stale = lambda *a: False     # 기록이 오래 멈춘 백그라운드는 test-discord-idle-stale 이 본다 — 여기선 '일하는 중'이 막는지만
 empty = [True]; attached = [False]
 mb._input_empty = lambda name: empty[0]
 real_attached = mi._attached
@@ -201,7 +202,8 @@ check(any("쉰 지" in w for w in mi.verdict(a, A, later)), "훅 기록이 없�
 put(base_tr + "깨진 줄 {\n")
 check(abs(mi.last_activity(a) - born_a) < 5, "마지막 줄을 못 읽으면 후보에서만 뺀다(다른 후보로)")
 put(base_tr)
-# 팀 에이전트: 쉬고 있는 팀 에이전트가 목록에 남은 세션은 restart_blockers 가 막는다(의도) — 화면 파싱을 가짜로 줘서 확인
+# 팀 에이전트: 쉬고 있는 팀 에이전트가 목록에 남은 세션은 restart_blockers 가 막는다 — 단 기록이 2시간 넘게 멈췄으면
+# 안 막는다(형 2026-10-23, test-discord-idle-stale). 여기선 _work_stale 을 꺼 두고 '막는다' 쪽만 화면 파싱을 가짜로 줘서 확인
 real_tmux = ms._tmux
 class R:
     def __init__(s, out): s.stdout = out; s.returncode = 0
@@ -210,7 +212,7 @@ def fake_tmux(*args, **kw):
         return R("대화\n⏺ main\n  ◯ reviewer  쉬는 중\n❯ \n")
     return real_tmux(*args, **kw)
 ms._tmux = fake_tmux
-check("팀 에이전트 일하는 중" in mi.verdict(a, A, later), "팀 에이전트가 목록에 남아 있으면 자동으로는 안 내린다(의도된 동작)")
+check("팀 에이전트 일하는 중" in mi.verdict(a, A, later), "기록이 움직이는 동안 팀 에이전트가 목록에 남아 있으면 안 내린다")
 ms._tmux = real_tmux
 # _attached 자체: tmux 가 0 이라고 하면 아님, 1 이상·못 읽음은 붙어 있다
 mi._attached = real_attached
