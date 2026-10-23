@@ -979,7 +979,10 @@ def typing_tick(snap: dict[str, Any], ty: dict[str, float], now: float, agents: 
 def _session_transcript(rec: dict[str, Any]) -> Path | None:
     if ms.is_codex(rec):                       # 코덱스 방의 기록 = rollout
         import marina_codex
-        return marina_codex.rollout_of(rec)
+        try:
+            return marina_codex.rollout_of(rec)
+        except OSError:                        # rollout 이 옮겨지거나 지워졌으면 기록 없음으로(#상태 전체를 깨뜨리지 않게)
+            return None
     sid = str(rec.get("sessionId") or "")
     if sid:
         return ms.find_transcript(sid)
