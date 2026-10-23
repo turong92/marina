@@ -39,7 +39,8 @@ CODEX_RULES = (
     "- 이미지는 첨부한다. 10MB 를 넘는 파일은 링크로 보낸다.\n"
     "- 상대가 볼 결과물(스펙·보고서 md, HTML·목업, 스크린샷)을 만들면 mcp__marina__share_file 에 넘기고, "
     "돌려받은 미리보기 파일을 reply 로 첨부하며 열어보기 주소를 reply 본문에 넣는다.\n"
-    "- 터미널에서 직접 받은 지시의 답은 터미널에 둬도 된다."
+    "- 터미널에서 직접 받은 지시의 답은 터미널에 둬도 된다.\n"
+    + ms.ROOM_SEND_RULE
 )
 
 
@@ -648,6 +649,25 @@ def _taken_sids(rec: dict[str, Any]) -> "set[str]":
     return {str(r.get("sessionId")) for r in ms.load_sessions() if r.get("sessionId") and r.get("stateDir") != rec.get("stateDir")}
 
 
+def type_and_confirm(rec: dict[str, Any], name: str, text: str, marker: str) -> bool:
+    """입력창에 text 를 넣고 marker 가 rollout(또는 바쁠 때 화면 대기 목록)에 나타나는지 본다. 호출자가 방 잠금을 쥐고 있어야 한다."""
+    ro = rollout_of(rec)
+    offset = ro.stat().st_size if ro else 0
+    t0 = time.time()
+    queued_before = queued_count(_screen(name))
+    type_text(name, text)
+    if ro is None:                        # 첫 입력 전엔 rollout 을 모른다 — 새로 생긴 것 하나를 찾아 방 기록에 적는다
+        deadline = t0 + 8.0
+        while ro is None and time.time() < deadline:
+            sid = discover_sid(rec.get("root") or "", t0 - 60, _taken_sids(rec))
+            ro = find_rollout(sid) if sid else None
+            if ro is None:
+                time.sleep(0.3)
+        if ro is not None:
+            ms._record_session_id(rec, sid)
+    return confirm(ro, offset, marker, tmux=name, queued_before=queued_before)
+
+
 def deliver_missed(rec: dict[str, Any], cfg: dict[str, Any], message: str = "", thread: str = "") -> str:
     """살아 있는 코덱스 방에 아직 안 넣은 글을 넣는다. nothing | delivered | failed:* | busy.
     같은 글 두 번 넣기 금지 = 방 잠금 + woke.json.delivered + rollout 의 seen_ids."""
@@ -674,21 +694,7 @@ def deliver_missed(rec: dict[str, Any], cfg: dict[str, Any], message: str = "", 
         last = msgs[-1]
         lch, lid = str(last.get("channel_id") or rec["channelId"]), str(last["id"])
         text = "\n".join(mw._tag(m, str(rec["channelId"])) for m in msgs)
-        ro = rollout_of(rec)
-        offset = ro.stat().st_size if ro else 0
-        t0 = time.time()
-        queued_before = queued_count(_screen(name))
-        type_text(name, text)
-        if ro is None:                        # 첫 입력 전엔 rollout 을 모른다 — 새로 생긴 것 하나를 찾아 방 기록에 적는다
-            deadline = t0 + 8.0
-            while ro is None and time.time() < deadline:
-                sid = discover_sid(rec.get("root") or "", t0 - 60, _taken_sids(rec))
-                ro = find_rollout(sid) if sid else None
-                if ro is None:
-                    time.sleep(0.3)
-            if ro is not None:
-                ms._record_session_id(rec, sid)
-        if not confirm(ro, offset, lid, tmux=name, queued_before=queued_before):
+        if not type_and_confirm(rec, name, text, lid):
             mb._log(f"codex deliver {rec.get('task')}: 전달 확인 실패 {lid}")
             try:
                 dc.add_reaction(lch, lid, "\u26a0\ufe0f")

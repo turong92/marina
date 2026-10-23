@@ -33,6 +33,13 @@ API_DEFAULT = "https://discord.com/api/v10"
 _TASK_RE = re.compile(r"[A-Za-z0-9._/-]+")
 _KEEP_ENV = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "JAVA_HOME", "SDKMAN_DIR", "TMPDIR", "SSH_AUTH_SOCK")
 
+# 개발 방(클로드·코덱스) 공통 — 방끼리 소통(room-send). 코덱스 규칙(marina_codex.CODEX_RULES)도 이 문구를 쓴다
+ROOM_SEND_RULE = (
+    "- 다른 개발 방에 물을 게 있거나 알릴 게 있으면 Bash 로 `marina session room-send <방> \"…\"` 를 쓴다(방 목록은 `marina session ls`). "
+    "알림은 짧게(한 줄) 보내고, 길고 오래 남을 내용(계약·결정·조사 결과)은 레포 공통 파일(docs/handoff/….md)에 쓰고 그 경로만 알린다. "
+    "'[마리나 · <방> 방에서] …' 로 온 글은 그 방이 보낸 것이다 — 답은 글 끝에 적힌 room-send 로 그 방에 한다(사람이 직접 한 말이 아니다)."
+)
+
 CHANNEL_RULES = (
     "이 세션은 Discord 채널에 연결돼 있다. 상대는 Discord 만 보고 이 터미널은 보지 않는다.\n"
     "- 결과·질문·실패/막힘·완료는 반드시 discord reply 도구로 보낸다.\n"
@@ -50,7 +57,8 @@ CHANNEL_RULES = (
     "돌려받은 미리보기 파일을 reply 로 첨부하고 열어보기 주소를 reply 본문에 넣는다(폰에서 바로 열리고, 프로젝트 #자료실 에도 모인다).\n"
     "- 사람이 직접 실행해야 하는 명령(사람 확인이 박힌 래퍼 — 예 `cloud prod db --admin`)은 `!` 부탁 대신 ask_terminal 도구에 넘긴다 "
     "(Discord 에 [터미널에서 열기] 버튼이 뜨고, 상대가 열어 Enter 를 친다). 래퍼의 안전장치를 우회해 직접 붙지 않는다.\n"
-    "- 터미널에서 직접 받은 지시의 답은 터미널에 둬도 된다."
+    "- 터미널에서 직접 받은 지시의 답은 터미널에 둬도 된다.\n"
+    + ROOM_SEND_RULE
 )
 
 CHAT_PROJECT = "chat"
@@ -4814,6 +4822,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("say", help="채팅방에 사람이 말한 것처럼 글을 넣는다(꺼진 방은 띄우면서 첫 지시로)")
     p.add_argument("ref")
     p.add_argument("text", nargs="+")
+    p = sub.add_parser("room-send", help="다른 개발 방(클로드·코덱스)에 말을 건다 — 알림만 입력창으로, 긴 내용은 레포 공통 파일(docs/handoff/…md)")
+    p.add_argument("ref")
+    p.add_argument("text", nargs="+")
     sub.add_parser("brief-install", help="~/.marina/brief.json 의 시각에 방에 글을 넣는 LaunchAgent(marina.brief) 설치 — 시각을 바꾸면 다시 실행")
     sub.add_parser("brief-uninstall", help="예약 브리핑 LaunchAgent 해제")
     sub.add_parser("brief-status", help="예약 브리핑 설정·등록 상태")
@@ -5047,6 +5058,15 @@ def main(argv: list[str] | None = None) -> int:
             how = mw.say(a.ref, " ".join(a.text))
             s = find_session(a.ref)
             what = {"started": "첫 지시로 줘서 방을 띄웠어", "delivered": "입력창에 넣었어",
+                    "typed": "입력창에 쳤지만 들어갔는지 확인하지 못했어(글이 입력창에 남아 있을 수 있어)"}[how]
+            print(f"✓ {s['project']}/{s['task']} 에 글을 {what}")
+        elif a.cmd == "room-send":
+            import marina_discord_wake as mw
+            os.environ["PATH"] = daemon_path() + ":" + os.environ.get("PATH", "")      # 띄우는 claude·codex·tmux·git 을 찾게(say 와 같다)
+            how = mw.room_send(a.ref, " ".join(a.text))
+            s = find_session(a.ref)
+            what = {"started": "잠들어 있어서 이 글을 첫 지시로 줘 깨웠어", "delivered": "입력창에 전달했어",
+                    "queued": "지금 바빠서 대기열에 넣었어(쉬는 순간·다음 도구 호출 뒤에 읽어)",
                     "typed": "입력창에 쳤지만 들어갔는지 확인하지 못했어(글이 입력창에 남아 있을 수 있어)"}[how]
             print(f"✓ {s['project']}/{s['task']} 에 글을 {what}")
         elif a.cmd in ("brief-install", "brief-uninstall", "brief-status", "brief-run"):

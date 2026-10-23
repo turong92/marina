@@ -2199,7 +2199,7 @@ def typeable(text: str, channel: str = "") -> bool:
     if m:
         rec = next((x for x in ms.load_sessions() if channel and str(x.get("channelId")) == str(channel)), None)
         return bool(rec and rec.get("stateDir")) and os.path.dirname(m.group(1)) == str(rec["stateDir"])
-    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK))
+    return ms.slash_allowed(text) or text.startswith((SUGGEST_MARK, SLASH_MARK, mw.ROOM_SEND_PREFIX))   # room-send 가 바빠서 넘긴 글
 
 
 RESTART_AGENT_FRESH = 1800.0     # 재시작 판정: 안 끝난 에이전트는 30분 조용해야 죽은 것으로 본다(긴 빌드·녹화로 5분 넘게 조용한 에이전트가 있었다, 2026-10-07 사고)
@@ -2773,7 +2773,7 @@ def input_holds(screen: str, text: str) -> "bool | None":
 
 
 def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, settle: float = 3.0,
-              timeout: float = 1800.0) -> bool:
+              timeout: float = 1800.0, return_after_type: bool = False) -> bool:
     """Discord 로 온 /compact·/model X·/effort X: 세션이 쉬고 입력창이 정말 비었을 때만 직접 친다(허용 목록은 훅이 거른다).
     권한·선택 창이 떠 있으면 Enter 가 '승인'이 되므로 치지 않는다(리뷰 I1). 대기자끼리는 잠금으로 하나씩(리뷰 I6).
     🗜️/⚙️ → 끝나면 ✅, 못 하면 ⚠️ — 어떤 길로 끝나도 표시가 남지 않게(리뷰 I4)."""
@@ -2827,6 +2827,9 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
                     after = ms._tmux("capture-pane", "-p", "-e", "-t", tmux).stdout or ""
                 _log(f"type {tmux}: 입력함 {cmd[:60]!r} · 화면 끝: "
                      f"{' | '.join(_ANSI.sub('', after).rstrip().splitlines()[-6:])[:400]!r}")
+                if return_after_type:            # room-send: 상대 턴이 끝나길 기다리면 보낸 방의 도구 호출이 그동안 묶인다
+                    ok = True
+                    return True
                 break
             time.sleep(poll)
         if not typed:

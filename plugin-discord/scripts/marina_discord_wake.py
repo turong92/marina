@@ -343,6 +343,91 @@ def say(ref: str, message: str, source: str = "say") -> str:
     return "typed"
 
 
+ROOM_SEND_PREFIX = "[마리나 · "      # `type` 하위명령이 이 머리말의 글을 칠 수 있다(typeable) — 대기열로 넘긴 글
+ROOM_SEND_MAX = 1200                  # 길고 오래 남을 내용은 레포 공통 파일(docs/handoff/…md)에 쓰고 알림만 보낸다 — 잘라서 보내지 않는다
+ROOM_SEND_WAIT_S = 20.0               # 클로드 방이 쉬길 기다리는 최대 — 보낸 방의 도구 호출을 오래 잡지 않는다. 넘으면 대기열
+ROOM_SEND_MARK = "marina session room-send"      # 답하는 법 꼬리에 들어가는 명령 이름
+ROOM_SEND_PREVIEW = 300
+
+
+def room_sender() -> str:
+    """보낸 방 ref — 환경의 DISCORD_STATE_DIR 로 방 기록을 찾는다(클로드·코덱스 방 모두 이 변수가 있다). 못 찾으면 '터미널'."""
+    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    rec = next((r for r in ms.load_sessions() if sdir and r.get("stateDir") == sdir), None)
+    return f"{rec.get('project')}/{rec.get('task')}" if rec else "터미널"
+
+
+def _announce(rec: dict[str, Any], sender: str, body: str) -> None:
+    """대상 방 채널에 한 줄 — 형이 방끼리 오가는 말을 본다. 이미 전달한 뒤라 실패해도 전달은 취소하지 않고 stderr 로 알린다."""
+    shown = body[:ROOM_SEND_PREVIEW] + ("…" if len(body) > ROOM_SEND_PREVIEW else "")
+    try:
+        cfg = ms.load_config()
+        ms.Discord(ms.read_token_file(ms.token_file(cfg, str(rec.get("project") or "")))).send_message(
+            str(rec["channelId"]), f"📨 {sender} 방에서: {shown}")
+    except ms.SessionError as exc:
+        print(f"marina session: 전달은 했지만 채널에 한 줄을 못 남겼어 — {exc}", file=sys.stderr)
+
+
+def room_send(ref: str, message: str, sender_ref: "str | None" = None) -> str:
+    """`marina session room-send` — 개발 방(클로드·코덱스)이 다른 개발 방에 말을 건다. 입력창에 '[마리나 · <보낸 방> 방에서] 글 (답은: …)' 한 줄.
+    started(잠든 방을 이 글을 첫 지시로 깨움) | delivered(입력창에 넣었고 확인) | queued(바빠서 대기열 — 코덱스는 대기 목록, 클로드는 쉬는 순간에 칠 것) |
+    typed(쳤지만 입력창에 남아 있음), 못 하면 SessionError. 채팅방·비서·로비는 제한 세션이라 받지 않는다."""
+    rec = ms.find_session(ref)
+    name = f"{rec.get('project')}/{rec.get('task')}"
+    if rec.get("kind") in ms.CHAT_KINDS:
+        raise ms.SessionError(f"{name} 은 개발 방이 아니야 — room-send 는 개발 방(클로드·코덱스)끼리만 써")
+    sender = room_sender() if sender_ref is None else sender_ref
+    if sender == name:
+        raise ms.SessionError("자기 자신에게는 보낼 수 없어")
+    body = "".join(c for c in " ".join(str(message).split()) if c.isprintable())     # 한 줄(입력창에선 줄바꿈이 전송) + 제어문자 제거
+    if not body:
+        raise ms.SessionError("보낼 글이 비었어")
+    if len(body) > ROOM_SEND_MAX:
+        raise ms.SessionError(f"글이 너무 길어({len(body)}자 > {ROOM_SEND_MAX}) — 길고 오래 남을 내용은 레포 공통 파일(docs/handoff/…md)에 쓰고 알림만 보내")
+    text = f"{ROOM_SEND_PREFIX}{sender} 방에서] {body}"
+    if sender != "터미널":                        # 터미널엔 답할 방이 없다
+        text += f' (답은: {ROOM_SEND_MARK} {sender} "…")'
+    sd, tmux = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("tmux") or "")
+    if not sd.is_dir():
+        raise ms.SessionError(f"{name}: 상태 폴더가 없어")
+    codex, how = ms.is_codex(rec), ""
+    with ms.room_lock(sd) as got:
+        if not got:
+            raise ms.SessionError(f"{name}: 다른 쪽이 이 방을 켜거나 내리는 중이야 — 잠시 뒤에 다시")
+        if not ms.tmux_alive(tmux):
+            started, failed = _start_with_launch_env(name, sd, text)
+            if started:
+                _save_woke(sd, at=time.time(), ok=True, delivered=[])
+                how = "started"
+            elif not ms.tmux_alive(tmux):
+                raise ms.SessionError(f"{name}: 방을 못 띄웠어 — {(failed[0] if failed else '알 수 없는 이유')[:200]}")
+        if not how and codex:            # 코덱스는 채널 플러그인이 없다 — 입력창에 넣고 rollout(바쁘면 대기 목록)으로 확인. 바빠도 넣는다(steer)
+            import marina_codex
+            if marina_codex.selecting(tmux):
+                raise ms.SessionError(f"{name}: 선택·확인 창이 떠 있어 글을 못 넣었어")
+            if not marina_codex.input_empty(tmux):
+                raise ms.SessionError(f"{name}: 입력창에 쓰던 글이 있어 덮어쓰지 않았어")
+            busy = mb._room_busy(rec)[1]
+            mark = re.split(r'["\\]', text, 1)[0][:90]      # 확인 표식 = 머리말+글 앞부분(따옴표·역슬래시 앞까지 — rollout JSON 에선 이스케이프된다). 보낸 방만으론 이전 대기 글과 구분이 안 된다
+            if not marina_codex.type_and_confirm(rec, tmux, text, mark):
+                raise ms.SessionError(f"{name}: 입력창에 넣었지만 전달을 확인하지 못했어 — 방 화면을 직접 확인해")
+            how = "queued" if busy or marina_codex.queued_count(marina_codex._screen(tmux)) else "delivered"     # 넣기 전엔 한가해 보여도 화면 대기 목록에 있으면 대기열
+    if not how:                           # 떠 있는 클로드 방 — 잠금은 놓고 쉬는 순간 입력창에 친다(치자마자 돌아온다)
+        if mb.run_slash(tmux, text, str(rec["channelId"]), "", settle=0.5, timeout=ROOM_SEND_WAIT_S, return_after_type=True):
+            for i in range(SAY_CHECK_TRIES):
+                if not _left_in_input(tmux, text):
+                    how = "delivered"
+                    break
+                if i + 1 < SAY_CHECK_TRIES:
+                    time.sleep(SAY_CHECK_GAP)
+            how = how or "typed"
+        else:
+            mb._spawn_type(tmux, text, str(rec["channelId"]), "")      # 계속 바쁘다 — 떼어 둔 프로세스가 쉬는 순간에 친다
+            how = "queued"
+    _announce(rec, sender, body)
+    return how
+
+
 def wake_settle(channel: str, started: float, wait: bool = True) -> str:
     """깨어나는 동안(첫 지시를 모은 뒤 ~ 플러그인 접속 전) 온 글은 아무도 못 받는다 — 한 번 보고, 있으면 고정 문구로 읽게 한다.
     missed() 가 방 스레드까지 훑으므로 스레드에 연달아 쓴 글도 여기서 잡힌다."""
