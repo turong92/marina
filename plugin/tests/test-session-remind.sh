@@ -211,6 +211,57 @@ check(len(spawned) == 1 and spawned[0][-1] == "remind-run", f"때가 됐으면 r
 mb.subprocess.Popen = real_popen
 ms.save_reminders([])
 
+# tmux 가 'command too long' 으로 거절하면 스크립트로 빼고 다시 — 방 규칙이 1KB 늘자 방 둘이 안 떴다
+one = ms._launch_script('secretary-test', 'echo ' + 'y' * 5000, str(room['stateDir']))
+check(one.startswith('/bin/sh ') and len(one) < 300, f'짧은 한 줄을 돌려준다: {one[:80]}')
+sh = Path(one.split(' ', 1)[1])
+check(sh.is_file() and sh.parent == Path(room['stateDir']), f'상태 폴더에 쓴다: {sh}')
+check(sh.read_text().startswith('#!/bin/sh\nexec echo ') and ('y' * 200) in sh.read_text(), '명령을 그대로 담는다')
+check(oct(sh.stat().st_mode)[-3:] == '700', f'남이 못 읽게: {oct(sh.stat().st_mode)}')
+nos = ms._launch_script('없는방', 'echo z', '/nonexistent')
+check(Path(nos.split(' ', 1)[1]).is_file(), '상태 폴더가 없으면 marina 폴더에')
+# 같은 파일을 다시 써도 제자리에서 자르지 않는다(앞 기동의 /bin/sh 가 읽던 중이면 반쯤 잘린 걸 실행한다)
+old_ino = sh.stat().st_ino
+ms._launch_script('secretary-test', 'echo ' + 'w' * 5000, str(room['stateDir']))
+check(sh.stat().st_ino != old_ino, '바꿔 끼운다(inode 가 바뀐다)')
+check(not list(Path(room['stateDir']).glob('.launch-*')), '임시 파일을 남기지 않는다')
+
+# 폴백 분기 — 오늘 두 방을 못 띄웠던 그 길. tmux 를 가짜로 끼워 세 가지를 못 박는다
+calls = []
+real_tmux, real_alive, real_save, real_sig = ms._tmux, ms.tmux_alive, ms._save_launch_env, ms.dashboard_signal
+def fake_tmux(*a, **kw):
+    calls.append(a)
+    bad = a[0] == "new-session" and len([c for c in calls if c[0] == "new-session"]) == 1
+    return type("R", (), {"returncode": 1 if bad else 0, "stderr": fake_tmux.err if bad else "", "stdout": ""})()
+fake_tmux.err = "command too long"
+ms._tmux, ms.tmux_alive, ms._save_launch_env, ms.dashboard_signal = fake_tmux, lambda n: True, lambda d: None, lambda: None
+os.environ["MARINA_SESSION_BOOT_WAIT"] = "0"
+env = {"DISCORD_STATE_DIR": str(room["stateDir"])}
+ms.tmux_start("fallback-room", Path(room["root"]), ["echo", "x" * 100], env)
+ns = [c for c in calls if c[0] == "new-session"]
+check(len(ns) == 2, f"거절당하면 한 번 더 — 두 번 불린다: {len(ns)}")
+check(ns[1][-1].startswith("/bin/sh ") and "launch-fallback-room.sh" in ns[1][-1],
+      f"두 번째는 스크립트로: {ns[1][-1][:70]}")
+check("launch-" not in ns[0][-1] and "echo" in ns[0][-1], f"첫 번째는 명령 그대로: {ns[0][-1][:60]}")
+# 길이 때문이 아닌 실패(이름 중복 등)에는 스크립트를 쓰지 않는다 — 실패한 기동마다 파일을 쓰면 안 된다
+calls.clear()
+fake_tmux.err = "duplicate session: dup-room"
+(Path(room["stateDir"]) / "launch-dup-room.sh").unlink(missing_ok=True)
+try:
+    ms.tmux_start("dup-room", Path(room["root"]), ["echo", "x" * 100], env)
+    check(False, "그 실패는 그대로 올라와야")
+except ms.SessionError as exc:
+    check("duplicate" in str(exc) and "처음은" not in str(exc), f"첫 에러를 그대로: {exc}")
+check(len([c for c in calls if c[0] == "new-session"]) == 1, "한 번만 부른다")
+check(not (Path(room["stateDir"]) / "launch-dup-room.sh").exists(), "스크립트를 쓰지 않는다")
+# 긴 명령이면 거절 문구가 달라도 한 번 더 — tmux 가 말을 바꿔도 방이 뜨게
+calls.clear()
+fake_tmux.err = "something else"
+ms.tmux_start("long-room", Path(room["root"]), ["echo", "y" * (ms.TMUX_RETRY_OVER + 100)], env)
+ns = [c for c in calls if c[0] == "new-session"]
+check(len(ns) == 2 and "launch-long-room.sh" in ns[1][-1], f"긴 명령은 문구와 무관하게 다시: {len(ns)}")
+ms._tmux, ms.tmux_alive, ms._save_launch_env, ms.dashboard_signal = real_tmux, real_alive, real_save, real_sig
+
 # 도구 목록 — 대화방에만 보인다(쓸 수 없는 도구를 개발 세션에 보여 주면 권한 창에서 멈춘다)
 room_names = [t["name"] for t in ms.chat_tools_for(room)]
 dev_names = [t["name"] for t in ms.chat_tools_for(dev)]

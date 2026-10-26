@@ -811,6 +811,30 @@ def session_launch(s: dict[str, Any], resume: bool = False, first: str = "") -> 
                              from_id=str(s.get("forkedFrom") or ""), first=first)
 
 
+TMUX_RETRY_OVER = 8192     # 이보다 긴 명령이 실패하면 거절 문구가 달라도 스크립트로 한 번 더 해 본다
+
+
+def _launch_script(name: str, cmd: str, sdir: str) -> str:
+    """긴 기동 명령을 스크립트로 빼고 tmux 에 줄 짧은 한 줄을 돌려준다.
+    방 규칙(CLAUDE.md)이 1KB 늘자 비서 방 둘이 'tmux 실행 실패: command too long' 으로 안 떴다(2026-10-26).
+    한계는 감싸기(알림 셸·계정 토큰 셸)와 이스케이프에 따라 달라지므로 미리 재지 않고,
+    tmux 가 거절했을 때만 이 길로 간다."""
+    base = Path(sdir) if sdir and Path(sdir).is_dir() else marina_home() / "launch"
+    sh = base / f"launch-{re.sub(r'[^A-Za-z0-9_-]', '-', name)}.sh"
+    try:
+        base.mkdir(parents=True, exist_ok=True)
+        # 처음부터 0600 으로 쓰고 바꿔 끼운다 — 제자리에서 자르면 앞 기동의 /bin/sh 가 읽던 중에
+        # 반쯤 잘린 스크립트(방 규칙에 개행이 있어 여러 줄이다)를 실행하고, chmod 전까지 남이 읽을 수도 있다
+        tmp = sh.with_name(f".{sh.name}.{os.getpid()}")
+        fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o700)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/sh\nexec " + cmd + "\n")
+        os.replace(tmp, sh)
+    except OSError as exc:
+        raise SessionError(f"긴 기동 명령을 파일로 못 썼어: {exc}") from None
+    return shlex.join(["/bin/sh", str(sh)])
+
+
 def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str], notify_ref: str = "",
                account: str = "") -> None:
     """account = 코덱스 방의 계정 이름(account-running 에 적는다). 클로드 방은 토큰 파일 이름 / 기본 계정."""
@@ -829,8 +853,16 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
                f'export CLAUDE_CODE_OAUTH_TOKEN; fi; unset {ACCOUNT_TOKEN_ENV}; exec "$@"', "sh"] + run
     cmd = shlex.join(clean_env_prefix(env_extra) + run)
     r = _tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), cmd)
+    first = ""
+    # tmux 가 명령이 길다고 거절했다 — 스크립트로 빼고 다시(짧은 명령은 지금까지와 똑같이 간다).
+    # 문구가 바뀌어도 긴 명령이면 한 번 더 해 본다(한 번의 tmux 호출이 비용의 전부다)
+    if r.returncode != 0 and ("too long" in (r.stderr or r.stdout or "").lower() or len(cmd) > TMUX_RETRY_OVER):
+        first = (r.stderr or r.stdout or "").strip()[:120]
+        cmd = _launch_script(name, cmd, env_extra.get("DISCORD_STATE_DIR") or "")
+        r = _tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), cmd)
     if r.returncode != 0:
-        raise SessionError(f"tmux 실행 실패: {(r.stderr or r.stdout).strip()}")
+        raise SessionError(f"tmux 실행 실패: {(r.stderr or r.stdout).strip()}"
+                           + (f" (스크립트로 다시 해 봤고, 처음은: {first})" if first else ""))
     sdir = env_extra.get("DISCORD_STATE_DIR") or ""
     if sdir and Path(sdir).is_dir():
         try:
