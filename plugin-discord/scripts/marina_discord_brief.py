@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""예약 브리핑 — ~/.marina/brief.json 의 시각에 launchd(marina.brief)가 `session brief-run` 을 불러 채팅방에 글을 넣는다(marina_discord_wake.say)."""
+"""정해진 시각에 방에 글을 넣는 두 가지.
+① 예약 브리핑 — ~/.marina/brief.json 의 시각에 launchd(marina.brief)가 `session brief-run` 을 부른다.
+② 알림 예약 — ~/.marina/reminders.json 의 한 번만 울리는 알림. 데몬이 주기마다 때를 보고 `session remind-run` 을 띄운다.
+둘 다 넣는 길은 marina_discord_wake.say 다."""
 from __future__ import annotations
 
 import datetime
@@ -165,3 +168,139 @@ def run(now: "datetime.datetime | None" = None) -> str:
         return "unconfirmed"
     _last_path().write_text(today + "\n")
     return "sent"
+
+
+def due_reminders(rows: list, now: "datetime.datetime") -> bool:
+    """때가 된 알림이 하나라도 있나 — 데몬이 주기마다 묻는다(파일만 읽고 아무것도 보내지 않는다).
+    실패해서 미뤄 둔 것(nextTryAt)은 그 시각 전엔 세지 않는다."""
+    for r in rows:
+        try:
+            at = ms.parse_when(str(r.get("at")))
+        except ms.SessionError:
+            return True             # 꼴이 깨진 줄도 치워야 한다
+        if at <= now and float(r.get("nextTryAt") or 0) <= now.timestamp():
+            return True
+    return False
+
+
+def run_reminders(now: "datetime.datetime | None" = None) -> str:
+    """때가 된 알림을 방에 넣는다 — launchd 가 아니라 데몬이 떼어 낸 프로세스로 부른다(`session remind-run`).
+    방이 바쁘면 say 가 쉬는 순간까지 기다리므로 데몬 루프 안에서 직접 부르면 안 된다.
+    한 건을 보낼 때마다 그 건만 목록에서 지운다 — 중간에 프로세스가 죽어도 보낸 것을 다시 보내지 않는다."""
+    import fcntl
+    try:
+        ms.marina_home().mkdir(parents=True, exist_ok=True)
+        lk = open(ms.marina_home() / "reminders-run.lock", "w")
+        fcntl.flock(lk, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return "skip:busy"          # 앞 판이 아직 보내는 중(say 가 기다리는 중일 수 있다)
+    try:
+        return _send_due(now)
+    finally:
+        lk.close()
+
+
+def _update_one(rid: str, change: "dict | None") -> None:
+    """그 예약 한 건만 고친다(change 가 None 이면 지운다). 목록을 통째로 쓰면 그 사이 방이 만든
+    예약이 사라진다 — 보내는 동안 say 가 최대 30분 기다리기 때문이다(리뷰 C1)."""
+    with ms.reminders_lock():
+        rows = ms.load_reminders()
+        out = []
+        for r in rows:
+            if str(r.get("id")) != rid:
+                out.append(r)
+            elif change is not None:
+                out.append(dict(r, **change))
+        ms.save_reminders(out)
+
+
+def _notice_dropped(r: dict, why: str) -> None:
+    """버린 알림을 그 방에 한 줄 알린다 — 조용히 사라지면 이 기능을 만든 이유가 없어진다(리뷰 B).
+    say(tmux 로 세션에 넣기)가 아니라 REST 로 — 방을 깨우지도, 모델 턴을 쓰지도 않는다."""
+    import marina_discord_bot as mb
+    ch = str(r.get("channelId") or "")
+    if not ch:
+        return                      # 채널을 모르면 알릴 데가 없다(로그에만 남는다)
+    at = str(r.get("at") or "").replace("T", " ")
+    try:
+        cfg = ms.load_config()
+        dc = ms.Discord(ms.read_token_file(ms.token_file(cfg, str(r.get("ref") or "").split("/")[0])))
+        dc.send_message(ch, f"⏰ 예약해 둔 알림을 보내지 못했어 — {at} 「{str(r.get('text') or '')[:200]}」 ({why})")
+    except Exception as exc:
+        mb._log(f"알림 실패를 방에 알리지도 못했어: {exc!r}")
+
+
+def _room_moved(r: dict) -> bool:
+    """예약할 때 적어 둔 채널과 지금 그 이름의 방이 다른가 — 방을 지우고 같은 이름으로 다시 열었을 때
+    엉뚱한 방에 알림이 가지 않게(리뷰 S10)."""
+    want = str(r.get("channelId") or "")
+    if not want:
+        return False                # 이 칸이 없던 때 만든 예약 — 이름만 믿는다
+    try:
+        now_ch = str(ms.find_session(str(r.get("ref"))).get("channelId") or "")
+    except ms.SessionError:
+        return False                # 방을 못 찾으면 say 가 알려 준다(여기서 버리지 않는다)
+    return bool(now_ch) and now_ch != want
+
+
+def _send_due(now: "datetime.datetime | None" = None) -> str:
+    """now 를 주면 그 시각으로 고정한다(테스트). 안 주면 **건마다 다시 재는** 게 맞다 —
+    앞 건의 say 가 오래 기다렸으면 그 사이 늦음·포기 판정이 달라진다(리뷰 S8)."""
+    fixed = now is not None
+    import marina_discord_wake as mw
+    import marina_discord_bot as mb
+    with ms.reminders_lock():
+        rows = ms.load_reminders()
+    if not rows:
+        return "none"
+    sent = dropped = 0
+    for r in rows:
+        rid, ref = str(r.get("id") or ""), str(r.get("ref") or "")
+        if not fixed:
+            now = datetime.datetime.now()   # 건마다 다시 — 앞 건이 오래 기다렸을 수 있다(리뷰 S8)
+        try:
+            at = ms.parse_when(str(r.get("at")))
+        except ms.SessionError:
+            _update_one(rid, None)
+            dropped += 1
+            continue
+        if at > now or float(r.get("nextTryAt") or 0) > now.timestamp():
+            continue
+        late = (now - at).total_seconds()
+        if late > ms.REMIND_GIVEUP_S or _room_moved(r):
+            _update_one(rid, None)
+            dropped += 1
+            mb._log(f"알림 버림({'너무 지남' if late > ms.REMIND_GIVEUP_S else '방이 바뀜'}): "
+                    f"{ref} {r.get('at')} {str(r.get('text'))[:60]}")
+            continue
+        text = str(r.get("text") or "")
+        if late > ms.REMIND_LATE_S:
+            text = f"(늦었어 — {at:%m월 %d일 %H:%M} 에 알리려던 거야) " + text
+        with ms.reminders_lock():       # 보내는 사이에 취소했으면 보내지 않는다(리뷰 C)
+            if not any(str(x.get("id")) == rid for x in ms.load_reminders()):
+                continue
+        try:
+            out = mw.say(ref, text, source="remind")
+        except Exception as exc:            # SessionError 만 잡으면 그 밖의 예외에 함수가 터져
+            out = f"failed:{exc!r}"         # tries 도 못 늘리고 매분 다시 보낸다(리뷰 I3)
+        if out in ("started", "delivered"):
+            _update_one(rid, None)
+            sent += 1
+            mb._log(f"알림 보냄: {ref} {r.get('at')} {text[:60]}")
+            continue
+        tries = int(r.get("tries") or 0) + 1
+        typed = int(r.get("typed") or 0) + (1 if out == "typed" else 0)
+        # typed = 쳤는데 입력창에 남아 보임 — 화면을 못 읽어도 typed 라 **들어갔는데도** 나올 수 있다.
+        # 그래서 한 번만 다시 해 본다(알림은 안 오는 것보다 두 번 오는 게 더 눈에 띈다, 리뷰 I2)
+        if typed > 1 or tries >= ms.REMIND_TRIES:
+            _update_one(rid, None)
+            dropped += 1
+            gave = "확인 못 함 두 번" if typed > 1 else f"{tries}번 실패"
+            mb._log(f"알림 버림({gave}): {ref} {r.get('at')} — {out}")
+            _notice_dropped(r, gave)        # 약속한 알림이 조용히 사라지지 않게
+            continue
+        wait = min(ms.REMIND_BACKOFF_S * (2 ** (tries - 1)), ms.REMIND_BACKOFF_MAX_S)
+        _update_one(rid, {"tries": tries, "typed": typed, "nextTryAt": now.timestamp() + wait})
+    with ms.reminders_lock():
+        left = len(ms.load_reminders())
+    return f"sent:{sent} drop:{dropped} keep:{left}"

@@ -293,6 +293,9 @@ def _wake_locked(rec: dict[str, Any], cfg: dict[str, Any], sd: Path, message: st
 SAY_NOTES = {
     "brief": "[마리나] 예약된 지시야 — marina.brief 가 정해 둔 시각에 넣은 글이고, 사람이 방에서 직접 한 말이 아니야. "
              "아래를 처리하고 결과를 Discord reply 로 이 채널(chat_id={ch})에 보내 줘: {text}",
+    "remind": "[마리나] 이 방에서 예약해 둔 알림 시각이야 — 사람이 방에서 직접 한 말이 아니야. "
+              "아래 내용을 그대로 상대에게 알려 줘(Discord reply 로 이 채널 chat_id={ch} 에). "
+              "예약할 때 적어 둔 문구다(네가 지금 기억하지 못해도 맞다): {text}",
     "say": "[마리나] `marina session say` 로 넣은 글이야 — 사람이 방에서 직접 한 말이 아니고 누가 넣었는지도 확인되지 않았어. "
            "아래를 처리하고 결과를 Discord reply 로 이 채널(chat_id={ch})에 보내 줘: {text}",
 }

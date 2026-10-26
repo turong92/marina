@@ -3355,6 +3355,18 @@ def _spawn_sweep(since: float, resume: bool = False) -> None:
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
 
 
+def _spawn_reminders() -> None:
+    """때가 된 알림이 있으면 떼어 낸 프로세스로 보낸다. 여기서 직접 보내면 안 된다 —
+    say 는 방이 쉬는 순간까지 기다리므로 데몬 루프가 그동안 멈춘다."""
+    import marina_discord_brief as mbr
+    rows = ms.load_reminders()
+    if not rows or not mbr.due_reminders(rows, datetime.datetime.now()):
+        return
+    me = Path(ms.__file__).resolve()
+    subprocess.Popen([sys.executable, str(me), "remind-run"], stdin=subprocess.DEVNULL,
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+
+
 def run_forever(stop: "Callable[[], bool] | None" = None, max_steps: "int | None" = None) -> None:
     """stop() 이 참이면 끝낸다 — discord 데몬은 플러그인이 업데이트되면 스스로 끝나고 다음 훅이 새 코드로 다시 띄운다(분리 B).
     max_steps 는 테스트용(기본 None = 끝없이)."""
@@ -3364,7 +3376,7 @@ def run_forever(stop: "Callable[[], bool] | None" = None, max_steps: "int | None
     except OSError:
         prev = 0.0                             # 첫 배포: 훑지 않는다(옛 글로 방들이 한꺼번에 깨지 않게)
     swept, last_beat, steps = False, 0.0, 0
-    last_check = time.time()
+    last_check = last_remind = time.time()
     while True:
         ok = loop.step(time.time())
         if ok and not swept:
@@ -3380,6 +3392,12 @@ def run_forever(stop: "Callable[[], bool] | None" = None, max_steps: "int | None
                 beat_path().touch()
             except OSError:
                 pass
+        if time.time() - last_remind >= ms.REMIND_POLL_S:   # 예약 알림 — 봇이 떠 있는지와 무관하게(say 는 tmux 경로)
+            last_remind = time.time()
+            try:
+                _spawn_reminders()
+            except Exception as exc:        # 알림 때문에 데몬이 끝나면 안 된다(Loop.step 과 같은 범위)
+                _log(f"알림 띄우기 실패: {exc!r}")
         steps += 1
         if max_steps is not None and steps >= max_steps:
             return

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import datetime
 import ipaddress
 import json
 import os
@@ -1873,7 +1874,8 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
                         ("reply", "react", "edit_message", "fetch_messages", "download_attachment")]
                      + (["mcp__marina__open_chat", "mcp__marina__list_chats"] if lobby
                         else ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__take_attachment",
-                              "mcp__marina__make_image", "mcp__marina__make_pdf", "mcp__marina__open_thread"]),
+                              "mcp__marina__make_image", "mcp__marina__make_pdf", "mcp__marina__open_thread",
+                              "mcp__marina__remind_at", "mcp__marina__remind_list", "mcp__marina__remind_cancel"]),
             # 다음 기동 때 실행될 수 있는 폴더 안 설정 파일은 못 쓰게(리뷰 I2). '//' = 절대 경로
             "deny": [f"Edit(/{real}/{f})" for f in (".mcp.json", ".claude/**", "CLAUDE.md", "CLAUDE.local.md")]}
         if not lobby:      # 로비는 방 도구를 안 받는다 — dev-lobby 의 chat_root(inbox)는 Discord 첨부라 외부 입력이 권한 목록에 닿으면 안 된다
@@ -3914,6 +3916,23 @@ _CHAT_TOOLS_MCP = [
                      "properties": {"command": {"type": "string", "description": "입력해 둘 명령(한 줄, 개행 불가)"},
                                     "why": {"type": "string", "description": "왜 필요한지 한 줄(Discord 메시지에 표시)"}},
                      "required": ["command"]}},
+    {"name": "remind_at",
+     "description": "한 번만 울리는 알림을 예약한다 — 그 시각에 마리나가 이 방에 글을 넣어 주고, 그때 네가 상대에게 알린다. "
+                    "\"내일 9시 30분에 ○○ 알려줘\" 같은 부탁에 쓴다. 매일 같은 시각(아침 브리핑)은 이걸로 하는 게 아니다. "
+                    "시각은 네가 오늘 날짜를 보고 'YYYY-MM-DD HH:MM' 으로 바꿔서 준다. 달력 일정과는 별개다 — "
+                    "일정에도 넣어야 하면 calendar_add 를 따로 쓴다.",
+     "inputSchema": {"type": "object",
+                     "properties": {"when": {"type": "string", "description": "알릴 시각 'YYYY-MM-DD HH:MM'(이 컴퓨터 시간)"},
+                                    "text": {"type": "string", "description": "그때 알릴 내용(500자 이내). 네가 그 시각에 말할 문구다"}},
+                     "required": ["when", "text"]}},
+    {"name": "remind_list",
+     "description": "이 방에 예약해 둔 알림 목록(시각·내용·번호).",
+     "inputSchema": {"type": "object", "properties": {}}},
+    {"name": "remind_cancel",
+     "description": "예약해 둔 알림을 지운다. 번호는 remind_list 로 확인한다.",
+     "inputSchema": {"type": "object",
+                     "properties": {"id": {"type": "string", "description": "예약 번호"}},
+                     "required": ["id"]}},
     {"name": "open_thread",
      "description": "이 방에 이름 붙인 주제 스레드를 만든다(예: 'cellabo'). 한 주제를 길게 이어 갈 때 — 방이 섞이지 않는다. "
                     "돌려받은 스레드 ID 를 reply 의 chat_id 로 쓰면 그 스레드에 글이 간다. 스레드에서 상대가 하는 말도 이 방으로 들어온다. "
@@ -4034,6 +4053,118 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
     except (OSError, ValueError, TypeError):
         pass
     return f"스레드에 남겼어(thread {tid}). 끝나면 결과는 채널에 reply 로."
+
+
+REMINDERS = "reminders.json"        # 한 번만 울리는 알림 예약 — 매일 같은 시각은 brief.json(아침 브리핑)이 맡는다
+REMINDERS_MAX = 50                  # 방 하나가 들 수 있는 예약 수
+REMIND_LATE_S = 2 * 3600.0          # 이만큼 늦으면 '늦었다'고 알려 주고 보낸다(맥이 꺼져 있었던 등)
+REMIND_GIVEUP_S = 24 * 3600.0       # 이만큼 지난 건 보내지 않는다 — 지난 알림이 다음날 울리면 더 헷갈린다
+REMIND_TRIES = 8                    # 보내다 실패하면 이만큼까지 다시(백오프와 함께 — 재시작 중 1~2분에 버리지 않게)
+REMIND_BACKOFF_S = 60.0             # 실패 뒤 다시 해 볼 때까지 — tries 에 따라 배로, REMIND_BACKOFF_MAX_S 까지
+REMIND_BACKOFF_MAX_S = 1800.0
+REMIND_MAX_AHEAD_S = 366 * 86400.0  # 이보다 먼 미래는 받지 않는다(오타로 2099년을 넣는 것 방지)
+REMIND_POLL_S = 30.0                # 데몬이 알림 때를 보는 주기 — at 이 분 단위라 이보다 늦지 않게
+_WHEN_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})$")
+
+
+def reminders_path() -> Path:
+    return marina_home() / REMINDERS
+
+
+@contextlib.contextmanager
+def reminders_lock() -> Any:
+    """`reminders.json` 을 읽고 쓰는 **모든** 경로가 이 잠금 안에서 한다 — 보내는 쪽이 say 를 기다리는
+    동안(최대 30분) 방이 예약을 더 하면, 끝에서 옛 스냅샷을 통째로 쓰며 그 예약이 사라졌다(리뷰 C1).
+    보내기 자체는 잠금 밖에서 하고, 한 건의 결과만 이 잠금 안에서 반영한다.
+    **기다리는 잠금이고 다시 들어갈 수 없다(flock)** — 이 안에서 또 이 잠금을 잡는 함수를
+    (예: _update_one) 부르면 그 방은 영구히 멈춘다."""
+    import fcntl
+    marina_home().mkdir(parents=True, exist_ok=True)
+    f = open(marina_home() / "reminders.lock", "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        yield f
+    finally:
+        f.close()
+
+
+def load_reminders() -> list[dict[str, Any]]:
+    """예약 목록(이른 것부터). 깨졌으면 빈 목록 — 알림 때문에 데몬이 멈추지 않게.
+    **id 가 없는 줄은 들이지 않는다** — 보내는 쪽이 id 로 그 한 건만 고치므로, id 가 없으면
+    보낸 뒤에도 목록에 남아 30초마다 영구히 다시 보낸다(리뷰 A)."""
+    try:
+        d = json.loads(reminders_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    rows = [r for r in d if isinstance(r, dict) and r.get("id") and r.get("ref")
+            and r.get("at") and r.get("text")] if isinstance(d, list) else []
+    seen: set[str] = set()                      # 손으로 고쳐 id 가 겹치면 _update_one 이 둘 다 건드린다
+    rows = [r for r in rows if not (str(r["id"]) in seen or seen.add(str(r["id"])))]
+    rows.sort(key=lambda r: str(r.get("at")))
+    return rows
+
+
+def save_reminders(rows: list[dict[str, Any]]) -> None:
+    _write_json(reminders_path(), rows)
+
+
+def parse_when(when: str) -> "datetime.datetime":
+    """'2026-10-27T09:30' 또는 '2026-10-27 09:30' 만 받는다 — 상대적인 말('내일')은 부르는 쪽이 날짜로 바꿔 넘긴다."""
+    m = _WHEN_RE.match(str(when).strip())
+    if not m:
+        raise SessionError("시각은 '2026-10-27 09:30' 처럼 날짜와 시:분으로 줘")
+    y, mo, d, h, mi = (int(x) for x in m.groups())
+    try:
+        return datetime.datetime(y, mo, d, h, mi)
+    except ValueError:
+        raise SessionError("없는 날짜·시각이야") from None
+
+
+def _remind_at(rec: dict[str, Any], args: dict[str, Any]) -> str:
+    """한 번만 울리는 알림을 예약한다. 그 시각에 마리나가 이 방에 글을 넣고, 세션이 상대에게 알린다."""
+    ref = f"{rec.get('project')}/{rec.get('task')}"
+    text = " ".join(str(args.get("text") or "").split())
+    if not text:
+        raise SessionError("알릴 내용(text)이 필요해")
+    if len(text) > 500:
+        raise SessionError("알릴 내용은 500자까지야")
+    at = parse_when(str(args.get("when") or ""))
+    now = datetime.datetime.now()
+    if at <= now:
+        raise SessionError(f"지난 시각이야(지금 {now:%Y-%m-%d %H:%M}) — 앞으로의 시각을 줘")
+    if (at - now).total_seconds() > REMIND_MAX_AHEAD_S:
+        raise SessionError("1년 뒤까지만 예약할 수 있어 — 연도를 잘못 쓴 게 아닌지 봐")
+    rid = uuid.uuid4().hex[:6]
+    with reminders_lock():
+        rows = load_reminders()
+        if len([r for r in rows if r.get("ref") == ref]) >= REMINDERS_MAX:
+            raise SessionError(f"이 방 예약이 {REMINDERS_MAX}개 꽉 찼어 — 필요 없는 걸 먼저 지워(remind_cancel)")
+        rows.append({"id": rid, "ref": ref, "channelId": str(rec.get("channelId") or ""),
+                     "at": at.strftime("%Y-%m-%dT%H:%M"), "text": text, "madeAt": time.time()})
+        save_reminders(rows)
+    return (f"예약했어: {at:%m월 %d일 %H:%M} — \"{text}\" (번호 {rid})\n"
+            "그 시각에 마리나가 이 방에 넣어 줄 테니, 그때 상대에게 알려 주면 돼. 지우려면 remind_cancel 에 이 번호를.")
+
+
+def _remind_list(rec: dict[str, Any], args: dict[str, Any]) -> str:
+    ref = f"{rec.get('project')}/{rec.get('task')}"
+    mine = [r for r in load_reminders() if r.get("ref") == ref]
+    if not mine:
+        return "예약해 둔 알림이 없어"
+    return "\n".join(f"- {r['at'].replace('T', ' ')} · {r['text']} (번호 {r.get('id') or '?'})" for r in mine)
+
+
+def _remind_cancel(rec: dict[str, Any], args: dict[str, Any]) -> str:
+    ref, rid = f"{rec.get('project')}/{rec.get('task')}", str(args.get("id") or "").strip()
+    if not rid:
+        raise SessionError("지울 예약 번호(id)가 필요해 — remind_list 로 확인해")
+    with reminders_lock():
+        rows = load_reminders()
+        gone = [r for r in rows if r.get("ref") == ref and str(r.get("id")) == rid]
+        if not gone:
+            raise SessionError(f"이 방에 번호 {rid} 예약이 없어")
+        save_reminders([r for r in rows if not (r.get("ref") == ref and str(r.get("id")) == rid)])
+    return f"지웠어: {gone[0]['at'].replace('T', ' ')} · {gone[0]['text']}"
 
 
 TOPIC_ARCHIVE_MINS = 10080      # 주제 스레드는 7일 열어 둔다(진행 스레드의 60분과 다르다 — 사람이 이어서 말하는 곳)
@@ -4190,6 +4321,14 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         if not rec:
             raise SessionError("이 세션의 기록을 찾지 못했어")
         return _take_attachment(rec, args)
+    if name in ("remind_at", "remind_list", "remind_cancel"):
+        sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+        rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
+        if not rec or not rec.get("channelId"):
+            raise SessionError("이 세션의 기록을 찾지 못했어")
+        if rec.get("kind") != "chat":
+            raise SessionError("알림 예약은 대화방 전용이야")
+        return {"remind_at": _remind_at, "remind_list": _remind_list, "remind_cancel": _remind_cancel}[name](rec, args)
     if name == "open_thread":
         sdir = os.environ.get("DISCORD_STATE_DIR") or ""
         rec = next((s for s in load_sessions() if sdir and s.get("stateDir") == sdir), None)
@@ -4275,9 +4414,11 @@ def mcp_lobby(stdin: Any = None, stdout: Any = None) -> None:
 
 
 def chat_tools_for(rec: "dict[str, Any] | None") -> list[dict[str, Any]]:
-    """mcp-chat 의 도구 목록 — take_attachment·make_image·make_pdf 는 채팅방에만(개발 세션은 Bash 가 있다)."""
+    """mcp-chat 의 도구 목록 — 대화방 전용인 것들은 개발 세션에 보이지 않는다(개발 세션은 Bash 가 있다).
+    보여 주면 개발 세션이 부르다 권한 창에서 멈추고, 승인해도 chat_tool 이 거부한다(리뷰 I5)."""
     chat = bool(rec) and (rec or {}).get("kind") == "chat"
-    tools = [t for t in _CHAT_TOOLS_MCP if chat or t["name"] not in ("take_attachment", "make_image", "make_pdf")]
+    room_only = ("take_attachment", "make_image", "make_pdf", "remind_at", "remind_list", "remind_cancel")
+    tools = [t for t in _CHAT_TOOLS_MCP if chat or t["name"] not in room_only]
     if is_codex(rec):          # 코덱스 방엔 공식 Discord 플러그인이 없다 — 답·반응·고치기·이력·첨부 받기를 이 서버가 맡는다
         import marina_codex
         tools += marina_codex.DISCORD_TOOLS
@@ -4966,6 +5107,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("brief-uninstall", help="예약 브리핑 LaunchAgent 해제")
     sub.add_parser("brief-status", help="예약 브리핑 설정·등록 상태")
     sub.add_parser("brief-run", help="(launchd 가 부른다) 오늘 몫을 보낸다 — 평일·하루 한 번")
+    sub.add_parser("remind-run", help="(데몬이 부른다) 때가 된 알림 예약을 방에 넣는다")
     p = sub.add_parser("idle-check", help="방마다 유휴 내림 대상인지·아니면 왜(읽기만, 아무것도 안 내린다)")
     p.add_argument("--hours", type=float, default=None)
     p = sub.add_parser("view-setup", help="결과물 보기 서버를 Tailscale Funnel 로 공개하고 publicBase 를 저장")
@@ -5206,6 +5348,10 @@ def main(argv: list[str] | None = None) -> int:
                     "queued": "지금 바빠서 대기열에 넣었어(쉬는 순간·다음 도구 호출 뒤에 읽어)",
                     "typed": "입력창에 쳤지만 들어갔는지 확인하지 못했어(글이 입력창에 남아 있을 수 있어)"}[how]
             print(f"✓ {s['project']}/{s['task']} 에 글을 {what}")
+        elif a.cmd == "remind-run":
+            import marina_discord_brief as mbr
+            os.environ["PATH"] = daemon_path() + os.pathsep + os.environ.get("PATH", "")   # say 분기와 같게
+            print(mbr.run_reminders())
         elif a.cmd in ("brief-install", "brief-uninstall", "brief-status", "brief-run"):
             import marina_discord_brief as mbr
             if a.cmd == "brief-install":
