@@ -3915,7 +3915,9 @@ def lobby_tool(name: str, args: dict[str, Any]) -> str:
 _CHAT_TOOLS_MCP = [
     {"name": "share_file",
      "description": "만든 결과물을 Discord 로 보낼 준비를 한다. HTML·md 이면 미리보기 이미지를 만들고, #자료실 에도 모아 올린다. "
-                    "돌려받은 파일 경로들을 reply 의 files 로 첨부하고, 열어보기 주소가 있으면 reply 본문에 넣어라.",
+                    "결과물을 만들면 **시키지 않아도** 하나씩 이걸로 넘기고, 돌려받은 파일을 **전부** reply 의 files 로 "
+                    "첨부하고 열어보기 주소를 reply 본문에 넣어라 — 파일 이름만 적어 주는 것은 안 보낸 것이다"
+                    "(상대는 이 컴퓨터의 폴더를 볼 수 없다).",
      "inputSchema": {"type": "object",
                      "properties": {"path": {"type": "string", "description": "이 폴더 안 파일 경로(상대·절대)"},
                                     "title": {"type": "string", "description": "결과물 제목(자료실 표시용)"}},
