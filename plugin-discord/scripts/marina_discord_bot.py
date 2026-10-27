@@ -1617,6 +1617,78 @@ def _pane_ask_one(rec: dict[str, Any], names: "set[str] | None", now: float) -> 
     seen["done"] = True
 
 
+CODEX_ERR_MAX_AGE = 6 * 3600     # 이보다 오래된 오류는 알리지 않는다(배포 직후 지난 기록을 쏟지 않게)
+CODEX_ERR_FILE = "codex-turn-error.json"
+_CODEX_ERR_MTIME: dict[str, float] = {}
+
+
+def codex_error_tick(now: "float | None" = None) -> None:
+    """(형 2026-10-28) 코덱스 주간 한도가 바닥나 방들이 형 메시지마다 429 로 튕겼는데 Discord 엔 아무것도 안 갔다.
+    코덱스 턴이 오류로 끝나면 그 턴을 연 메시지에 답을 단다 — 한도면 사용률·리셋 시각. 턴마다 한 번."""
+    now = time.time() if now is None else now
+    for rec in ms.load_sessions():
+        if not ms.is_codex(rec) or not rec.get("channelId") or not rec.get("stateDir"):
+            continue
+        try:
+            _codex_error_one(rec, now)
+        except Exception as exc:
+            _log(f"codex_error {rec.get('tmux')}: {exc!r}")
+
+
+def _codex_error_one(rec: dict[str, Any], now: float) -> None:
+    import marina_codex
+    ro = _session_transcript(rec)
+    if not ro:
+        return
+    try:
+        mt = ro.stat().st_mtime
+    except OSError:
+        return
+    if _CODEX_ERR_MTIME.get(str(ro)) == mt:            # 기록이 안 바뀌었으면 다시 안 읽는다
+        return
+    err = marina_codex.last_turn_error(ro)
+    _CODEX_ERR_MTIME[str(ro)] = mt
+    sd, ch = Path(str(rec["stateDir"])), str(rec["channelId"])
+    if not err or now - err["at"] > CODEX_ERR_MAX_AGE:
+        return
+    key = err["turn"] or f"{ro}:{err['at']}"           # fork 해도 turn_id 는 그대로(리뷰 I1)
+    try:
+        if json.loads((sd / CODEX_ERR_FILE).read_text()).get("key") == key:
+            return
+    except (OSError, ValueError, AttributeError):
+        pass
+    if err["limit"]:
+        text = "⚠️ **코덱스 한도 초과로 답을 못 했어(429)**"
+        try:
+            wins = marina_codex.rate_windows(ms.load_sessions(), str(rec.get("codexAccount") or marina_codex.codex_cfg(ms.load_config())["account"]))
+        except Exception:
+            wins = []
+        parts = []
+        for w in wins:
+            s = f"{w['label']} {round(float(w['usedPercent']))}%"
+            if isinstance(w.get("resetsAt"), (int, float)):
+                t = time.localtime(w["resetsAt"])
+                s += f" · 리셋 {t.tm_mon}/{t.tm_mday}({'월화수목금토일'[t.tm_wday]}) {t.tm_hour:02d}:{t.tm_min:02d}"
+            parts.append(s)
+        if parts:
+            text += " — " + ", ".join(parts)
+        text += "\n풀릴 때까지 이 방은 답을 못 해. 급하면 다른 계정으로 바꾸거나 클로드 방에서 이어 가."
+    else:
+        text = f"⚠️ **코덱스가 오류로 답을 못 했어** — `{_clean(err['error'])[:300].replace('`', chr(39))}`\n다시 보내면 새로 해 봐."
+    body: dict[str, Any] = {"content": text, "allowed_mentions": {"parse": []}}
+    if err["mid"] and err["chat"] == ch:
+        body["message_reference"] = {"message_id": err["mid"], "fail_if_not_exists": False}
+    try:
+        _dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", body)
+    except ms.DiscordError as exc:                     # 채널이 없거나 권한이 없으면 다시 해도 같다 — 이 턴은 포기(리뷰 I3)
+        _log(f"codex_error {rec.get('tmux')}: 알림 거절 {exc!r}")
+    except ms.SessionError:
+        _CODEX_ERR_MTIME.pop(str(ro), None)            # 연결 실패는 다음 판에 다시
+        return
+    ms._write_json(sd / CODEX_ERR_FILE, {"key": key, "at": now})
+    _log(f"codex_error {rec.get('tmux')}: 오류 턴 알림 ({err['error'][:60]})")
+
+
 def _pane_answer(rec: dict[str, Any], sd: Path, token: str, d: dict[str, Any], allow: bool) -> str:
     f = sd / f"perm-{token}.json"
     ch, name = str(rec.get("channelId")), str(rec.get("tmux") or "")
@@ -3305,6 +3377,10 @@ class Loop:
             pane_ask_tick(now=now)
         except Exception as exc:
             _log(f"pane_ask failed: {exc!r}")
+        try:
+            codex_error_tick(now)
+        except Exception as exc:
+            _log(f"codex_error failed: {exc!r}")
         try:
             role_events_tick()
         except Exception as exc:

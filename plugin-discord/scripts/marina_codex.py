@@ -341,6 +341,39 @@ def _latest_rate_limits(rollout: Path) -> "tuple[float, dict[str, Any]] | None":
     return None
 
 
+TURN_ERR_TAIL = 256 * 1024
+_LIMIT_STATUS = re.compile(r"\bstatus:? 429\b")
+
+
+def last_turn_error(rollout: Path) -> "dict[str, Any] | None":
+    """마지막 턴이 오류로 끝났으면 {turn, error, at, chat, mid} — 그 턴을 연 Discord 메시지까지. 다음 턴이 돌고 있거나 정상 끝이면 None."""
+    objs = _objs(_tail_lines(rollout, TURN_ERR_TAIL))
+    for i in range(len(objs) - 1, -1, -1):
+        o = objs[i]
+        p = o.get("payload") if isinstance(o.get("payload"), dict) else {}
+        if o.get("type") != "event_msg" or p.get("type") not in ("task_started", "task_complete"):
+            continue
+        err = p.get("error") if isinstance(p.get("error"), dict) else None
+        if p.get("type") == "task_started" or not err:
+            return None
+        done = p.get("completed_at")                    # fork 사본은 바깥 timestamp 가 복사 시각이라 이걸 먼저(리뷰 I1)
+        msg = str(err.get("message") or "알 수 없는 오류")
+        out = {"turn": str(p.get("turn_id") or ""), "error": msg,
+               "at": float(done) if isinstance(done, (int, float)) and not isinstance(done, bool) else _epoch(o.get("timestamp")),
+               "limit": "429" in json.dumps(err.get("codex_error_info") or {}) or bool(_LIMIT_STATUS.search(msg)),
+               "chat": "", "mid": ""}
+        for u in reversed(objs[:i]):                    # 이 턴을 연 메시지 — 앞 턴 시작을 넘어가지 않는다
+            q = u.get("payload") if isinstance(u.get("payload"), dict) else {}
+            if u.get("type") == "event_msg" and q.get("type") in ("task_complete", "task_started", "turn_aborted"):
+                break
+            m = ms._CHANNEL_TAG.search(str(q.get("message") or "")) if q.get("type") == "user_message" else None
+            if m:
+                out["chat"], out["mid"] = m.group(1), m.group(2)
+                break
+        return out
+    return None
+
+
 def rate_windows(recs: "list[dict[str, Any]]", account: str, now: "float | None" = None) -> list[dict[str, Any]]:
     """이 계정으로 뜬 코덱스 방들의 rollout 에서 가장 최근 rate_limits → 창 목록(primary·secondary 중 있는 것).
     방 기록에 없는 rollout(데스크톱 다른 계정)은 더 최근이어도 읽지 않는다. 60초 캐시, resets_at 이 지났으면 0%."""
