@@ -361,15 +361,22 @@ def last_turn_error(rollout: Path) -> "dict[str, Any] | None":
         out = {"turn": str(p.get("turn_id") or ""), "error": msg,
                "at": float(done) if isinstance(done, (int, float)) and not isinstance(done, bool) else _epoch(o.get("timestamp")),
                "limit": "429" in json.dumps(err.get("codex_error_info") or {}) or bool(_LIMIT_STATUS.search(msg)),
-               "chat": "", "mid": ""}
-        for u in reversed(objs[:i]):                    # 이 턴을 연 메시지 — 앞 턴 시작을 넘어가지 않는다
+               "chat": "", "mid": "", "rooms": [], "texts": {}}
+        import marina_discord_wake as mw
+        for u in reversed(objs[:i]):                    # 이 턴에 들어온 메시지들 — 앞 턴 시작을 넘어가지 않는다
             q = u.get("payload") if isinstance(u.get("payload"), dict) else {}
             if u.get("type") == "event_msg" and q.get("type") in ("task_complete", "task_started", "turn_aborted"):
                 break
-            m = ms._CHANNEL_TAG.search(str(q.get("message") or "")) if q.get("type") == "user_message" else None
-            if m:
+            if u.get("type") != "event_msg" or q.get("type") != "user_message":
+                continue
+            text = str(q.get("message") or "")
+            m = ms._CHANNEL_TAG.search(text)
+            if m and not out["mid"]:
                 out["chat"], out["mid"] = m.group(1), m.group(2)
-                break
+            r = mw.ROOM_FROM.match(text)                # 방이 room-send 로 보낸 글 — 튕기면 보낸 방에 알린다
+            if r and r.group(1) != mw.NOTICE_SENDER and r.group(1) not in out["rooms"]:
+                out["rooms"].insert(0, r.group(1))
+                out["texts"][r.group(1)] = text[r.end():].strip()
         return out
     return None
 

@@ -39,8 +39,35 @@ ROOM_SEND_RULE = (
     "- 다른 개발 방에 물을 게 있거나 알릴 게 있으면 Bash 로 `marina session room-send <방> \"…\"` 를 쓴다(방 목록은 `marina session ls`). "
     "알림은 짧게(한 줄) 보내고, 길고 오래 남을 내용(계약·결정·조사 결과)은 레포 공통 파일(docs/handoff/….md)에 쓰고 그 경로만 알린다. "
     "'[마리나 · <방> 방에서] …' 로 온 글은 그 방이 보낸 것이다 — 답은 글 끝에 적힌 room-send 로 그 방에 한다(사람이 직접 한 말이 아니다). "
-    "받은 글이 질문·요청일 때만 답하고, 단순 알림·확인·감사에는 답하지 않는다(서로 답만 주고받는 루프 방지 — 같은 방 쌍은 10분에 6번까지만 보낼 수 있다)."
+    "받은 글이 질문·요청일 때만 답하고, 단순 알림·확인·감사에는 답하지 않는다(서로 답만 주고받는 루프 방지 — 같은 방 쌍은 10분에 6번까지만 보낼 수 있다). "
+    "단 '[마리나 · 메인 <방> 방의 지시] …' 는 형이 그 메인 방에 지휘를 맡긴 것이다 — 짧은 '좋아·진행해'도 일 지시로 받아 바로 하고, 끝나면 그 방에 보고한다."
 )
+
+MAIN_ROOM_FILE = "main-room"    # 이 방이 프로젝트의 메인(형과 얘기하며 다른 방을 지휘) — 상태 폴더의 표식 파일
+
+
+def main_room(project: str) -> "str | None":
+    """프로젝트의 메인 방 ref(표식이 있는 방 중 하나), 없으면 None."""
+    for r in load_sessions():
+        if str(r.get("project") or "") == project and r.get("stateDir") and (Path(str(r["stateDir"])) / MAIN_ROOM_FILE).exists():
+            return f"{r.get('project')}/{r.get('task')}"
+    return None
+
+
+def set_main_room(ref: str, on: bool = True) -> None:
+    """메인 방 지정 — 같은 프로젝트의 다른 방 표식은 지운다(메인은 하나). on=False 면 이 방 표식만 끈다."""
+    rec = find_session(ref)
+    for r in load_sessions():
+        if r.get("project") != rec.get("project") or not r.get("stateDir"):
+            continue
+        f = Path(str(r["stateDir"])) / MAIN_ROOM_FILE
+        mine = r.get("tmux") == rec.get("tmux")
+        if on and mine:
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(time.strftime("%Y-%m-%dT%H:%M:%S") + "\n", encoding="utf-8")
+        elif on or mine:
+            f.unlink(missing_ok=True)
+
 
 CHANNEL_RULES = (
     "이 세션은 Discord 채널에 연결돼 있다. 상대는 Discord 만 보고 이 터미널은 보지 않는다.\n"
@@ -5134,6 +5161,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("say", help="채팅방에 사람이 말한 것처럼 글을 넣는다(꺼진 방은 띄우면서 첫 지시로)")
     p.add_argument("ref")
     p.add_argument("text", nargs="+")
+    p = sub.add_parser("main", help="프로젝트의 메인 방(형과 얘기하며 다른 방을 지휘)을 정한다 — 그 방의 room-send 는 '메인 지시'로 간다")
+    p.add_argument("ref")
+    p.add_argument("--off", action="store_true", help="메인 지정을 끈다")
     p = sub.add_parser("room-send", help="다른 개발 방(클로드·코덱스)에 말을 건다 — 알림만 입력창으로, 긴 내용은 레포 공통 파일(docs/handoff/…md)")
     p.add_argument("ref")
     p.add_argument("text", nargs="+")
@@ -5373,6 +5403,12 @@ def main(argv: list[str] | None = None) -> int:
             what = {"started": "첫 지시로 줘서 방을 띄웠어", "delivered": "입력창에 넣었어",
                     "typed": "입력창에 쳤지만 들어갔는지 확인하지 못했어(글이 입력창에 남아 있을 수 있어)"}[how]
             print(f"✓ {s['project']}/{s['task']} 에 글을 {what}")
+        elif a.cmd == "main":
+            if os.environ.get("DISCORD_STATE_DIR"):        # 방이 스스로 메인이 되면 '형이 맡긴 지시' 권위를 아무나 붙인다(리뷰 I1)
+                raise SessionError("메인 방은 사람이 정한다 — 방 안에서는 못 바꿔. 형에게 터미널에서 `marina session main <방>` 을 부탁해")
+            set_main_room(a.ref, on=not a.off)
+            s = find_session(a.ref)
+            print(f"✓ {s['project']} 메인 방: " + (f"{s['project']}/{s['task']}" if not a.off else "없음"))
         elif a.cmd == "room-send":
             import marina_discord_wake as mw
             os.environ["PATH"] = daemon_path() + ":" + os.environ.get("PATH", "")      # 띄우는 claude·codex·tmux·git 을 찾게(say 와 같다)

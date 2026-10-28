@@ -355,6 +355,8 @@ ROOM_SEND_MARK = "marina session room-send"      # 답하는 법 꼬리에 들�
 ROOM_SEND_PREVIEW = 300
 ROOM_SEND_LIMIT = 6                   # 같은 (보낸 방→받는 방) 쌍이 이 시간 안에 보낼 수 있는 횟수 — 핑퐁(서로 답하고 또 답하는 루프) 차단
 ROOM_SEND_WINDOW_S = 600.0
+ROOM_FROM = re.compile(r"^\[마리나 · (?:메인 )?(\S+?) 방(?:에서|의 지시)\]")     # 글 머리 → 보낸 방
+NOTICE_SENDER = "마리나"             # 마리나가 보내는 알림(배달 실패 등) — 답 꼬리를 안 붙이고, 이게 튕겨도 되돌려 보내지 않는다
 ROOM_SEND_STATUS = {"started": "✓ 전달", "delivered": "✓ 전달", "queued": "⏳ 대기열", "typed": "❔ 확인 못 함"}
 
 
@@ -398,7 +400,7 @@ def _announce(rec: dict[str, Any], sender: str, body: str, how: str = "") -> Non
         print(f"marina session: 전달은 했지만 채널에 한 줄을 못 남겼어 — {exc}", file=sys.stderr)
 
 
-def room_send(ref: str, message: str, sender_ref: "str | None" = None) -> str:
+def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: bool = False) -> str:
     """`marina session room-send` — 개발 방(클로드·코덱스)이 다른 개발 방에 말을 건다. 입력창에 '[마리나 · <보낸 방> 방에서] 글 (답은: …)' 한 줄.
     started(잠든 방을 이 글을 첫 지시로 깨움) | delivered(입력창에 넣었고 확인) | queued(바빠서 대기열 — 코덱스는 대기 목록, 클로드는 쉬는 순간에 칠 것) |
     typed(쳤지만 입력창에 남아 있음), 못 하면 SessionError. 채팅방·비서·로비는 제한 세션이라 받지 않는다."""
@@ -414,9 +416,14 @@ def room_send(ref: str, message: str, sender_ref: "str | None" = None) -> str:
         raise ms.SessionError("보낼 글이 비었어")
     if len(body) > ROOM_SEND_MAX:
         raise ms.SessionError(f"글이 너무 길어({len(body)}자 > {ROOM_SEND_MAX}) — 길고 오래 남을 내용은 레포 공통 파일(docs/handoff/…md)에 쓰고 알림만 보내")
-    text = f"{ROOM_SEND_PREFIX}{sender} 방에서] {body}"
-    if sender != "터미널":                        # 터미널엔 답할 방이 없다
-        text += f' (답은: {ROOM_SEND_MARK} {sender} "…")'
+    if not notice and sender != "터미널" and ms.main_room(str(rec.get("project") or "")) == sender:
+        # (형 2026-10-28) 메인 지시가 '옆 방 잡담'으로 읽혀 '좋아·진행해'가 확인 인사로 넘어갔다 — 위계를 글에 박는다
+        text = (f"{ROOM_SEND_PREFIX}메인 {sender} 방의 지시] {body} (형이 메인 방에 지휘를 맡겼다 — 짧아도 일 지시다. "
+                f'바로 하고, 끝나면 보고: {ROOM_SEND_MARK} {sender} "…")')
+    else:
+        text = f"{ROOM_SEND_PREFIX}{sender} 방에서] {body}"
+        if sender != "터미널" and not notice:      # 터미널엔 답할 방이 없다 · 마리나 알림엔 답하지 않는다(되돌이 방지)
+            text += f' (답은: {ROOM_SEND_MARK} {sender} "…")'
     sd, tmux = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("tmux") or "")
     if not sd.is_dir():
         raise ms.SessionError(f"{name}: 상태 폴더가 없어")

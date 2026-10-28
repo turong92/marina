@@ -14,6 +14,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -1687,6 +1688,47 @@ def _codex_error_one(rec: dict[str, Any], now: float) -> None:
         return
     ms._write_json(sd / CODEX_ERR_FILE, {"key": key, "at": now})
     _log(f"codex_error {rec.get('tmux')}: 오류 턴 알림 ({err['error'][:60]})")
+    me = f"{rec.get('project')}/{rec.get('task')}"
+    why = "코덱스 한도 초과(429)" if err["limit"] else f"오류({_clean(err['error'])[:80]})"
+    for room in err.get("rooms") or []:             # (형 2026-10-28) 보낸 방은 '전달했어'만 알고 기다렸다 — 못 받았다고 돌려준다
+        _room_bounce(room, me, why, err["texts"].get(room, ""))
+
+
+_BOUNCE_LOCK = threading.Lock()     # 같은 판의 반송들이 방 잠금에서 부딪혀 사라지지 않게 차례로(리뷰 I3)
+
+
+def _room_bounce(sender: str, receiver: str, why: str, text: str, wait: bool = False, lost: bool = False) -> None:
+    """room-send 로 보낸 글이 받는 방에서 처리되지 못했을 때 보낸 방에 한 줄 — 마리나 이름으로, 답 꼬리 없이.
+    lost=True 는 입력창에 끝내 못 넣은 것(못 받음), 아니면 받은 턴이 오류로 끊긴 것(어디까지 했는지 모름, 리뷰 I4).
+    보낸 방이 잠들어 있으면 깨우지 않고 그 방 채널에만 남긴다(리뷰 I2). 클로드 방은 쉬길 기다릴 수 있어 데몬 판을 막지 않게 따로 돈다.
+    곧 끝나는 프로세스(type)에선 wait=True — 스레드가 같이 죽는다."""
+    import marina_discord_wake as mw
+    if sender in (mw.NOTICE_SENDER, "터미널", receiver):
+        return
+    for cut in (" (답은:", " (형이 메인", " (끝나면 보고:"):
+        text = text.split(cut)[0]
+    shown = " ".join(text.split())
+    shown = shown[:150] + ("…" if len(shown) > 150 else "")
+    if lost:
+        msg = f"⚠️ {receiver} 방이 네가 보낸 글을 못 받았어 — {why}. 보낸 글: {shown} · 필요하면 다시 보내거나 형에게 알려."
+    else:
+        msg = (f"⚠️ {receiver} 방이 네 글을 받았지만 처리 중 {why}로 턴이 끊겼어 — 어디까지 했는지는 그 방 채널에서 확인해. "
+               f"보낸 글: {shown}")
+
+    def go() -> None:
+        with _BOUNCE_LOCK:
+            try:
+                rec = ms.find_session(sender)
+                if not ms.tmux_alive(str(rec.get("tmux") or "")):
+                    _dc(ms.load_config()).send_message(str(rec["channelId"]), f"📨 마리나: {msg}")
+                    return
+                mw.room_send(sender, msg, sender_ref=mw.NOTICE_SENDER, notice=True)
+            except Exception as exc:
+                _log(f"room bounce {sender}: {exc!r}")
+    if wait:
+        go()
+        return
+    threading.Thread(target=go, name=f"room-bounce-{sender}", daemon=True).start()
 
 
 def _pane_answer(rec: dict[str, Any], sd: Path, token: str, d: dict[str, Any], allow: bool) -> str:
@@ -2390,6 +2432,12 @@ def _room_send_lost(channel: str, text: str) -> None:
         _dc(ms.load_config()).send_message(channel, f"⚠️ 다른 방이 보낸 글을 끝내 입력창에 못 넣었어(방이 꺼졌거나 오래 바빴어): {shown}")
     except ms.SessionError as exc:
         _log(f"room-send 유실 알림 실패 {channel}: {exc}")
+    import marina_discord_wake as mw
+    m = mw.ROOM_FROM.match(text)
+    rec = next((r for r in ms.load_sessions() if str(r.get("channelId")) == str(channel)), None)
+    if m and rec:                                   # 보낸 방에도 — 못 받은 줄 모르고 기다리지 않게
+        _room_bounce(m.group(1), f"{rec.get('project')}/{rec.get('task')}", "끝내 입력창에 못 넣었어(꺼졌거나 오래 바빴어)",
+                     text[m.end():], wait=True, lost=True)
 
 
 def typeable(text: str, channel: str = "") -> bool:
