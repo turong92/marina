@@ -84,6 +84,12 @@ def mcp_args(sdir: Path) -> list[str]:
     return ["-c", f"mcp_servers.marina={{command={_q(entry[0])},args=[{args}],env={{{env}}}}}"]
 
 
+def shell_env_args(sdir: Path) -> list[str]:
+    """셸 명령(room-send 등)이 방을 알게 — shell_environment_policy(inherit="core")가 DISCORD_STATE_DIR 를 걸러
+    보낸 방이 '터미널'로 적혔다(2026-10-28). 점 경로로 넣어 형 config 의 set 표는 그대로 둔다."""
+    return [x for k, v in _mcp_env(sdir).items() for x in ("-c", f"shell_environment_policy.set.{k}={_q(v)}")]
+
+
 def rules_args() -> list[str]:
     return ["-c", f"developer_instructions={_q(CODEX_RULES)}"]
 
@@ -158,7 +164,7 @@ def codex_argv(rec: dict[str, Any], resume: bool = False, first: str = "") -> li
         argv += ["resume", sid]
     argv += ["-C", root, "-a", "never", "-c", "check_for_update_on_startup=false",
              *trust_args(root), "--dangerously-bypass-hook-trust",
-             *mcp_args(sdir), *rules_args(), *hook_args(sdir)]
+             *mcp_args(sdir), *shell_env_args(sdir), *rules_args(), *hook_args(sdir)]
     if first:
         argv.append(first)
     return argv
