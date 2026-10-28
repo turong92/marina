@@ -2953,6 +2953,42 @@ def _archive_threads(s: dict[str, Any], dc: "Discord", keep: Any = "") -> None:
         _write_json(afile, sorted(archived | set(done))[-200:])
 
 
+def close_instruction(s: dict[str, Any], sd: Path, dc: "Discord", mid: str) -> None:
+    """한 지시를 끝낸다 — 그 지시에 단 진행 표시만 떼고 그 진행 스레드를 접는다. 턴 끝을 기다리지 않는다:
+    코덱스는 일하는 중 온 지시를 같은 턴에 받아(steer) 턴이 한 시간 넘게 이어져 스레드가 안 닫혔다(형 2026-10-28)."""
+    if not mid or not sd.is_dir():
+        return
+    ch = str(s.get("channelId") or "")
+    lockf = _wait_lock(sd / "activity.lock")
+    try:
+        st = _activity_state(sd)
+        chans = st.get("chans") or {}
+        for e in list(dict.fromkeys(list((st.get("marked") or {}).get(mid) or []) + list((st.get("ever") or {}).get(mid) or []))):
+            _unmark(dc, str(chans.get(mid) or ch), st, mid, e, ever=True)
+        for k in ("marked", "ever", "chans"):
+            (st.get(k) or {}).pop(mid, None)
+        _write_json(sd / "activity.json", st)
+    finally:
+        if lockf:
+            lockf.close()
+    try:
+        threads = json.loads((sd / "threads.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    afile = sd / "threads-archived.json"
+    try:
+        archived = set(json.loads(afile.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        archived = set()
+    if not (isinstance(threads, dict) and threads.get(mid)) or mid in archived:
+        return
+    try:
+        dc._req("PATCH", f"/channels/{threads[mid]}", {"archived": True})
+    except SessionError:
+        return
+    _write_json(afile, sorted(archived | {mid})[-200:])
+
+
 _TEST_CMD = re.compile(r"\b(pytest|run-affected|test-[\w-]+\.sh|npm (run )?test|gradlew\b.*\btest|jest|vitest|go test|cargo test)")
 
 

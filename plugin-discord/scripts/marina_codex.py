@@ -618,6 +618,10 @@ def _reply(rec: dict[str, Any], dc: "ms.Discord", token: str, args: dict[str, An
         raise ms.SessionError(f"reply 가 {len(chunks)}조각 중 {len(ids)}조각을 보낸 뒤 실패: {exc}")
     if reply_to:
         ms._write_json(sd / "replied.json", {"mid": reply_to, "at": time.time()})
+        try:                                   # 답한 지시는 그 자리에서 닫는다 — 코덱스 턴은 끝나지 않을 수 있다
+            ms.close_instruction(rec, sd, dc, reply_to)
+        except Exception:
+            pass
     return f"sent (id: {ids[0]})" if len(ids) == 1 else f"sent {len(ids)} parts (ids: {', '.join(ids)})"
 
 
