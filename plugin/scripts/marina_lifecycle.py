@@ -739,15 +739,26 @@ def _expose_cors_targets(xm_gateway: dict) -> dict:
     return {k: sorted(v) for k, v in out.items()}
 
 
+def _gateway_services(root, proj: dict) -> list:
+    return _compose_services(root, proj) if proj.get("kind", "compose") == "compose" else []
+
+
+def _root_source(root) -> str:
+    from marina_registry import root_source
+    return root_source(root)
+
+
 def _gateway_snapshot() -> list:
     """모든 워크트리 → {id, projectId, services:[{service,port,running,routes}]} (라이브 호스트포트). 게이트웨이 config 입력.
     routes = backing.json top-level gatewayRoutes[<service>](경로 prefix 리스트) — 브라우저 상대주소 be 호출을 대표 도메인에서 path 라우팅(limit#1)."""
     out = []
     for root in discover_roots():
         try:
-            p = session_payload(root)
+            # (2026-10-28) 통째 session_payload 는 메모리·git status --untracked-files=all·로그까지 읽어 한 번에 git 97회·38초 —
+            # 게이트웨이엔 서비스·포트만 필요하다
             proj = project_for(root) or {}
-            pid = proj.get("id") or p.get("source") or ""
+            p = {"id": session_id(root), "services": _gateway_services(root, proj)}
+            pid = proj.get("id") or _root_source(root) or ""
         except Exception:
             continue
         groutes = {}; gprimary = ""; xm_gw = {}             # 선언형 — 감지 안 함(SPEC 원칙)
