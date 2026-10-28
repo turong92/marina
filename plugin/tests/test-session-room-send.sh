@@ -42,8 +42,16 @@ def posts(ch):
         if o["m"] == "POST" and o["p"] == f"/channels/{ch}/messages":
             out.append((o.get("b") or {}).get("content", ""))
     return out
+def thread_of(ch):
+    """(형 2026-10-28) 방끼리 오간 말(📨)은 형 채널이 아니라 그 방 채널의 '📨 방끼리' 스레드에 남는다."""
+    r = next((x for x in ms.load_sessions() if str(x.get("channelId")) == str(ch)), None)
+    t = [k for k, v in ms.room_threads(r["stateDir"]).items() if v.get("name") == mw.ROOM_SEND_THREAD] if r else []
+    return t[-1] if t else None
 def has_line(ch, head, tail):
-    return any(p.startswith(head) and p.endswith(tail) for p in posts(ch))
+    th = thread_of(ch)
+    if any(p.startswith("📨") for p in posts(ch)):
+        fails.append(f"📨 줄이 형 채널에 남음: {ch}")
+    return bool(th) and any(p.startswith(head) and p.endswith(tail) for p in posts(th))
 def rollout(): return next(Path(os.environ["MARINA_CODEX_SESSIONS"]).glob("*/*/*/rollout-*.jsonl"))
 def user_msgs():
     out = []
@@ -113,7 +121,7 @@ import os; exec(open(os.environ["TMPROOT"] + "/prelude.py").read())
 m = [x for x in user_msgs() if "터미널에서 보낸 글" in x]
 check(len(m) == 1 and m[0].startswith("[마리나 · 터미널 방에서] 터미널에서 보낸 글"), f"터미널 머리말: {m}")
 check(m and "답은" not in m[0], f"터미널엔 답하는 법 없음: {m}")
-check(any(p.startswith("📨 터미널 방에서: ") for p in posts(rec("proj/feat/cx")["channelId"])), "채널 한 줄(터미널)")
+check(any(p.startswith("📨 터미널 방에서: ") for p in posts(thread_of(rec("proj/feat/cx")["channelId"]) or "x")), "방끼리 스레드 한 줄(터미널)")
 finish()
 PY
 

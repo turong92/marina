@@ -1719,8 +1719,8 @@ def _room_bounce(sender: str, receiver: str, why: str, text: str, wait: bool = F
         with _BOUNCE_LOCK:
             try:
                 rec = ms.find_session(sender)
-                if not ms.tmux_alive(str(rec.get("tmux") or "")):
-                    _dc(ms.load_config()).send_message(str(rec["channelId"]), f"📨 마리나: {msg}")
+                if not ms.tmux_alive(str(rec.get("tmux") or "")):      # 깨우지 않고 그 방의 방끼리 스레드에만
+                    mw.post_room_line(rec, _dc(ms.load_config()), f"📨 마리나: {msg}")
                     return
                 mw.room_send(sender, msg, sender_ref=mw.NOTICE_SENDER, notice=True)
             except Exception as exc:

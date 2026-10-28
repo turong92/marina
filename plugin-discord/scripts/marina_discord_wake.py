@@ -388,16 +388,55 @@ def _rate_check(sd: Path, sender: str, record: bool) -> None:
     ms._write_json(path, data)
 
 
+ROOM_SEND_THREAD = "📨 방끼리"        # 방끼리 오간 말은 형과 얘기하는 채널이 아니라 이 스레드에(형 2026-10-28 — 기술 보고가 대화를 덮었다)
+
+
+def room_thread(rec: dict[str, Any], dc: Any) -> str:
+    """받는 방 채널 밑 '📨 방끼리' 스레드 id — 없으면 새로 연다. 못 열면 ""(채널에 쓴다).
+    봇은 스레드를 못 지우니 둘이 동시에 만들지 않게 방마다 잠근다(리뷰 I2)."""
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    if not sd.is_dir():
+        return ""                                    # 장부를 못 쓰면 부를 때마다 새로 만든다
+    lock = ms._try_lock(sd / "room-thread.lock", 10.0)
+    if lock is None:
+        return ""
+    try:
+        have = [t for t, v in ms.room_threads(str(sd)).items() if str(v.get("name") or "") == ROOM_SEND_THREAD]
+        if have:
+            return have[-1]
+        try:
+            tid = str(dc._req("POST", f"/channels/{rec['channelId']}/threads",
+                              {"name": ROOM_SEND_THREAD, "type": 11, "auto_archive_duration": 10080})["id"])
+        except (ms.SessionError, KeyError, TypeError):
+            return ""
+        ms.remember_room_thread(str(sd), tid, ROOM_SEND_THREAD)
+        return tid
+    finally:
+        lock.close()
+
+
+def post_room_line(rec: dict[str, Any], dc: Any, line: str) -> None:
+    """방의 '📨 방끼리' 스레드에 한 줄 — 사람이 스레드를 지웠으면(404) 장부에서 빼고 다시 열어 쓴다, 못 열면 채널에."""
+    tid = room_thread(rec, dc)
+    try:
+        dc.send_message(tid or str(rec["channelId"]), line)
+    except ms.DiscordError as exc:
+        if not tid or exc.code != 404:
+            raise
+        ms.forget_room_threads(str(rec.get("stateDir")), [tid], keep_named=False)
+        dc.send_message(room_thread(rec, dc) or str(rec["channelId"]), line)
+
+
 def _announce(rec: dict[str, Any], sender: str, body: str, how: str = "") -> None:
-    """대상 방 채널에 한 줄 — 형이 방끼리 오가는 말을 본다. 이미 전달한 뒤라 실패해도 전달은 취소하지 않고 stderr 로 알린다."""
+    """대상 방의 '📨 방끼리' 스레드에 한 줄 — 형은 궁금할 때 열어 본다. 이미 전달한 뒤라 실패해도 전달은 취소하지 않고 stderr 로 알린다."""
     shown = body[:ROOM_SEND_PREVIEW] + ("…" if len(body) > ROOM_SEND_PREVIEW else "")
     status = ROOM_SEND_STATUS.get(how)
+    line = f"📨 {sender} 방에서: {shown}" + (f"  {status}" if status else "")
     try:
         cfg = ms.load_config()
-        ms.Discord(ms.read_token_file(ms.token_file(cfg, str(rec.get("project") or "")))).send_message(
-            str(rec["channelId"]), f"📨 {sender} 방에서: {shown}" + (f"  {status}" if status else ""))
+        post_room_line(rec, ms.Discord(ms.read_token_file(ms.token_file(cfg, str(rec.get("project") or "")))), line)
     except ms.SessionError as exc:
-        print(f"marina session: 전달은 했지만 채널에 한 줄을 못 남겼어 — {exc}", file=sys.stderr)
+        print(f"marina session: 전달은 했지만 방끼리 스레드에 한 줄을 못 남겼어 — {exc}", file=sys.stderr)
 
 
 def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: bool = False) -> str:

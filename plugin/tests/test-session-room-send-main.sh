@@ -44,6 +44,10 @@ check(ms.main_room("proj") == "proj/feat/a", "다시 정하면 바뀐다(하나�
 ms.set_main_room("proj/feat/a", on=False)
 check(ms.main_room("proj") is None, "끄기")
 check("메인" in ms.ROOM_SEND_RULE, "방 규칙에도 메인 지시를 따르라는 말")
+# (형 2026-10-28) 줄글 보고가 읽히지 않는다 — 결론 한 줄·형이 정할 것·3~5줄, 세부는 빼거나 끝 한 줄
+import marina_codex as _mc
+for name, rules in (("클로드", ms.CHANNEL_RULES), ("코덱스", _mc.CODEX_RULES)):
+    check(ms.REPORT_RULE in rules and "결론" in ms.REPORT_RULE and "3~5줄" in ms.REPORT_RULE, f"{name} 방 규칙에 보고 형식")
 
 # ── ② 튕긴 room-send 를 보낸 방에 알림 ──
 ms.set_main_room("proj/feat/b")
@@ -96,11 +100,31 @@ for th in threading.enumerate():
 check(len(sent) == 2 and not overlap[0], f"차례로 둘 다: {sent} overlap={overlap[0]}")
 # (리뷰 I2) 보낸 방이 잠들어 있으면 알림 한 줄 때문에 깨우지 않는다 — 그 방 채널에 한 줄만
 sent.clear(); posted = []
-mb._dc = lambda cfg: type("D", (), {"send_message": lambda self, ch, t: posted.append((ch, t))})()
+mb._dc = lambda cfg: type("D", (), {"send_message": lambda self, ch, t: posted.append((ch, t)),
+                                    "_req": lambda self, m, p, b=None: {"id": "777"}})()
 ms.tmux_alive = lambda t: False
 mb._room_bounce("proj/feat/b", "proj/feat/c", "x", "글3", wait=True)
-check(not sent and posted and posted[0][0] == ms.find_session("proj/feat/b")["channelId"] and "글3" in posted[0][1], f"잠든 방은 채널에만: {sent} {posted}")
+thb = [k for k, v in ms.room_threads(ms.find_session("proj/feat/b")["stateDir"]).items() if v.get("name") == mw.ROOM_SEND_THREAD]
+check(not sent and posted and posted[0][0] in thb and "글3" in posted[0][1], f"잠든 방은 그 방의 방끼리 스레드에만: {sent} {posted} {thb}")
 ms.tmux_alive = lambda t: True
+# (리뷰 I1) 사람이 '📨 방끼리' 스레드를 지웠으면 잠든 방 알림도 다시 열어 남긴다(사라지지 않게)
+old_tid = [k for k, v in ms.room_threads(ms.find_session("proj/feat/b")["stateDir"]).items() if v.get("name") == mw.ROOM_SEND_THREAD][-1]
+class Gone404:
+    def __init__(self): self.sent = []
+    def _req(self, m, p, b=None): return {"id": "888"}
+    def send_message(self, ch, t):
+        if ch == old_tid: raise ms.DiscordError(404, "Unknown Channel")
+        self.sent.append((ch, t))
+g = Gone404(); mb._dc = lambda cfg: g
+ms.tmux_alive = lambda t: False
+mb._room_bounce("proj/feat/b", "proj/feat/c", "x", "글4", wait=True)
+check(g.sent and g.sent[0][0] == "888" and "글4" in g.sent[0][1], f"지운 스레드면 새로 열어 남김: {g.sent}")
+ms.tmux_alive = lambda t: True
+# (리뷰 I2) 상태 폴더가 없으면 스레드를 만들지 않는다(장부를 못 써 매번 새로 만들게 된다)
+made = []
+class D2:
+    def _req(self, m, p, b=None): made.append(p); return {"id": "999"}
+check(mw.room_thread({"stateDir": "/nonexistent/x", "channelId": "5"}, D2()) == "" and not made, f"상태 폴더 없으면 안 만든다: {made}")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY

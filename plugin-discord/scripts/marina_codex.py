@@ -41,6 +41,7 @@ CODEX_RULES = (
     "- 상대가 볼 결과물(스펙·보고서 md, HTML·목업, 스크린샷)을 만들면 mcp__marina__share_file 에 넘기고, "
     "돌려받은 미리보기 파일을 reply 로 첨부하며 열어보기 주소를 reply 본문에 넣는다.\n"
     "- 터미널에서 직접 받은 지시의 답은 터미널에 둬도 된다.\n"
+    + ms.REPORT_RULE
     + ms.ROOM_SEND_RULE
 )
 
