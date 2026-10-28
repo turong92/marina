@@ -59,10 +59,49 @@ def _gateway_every() -> float:
     return float(max(2, int(_env("GATEWAY_POLL", "5") or "5")))
 
 
-def _refresh_gateway() -> None:
-    from marina_lifecycle import boot_gateway, refresh_gateway
+GW_FULL_EVERY_S = 300.0     # 서명이 같아도 이만큼 지나면 한 번은 통째로(놓친 변화 보정)
+_GW_LAST = {"sig": None, "at": 0.0}
+
+
+def _gateway_signature() -> str:
+    """라우트가 바뀔 수 있는 것만 싸게 — 워크트리 목록 + 도커 호스트별 `docker ps` 한 번(컨테이너·포트·상태).
+    (2026-10-28) 통째 스냅샷은 한 번에 git 97회·docker 72회·38초 — 5초마다 돌면 쉬지 않는다."""
+    import hashlib
+    import subprocess
+    import marina_runtime_target as rt
+    from marina_registry import discover_roots
+    roots = sorted(str(r) for r in discover_roots())
+    hosts = sorted({str((rt.docker_env_for_root(r) or {}).get("DOCKER_HOST") or "") for r in roots})
+    h = hashlib.sha1("\n".join(roots).encode())
+    for host in hosts:
+        env = dict(os.environ)
+        if host:
+            env["DOCKER_HOST"] = host
+        r = subprocess.run(["docker", "ps", "--no-trunc", "--format", "{{.ID}} {{.State}} {{.Ports}}"],
+                           env=env, capture_output=True, text=True, timeout=30)
+        h.update(f"{host}|{r.returncode}|{''.join(sorted(r.stdout.splitlines(True)))}".encode())
+    return h.hexdigest()
+
+
+def _refresh_full() -> None:
+    from marina_lifecycle import refresh_gateway
     refresh_gateway()      # 떠 있으면 라우트 갱신
-    boot_gateway()         # 꺼져 있으면(재부팅 직후 등) 띄운다 — 의도적 정지는 존중
+
+
+def _refresh_gateway(now: "float | None" = None) -> None:
+    now = time.time() if now is None else now
+    try:
+        sig = _gateway_signature()
+    except Exception:
+        sig = None                                   # 서명을 못 구하면 안전하게 통째로
+    if sig is None or sig != _GW_LAST["sig"] or now - _GW_LAST["at"] >= GW_FULL_EVERY_S:
+        _refresh_full()
+        _GW_LAST.update(sig=sig, at=now)
+    try:
+        from marina_lifecycle import boot_gateway
+        boot_gateway()     # 꺼져 있으면(재부팅 직후 등) 띄운다 — 의도적 정지는 존중
+    except ImportError:
+        pass
 
 
 def _docker_gc(primary: bool) -> None:

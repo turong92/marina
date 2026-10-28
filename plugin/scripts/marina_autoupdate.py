@@ -106,7 +106,10 @@ def installed_scripts_dir() -> Path | None:
 
 
 def _default_restart() -> tuple[int, str]:
-    """설치된(새) 경로의 marina-dashboard.sh restart — launchd 헬퍼가 1초 뒤 재시작한다(대시보드 버튼과 같은 방식)."""
+    """설치된(새) 경로의 marina-dashboard.sh restart — launchd 헬퍼가 1초 뒤 재시작한다(대시보드 버튼과 같은 방식).
+    `marina dashboard off` 로 꺼 둔 대시보드는 다시 띄우지 않는다(2026-10-28 — 한 시간마다 되살아나 git 폭주·fseventsd 100%)."""
+    if (MARINA_HOME / "dashboard-off").exists():
+        return 0, "대시보드 꺼 둠 — 다시 띄우지 않음"
     try:
         data = json.loads((CLAUDE_CONFIG_DIR / "plugins" / "installed_plugins.json").read_text(encoding="utf-8"))
         ip = Path(str(data["plugins"][PLUGIN_ID][0]["installPath"]))
