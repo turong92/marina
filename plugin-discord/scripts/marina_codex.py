@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -381,6 +382,76 @@ def last_turn_error(rollout: Path) -> "dict[str, Any] | None":
     return None
 
 
+LIVE_TTL_S = 300.0                    # 지금 숫자는 코덱스를 하나 띄워 묻는다(2~5초) — 5분에 한 번
+LIVE_TIMEOUT_S = 10.0                 # 데몬 판을 오래 잡지 않게
+_LIVE_CACHE: "dict[str, tuple[float, dict[str, Any] | None]]" = {}
+
+
+def _live_raw(account: str) -> "dict[str, Any] | None":
+    """`codex app-server` 에 account/rateLimits/read 를 물어 {primary, secondary}(카멜 표기) — 실패하면 None.
+    (2026-10-28) 리셋 뒤 성공한 턴이 없으면 rollout 은 옛 숫자에 머문다."""
+    import select
+    exe = shutil.which("codex") or "/opt/homebrew/bin/codex"
+    if not os.path.exists(exe):
+        return None
+    env = dict(os.environ, CODEX_HOME=str(codex_home(account)))
+    reqs = [{"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "marina", "version": "0"}}},
+            {"jsonrpc": "2.0", "method": "initialized"},
+            {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read"}]
+    try:
+        p = subprocess.Popen([exe, "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             env=env, cwd=str(Path.home()), text=True, start_new_session=True)
+    except OSError:
+        return None
+    try:
+        assert p.stdin and p.stdout
+        p.stdin.write("".join(json.dumps(r) + "\n" for r in reqs))
+        p.stdin.flush()
+        end = time.time() + LIVE_TIMEOUT_S
+        while time.time() < end:
+            ready, _, _ = select.select([p.stdout], [], [], max(0.0, end - time.time()))
+            if not ready:
+                break
+            line = p.stdout.readline()
+            if not line:
+                break
+            try:
+                o = json.loads(line)
+            except ValueError:
+                continue
+            if o.get("id") == 2:
+                rl = (o.get("result") or {}).get("rateLimits")
+                return rl if isinstance(rl, dict) else None
+        return None
+    except (OSError, AssertionError):
+        return None
+    finally:
+        try:
+            p.kill()
+            p.wait(timeout=5)
+        except Exception:
+            pass
+
+
+def live_rate_limits(account: str) -> "dict[str, Any] | None":
+    """지금 숫자(rollout 꼴 snake 표기로) — 5분 캐시. 테스트(MARINA_E2E)는 MARINA_CODEX_LIVE_RATE=1 일 때만 묻는다."""
+    if os.environ.get("MARINA_CODEX_LIVE_RATE") == "0" or (os.environ.get("MARINA_E2E") and os.environ.get("MARINA_CODEX_LIVE_RATE") != "1"):
+        return None
+    hit = _LIVE_CACHE.get(account)
+    if hit and time.time() - hit[0] < LIVE_TTL_S:
+        return hit[1]
+    raw = _live_raw(account)
+    out = None
+    if raw:
+        out = {}
+        for k in ("primary", "secondary"):
+            w = raw.get(k)
+            if isinstance(w, dict):
+                out[k] = {"used_percent": w.get("usedPercent"), "window_minutes": w.get("windowDurationMins"), "resets_at": w.get("resetsAt")}
+    _LIVE_CACHE[account] = (time.time(), out)
+    return out
+
+
 def rate_windows(recs: "list[dict[str, Any]]", account: str, now: "float | None" = None) -> list[dict[str, Any]]:
     """이 계정으로 뜬 코덱스 방들의 rollout 에서 가장 최근 rate_limits → 창 목록(primary·secondary 중 있는 것).
     방 기록에 없는 rollout(데스크톱 다른 계정)은 더 최근이어도 읽지 않는다. 60초 캐시, resets_at 이 지났으면 0%."""
@@ -396,6 +467,9 @@ def rate_windows(recs: "list[dict[str, Any]]", account: str, now: "float | None"
             got = _latest_rate_limits(Path(path))
             if got and (best is None or got[0] > best[0]):
                 best = got
+        live = live_rate_limits(account)               # 지금 숫자가 있으면 그게 기록보다 맞다(리셋 뒤 턴이 없어도)
+        if live:
+            best = (time.time(), live)
         raw = [w for w in ((best[1].get("primary"), best[1].get("secondary")) if best else ()) if isinstance(w, dict)]
         _RATE_CACHE[key] = (time.time(), raw)
     clock = time.time() if now is None else now
