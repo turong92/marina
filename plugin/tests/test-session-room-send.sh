@@ -43,9 +43,8 @@ def posts(ch):
             out.append((o.get("b") or {}).get("content", ""))
     return out
 def thread_of(ch):
-    """(형 2026-10-28) 방끼리 오간 말(📨)은 형 채널이 아니라 그 방 채널의 '📨 방끼리' 스레드에 남는다."""
-    r = next((x for x in ms.load_sessions() if str(x.get("channelId")) == str(ch)), None)
-    t = [k for k, v in ms.room_threads(r["stateDir"]).items() if v.get("name") == mw.ROOM_SEND_THREAD] if r else []
+    """(형 2026-10-28) 방끼리 오간 말(📨)은 형 채널이 아니라 그 방의 고정 포럼 글 '[task] 📨 방끼리' 에 남는다."""
+    t = [k for k, v in ms._forum_posts().items() if v.get("kind") == "room" and str(v.get("channelId")) == str(ch)]
     return t[-1] if t else None
 def has_line(ch, head, tail):
     th = thread_of(ch)

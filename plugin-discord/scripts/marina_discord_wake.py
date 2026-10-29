@@ -391,6 +391,25 @@ def _rate_check(sd: Path, sender: str, record: bool) -> None:
 ROOM_SEND_THREAD = "📨 방끼리"        # 방끼리 오간 말은 형과 얘기하는 채널이 아니라 이 스레드에(형 2026-10-28 — 기술 보고가 대화를 덮었다)
 
 
+def _room_post(rec: dict[str, Any], dc: Any) -> str:
+    """받는 방의 고정 포럼 글 '[task] 📨 방끼리' id — 장부(forum-posts.json, kind=room)에 있으면 그대로, 없으면 포럼에 만든다.
+    포럼이나 글을 못 만들면 ""(부르는 쪽이 옛 스레드로 간다). 글 id 는 재사용 — 닫힌 글은 쓰기 전에 post_room_line 이 연다."""
+    room = str(rec.get("channelId") or "")
+    for tid, v in ms._forum_posts().items():
+        if isinstance(v, dict) and v.get("kind") == "room" and str(v.get("channelId")) == room:
+            return str(tid)
+    try:
+        fid, _ = ms.ensure_forum(dc, ms.load_config(), rec)
+        tid = str(dc._req("POST", f"/channels/{fid}/threads", {
+            "name": f"[{rec.get('task')}] {ROOM_SEND_THREAD}", "auto_archive_duration": 10080,
+            "message": {"content": "다른 방이 이 방에 보낸 말이 여기 쌓여. 여기 쓰면 이 방 세션에도 덧붙임으로 들어가.",
+                        "flags": 4096, "allowed_mentions": {"parse": []}}})["id"])
+    except (ms.SessionError, KeyError, TypeError, AttributeError):
+        return ""
+    ms.remember_forum_post(tid, {"ref": f"{rec.get('project')}/{rec.get('task')}", "mid": "", "channelId": room, "kind": "room"})
+    return tid
+
+
 def room_thread(rec: dict[str, Any], dc: Any) -> str:
     """받는 방 채널 밑 '📨 방끼리' 스레드 id — 없으면 새로 연다. 못 열면 ""(채널에 쓴다).
     봇은 스레드를 못 지우니 둘이 동시에 만들지 않게 방마다 잠근다(리뷰 I2)."""
@@ -401,6 +420,9 @@ def room_thread(rec: dict[str, Any], dc: Any) -> str:
     if lock is None:
         return ""
     try:
+        post = _room_post(rec, dc)
+        if post:
+            return post
         have = [t for t, v in ms.room_threads(str(sd)).items() if str(v.get("name") or "") == ROOM_SEND_THREAD]
         if have:
             return have[-1]
@@ -416,13 +438,20 @@ def room_thread(rec: dict[str, Any], dc: Any) -> str:
 
 
 def post_room_line(rec: dict[str, Any], dc: Any, line: str) -> None:
-    """방의 '📨 방끼리' 스레드에 한 줄 — 사람이 스레드를 지웠으면(404) 장부에서 빼고 다시 열어 쓴다, 못 열면 채널에."""
+    """방의 '📨 방끼리' 글(못 만들었으면 스레드)에 한 줄 — 닫힌 글은 먼저 다시 열고, 사람이 지웠으면(404) 장부에서 빼고 다시 만들어 쓴다, 못 만들면 채널에."""
     tid = room_thread(rec, dc)
     try:
+        if tid in ms._forum_posts():
+            try:
+                dc._req("PATCH", f"/channels/{tid}", {"archived": False})
+            except ms.DiscordError as exc:
+                if exc.code == 404:
+                    raise
         dc.send_message(tid or str(rec["channelId"]), line)
     except ms.DiscordError as exc:
         if not tid or exc.code != 404:
             raise
+        ms.forget_forum_post(tid)
         ms.forget_room_threads(str(rec.get("stateDir")), [tid], keep_named=False)
         dc.send_message(room_thread(rec, dc) or str(rec["channelId"]), line)
 
@@ -439,30 +468,9 @@ def _announce(rec: dict[str, Any], sender: str, body: str, how: str = "") -> Non
         print(f"marina session: 전달은 했지만 방끼리 스레드에 한 줄을 못 남겼어 — {exc}", file=sys.stderr)
 
 
-def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: bool = False) -> str:
-    """`marina session room-send` — 개발 방(클로드·코덱스)이 다른 개발 방에 말을 건다. 입력창에 '[마리나 · <보낸 방> 방에서] 글 (답은: …)' 한 줄.
-    started(잠든 방을 이 글을 첫 지시로 깨움) | delivered(입력창에 넣었고 확인) | queued(바빠서 대기열 — 코덱스는 대기 목록, 클로드는 쉬는 순간에 칠 것) |
-    typed(쳤지만 입력창에 남아 있음), 못 하면 SessionError. 채팅방·비서·로비는 제한 세션이라 받지 않는다."""
-    rec = ms.find_session(ref)
-    name = f"{rec.get('project')}/{rec.get('task')}"
-    if rec.get("kind") and not ms.is_codex(rec):          # 허용 목록: kind 없음(클로드 개발 방) 또는 codex 만
-        raise ms.SessionError(f"{name} 은 개발 방이 아니야 — room-send 는 개발 방(클로드·코덱스)끼리만 써")
-    sender = room_sender() if sender_ref is None else sender_ref
-    if sender == name:
-        raise ms.SessionError("자기 자신에게는 보낼 수 없어")
-    body = "".join(c for c in " ".join(str(message).split()) if c.isprintable())     # 한 줄(입력창에선 줄바꿈이 전송) + 제어문자 제거
-    if not body:
-        raise ms.SessionError("보낼 글이 비었어")
-    if len(body) > ROOM_SEND_MAX:
-        raise ms.SessionError(f"글이 너무 길어({len(body)}자 > {ROOM_SEND_MAX}) — 길고 오래 남을 내용은 레포 공통 파일(docs/handoff/…md)에 쓰고 알림만 보내")
-    if not notice and sender != "터미널" and ms.main_room(str(rec.get("project") or "")) == sender:
-        # (형 2026-10-28) 메인 지시가 '옆 방 잡담'으로 읽혀 '좋아·진행해'가 확인 인사로 넘어갔다 — 위계를 글에 박는다
-        text = (f"{ROOM_SEND_PREFIX}메인 {sender} 방의 지시] {body} (형이 메인 방에 지휘를 맡겼다 — 짧아도 일 지시다. "
-                f'바로 하고, 끝나면 보고: {ROOM_SEND_MARK} {sender} "…")')
-    else:
-        text = f"{ROOM_SEND_PREFIX}{sender} 방에서] {body}"
-        if sender != "터미널" and not notice:      # 터미널엔 답할 방이 없다 · 마리나 알림엔 답하지 않는다(되돌이 방지)
-            text += f' (답은: {ROOM_SEND_MARK} {sender} "…")'
+def _deliver(rec: dict[str, Any], name: str, text: str, before: "Any" = None) -> str:
+    """방 하나에 글 한 줄을 넣는다(room_send·포럼 글 덧붙임 공용). 잠든 방은 이 글을 첫 지시로 깨우고(started), 떠 있으면
+    입력창에 친다(delivered | queued | typed). `before` 는 방 잠금 안에서 먼저 불린다(보낸 쪽 속도 제한 같은 검사). 못 하면 SessionError."""
     sd, tmux = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("tmux") or "")
     if not sd.is_dir():
         raise ms.SessionError(f"{name}: 상태 폴더가 없어")
@@ -470,7 +478,8 @@ def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: b
     with ms.room_lock(sd) as got:
         if not got:
             raise ms.SessionError(f"{name}: 다른 쪽이 이 방을 켜거나 내리는 중이야 — 잠시 뒤에 다시")
-        _rate_check(sd, sender, record=False)
+        if before:
+            before()
         if not ms.tmux_alive(tmux):
             woke_at = time.time()
             try:
@@ -508,6 +517,35 @@ def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: b
                 raise ms.SessionError(f"{name}: 기다리는 동안 방이 꺼졌어 — 글을 못 넣었어")
             mb._spawn_type(tmux, text, str(rec["channelId"]), "")      # 계속 바쁘다 — 떼어 둔 프로세스가 쉬는 순간에 친다(끝내 못 치면 거기서 채널에 ⚠️)
             how = "queued"
+    return how
+
+
+def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: bool = False) -> str:
+    """`marina session room-send` — 개발 방(클로드·코덱스)이 다른 개발 방에 말을 건다. 입력창에 '[마리나 · <보낸 방> 방에서] 글 (답은: …)' 한 줄.
+    started(잠든 방을 이 글을 첫 지시로 깨움) | delivered(입력창에 넣었고 확인) | queued(바빠서 대기열 — 코덱스는 대기 목록, 클로드는 쉬는 순간에 칠 것) |
+    typed(쳤지만 입력창에 남아 있음), 못 하면 SessionError. 채팅방·비서·로비는 제한 세션이라 받지 않는다."""
+    rec = ms.find_session(ref)
+    name = f"{rec.get('project')}/{rec.get('task')}"
+    if rec.get("kind") and not ms.is_codex(rec):          # 허용 목록: kind 없음(클로드 개발 방) 또는 codex 만
+        raise ms.SessionError(f"{name} 은 개발 방이 아니야 — room-send 는 개발 방(클로드·코덱스)끼리만 써")
+    sender = room_sender() if sender_ref is None else sender_ref
+    if sender == name:
+        raise ms.SessionError("자기 자신에게는 보낼 수 없어")
+    body = "".join(c for c in " ".join(str(message).split()) if c.isprintable())     # 한 줄(입력창에선 줄바꿈이 전송) + 제어문자 제거
+    if not body:
+        raise ms.SessionError("보낼 글이 비었어")
+    if len(body) > ROOM_SEND_MAX:
+        raise ms.SessionError(f"글이 너무 길어({len(body)}자 > {ROOM_SEND_MAX}) — 길고 오래 남을 내용은 레포 공통 파일(docs/handoff/…md)에 쓰고 알림만 보내")
+    if not notice and sender != "터미널" and ms.main_room(str(rec.get("project") or "")) == sender:
+        # (형 2026-10-28) 메인 지시가 '옆 방 잡담'으로 읽혀 '좋아·진행해'가 확인 인사로 넘어갔다 — 위계를 글에 박는다
+        text = (f"{ROOM_SEND_PREFIX}메인 {sender} 방의 지시] {body} (형이 메인 방에 지휘를 맡겼다 — 짧아도 일 지시다. "
+                f'바로 하고, 끝나면 보고: {ROOM_SEND_MARK} {sender} "…")')
+    else:
+        text = f"{ROOM_SEND_PREFIX}{sender} 방에서] {body}"
+        if sender != "터미널" and not notice:      # 터미널엔 답할 방이 없다 · 마리나 알림엔 답하지 않는다(되돌이 방지)
+            text += f' (답은: {ROOM_SEND_MARK} {sender} "…")'
+    sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+    how = _deliver(rec, name, text, before=lambda: _rate_check(sd, sender, record=False))
     _rate_check(sd, sender, record=True)
     _announce(rec, sender, body, how)
     return how

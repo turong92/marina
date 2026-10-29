@@ -4291,6 +4291,19 @@ def _forum_posts() -> dict[str, Any]:
     return d if isinstance(d, dict) else {}
 
 
+def remember_forum_post(tid: str, entry: dict[str, Any]) -> None:
+    posts = _forum_posts()
+    posts.pop(tid, None)
+    posts[tid] = entry
+    _write_json(marina_home() / FORUM_POSTS, dict(list(posts.items())[-FORUM_POSTS_MAX:]))
+
+
+def forget_forum_post(tid: str) -> None:
+    posts = _forum_posts()
+    if posts.pop(tid, None) is not None:
+        _write_json(marina_home() / FORUM_POSTS, posts)
+
+
 def _create_forum_post(dc: "Discord", cfg: dict[str, Any], rec: dict[str, Any], mid: str, text: str) -> str:
     """지시 하나의 포럼 글을 만든다 — 제목 [task] 지시 첫 줄, 첫 글 = 원래 메시지 링크 + 본문, 태그 진행중.
     형 메시지에는 알림 없는 답으로 글 링크만 남긴다. 포럼이나 글을 못 만들면(권한·커뮤니티 아닌 서버 등) ""
@@ -4312,10 +4325,7 @@ def _create_forum_post(dc: "Discord", cfg: dict[str, Any], rec: dict[str, Any], 
         tid = str(made["id"])
     except (SessionError, KeyError):
         return ""
-    ref = f"{rec.get('project')}/{rec.get('task')}"
-    posts = _forum_posts()
-    posts[tid] = {"ref": ref, "mid": mid, "channelId": room}
-    _write_json(marina_home() / FORUM_POSTS, dict(list(posts.items())[-FORUM_POSTS_MAX:]))
+    remember_forum_post(tid, {"ref": f"{rec.get('project')}/{rec.get('task')}", "mid": mid, "channelId": room})
     try:
         dc._req("POST", f"/channels/{room}/messages", {
             "content": f"📋 진행 → <#{tid}>", "flags": 4096,

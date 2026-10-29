@@ -104,11 +104,11 @@ mb._dc = lambda cfg: type("D", (), {"send_message": lambda self, ch, t: posted.a
                                     "_req": lambda self, m, p, b=None: {"id": "777"}})()
 ms.tmux_alive = lambda t: False
 mb._room_bounce("proj/feat/b", "proj/feat/c", "x", "글3", wait=True)
-thb = [k for k, v in ms.room_threads(ms.find_session("proj/feat/b")["stateDir"]).items() if v.get("name") == mw.ROOM_SEND_THREAD]
-check(not sent and posted and posted[0][0] in thb and "글3" in posted[0][1], f"잠든 방은 그 방의 방끼리 스레드에만: {sent} {posted} {thb}")
+thb = [k for k, v in ms._forum_posts().items() if v.get("kind") == "room" and v.get("channelId") == ms.find_session("proj/feat/b")["channelId"]]
+check(not sent and posted and posted[0][0] in thb and "글3" in posted[0][1], f"잠든 방은 그 방의 방끼리 글에만: {sent} {posted} {thb}")
 ms.tmux_alive = lambda t: True
 # (리뷰 I1) 사람이 '📨 방끼리' 스레드를 지웠으면 잠든 방 알림도 다시 열어 남긴다(사라지지 않게)
-old_tid = [k for k, v in ms.room_threads(ms.find_session("proj/feat/b")["stateDir"]).items() if v.get("name") == mw.ROOM_SEND_THREAD][-1]
+old_tid = [k for k, v in ms._forum_posts().items() if v.get("kind") == "room" and v.get("channelId") == ms.find_session("proj/feat/b")["channelId"]][-1]
 class Gone404:
     def __init__(self): self.sent = []
     def _req(self, m, p, b=None): return {"id": "888"}
@@ -118,7 +118,7 @@ class Gone404:
 g = Gone404(); mb._dc = lambda cfg: g
 ms.tmux_alive = lambda t: False
 mb._room_bounce("proj/feat/b", "proj/feat/c", "x", "글4", wait=True)
-check(g.sent and g.sent[0][0] == "888" and "글4" in g.sent[0][1], f"지운 스레드면 새로 열어 남김: {g.sent}")
+check(g.sent and g.sent[0][0] == "888" and "글4" in g.sent[0][1], f"지운 글이면 (포럼을 못 쓰는 환경에선 옛 스레드로) 새로 열어 남김: {g.sent}")
 ms.tmux_alive = lambda t: True
 # (리뷰 I2) 상태 폴더가 없으면 스레드를 만들지 않는다(장부를 못 써 매번 새로 만들게 된다)
 made = []
