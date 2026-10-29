@@ -48,10 +48,10 @@ def seen_at() -> float:
         return 0.0
 
 
-def wake_event(channel: str, user: str = "", message: str = "", thread: str = "", forum_post: str = "") -> str:
+def wake_event(channel: str, user: str = "", message: str = "", thread: str = "", forum_post: str = "", author: str = "") -> str:
     """봇이 넘긴 글 이벤트 처리 — wake() 가 예외 없이 돌아오고 failed:* 가 아닐 때만 수신 표식을 남긴다
     (깨우기가 매번 실패하는데 표식만 열려 쉰 방이 내려가는 일을 막는다). 포럼 글에서 온 글은 wake_forum_post 로."""
-    r = wake_forum_post(forum_post, user, message) if forum_post else wake(channel, user, message, thread)
+    r = wake_forum_post(forum_post, user, message, author) if forum_post else wake(channel, user, message, thread)
     if not r.startswith("failed"):
         mark_seen()
     return r
@@ -237,7 +237,7 @@ def wake(channel: str, user: str = "", message: str = "", thread: str = "", sinc
         return _wake_locked(rec, cfg, sd, str(message or ""), str(thread or ""), since)
 
 
-def wake_forum_post(post: str, user: str, message: str) -> str:
+def wake_forum_post(post: str, user: str, message: str, author: str = "") -> str:
     """형이 포럼 글(forum-posts.json 에 있는 것)에 쓴 글을 그 글의 방 세션에 덧붙임으로 넣는다 — 새 지시를 만들지 않는다.
     포럼은 access.json groups 에 없어서 채널 플러그인이 못 받는다. 허용 사용자는 방의 allowFrom 그대로.
     꺼진 방은 이 글을 첫 지시로 깨우고, 켜진 방은 room-send 처럼 쉬는 순간 입력창에 친다."""
@@ -247,6 +247,8 @@ def wake_forum_post(post: str, user: str, message: str) -> str:
     rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(entry.get("channelId"))), None)
     if not rec:
         return "ignored:unknown"
+    if rec.get("kind") in ms.CHAT_KINDS:      # 제한 세션은 받지 않는다 — 글쓴이가 확인되지 않은 글이 '덧붙임' 으로 쳐지면 사칭이 된다(room_send 와 같은 선)
+        return "ignored:restricted-room"
     try:
         cfg = ms.load_config()
     except ms.SessionError:
@@ -265,7 +267,8 @@ def wake_forum_post(post: str, user: str, message: str) -> str:
         return "failed:discord"
     if not body:
         return "ignored:empty"
-    text = f"[마리나 · 포럼 글에서] {title} 에 형이 덧붙임: {body}"
+    who = _clean(author)[:40]
+    text = f"[마리나 · 포럼 글에서] {title} 에 {who + '(이)가' if who else '형이'} 덧붙임: {body}"
     if entry.get("mid"):              # 방끼리 고정 글엔 원래 지시가 없다 — 답할 지시 id 도 없다
         text += f" (답은 방 채널({entry['channelId']})에 reply_to={entry['mid']})"
     name = f"{rec.get('project')}/{rec.get('task')}"
@@ -273,6 +276,10 @@ def wake_forum_post(post: str, user: str, message: str) -> str:
         return _deliver(rec, name, text)
     except ms.SessionError as exc:
         mb._log(f"wake 포럼 글 {post}: 못 넣음 {exc}")
+        try:                              # 형이 알아야 한다 — 콘솔 로그만 남으면 글이 조용히 사라진다(원문은 로그에만)
+            dc.send_message(str(post), "⚠️ 이 글을 방 세션에 넣지 못했어 — 잠시 뒤 다시 쓰거나 방 채널에 직접 말해 줘")
+        except ms.SessionError:
+            pass
         return "failed:" + str(exc)[:200]
 
 
@@ -730,7 +737,7 @@ def main(argv: list[str]) -> int:
     w.add_argument("--channel", required=True); w.add_argument("--user", default="")
     w.add_argument("--message", default=""); w.add_argument("--thread", default="")
     w.add_argument("--after-idle", action="store_true")
-    w.add_argument("--forum-post", default="")
+    w.add_argument("--forum-post", default=""); w.add_argument("--author", default="")
     s = sub.add_parser("settle")
     s.add_argument("channel"); s.add_argument("started", type=float)
     sw = sub.add_parser("sweep")
@@ -744,7 +751,7 @@ def main(argv: list[str]) -> int:
             if a.after_idle:
                 print(wake_after_idle(a.channel))
             elif a.message:
-                print(wake_event(a.channel, a.user, a.message, a.thread, a.forum_post))     # 봇이 넘긴 글 이벤트
+                print(wake_event(a.channel, a.user, a.message, a.thread, a.forum_post, a.author))     # 봇이 넘긴 글 이벤트
             else:
                 print(wake(a.channel, a.user, a.message, a.thread))
         elif a.cmd == "sweep":

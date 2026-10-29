@@ -18,6 +18,15 @@ const client = new Client({
   partials: [Partials.Message, Partials.Channel, Partials.Reaction, Partials.User],
 });
 
+// 스레드의 부모가 포럼인가 — 마리나의 지시 글이다. 부모 조회가 실패하면 모른다(false)
+async function inForum(ch: any): Promise<boolean> {
+  if (!ch?.isThread() || !ch.parentId) return false;
+  try {
+    const up = ch.parent ?? (await client.channels.fetch(ch.parentId));
+    return up?.type === ChannelType.GuildForum;
+  } catch { return false; }
+}
+
 client.on(Events.MessageReactionAdd, async (reaction, user) => {
   if (user.bot || user.id === client.user?.id || reaction.emoji.name !== "🛑") return; // 미리 단 🛑 는 봇 것
   const msg = reaction.message;
@@ -25,7 +34,8 @@ client.on(Events.MessageReactionAdd, async (reaction, user) => {
   let channelId = msg.channelId;
   try {
     const ch = await client.channels.fetch(msg.channelId);
-    if (ch?.isThread() && ch.parentId) channelId = ch.parentId; // 진행 스레드에서 눌러도 그 세션
+    // 진행 스레드에서 눌러도 그 세션. 포럼 글이면 글 id 를 그대로 — 파이썬이 장부(forum-posts.json)로 방을 찾는다
+    if (ch?.isThread() && ch.parentId && !(await inForum(ch))) channelId = ch.parentId;
   } catch {}
   execFile(py, [script, "interrupt", "--channel", channelId, "--user", user.id, "--message", msg.id],
     { timeout: 20000, env: childEnv }, (err, out, errOut) => {
@@ -44,14 +54,12 @@ client.on(Events.MessageCreate, async (msg) => {
   try {
     const ch = msg.channel ?? (await client.channels.fetch(msg.channelId));
     if (ch?.isThread() && ch.parentId) {
+      channelId = ch.parentId;                      // 스레드 글은 부모 채널의 방 (부모 조회가 실패해도 이건 유지)
       // 부모가 포럼이면 마리나의 지시 글이다 — 바꾸지 않고 글 id 만 넘긴다(파이썬이 forum-posts.json 으로 방을 찾는다)
-      const up = ch.parent ?? (await client.channels.fetch(ch.parentId));
-      if (up?.type === ChannelType.GuildForum) forumPost = msg.channelId;
-      else thread = msg.channelId;                  // 스레드 글은 부모 채널의 방
-      channelId = ch.parentId;
+      if (await inForum(ch)) forumPost = msg.channelId; else thread = msg.channelId;
     }
   } catch {}
-  execFile(py, [wakePy, "wake", "--channel", channelId, "--user", msg.author.id, "--message", msg.id, `--thread=${thread}`, `--forum-post=${forumPost}`],
+  execFile(py, [wakePy, "wake", "--channel", channelId, "--user", msg.author.id, "--message", msg.id, `--thread=${thread}`, `--forum-post=${forumPost}`, `--author=${msg.member?.displayName ?? msg.author.globalName ?? msg.author.username}`],
     { timeout: 120000, env: childEnv }, (err, out, errOut) => {
       const res = (out || errOut || String(err ?? "")).trim();
       if (res !== "alive" && !res.startsWith("ignored:")) console.log(new Date().toISOString(), "wake", channelId, msg.id, res.slice(0, 200));
@@ -168,9 +176,9 @@ function runPy(args: string[], cb: (out: string) => void) {
 async function sessionChannel(it: any): Promise<string> {
   try {
     const ch = it.channel ?? (await client.channels.fetch(it.channelId));
-    if (ch?.isThread() && ch.parentId) return ch.parentId;
+    if (ch?.isThread() && ch.parentId && !(await inForum(ch))) return ch.parentId;
   } catch {}
-  return it.channelId;
+  return it.channelId;       // 포럼 글이면 글 id — 파이썬이 방을 찾는다
 }
 const MODELS = ["opus", "sonnet", "haiku", "fable", "opusplan", "default"];
 client.on(Events.InteractionCreate, async (it) => {

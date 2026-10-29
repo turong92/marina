@@ -3720,6 +3720,8 @@ def main(argv: list[str]) -> int:
     sl.add_argument("channel")
     sl.add_argument("message")
     a = p.parse_args(argv)
+    if a.cmd in ("interrupt", "perm", "slash-cmd", "skills", "say", "view"):
+        a.channel = ms.room_channel(a.channel)        # 포럼 글 안에서 누른 것 — 봇은 글 id 를 넘기고 방은 장부가 안다
     if a.cmd == "perm":
         try:
             print(perm(a.channel, a.user, a.token, a.allow))

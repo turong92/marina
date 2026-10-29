@@ -4316,6 +4316,12 @@ def _update_forum_posts(change: Any) -> None:
             lockf.close()
 
 
+def room_channel(channel: str) -> str:
+    """포럼 글 id 면 그 글이 속한 방 채널 id, 아니면 그대로."""
+    entry = _forum_posts().get(str(channel))
+    return str(entry["channelId"]) if isinstance(entry, dict) and entry.get("channelId") else str(channel)
+
+
 def remember_forum_post(tid: str, entry: dict[str, Any]) -> None:
     def add(posts: dict[str, Any]) -> None:
         posts.pop(tid, None)

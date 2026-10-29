@@ -80,16 +80,16 @@ mb.run_slash = lambda tmux, text, ch, extra, **k: (typed.append((tmux, text)), T
 mw._left_in_input = lambda tmux, text: False
 mw._start_with_launch_env = lambda ref, sd, first: (started.append((ref, first)), ([ref], []))[1]
 mw._spawn_settle = lambda *x: None
-expect = f"[마리나 · 포럼 글에서] [feat/a] 원래 지시 에 형이 덧붙임: 이것도 같이 봐 줘 (답은 방 채널({a['channelId']})에 reply_to=9001)"
+expect = f"[마리나 · 포럼 글에서] [feat/a] 원래 지시 에 수민(이)가 덧붙임: 이것도 같이 봐 줘 (답은 방 채널({a['channelId']})에 reply_to=9001)"
 ms.tmux_alive = lambda name: True
 typed.clear(); started.clear()
-check(mw.wake_forum_post(post, "U1", "5001") == "delivered" and typed == [(a["tmux"], expect)] and not started, f"켜진 방 입력창 문구: {typed}")
+check(mw.wake_forum_post(post, "U1", "5001", "수민") == "delivered" and typed == [(a["tmux"], expect)] and not started, f"켜진 방 입력창 문구: {typed}")
 ms.tmux_alive = lambda name: False
 typed.clear(); started.clear()
-check(mw.wake_forum_post(post, "U1", "5001") == "started" and started == [("proj/feat/a", expect)] and not typed, f"꺼진 방은 첫 지시로: {started}")
+check(mw.wake_forum_post(post, "U1", "5001", "수민") == "started" and started == [("proj/feat/a", expect)] and not typed, f"꺼진 방은 첫 지시로: {started}")
 ms.tmux_alive = lambda name: True
 typed.clear(); started.clear()
-check(mw.wake_forum_post(post, "U9", "5001").startswith("ignored:") and not typed, "방의 allowFrom 밖 사람은 무시")
+check(mw.wake_forum_post(post, "U9", "5001", "수민").startswith("ignored:") and not typed, "방의 allowFrom 밖 사람은 무시")
 check(mw.wake_forum_post("123", "U1", "5001") == "ignored:unknown-post" and not typed, "매핑에 없는 글은 무시")
 # 방끼리 고정 글: 원래 지시가 없으니 reply_to 부분은 뺀다
 mw.post_room_line(a, dc(), "📨 b 방에서: x")
@@ -104,6 +104,32 @@ check(json.loads((Path(a["stateDir"]) / "threads.json").read_text()) == {"9001":
 (fd / "messages.json").write_text(json.dumps({post: [{"id": "5003", "content": "  ", "author": {"id": "U1"}}]}))
 typed.clear()
 check(mw.wake_forum_post(post, "U1", "5003").startswith("ignored:") and not typed, "빈 글은 무시")
+
+# 글쓴이를 안 넘기면 형이 쓴 것으로(방끼리 고정 글 문구는 그대로)
+# 제한 세션(채팅방 등)은 받지 않는다 — 글쓴이 확인 없이 '덧붙임' 으로 쳐지면 사칭이다
+typed.clear(); started.clear()
+ms.save_sessions([dict(x, kind="chat") if x.get("channelId") == a["channelId"] else x for x in ms.load_sessions()])
+(fd / "messages.json").write_text(json.dumps({post: [{"id": "5001", "content": "이것도 같이\n봐 줘", "author": {"id": "U1"}}]}))
+check(mw.wake_forum_post(post, "U1", "5001", "수민") == "ignored:restricted-room" and not typed and not started, "제한 세션은 거절")
+ms.save_sessions([{k: v for k, v in x.items() if k != "kind"} if x.get("channelId") == a["channelId"] else x for x in ms.load_sessions()])
+# 넣지 못하면 그 글에 ⚠️ 한 줄(형이 안다)
+def boom(*x, **k): raise ms.SessionError("a/b: 다른 쪽이 이 방을 켜거나 내리는 중이야")
+real = mw._deliver; mw._deliver = boom
+n = len(lines(post))
+r = mw.wake_forum_post(post, "U1", "5001", "수민")
+check(r.startswith("failed:") and len(lines(post)) == n + 1 and lines(post)[-1].startswith("⚠️"), f"실패하면 글에 ⚠️: {r} {lines(post)[-1:]}")
+mw._deliver = real
+
+# 포럼 글 안의 🛑·슬래시 명령: 봇이 글 id 를 넘기면 파이썬이 장부로 방을 찾는다(부모가 포럼이라 bot.ts 가 방 id 를 모른다)
+import io, contextlib
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    mb.main(["interrupt", "--channel", post, "--user", "U1", "--message", ""])
+check("모르는 채널" not in buf.getvalue(), f"글에서 누른 🛑 도 그 방으로: {buf.getvalue()!r}")
+buf = io.StringIO()
+with contextlib.redirect_stdout(buf):
+    mb.main(["interrupt", "--channel", "424242", "--user", "U1", "--message", ""])
+check("모르는 채널" in buf.getvalue(), "장부에 없는 채널은 그대로 모르는 채널")
 
 # ── 장부 보호 ──
 # 방끼리 고정 글은 지시 글 500개 한도에 밀려나지 않는다
