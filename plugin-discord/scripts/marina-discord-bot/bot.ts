@@ -1,6 +1,6 @@
 // 마리나 Discord 봇 — 공식 Discord 플러그인이 못 받는 이벤트만 받는다(지금은 🛑 반응).
 // 판단은 전부 파이썬(marina_discord_bot.py interrupt)에 맡긴다. 마리나 데몬이 띄우고, 데몬이 죽으면 따라 끝난다.
-import { ActionRowBuilder, Client, Events, GatewayIntentBits, MessageFlags, ModalBuilder, Partials, TextInputBuilder, TextInputStyle } from "discord.js";
+import { ActionRowBuilder, ChannelType, Client, Events, GatewayIntentBits, MessageFlags, ModalBuilder, Partials, TextInputBuilder, TextInputStyle } from "discord.js";
 import { execFile } from "node:child_process";
 
 const guild = process.env.MARINA_GUILD ?? "";
@@ -40,11 +40,18 @@ client.on(Events.MessageCreate, async (msg) => {
   if (!msg.author || msg.author.bot || msg.guildId !== guild) return;
   let channelId = msg.channelId;
   let thread = "";
+  let forumPost = "";
   try {
     const ch = msg.channel ?? (await client.channels.fetch(msg.channelId));
-    if (ch?.isThread() && ch.parentId) { thread = msg.channelId; channelId = ch.parentId; } // 스레드 글은 부모 채널의 방
+    if (ch?.isThread() && ch.parentId) {
+      // 부모가 포럼이면 마리나의 지시 글이다 — 바꾸지 않고 글 id 만 넘긴다(파이썬이 forum-posts.json 으로 방을 찾는다)
+      const up = ch.parent ?? (await client.channels.fetch(ch.parentId));
+      if (up?.type === ChannelType.GuildForum) forumPost = msg.channelId;
+      else thread = msg.channelId;                  // 스레드 글은 부모 채널의 방
+      channelId = ch.parentId;
+    }
   } catch {}
-  execFile(py, [wakePy, "wake", "--channel", channelId, "--user", msg.author.id, "--message", msg.id, `--thread=${thread}`],
+  execFile(py, [wakePy, "wake", "--channel", channelId, "--user", msg.author.id, "--message", msg.id, `--thread=${thread}`, `--forum-post=${forumPost}`],
     { timeout: 120000, env: childEnv }, (err, out, errOut) => {
       const res = (out || errOut || String(err ?? "")).trim();
       if (res !== "alive" && !res.startsWith("ignored:")) console.log(new Date().toISOString(), "wake", channelId, msg.id, res.slice(0, 200));

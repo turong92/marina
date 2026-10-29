@@ -69,7 +69,46 @@ mw.post_room_line(a, dc(), "📨 b 방에서: 폴백")
 check(room_posts(a["channelId"]) == [] and [v for v in ms.room_threads(a["stateDir"]).values() if v.get("name") == mw.ROOM_SEND_THREAD], "포럼 못 쓰면 옛 스레드")
 (fd / "no_forum").unlink()
 
+# ── F4: 포럼 글에 형이 쓴 글 → 그 방 세션 ──
+acc = Path(a["stateDir"]) / "access.json"
+d = json.loads(acc.read_text()); d["groups"][a["channelId"]].update(requireMention=False, allowFrom=["U1"]); acc.write_text(json.dumps(d))
+ms._progress(a, {"message_id": "9001", "text": "원래 지시"})
+post = json.loads((Path(a["stateDir"]) / "threads.json").read_text())["9001"]
+(fd / "messages.json").write_text(json.dumps({post: [{"id": "5001", "content": "이것도 같이\n봐 줘", "author": {"id": "U1"}}]}))
+typed, started = [], []
+mb.run_slash = lambda tmux, text, ch, extra, **k: (typed.append((tmux, text)), True)[1]
+mw._left_in_input = lambda tmux, text: False
+mw._start_with_launch_env = lambda ref, sd, first: (started.append((ref, first)), ([ref], []))[1]
+mw._spawn_settle = lambda *x: None
+expect = f"[마리나 · 포럼 글에서] [feat/a] 원래 지시 에 형이 덧붙임: 이것도 같이 봐 줘 (답은 방 채널({a['channelId']})에 reply_to=9001)"
+ms.tmux_alive = lambda name: True
+typed.clear(); started.clear()
+check(mw.wake_forum_post(post, "U1", "5001") == "delivered" and typed == [(a["tmux"], expect)] and not started, f"켜진 방 입력창 문구: {typed}")
+ms.tmux_alive = lambda name: False
+typed.clear(); started.clear()
+check(mw.wake_forum_post(post, "U1", "5001") == "started" and started == [("proj/feat/a", expect)] and not typed, f"꺼진 방은 첫 지시로: {started}")
+ms.tmux_alive = lambda name: True
+typed.clear(); started.clear()
+check(mw.wake_forum_post(post, "U9", "5001").startswith("ignored:") and not typed, "방의 allowFrom 밖 사람은 무시")
+check(mw.wake_forum_post("123", "U1", "5001") == "ignored:unknown-post" and not typed, "매핑에 없는 글은 무시")
+# 방끼리 고정 글: 원래 지시가 없으니 reply_to 부분은 뺀다
+mw.post_room_line(a, dc(), "📨 b 방에서: x")
+rp = room_posts(a["channelId"])[0]
+(fd / "messages.json").write_text(json.dumps({rp: [{"id": "5002", "content": "여기도 쓴다", "author": {"id": "U1"}}]}))
+typed.clear()
+mw.wake_forum_post(rp, "U1", "5002")
+check(typed and typed[0][1] == "[마리나 · 포럼 글에서] [feat/a] 📨 방끼리 에 형이 덧붙임: 여기도 쓴다", f"고정 글엔 reply_to 없음: {typed}")
+# 포럼 글에서 새 지시를 만들지 않는다 — 덧붙임이 대기 중인 progress/threads 장부를 건드리지 않는다
+check(json.loads((Path(a["stateDir"]) / "threads.json").read_text()) == {"9001": post}, "새 지시(스레드 장부) 안 만듦")
+# 글 내용이 비면(첨부만) 보내지 않는다
+(fd / "messages.json").write_text(json.dumps({post: [{"id": "5003", "content": "  ", "author": {"id": "U1"}}]}))
+typed.clear()
+check(mw.wake_forum_post(post, "U1", "5003").startswith("ignored:") and not typed, "빈 글은 무시")
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY
+# 봇이 넘기는 CLI 길: --forum-post 가 있으면 포럼 글 길로(매핑에 없으면 무시) — 수신 표식은 남긴다
+out="$(python3 "$DSCRIPTS/marina_discord_wake.py" wake --channel 1 --user U1 --message 5001 --thread= --forum-post=123)"
+[ "$out" = "ignored:unknown-post" ] || fail "CLI 포럼 글 길: $out"
 echo "PASS test-forum-wake"
