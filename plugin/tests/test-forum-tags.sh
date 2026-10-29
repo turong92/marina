@@ -86,6 +86,20 @@ ms._progress(rec, {"message_id": "9001", "text": "늦게 끝난 서브에이전�
 mb._rearchive(rec, "9001", "완료")
 check(patches(tid)[-2:] == [{"archived": True}, {"applied_tags": [T["완료"]]}], f"다시 닫고 완료 태그 복원: {patches(tid)[-3:]}")
 
+# PostToolUse 의 tool_input 에 reply_to 가 안 실려도(PreToolUse 가 채운 값은 안 올 수 있다) 같은 규칙으로 보완 —
+# 방 채널로 간 reply 는 그 채널에서 Claude 가 읽은 마지막 지시에 대한 답. 다른 채널·읽은 지시 없음이면 완료로 오인하지 않는다
+ms._progress(rec, {"message_id": "9001", "text": "또 이어서"})
+def tagline(m, c): return f'<channel source="plugin:discord:discord" chat_id="{c}" message_id="{m}" user="u" user_id="U1">\nx\n</channel>'
+trn = sd / "t.jsonl"
+trn.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": tagline("9001", room)}}) + "\n")
+n = len(patches(tid))
+ms.hook_reply_done({"tool_name": ms._REPLY_TOOL, "transcript_path": str(trn), "tool_input": {"chat_id": "555", "text": "딴 채널"}})
+check(len(patches(tid)) == n, "방 밖 채널로 간 reply 는 완료가 아니다")
+ms.hook_reply_done({"tool_name": ms._REPLY_TOOL, "transcript_path": str(sd / "none.jsonl"), "tool_input": {"chat_id": room, "text": "읽은 지시 없음"}})
+check(len(patches(tid)) == n, "읽은 지시가 없으면 완료가 아니다")
+ms.hook_reply_done({"tool_name": ms._REPLY_TOOL, "transcript_path": str(trn), "tool_input": {"chat_id": room, "text": "reply_to 없이 온 끝 보고"}})
+check(patches(tid)[-1:] == [{"applied_tags": [T["완료"]], "archived": True}], f"reply_to 가 없어도 방 채널 reply 는 마지막 지시의 완료: {patches(tid)[-2:]}")
+
 # 코덱스 방: _reply → 완료
 rc = ms.find_session("proj/feat/cx")
 csd = Path(rc["stateDir"])

@@ -1544,6 +1544,18 @@ def hook_rm_guard(payload: dict[str, Any]) -> "dict[str, Any] | None":
     return _deny(_RM_FIX)
 
 
+def _inferred_reply_to(s: dict[str, Any], payload: dict[str, Any]) -> str:
+    """reply_to 가 빠진 답장이 달릴 지시 — 방(스레드 포함) 채널로 가는 답이면 그 채널에서 Claude 가 읽은 마지막 지시.
+    방 밖으로 가는 답·읽은 지시가 없으면 "". PreToolUse 가 채우는 규칙과 PostToolUse 보완이 같은 길을 쓴다."""
+    inp = payload.get("tool_input") or {}
+    chat = str(inp.get("chat_id") or "")
+    if chat not in room_chans(s):
+        return ""
+    # 그 채널(스레드면 그 스레드)에서 온 마지막 지시로 — 방 채널 글을 스레드 답장에 달면 Discord 가 거절한다
+    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), chat)
+    return ids[-1] if ids else ""
+
+
 def hook_reply_to(payload: dict[str, Any]) -> "dict[str, Any] | None":
     """답장 도구에 reply_to 가 빠졌으면 그 턴에 받은 마지막 지시 메시지로 채운다 — 답장이 곧 끝 표시(✅ 없음).
     규칙 문구만으론 Claude 가 잊는다(실사용) — 훅이 기계적으로."""
@@ -1551,15 +1563,13 @@ def hook_reply_to(payload: dict[str, Any]) -> "dict[str, Any] | None":
     inp = payload.get("tool_input") or {}
     if not s or s.get("kind") in CHAT_KINDS or payload.get("tool_name") != _REPLY_TOOL or not isinstance(inp, dict):
         return None
-    chat = str(inp.get("chat_id") or "")
-    if inp.get("reply_to") or chat not in room_chans(s):
+    if inp.get("reply_to"):
         return None
-    # 그 채널(스레드면 그 스레드)에서 온 마지막 지시로 — 방 채널 글을 스레드 답장에 달면 Discord 가 거절한다
-    ids = inbound_messages(Path(str(payload.get("transcript_path") or "/nonexistent")), chat)
-    if not ids:
+    mid = _inferred_reply_to(s, payload)
+    if not mid:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                   "updatedInput": dict(inp, reply_to=ids[-1])}}
+                                   "updatedInput": dict(inp, reply_to=mid)}}
 
 
 def clear_suggest(sd: Path, ch: str, dc: "Discord") -> None:
@@ -3130,10 +3140,14 @@ def hook_reply_done(payload: dict[str, Any]) -> None:
     """PostToolUse(reply): 지시에 reply_to 로 답이 나갔으면 그 지시의 포럼 글을 완료로(코덱스 방은 marina_codex._reply 가 한다)."""
     s = _session_from_env()
     inp = payload.get("tool_input") or {}
-    if not s or payload.get("tool_name") != _REPLY_TOOL or not isinstance(inp, dict) or not inp.get("reply_to"):
+    if not s or payload.get("tool_name") != _REPLY_TOOL or not isinstance(inp, dict):
+        return
+    # PostToolUse 의 tool_input 에 PreToolUse 가 채운 reply_to 가 안 올 수 있다 — 같은 규칙으로 다시 정한다
+    mid = str(inp.get("reply_to") or "") or (_inferred_reply_to(s, payload) if s.get("kind") not in CHAT_KINDS else "")
+    if not mid:
         return
     complete_post(Discord(read_token_file(token_file(load_config(), str(s.get("project") or "")))),
-                  Path(str(s["stateDir"])), str(inp["reply_to"]), str(inp.get("text") or ""))
+                  Path(str(s["stateDir"])), mid, str(inp.get("text") or ""))
 
 
 _TEST_CMD = re.compile(r"\b(pytest|run-affected|test-[\w-]+\.sh|npm (run )?test|gradlew\b.*\btest|jest|vitest|go test|cargo test)")
