@@ -2030,8 +2030,8 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
         qd_hook = shlex.join(_hook_entry() + ["hook-question-done"]) + " || true"
         settings["hooks"]["PreToolUse"].append({"matcher": "AskUserQuestion",
                                                 "hooks": [{"type": "command", "command": q_hook, "timeout": 60}]})   # 과부하 땐 파이썬 기동만 10초를 넘겨 카드가 죽었다(2026-10-23) — 늦어도 질문 창이 조금 늦게 뜰 뿐
-        settings["hooks"]["PostToolUse"] = [{"matcher": "AskUserQuestion",
-                                             "hooks": [{"type": "command", "command": qd_hook, "timeout": 15}]}]
+        settings["hooks"].setdefault("PostToolUse", []).append(
+            {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": qd_hook, "timeout": 15}]})
         # 권한 승인 버튼(봇 4): 채널에서 누를 때까지 기다린다 — 훅 제한은 기다림보다 넉넉히
         p_hook = shlex.join(_hook_entry() + ["hook-permission"]) + " || true"
         settings["hooks"]["PermissionRequest"] = [{"hooks": [{"type": "command", "command": p_hook,
@@ -2044,6 +2044,10 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
     reply_hook = shlex.join(_hook_entry() + ["hook-reply-to"]) + " || true"
     settings["hooks"]["PreToolUse"].append({"matcher": _REPLY_TOOL,
                                             "hooks": [{"type": "command", "command": reply_hook, "timeout": 10}]})
+    # 답이 나가면 그 지시의 포럼 글을 완료로 — 답 본문을 글에 복사하고 닫는다(Discord 왕복이라 넉넉한 제한)
+    done_hook = shlex.join(_hook_entry() + ["hook-reply-done"]) + " || true"
+    settings["hooks"].setdefault("PostToolUse", []).append(
+        {"matcher": _REPLY_TOOL, "hooks": [{"type": "command", "command": done_hook, "timeout": 20}]})
     if chat_root is None:
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
         settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__ask_terminal"]}
@@ -3054,6 +3058,82 @@ def close_instruction(s: dict[str, Any], sd: Path, dc: "Discord", mid: str) -> N
     except SessionError:
         return
     _write_json(afile, sorted(archived | {mid})[-200:])
+
+
+def set_post_state(dc: "Discord", tid: str, tag: str = "", archived: "bool | None" = None) -> bool:
+    """포럼 글(forum-posts.json 에 있는 것)의 태그·보관 상태를 한 번에 바꾼다. 옛 스레드(폴백)거나 태그를 모르거나
+    Discord 가 거절하면 False — 태그는 표시일 뿐이라 부르는 쪽 일을 막지 않는다."""
+    posts = _forum_posts()
+    entry = posts.get(tid)
+    if not isinstance(entry, dict):
+        return False
+    body: dict[str, Any] = {}
+    if tag:
+        try:
+            cfg = load_config()
+            rec = next((x for x in load_sessions() if str(x.get("channelId")) == str(entry.get("channelId"))), None)
+            import marina_codex
+            holder = marina_codex.codex_cfg(cfg) if is_codex(rec) else (cfg["projects"].get(str((rec or {}).get("project"))) or {})
+            tag_id = (holder.get("forumTags") or {}).get(tag)
+        except (SessionError, KeyError, AttributeError):
+            tag_id = None
+        if tag_id:
+            body["applied_tags"] = [tag_id]
+    if archived is not None:
+        body["archived"] = archived
+    if not body:
+        return False
+    try:
+        dc._req("PATCH", f"/channels/{tid}", body)
+    except SessionError:
+        return False
+    if tag and "applied_tags" in body:
+        entry["tag"] = tag                  # 지금 태그 — 끊김에서 일이 이어지면 진행중으로 되돌리는 데 쓴다
+        posts[tid] = entry
+        _write_json(marina_home() / FORUM_POSTS, posts)
+    return True
+
+
+def current_post(sd: Path) -> str:
+    """지금 하는 지시(activity.json 의 mid)의 포럼 글 id. 글이 없으면(진행 없이 reply 만 한 지시·옛 스레드) ""."""
+    mid = str(_activity_state(sd).get("mid") or "")
+    try:
+        tid = str(json.loads((sd / "threads.json").read_text(encoding="utf-8")).get(mid) or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+    return tid if mid and tid in _forum_posts() else ""
+
+
+def complete_post(dc: "Discord", sd: Path, mid: str, text: str) -> bool:
+    """그 지시에 답이 나갔다 — 답 본문을 포럼 글에 복사하고 태그 완료·글 닫기. 포럼 글이 아니면 아무것도 안 한다(False).
+    닫은 글은 접은 목록에 적어 턴 끝이 다시 접지 않게 하고, 같은 지시로 progress 가 오면 _progress 가 다시 연다."""
+    try:
+        tid = str(json.loads((sd / "threads.json").read_text(encoding="utf-8")).get(mid) or "")
+    except (OSError, ValueError, AttributeError):
+        return False
+    if not tid or tid not in _forum_posts():
+        return False
+    for i in range(0, min(len(text), 3 * 1900), 1900):          # 길면 앞 세 덩이까지 — 원문은 방 채널에 있다
+        try:
+            dc._req("POST", f"/channels/{tid}/messages",
+                    {"content": ("✅ " if i == 0 else "") + text[i:i + 1900], "flags": 4096, "allowed_mentions": {"parse": []}})
+        except SessionError:
+            break
+    ok = set_post_state(dc, tid, "완료", archived=True)
+    if ok:
+        afile = sd / "threads-archived.json"
+        _write_json(afile, sorted(set(_json_list(afile)) | {mid})[-200:])
+    return ok
+
+
+def hook_reply_done(payload: dict[str, Any]) -> None:
+    """PostToolUse(reply): 지시에 reply_to 로 답이 나갔으면 그 지시의 포럼 글을 완료로(코덱스 방은 marina_codex._reply 가 한다)."""
+    s = _session_from_env()
+    inp = payload.get("tool_input") or {}
+    if not s or payload.get("tool_name") != _REPLY_TOOL or not isinstance(inp, dict) or not inp.get("reply_to"):
+        return
+    complete_post(Discord(read_token_file(token_file(load_config(), str(s.get("project") or "")))),
+                  Path(str(s["stateDir"])), str(inp["reply_to"]), str(inp.get("text") or ""))
 
 
 _TEST_CMD = re.compile(r"\b(pytest|run-affected|test-[\w-]+\.sh|npm (run )?test|gradlew\b.*\btest|jest|vitest|go test|cargo test)")
@@ -4271,6 +4351,8 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
         tf.write_text(json.dumps(dict(list(threads.items())[-50:]), ensure_ascii=False) + "\n", encoding="utf-8")
     af = tf.with_name("threads-archived.json")
     was_archived = mid in _json_list(af)
+    if forum_post and not created and (_forum_posts().get(tid) or {}).get("tag") in ("완료", "끊김"):
+        set_post_state(dc, tid, "진행중", archived=False)       # 완료로 닫힌 글·끊겼다 이어진 글은 다시 연다
     dc._req("POST", f"/channels/{tid}/messages",
             {"content": text[:1900], "flags": 4096, "allowed_mentions": {"parse": []}})   # 4096 = 알림 없이
     if not created and not was_archived and not forum_post:      # 포럼 글 제목은 지시를 그대로 둔다
@@ -5363,6 +5445,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("hook-codex-start")
     sub.add_parser("hook-typing")
     sub.add_parser("hook-reply-to")
+    sub.add_parser("hook-reply-done")
     sub.add_parser("hook-rm-guard")
     sub.add_parser("hook-prompt")
     sub.add_parser("hook-question")
@@ -5395,6 +5478,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if a.cmd == "mcp-chat":
         mcp_chat()
+        return 0
+    if a.cmd == "hook-reply-done":
+        try:
+            hook_reply_done(json.loads(sys.stdin.read() or "{}"))
+        except Exception:
+            pass
         return 0
     if a.cmd in ("hook-question", "hook-question-done"):
         try:

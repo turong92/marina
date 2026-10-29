@@ -796,9 +796,17 @@ def _crash_resume(rec: dict[str, Any], ref: str, ch: str, now: float) -> None:
     how = "다시 켜서 이어서 하라고 했어" if ok else "다시 켜지 못했어 — 여기에 글을 쓰면 다시 켜져"
     _log(f"crash {ref}: 일하던 중 꺼짐 · {how}")
     try:
-        _dc(ms.load_config()).send_message(ch, CRASH_NOTICE.format(how=how))
+        dc = _dc(ms.load_config())
+        dc.send_message(ch, CRASH_NOTICE.format(how=how))
     except Exception as exc:
         _log(f"crash {ref}: 알림 실패 {exc!r}")
+        dc = None
+    try:                                    # 알림이 안 갔어도 지금 지시 글에는 끊김 태그를 단다(이어지면 progress 가 진행중으로)
+        tid = ms.current_post(Path(str(rec.get("stateDir") or "/nonexistent")))
+        if tid:
+            ms.set_post_state(dc or _dc(ms.load_config()), tid, "끊김")
+    except Exception as exc:
+        _log(f"crash {ref}: 끊김 태그 실패 {exc!r}")
 
 
 def crash_tick(rows: list[dict[str, Any]], mem: dict[str, dict[str, Any]], now: float) -> None:
@@ -2176,12 +2184,16 @@ def _clean_held(raw: dict[str, Any]) -> dict[str, Any]:
     return {a: h for a, h in raw.items() if isinstance(h, dict) and isinstance(h.get("ev"), dict) and isinstance(h.get("at"), (int, float))}
 
 
-def _rearchive(rec: dict[str, Any], mid: str) -> None:
-    """접혀 있던 스레드에 늦게 나간 줄이 스레드를 다시 열었다 — 그 스레드만 다시 접는다(기존 접기 함수 재사용)."""
+def _rearchive(rec: dict[str, Any], mid: str, restore_tag: str = "") -> None:
+    """접혀 있던 스레드에 늦게 나간 줄이 스레드를 다시 열었다 — 그 스레드만 다시 접는다(기존 접기 함수 재사용).
+    포럼 글이 완료였다면 그 줄이 진행중으로 되돌린 태그를 완료로 다시 단다(restore_tag)."""
     threads = _load_json_dict(Path(str(rec["stateDir"])) / "threads.json")
     if not threads.get(mid):                      # 못 읽었거나 없는 스레드 — keep 이 비면 열린 스레드를 몽땅 접는다
         return
-    ms._archive_threads(rec, ms.Discord(ms.read_token(ms.load_config())), keep=set(threads) - {mid})
+    dc = ms.Discord(ms.read_token(ms.load_config()))
+    ms._archive_threads(rec, dc, keep=set(threads) - {mid})
+    if restore_tag:
+        ms.set_post_state(dc, str(threads[mid]), restore_tag)
 
 
 def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_f: Path) -> None:
@@ -2291,6 +2303,8 @@ def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_
     for (_, mid), (rec, texts) in groups.items():
         sd = Path(str(rec.get("stateDir") or "/nonexistent"))
         was_archived = mid in _load_json_dict_list(sd / "threads-archived.json")
+        tid0 = str(_load_json_dict(sd / "threads.json").get(mid) or "")
+        was_done = (ms._forum_posts().get(tid0) or {}).get("tag") == "완료"       # 완료 글에 늦게 간 줄이 완료를 풀지 않게
         chunks, cur = [], ""
         for t in texts:                               # 1900자에서 잘리지 않게 줄 경계로 나눈다(리뷰 I1)
             if cur and len(cur) + 1 + len(t) > 1900:
@@ -2307,7 +2321,7 @@ def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_
         if was_archived and (str(rec.get("stateDir")), mid) not in mixed and not any(
                 v.get("mid") == mid and v.get("last") == "start" for v in pins.values()):
             try:
-                _rearchive(rec, mid)
+                _rearchive(rec, mid, "완료" if was_done else "")
             except Exception as exc:
                 _log(f"role rearchive: {exc!r}")
 

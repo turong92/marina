@@ -130,7 +130,7 @@ def post_question(sdir: str, ch: str, tool_input: dict[str, Any], started: float
     qs = [q for q in (tool_input.get("questions") or []) if isinstance(q, dict)][:5]
     if not qs:
         return
-    st = {"questions": qs, "answers": [None] * len(qs), "msg": ""}
+    st = {"questions": qs, "answers": [None] * len(qs), "msg": "", "tid": ms.current_post(sd)}   # tid = 답 필요를 단 포럼 글
     dc = _dc()
     r = dc._req("POST", f"/channels/{ch}/messages", {"flags": 1 << 15, "components": render(ch, st),
                                                       "allowed_mentions": {"parse": []}})
@@ -151,6 +151,8 @@ def post_question(sdir: str, ch: str, tool_input: dict[str, Any], started: float
         except ms.SessionError:
             pass
         return
+    if st["tid"]:
+        ms.set_post_state(dc, st["tid"], "답 필요")
     ms.dashboard_signal()
 
 
@@ -319,10 +321,13 @@ def done(sd: Path, ch: str, note: str = "답함") -> None:
     finally:
         if lockf:
             lockf.close()
+    dc = _dc()
     try:
-        _dc()._req("PATCH", f"/channels/{ch}/messages/{st['msg']}", {"components": render(ch, st, note)})
+        dc._req("PATCH", f"/channels/{ch}/messages/{st['msg']}", {"components": render(ch, st, note)})
     except ms.SessionError:
         pass
+    if st.get("tid"):
+        ms.set_post_state(dc, str(st["tid"]), "진행중")        # 질문이 끝났으니 답 필요를 내린다
     ms.dashboard_signal()
 
 

@@ -619,6 +619,7 @@ def _reply(rec: dict[str, Any], dc: "ms.Discord", token: str, args: dict[str, An
     if reply_to:
         ms._write_json(sd / "replied.json", {"mid": reply_to, "at": time.time()})
         try:                                   # 답한 지시는 그 자리에서 닫는다 — 코덱스 턴은 끝나지 않을 수 있다
+            ms.complete_post(dc, sd, reply_to, text)        # 포럼 글이면 답을 복사하고 완료·닫기(옛 스레드면 아무것도 안 함)
             ms.close_instruction(rec, sd, dc, reply_to)
         except Exception:
             pass
