@@ -603,6 +603,8 @@ FORUM_POSTS_MAX = 500
 def ensure_forum(dc: Discord, cfg: dict[str, Any], rec: dict[str, Any]) -> tuple[str, dict[str, str]]:
     """방이 속한 카테고리의 📋작업 포럼(코덱스 방은 chat-bot 의 것) — (포럼 id, 태그 이름 → id). 자료실처럼 저장된 id 가
     Discord 에 있으면 그대로, 없으면 만들어 discord.json(forumChannelId·forumTags)에 적는다. 못 만들면 SessionError 가 그대로 올라간다."""
+    if rec.get("kind") in CHAT_KINDS:      # 채팅방·비서방(제한 세션)은 옛 진행 스레드 — 남의 글이 들어갈 길을 만들지 않는다
+        raise SessionError("채팅방은 포럼을 쓰지 않아")
     if is_codex(rec):
         import marina_codex
         holder = marina_codex.codex_cfg(cfg)

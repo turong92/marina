@@ -117,6 +117,11 @@ cfg_now = cfg(); cfg_now["projects"]["proj"]["forumChannelId"] = fid; cfg_now["p
 # 포럼이 Discord 에 아직 있도록 fake 의 채널 목록에는 남아 있다
 ms._progress(rec3, {"message_id": "9302", "text": "글만 막힘"})
 check(len(posts(rf"/channels/{room}/messages/9302/threads")) == 1, "글 만들기 실패 → 옛 스레드")
+# 채팅방·비서방(제한 세션)은 포럼을 쓰지 않는다 — 옛 진행 스레드 그대로(지휘 세션 결정 2026-10-29)
+try:
+    ms.ensure_forum(None, {}, {"kind": "chat", "project": "chat", "task": "x"}); check(False, "채팅방은 포럼 거절")
+except ms.SessionError:
+    pass
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY
