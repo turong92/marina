@@ -105,6 +105,21 @@ check(json.loads((Path(a["stateDir"]) / "threads.json").read_text()) == {"9001":
 typed.clear()
 check(mw.wake_forum_post(post, "U1", "5003").startswith("ignored:") and not typed, "빈 글은 무시")
 
+# ── 장부 보호 ──
+# 방끼리 고정 글은 지시 글 500개 한도에 밀려나지 않는다
+for i in range(ms.FORUM_POSTS_MAX + 5):
+    ms.remember_forum_post(f"7{i:05d}", {"ref": "x", "mid": str(i), "channelId": "1"})
+allp = ms._forum_posts()
+check(rp in allp and len([k for k, v in allp.items() if v.get("kind") != "room"]) == ms.FORUM_POSTS_MAX, "방끼리 글은 한도 밖, 지시 글만 500개")
+# Discord 를 부르는 동안 다른 프로세스가 장부에 적은 항목을 태그 기록이 덮어쓰지 않는다
+class Racy(ms.Discord):
+    def _req(self, method, path, body=None):
+        if method == "PATCH":
+            ms.remember_forum_post("8000001", {"ref": "y", "mid": "1", "channelId": "1"})
+        return super()._req(method, path, body)
+ms.set_post_state(Racy(ms.read_token(ms.load_config())), rp, "진행중")
+check("8000001" in ms._forum_posts() and ms._forum_posts()[rp].get("tag") == "진행중", "동시에 적힌 항목이 남고 태그도 기록")
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY

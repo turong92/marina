@@ -32,6 +32,8 @@ def log():
     return [json.loads(l) for l in (fd / "log.jsonl").read_text().splitlines()]
 def patches(tid):
     return [x["b"] for x in log() if x["m"] == "PATCH" and x["p"] == f"/channels/{tid}"]
+def dc():
+    return ms.Discord(ms.read_token(ms.load_config()))
 def cfg():
     return json.loads((Path(os.environ["MARINA_HOME"]) / "discord.json").read_text())
 
@@ -84,7 +86,17 @@ check("9001" not in json.loads((sd / "threads-archived.json").read_text()), "접
 ms.hook_reply_done(payload)
 ms._progress(rec, {"message_id": "9001", "text": "늦게 끝난 서브에이전트"})
 mb._rearchive(rec, "9001", "완료")
-check(patches(tid)[-2:] == [{"archived": True}, {"applied_tags": [T["완료"]]}], f"다시 닫고 완료 태그 복원: {patches(tid)[-3:]}")
+check(patches(tid)[-1:] == [{"applied_tags": [T["완료"]], "archived": True}], f"다시 닫을 때 한 번에 완료 태그까지(닫은 뒤 태그만은 거절된다): {patches(tid)[-2:]}")
+
+# 이미 닫힌 글에 태그만 바꾸면 Discord 가 거절한다(50083) — 잠깐 열어 태그를 달고 도로 닫는다
+def state(t):
+    return next(c for c in dc().list_channels(ms.load_config()["guildId"]) if c["id"] == t)
+ms.set_post_state(dc(), tid, "", archived=True)
+n = len(patches(tid))
+check(ms.set_post_state(dc(), tid, "답 필요"), "닫힌 글도 태그는 바뀐다")
+check(state(tid).get("applied_tags") == [T["답 필요"]] and state(tid).get("archived") is True, f"태그 바뀌고 닫힌 채: {state(tid)}")
+check(patches(tid)[n:] == [{"applied_tags": [T["답 필요"]]}, {"applied_tags": [T["답 필요"]], "archived": False}, {"archived": True}], f"거절되면 열고 달고 닫기: {patches(tid)[n:]}")
+ms.set_post_state(dc(), tid, "완료", archived=True)
 
 # PostToolUse 의 tool_input 에 reply_to 가 안 실려도(PreToolUse 가 채운 값은 안 올 수 있다) 같은 규칙으로 보완 —
 # 방 채널로 간 reply 는 그 채널에서 Claude 가 읽은 마지막 지시에 대한 답. 다른 채널·읽은 지시 없음이면 완료로 오인하지 않는다

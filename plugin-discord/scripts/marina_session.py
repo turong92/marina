@@ -3095,12 +3095,24 @@ def set_post_state(dc: "Discord", tid: str, tag: str = "", archived: "bool | Non
         return False
     try:
         dc._req("PATCH", f"/channels/{tid}", body)
+    except DiscordError as exc:
+        if exc.code != 400 or archived is not None or "applied_tags" not in body:
+            return False
+        # 이미 닫힌 글은 태그만 고칠 수 없다(50083) — 열면서 달고 도로 닫는다
+        try:
+            dc._req("PATCH", f"/channels/{tid}", dict(body, archived=False))
+            dc._req("PATCH", f"/channels/{tid}", {"archived": True})
+        except SessionError:
+            return False
     except SessionError:
         return False
     if tag and "applied_tags" in body:
-        entry["tag"] = tag                  # 지금 태그 — 끊김에서 일이 이어지면 진행중으로 되돌리는 데 쓴다
-        posts[tid] = entry
-        _write_json(marina_home() / FORUM_POSTS, posts)
+        def mark(posts: dict[str, Any]) -> "bool | None":
+            cur = posts.get(tid)
+            if not isinstance(cur, dict):
+                return False
+            cur["tag"] = tag                # 지금 태그 — 끊김에서 일이 이어지면 진행중으로 되돌리는 데 쓴다
+        _update_forum_posts(mark)
     return True
 
 
@@ -4291,17 +4303,32 @@ def _forum_posts() -> dict[str, Any]:
     return d if isinstance(d, dict) else {}
 
 
+def _update_forum_posts(change: Any) -> None:
+    """forum-posts.json 은 세션 MCP·훅·봇 데몬이 함께 고친다 — 잠금 안에서 다시 읽고, 고치고, 쓴다.
+    `change(posts)` 가 False 를 돌려주면 쓰지 않는다. Discord 를 부르는 동안 옛 사본을 들고 있다가 덮어쓰지 않게 호출 쪽은 부른 뒤에 이걸 쓴다."""
+    lockf = _wait_lock(marina_home() / "forum-posts.lock")
+    try:
+        posts = _forum_posts()
+        if change(posts) is not False:
+            _write_json(marina_home() / FORUM_POSTS, posts)
+    finally:
+        if lockf:
+            lockf.close()
+
+
 def remember_forum_post(tid: str, entry: dict[str, Any]) -> None:
-    posts = _forum_posts()
-    posts.pop(tid, None)
-    posts[tid] = entry
-    _write_json(marina_home() / FORUM_POSTS, dict(list(posts.items())[-FORUM_POSTS_MAX:]))
+    def add(posts: dict[str, Any]) -> None:
+        posts.pop(tid, None)
+        posts[tid] = entry
+        rooms = {k for k, v in posts.items() if isinstance(v, dict) and v.get("kind") == "room"}
+        keep = set(list(k for k in posts if k not in rooms)[-FORUM_POSTS_MAX:]) | rooms     # 방끼리 고정 글은 한도 밖 — 밀려나면 새 글이 생기고 옛 글은 무시된다
+        for k in [k for k in posts if k not in keep]:
+            del posts[k]
+    _update_forum_posts(add)
 
 
 def forget_forum_post(tid: str) -> None:
-    posts = _forum_posts()
-    if posts.pop(tid, None) is not None:
-        _write_json(marina_home() / FORUM_POSTS, posts)
+    _update_forum_posts(lambda posts: posts.pop(tid, None) is not None and None)
 
 
 def _create_forum_post(dc: "Discord", cfg: dict[str, Any], rec: dict[str, Any], mid: str, text: str) -> str:
@@ -4323,7 +4350,7 @@ def _create_forum_post(dc: "Discord", cfg: dict[str, Any], rec: dict[str, Any], 
             "applied_tags": [tags["진행중"]] if "진행중" in tags else [],
             "message": {"content": first, "flags": 4096, "allowed_mentions": {"parse": []}}})
         tid = str(made["id"])
-    except (SessionError, KeyError):
+    except (SessionError, KeyError, TypeError, OSError):      # 진행이 사라지는 것보다 옛 스레드가 낫다 — 쓰기 실패도 같이
         return ""
     remember_forum_post(tid, {"ref": f"{rec.get('project')}/{rec.get('task')}", "mid": mid, "channelId": room})
     try:

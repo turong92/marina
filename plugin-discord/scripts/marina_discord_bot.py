@@ -2191,9 +2191,12 @@ def _rearchive(rec: dict[str, Any], mid: str, restore_tag: str = "") -> None:
     if not threads.get(mid):                      # 못 읽었거나 없는 스레드 — keep 이 비면 열린 스레드를 몽땅 접는다
         return
     dc = ms.Discord(ms.read_token(ms.load_config()))
+    if restore_tag and ms.set_post_state(dc, str(threads[mid]), restore_tag, archived=True):    # 닫은 뒤 태그만 고치면 Discord 가 거절한다 — 한 번에
+        sd = Path(str(rec["stateDir"]))
+        afile = sd / "threads-archived.json"
+        ms._write_json(afile, sorted(set(ms._json_list(afile)) | {mid})[-200:])
+        return
     ms._archive_threads(rec, dc, keep=set(threads) - {mid})
-    if restore_tag:
-        ms.set_post_state(dc, str(threads[mid]), restore_tag)
 
 
 def _role_events_post(lines: list[bytes], off: int, by_sid: dict[str, Any], off_f: Path) -> None:

@@ -125,6 +125,10 @@ class H(BaseHTTPRequestHandler):
         if mode == "429once":
             fp.unlink(); self._send(429, {"message": "rate limited", "retry_after": 0.05}); return
         p = self._parts()
+        if len(p) == 3 and p[0] == "channels" and p[2] == "messages":
+            with lock:
+                if (channels.get(p[1]) or {}).get("archived"):
+                    channels[p[1]]["archived"] = False
         if len(p) == 5 and p[0] == "channels" and p[2] == "messages" and p[4] == "threads":
             if (state / "no_threads").exists():
                 self._send(403, {"message": "Missing Permissions"}); return
@@ -206,6 +210,9 @@ class H(BaseHTTPRequestHandler):
             self._send(403, {"message": "Missing Access", "code": 50001}); return
         with lock:
             ch = channels.get(self._parts()[-1])
+            if ch is not None and ch.get("archived") and "archived" not in body and len(self._parts()) == 2 \
+                    and ("applied_tags" in body or "name" in body):       # 실제 Discord: 닫힌 스레드는 archived 없이 고칠 수 없다
+                self._send(400, {"message": "Thread is archived", "code": 50083}); return
             if ch is not None and len(self._parts()) == 2:      # 포럼 글의 태그·보관·이름 변경을 기억한다
                 for k in ("applied_tags", "name"):
                     if k in body:
