@@ -93,6 +93,10 @@ check(cls(fd1=f"/private/tmp/claude-{os.getuid() + 1}/x/tasks/a.output") is None
 check(cls(pid=1, cwd=gone_cwd) is None, "protected pid (self/daemon) excluded")
 check(cls(comm="/opt/homebrew/bin/caddy", cwd=gone_cwd) is None, "caddy excluded")
 check(cls(comm="caddy", cwd=gone_cwd) is None, "caddy (bare comm) excluded")
+# (2026-10-29) tmux 서버는 방이 없으면 스스로 꺼진다 — 살아 있으면 열린 방이 있다는 뜻. 플러그인 캐시에서 떠
+#  cwd 가 사라졌다고 죽였더니 모든 방이 한꺼번에 종료됐다
+check(cls(comm="/opt/homebrew/bin/tmux", cwd=gone_cwd) is None, "tmux server excluded")
+check(cls(comm="tmux", cwd=gone_cwd) is None, "tmux (bare comm) excluded")
 for sysc in ("/System/Library/x/y", "/usr/libexec/z", "/Applications/Foo.app/Contents/MacOS/Foo"):
     check(cls(comm=sysc, cwd=gone_cwd) is None, f"system comm excluded: {sysc}")
 check(cls(comm="/usr/libexec/z", fd1=OUT) == "claude-task-output", "sig1 is not subject to the system-path exclusion (a claude task is a claude task)")

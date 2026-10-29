@@ -12,7 +12,7 @@ tasks/<id>.output` 에 둔 채 5일간 CPU 97%(출력 파일은 이미 삭제됨
      표기가 없다 — 실측). 경로 매칭이라 삭제 여부와 무관하게 잡힌다.
   2) ppid==1 이고 cwd 디렉터리가 사라짐(삭제된 워크트리·/tmp 폴더). 단 marina 데몬($MARINA_HOME/
      dashboard.pid — launchd 가 띄워 ppid=1 이고 `marina reap` CLI 는 별도 프로세스라 os.getpid() 로는
-     못 알아본다)·게이트웨이(caddy)·시스템 경로(/System /usr /Applications)는 제외.
+     못 알아본다)·게이트웨이(caddy)·tmux 서버(방을 품고 있다)·시스템 경로(/System /usr /Applications)는 제외.
 여기에 시작 후 N시간(기본 6h, MARINA_REAPER_MIN_AGE_H)을 넘긴 것만 SIGTERM → 10s → SIGKILL.
 
 **규칙.** 세션 liveness(marina_sessions)와 같다 — 판정에 argv 를 쓰지 않는다. ps 는 `comm=`(실행
@@ -34,7 +34,8 @@ REASON_TASK_OUTPUT = "claude-task-output"
 REASON_CWD_GONE = "cwd-gone"
 _SYSTEM_PREFIXES = ("/System/", "/usr/", "/Applications/")
 _USER_PREFIXES = ("/usr/local/",)            # 시스템 경로처럼 보이지만 사용자 설치(homebrew intel 등)
-_EXCLUDED_COMMS = {"caddy"}                  # marina 게이트웨이(marina-gateway-control.sh 가 띄움)
+_EXCLUDED_COMMS = {"caddy",                 # marina 게이트웨이(marina-gateway-control.sh 가 띄움)
+                   "tmux"}                   # 방이 없으면 스스로 꺼진다 — 살아 있으면 열린 방이 있다(2026-10-29 전 방 종료 사고)
 _TERM_GRACE_S = 10.0
 _INTERVAL_S = 600                            # 데몬 폴링 주기 — 수 주 묵은 고아를 잡는 일이라 촘촘할 이유가 없다
 _LSOF_CHUNK = 200                            # lsof -p 목록이 너무 길면 실패한다 — 나눠서 부른다

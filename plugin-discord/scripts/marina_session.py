@@ -645,16 +645,22 @@ def tmux_tick_fresh() -> None:
         cache.clear()
 
 
+def _run_tmux(args: tuple) -> subprocess.CompletedProcess:
+    # 첫 호출이 서버를 띄우면 서버는 이 프로세스의 cwd 를 물려받는다. 플러그인 캐시 폴더면 자동 업데이트가 지운 뒤
+    # 리퍼가 'cwd 사라진 고아'로 보고 죽여 모든 방이 꺼졌다(2026-10-29) — 안 지워지는 홈에서 부른다.
+    return subprocess.run(_tmux_base() + list(args), capture_output=True, text=True, cwd=str(Path.home()))
+
+
 def _tmux(*args: str) -> subprocess.CompletedProcess:
     cache = getattr(_TICK, "cache", None)
     if cache is None:
-        return subprocess.run(_tmux_base() + list(args), capture_output=True, text=True)
+        return _run_tmux(args)
     if not args or args[0] not in _TICK_READS:
         cache.clear()                    # 키 입력·종료가 끼면 이 판에 읽은 것은 버린다
-        return subprocess.run(_tmux_base() + list(args), capture_output=True, text=True)
+        return _run_tmux(args)
     hit = cache.get(args)
     if hit is None or time.monotonic() - hit[0] > TICK_TTL:
-        hit = cache[args] = (time.monotonic(), subprocess.run(_tmux_base() + list(args), capture_output=True, text=True))
+        hit = cache[args] = (time.monotonic(), _run_tmux(args))
     return hit[1]
 
 
