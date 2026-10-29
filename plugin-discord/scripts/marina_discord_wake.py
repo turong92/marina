@@ -571,7 +571,7 @@ def wake_after_idle(channel: str) -> str:
     return r
 
 
-def _resume_interrupted(rec: dict[str, Any], now: float) -> bool:
+def _resume_interrupted(rec: dict[str, Any], now: float, text: str = ms.RESUME_TEXT) -> bool:
     """끊긴 방을 켜서 이어받게 — 방 잠금 안에서, 마지막으로 띄운 환경으로, 이어받기 문구를 첫 지시로(sessionId 없는 개발 방도)."""
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))
     ref = f"{rec.get('project')}/{rec.get('task')}"
@@ -580,7 +580,7 @@ def _resume_interrupted(rec: dict[str, Any], now: float) -> bool:
     with ms.room_lock(sd) as got:
         if not got or ms.tmux_alive(str(rec.get("tmux") or "")):
             return False
-        started, _failed = _start_with_launch_env(ref, sd, ms.RESUME_TEXT)
+        started, _failed = _start_with_launch_env(ref, sd, text)
         if started:
             _save_woke(sd, at=now, ok=True, delivered=[])
         return bool(started)

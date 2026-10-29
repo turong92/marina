@@ -1191,7 +1191,30 @@ def room_lock(sd: Any, wait: float = 0.0) -> Any:
             fh.close()                   # 닫으면 잠금도 풀린다
 
 
+def _down_mark(name: str) -> Path:
+    return marina_home() / "tmux-down" / name
+
+
+def mark_down(name: str) -> None:
+    """marina 가 이 방을 일부러 내린다(멈춤·재시작·쉼·스스로 종료) — 봇이 '갑자기 꺼짐'으로 오인하지 않게 시각을 남긴다."""
+    if not name:
+        return
+    try:
+        _down_mark(name).parent.mkdir(parents=True, exist_ok=True)
+        _down_mark(name).touch()
+    except OSError:
+        pass
+
+
+def tmux_down_at(name: str) -> float:
+    try:
+        return _down_mark(name).stat().st_mtime if name else 0.0
+    except OSError:
+        return 0.0
+
+
 def tmux_stop(name: str) -> None:
+    mark_down(name)
     if tmux_alive(name):
         _tmux("kill-session", "-t", f"={name}")
         dashboard_signal()
@@ -3155,6 +3178,16 @@ def adopt_prompt_threads(rec: dict[str, Any], sd: Path, prompt: str, chans: set[
     return got
 
 
+ASK_MAX = 60
+
+
+def _ask_line(prompt: str, mid: str) -> str:
+    """받은 글에서 그 메시지 본문의 첫 줄(#상태 작업 중 줄에 '무슨 지시인지'로) — 못 찾으면 빈 문자열."""
+    m = re.search(r'message_id=\\?"' + re.escape(mid) + r'\\?"[^>]*>(.*?)</channel>', prompt, re.S)
+    line = next((x.strip() for x in (m.group(1) if m else "").splitlines() if x.strip()), "")
+    return line if len(line) <= ASK_MAX else line[:ASK_MAX - 1] + "…"
+
+
 def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, ch: str, min_gap: float) -> None:
     at = float(payload.get("_at") or time.time())
     if _stopped_after(sd, at):      # 턴이 끝나기 전에 떠난 훅이 늦게 도착했다 — 끝난 지시에 다시 달지 않는다(실사용)
@@ -3226,9 +3259,12 @@ def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, 
         for m in fresh[:-1]:                        # 한 번에 읽은 앞 메시지들도 '받음'
             if not (st.get("marked") or {}).get(m):
                 _mark(dc, cof(m), st, m, "👀")
-        st.update(mid=mid, since=time.time())
+        st.update(mid=mid, since=time.time(), ask=_ask_line(str(payload.get("prompt") or ""), mid) if prompt else "")
         st.pop("emoji", None)
+        st.pop("doing", None)
         dashboard_signal()
+    if not prompt:     # #상태 작업 중 줄의 '지금 하는 일'
+        st["doing"] = f"{emoji} {label}" + (f" — {what}" if what else "")
     _mark(dc, cof(mid), st, mid, "🛑")             # 누르면 봇이 이 세션에 Esc(봇 1단계). 턴 끝에 뗀다
     if st.get("emoji") != emoji:
         _mark(dc, cof(mid), st, mid, emoji)
@@ -3263,6 +3299,7 @@ def notify_exit(ref: str, code: str) -> None:
         s = find_session(ref)
     except SessionError:
         return                                   # 기동 실패(기록 전) · 이미 rm 된 세션
+    mark_down(str(s.get("tmux") or ""))         # 스스로 끝났다 — 봇의 '갑자기 꺼짐' 알림과 겹치지 않게
     if not s.get("channelId"):
         return
     cfg = load_config()

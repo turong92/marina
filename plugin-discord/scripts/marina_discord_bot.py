@@ -510,7 +510,8 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         alive, busy = _room_busy(rec)
         bg = alive and (_pane_shells(str(rec.get("tmux") or "")) > 0 or bool(_working(live_tasks(rec)))
                         or (not busy and _has_recent_agents(rec)))
-        act = ms._activity_state(Path(str(rec.get("stateDir") or "/nonexistent")))
+        sdir = Path(str(rec.get("stateDir") or "/nonexistent"))
+        act = ms._activity_state(sdir)
         rows.append({"ref": f"{rec.get('project')}/{rec.get('task')}", "channelId": str(rec["channelId"]),
                      "alive": alive, "busy": busy, "bg": bg, "emoji": str(act.get("emoji") or "") if busy else "",
                      "wakeable": (not alive) and wake_on and Path(str(rec.get("root") or "/nonexistent")).is_dir(),   # 글을 쓰면 깨어나는 방
@@ -518,7 +519,8 @@ def snapshot(full: bool = True) -> dict[str, Any]:
                      "tasks": live_tasks(rec) if alive and full else [],
                      "asking": alive and full and (Path(str(rec.get("stateDir") or "/nonexistent")) / "question.json").exists(),
                      "permission": alive and full and _pane_permission(str(rec.get("tmux") or "")),
-                     "account": _row_account(rec, alive), "codex": ms.is_codex(rec)})
+                     "account": _row_account(rec, alive), "codex": ms.is_codex(rec),
+                     **(_turn_info(act, sdir) if busy and full else {})})
     if not full:
         # 뒤에서 도는 일(셸·팀 에이전트)도 '바쁨'으로 쳐서 #상태를 30초마다 — 끝나면 바로 보이게(입력 중 표시는 busy·도는 에이전트만)
         return {"sessions": rows, "anyBusy": any(r["busy"] or r["bg"] for r in rows)}
@@ -541,6 +543,28 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         stats = {}
     return {**stats, "usage": use, "accountUsage": account_usage(), "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
             "anyBusy": any(r["busy"] for r in rows)}
+
+
+def _turn_info(act: dict[str, Any], sdir: Path) -> dict[str, Any]:
+    """작업 중 줄에 붙일 것 — 받은 지시 첫 줄·시작 시각·지금 하는 일·마지막으로 도구를 쓴 뒤 지난 초(진행 훅이 activity-at 을 만진다)."""
+    def num(name: str) -> float:
+        try:
+            return float((sdir / name).read_text())
+        except (OSError, ValueError):
+            return 0.0
+    try:
+        moved = (sdir / "activity-at").stat().st_mtime
+    except OSError:
+        moved = 0.0
+    turn = num("turn-at")
+    since = act.get("since") if isinstance(act.get("since"), (int, float)) else 0.0
+    out = {"ask": str(act.get("ask") or ""), "since": since or None, "doing": str(act.get("doing") or "")}
+    if turn and since < turn - 2:
+        # 이번 턴은 디스코드에서 오지 않았다(이어받기·재촉·터미널) — 진행 훅이 안 돌아 지난 지시가 남아 있다(리뷰 I1)
+        out = {"ask": "", "since": turn, "doing": ""}
+    last = max(moved, turn)
+    out["quiet"] = max(0.0, time.time() - last) if last else None
+    return out
 
 
 def _bar(pct: float, width: int = 10) -> str:
@@ -568,6 +592,13 @@ def _row(r: dict[str, Any], proj_w: int) -> str:
 
 
 VIEW_PREFIX = "marina-view:"
+
+
+TEXT_MAX = 3700            # 한 메시지 text display 합 4000자 — 꼬리말 몫을 남긴다(리뷰 I2)
+
+
+def _chars(cs: list[dict[str, Any]]) -> int:
+    return sum(len(str(c.get("content") or "")) + _chars(c.get("components") or []) for c in cs)
 
 
 def _count(cs: list[dict[str, Any]]) -> int:
@@ -642,11 +673,41 @@ def _tasks_desc(r: dict[str, Any]) -> str:
     return f"\n-# {d}" if d else ""
 
 
+QUIET_WARN_S = 10 * 60      # 작업 중인데 도구를 이만큼 안 썼으면 ⚠ — 긴 빌드일 수도, 멈춘 것일 수도(형이 '계속 하냐'고 묻게 되던 것)
+
+
+def _span(sec: float) -> str:
+    m = int(sec // 60)
+    return f"{m // 60}시간째" if m >= 120 else f"{m}분째"
+
+
+def _turn_desc(r: dict[str, Any]) -> str:
+    """작업 중 줄 밑에 '📝 지시 · N분째 · 지금 하는 일 · ⚠ M분째 조용' — 모르는 칸은 뺀다."""
+    parts = []
+    if r.get("ask"):
+        parts.append(f"📝 {_clean(str(r['ask']))}")
+    since = r.get("since")
+    if isinstance(since, (int, float)) and since > 0:
+        parts.append(_span(time.time() - since))
+    if r.get("doing"):
+        parts.append(_clean(str(r["doing"]))[:60])
+    q = r.get("quiet")
+    if isinstance(q, (int, float)) and q >= QUIET_WARN_S:
+        parts.append(f"⚠ {int(q // 60)}분째 조용")
+    return f"\n-# {' · '.join(parts)}" if parts else ""
+
+
 def _view_button(r: dict[str, Any]) -> dict[str, Any]:
     return {"type": 2, "style": 2, "label": "보기", "custom_id": VIEW_PREFIX + r["channelId"]}
 
 
 def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
+    """글자 수가 넘치면 작업 줄의 설명(지시·도는 일)을 빼고 다시 그린다 — 넘친 채 PATCH 하면 400 으로 #상태가 멈춘다."""
+    out = _render(snap, lean=False)
+    return out if _chars(out) <= TEXT_MAX else _render(snap, lean=True)
+
+
+def _render(snap: dict[str, Any], lean: bool) -> list[dict[str, Any]]:
     """#상태 메시지(Components V2). 섹션: 작업 중(줄마다 정지 버튼) · 대기 · 잠듦(글을 쓰면 깨어남) · 꺼짐. 같으면 고쳐 쓰지 않는다.
     디스크·부하·시각은 꼬리말로 따로 — 매번 바뀌는 값이 비교를 흔들지 않게."""
     def line(ws: list[dict[str, Any]], tag: str = "") -> str:
@@ -680,7 +741,8 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     out.append({"type": 14})
     out.append(_text(f"### 🔧 작업 중 {len(busy)}" + ("" if busy else "\n-# 없음")))
     left = [r for r in busy if not add(
-        [{"type": 9, "components": [_text(f"{r['emoji'] or '🔧'} {_row(r, proj_w)}{_tasks_tag(r)}{_tasks_desc(r)}")],
+        [{"type": 9, "components": [_text(f"{r['emoji'] or '🔧'} {_row(r, proj_w)}{_tasks_tag(r)}"
+                                           + ("" if lean else _turn_desc(r) + _tasks_desc(r)))],
           "accessory": {"type": 2, "style": 4, "label": "정지", "custom_id": STOP_PREFIX + r["channelId"]}}]
         + ([{"type": 1, "components": [_view_button(r)]}] if r.get("tasks") else []))]
     if left:
@@ -688,7 +750,7 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     if bg:
         out.append({"type": 14})
         out.append(_text(f"### ⏳ 백그라운드 {len(bg)}\n-# 턴은 끝났고 뒤에서 셸·에이전트가 도는 중 — 세션 재시작하면 같이 죽는다"))
-        left = [r for r in bg if not add([{"type": 9, "components": [_text(f"{_row(r, proj_w)}{_tasks_tag(r)}{_tasks_desc(r)}")],
+        left = [r for r in bg if not add([{"type": 9, "components": [_text(f"{_row(r, proj_w)}{_tasks_tag(r)}{'' if lean else _tasks_desc(r)}")],
                                             "accessory": _view_button(r)}])]
         if left:
             out.append(_text("-# 외 " + " ".join(f"<#{r['channelId']}>" for r in left)))
@@ -696,14 +758,80 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
         out.append({"type": 14})
         out.append(_text(_role_block(snap["roleUsage"])))
     out.append({"type": 14})
-    out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) + _tasks_tag(r) + _tasks_desc(r) for r in idle)))
+    out.append(_text(f"### 💤 대기 {len(idle)}" + "".join("\n" + _row(r, proj_w) + _tasks_tag(r) + ("" if lean else _tasks_desc(r)) for r in idle)))
     if asleep:
         out.append({"type": 14})
-        out.append(_text(f"### 🌙 잠듦 {len(asleep)}\n-# 글을 쓰면 깨어나" + "".join("\n" + _row(r, proj_w) for r in asleep)))
+        # 방마다 한 줄이면 스무 줄 넘게 화면을 덮는다(형 2026-10-29) — 링크만 한 줄로. 링크가 채널 이름을 보여 준다
+        out.append(_text(f"### 🌙 잠듦 {len(asleep)}\n-# 글을 쓰면 깨어나\n" + " ".join(f"<#{r['channelId']}>" for r in asleep)))
     if off:
         out.append({"type": 14})
         out.append(_text(f"### ⚫ 꺼짐 {len(off)}" + "".join("\n" + _row(r, proj_w) for r in off)))
     return out
+
+
+CRASH_GRACE_S = 20.0        # 꺼진 걸 본 뒤 이만큼 기다려 판단 — 스스로 끝난 방의 종료 알림(notify-exit)이 내림 표식을 남길 시간
+CRASH_MAX_RESUME = 3        # 한 판에 다시 켜는 방 — 서버째 꺼졌을 때 열 방이 한꺼번에 claude 를 띄우지 않게(나머지는 다음 판)
+CRASH_TEXT = ("[마리나] 이 방 세션이 일하던 중에 갑자기 꺼졌다가 방금 다시 켜졌어. 뒤에서 돌던 셸·에이전트도 같이 꺼졌어. "
+              "하던 일이 어디까지 됐는지 확인하고 이어서 해 줘. 끝나면 Discord reply 로 보고해.")
+CRASH_NOTICE = "⚠ 일하던 중에 이 방 세션이 갑자기 꺼졌어 — {how}"
+
+
+def _spawn_bg(fn: Any) -> None:
+    """다시 켜기(로그인 셸 환경·부팅 대기로 수 초~수십 초)는 데몬 루프 밖에서 — typing·#상태가 멈추지 않게(리뷰 I3)."""
+    threading.Thread(target=fn, daemon=True).start()
+
+
+def _crash_resume(rec: dict[str, Any], ref: str, ch: str, now: float) -> None:
+    import marina_discord_wake as mw
+    # 따로 도는 스레드라 판 캐시(스레드별)가 없다 — tmux 를 지금 새로 읽는다(리뷰 M2)
+    if ms.tmux_alive(str(rec.get("tmux") or "")):
+        return                              # 그사이 깨우기·재시작이 띄웠다
+    try:
+        ok = mw._resume_interrupted(rec, now, text=CRASH_TEXT)
+    except Exception as exc:
+        _log(f"crash {ref}: 다시 켜기 실패 {exc!r}")
+        ok = False
+    if not ok and ms.tmux_alive(str(rec.get("tmux") or "")):
+        return                              # 잠금을 쥔 쪽이 띄웠다 — '못 켰어'라고 하지 않는다
+    how = "다시 켜서 이어서 하라고 했어" if ok else "다시 켜지 못했어 — 여기에 글을 쓰면 다시 켜져"
+    _log(f"crash {ref}: 일하던 중 꺼짐 · {how}")
+    try:
+        _dc(ms.load_config()).send_message(ch, CRASH_NOTICE.format(how=how))
+    except Exception as exc:
+        _log(f"crash {ref}: 알림 실패 {exc!r}")
+
+
+def crash_tick(rows: list[dict[str, Any]], mem: dict[str, dict[str, Any]], now: float) -> None:
+    """(2026-10-29) tmux 서버째 꺼져 ovation 방이 세 시간 꺼져 있었는데 아무도 몰랐다 — 일하던(작업 중·백그라운드) 방이
+    marina 가 내리지 않았는데 사라지면 그 방에 알리고 다시 켜서 잇게 한다. 쉬던 방은 조용히 둔다(글이 오면 깨어난다).
+    marina 가 내린 방(멈춤·재시작·쉼·rm)과 claude 가 스스로 끝난 방(notify-exit 가 따로 알린다)은 내림 표식으로 거른다.
+    사람이 tmux 를 직접 죽인 것도 끊김으로 본다."""
+    for ch in [c for c in mem if c not in {str(r["channelId"]) for r in rows}]:
+        mem.pop(ch, None)                   # 지워진 방(리뷰 M4)
+    resumed = 0
+    for r in rows:
+        ch = str(r["channelId"])
+        if r.get("alive"):
+            mem[ch] = {"at": now, "working": bool(r.get("busy") or r.get("bg"))}
+            continue
+        seen = mem.get(ch)
+        if not seen:
+            continue
+        if not seen["working"]:
+            mem.pop(ch, None)
+            continue
+        dead = seen.setdefault("dead", now)  # 유예는 처음 꺼진 걸 본 때부터 — 루프가 멈췄다 돌아와도 종료 알림이 표식을 남길 틈(리뷰 M1)
+        if now - dead < CRASH_GRACE_S:
+            continue
+        rec = next((x for x in ms.load_sessions() if str(x.get("channelId") or "") == ch), None)
+        if not rec or ms.tmux_down_at(str(rec.get("tmux") or "")) >= seen["at"] - 5:
+            mem.pop(ch, None)
+            continue
+        if resumed >= CRASH_MAX_RESUME:
+            continue                        # 다음 판에
+        mem.pop(ch, None)
+        resumed += 1
+        _spawn_bg(lambda rec=rec, ref=str(r.get("ref") or ""), ch=ch: _crash_resume(rec, ref, ch, now))
 
 
 def _cmd_out(argv: list[str]) -> str:
@@ -3244,6 +3372,7 @@ class Loop:
         self.codex_meters: dict[str, dict[str, Any]] = {}
         self.ty: dict[str, float] = {}
         self.words: dict[str, tuple[str, float]] = {}
+        self.crashed: dict[str, dict[str, Any]] = {}      # 방 → 마지막으로 떠 있던 시각·그때 일하던 중이었나(crash_tick)
         self.last_words = 0.0
         self.live: set[str] = set()
         self.last_render = -1.0          # 데몬이 막 떴으면 한 번은 그린다
@@ -3417,6 +3546,10 @@ class Loop:
         self.last_panel = panel_tick(self.last_panel, now)
         light = snapshot(full=False)
         typing_tick(light, self.ty, now, self.live)
+        try:
+            crash_tick(light["sessions"], self.crashed, now)
+        except Exception as exc:
+            _log(f"crash_tick failed: {exc!r}")
         try:
             pane_perm_tick()
         except Exception as exc:
