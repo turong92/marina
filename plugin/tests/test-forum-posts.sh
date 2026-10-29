@@ -46,7 +46,7 @@ room = rec["channelId"]
 ms._progress(rec, {"message_id": "9001", "text": "원인 찾는 중…"})
 forums = [x for x in posts(r"/guilds/G1/channels") if x["b"].get("type") == 15]
 cat = cfg()["projects"]["proj"]["categoryId"]
-check(len(forums) == 1 and forums[0]["b"]["name"] == "📋작업" and forums[0]["b"]["parent_id"] == cat, f"포럼 한 번: {forums}")
+check(len(forums) == 1 and forums[0]["b"]["name"] == f"📋{rec['project']}-작업" and forums[0]["b"]["parent_id"] == cat, f"포럼 한 번: {forums}")
 check([t["name"] for t in forums[0]["b"].get("available_tags", [])] == ["진행중", "답 필요", "완료", "끊김"], "태그 4개")
 fid = cfg()["projects"]["proj"].get("forumChannelId")
 tags = cfg()["projects"]["proj"].get("forumTags") or {}

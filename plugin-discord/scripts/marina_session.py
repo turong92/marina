@@ -593,7 +593,7 @@ def ensure_codex_archive(dc: Discord, cfg: dict[str, Any], category: str) -> str
     return _ensure_archive_in(dc, cfg, cc, category)
 
 
-FORUM_CHANNEL = "📋작업"
+FORUM_CHANNEL = "📋{}-작업"          # 프로젝트 이름을 붙인다 — 다 같은 이름이면 하나로 합친 것처럼 보였다(형 2026-10-30)
 FORUM_TOPIC = "지시 하나에 글 하나 — 마리나가 만들고 태그를 바꾸고 닫아. 여기선 지시하지 않아(지시는 방 채널에)"
 FORUM_TAGS = ("진행중", "답 필요", "완료", "끊김")
 FORUM_POSTS = "forum-posts.json"        # 글 id → {ref, mid, channelId} (최근 500) — 글이 어느 방의 어느 지시인지
@@ -618,7 +618,8 @@ def ensure_forum(dc: Discord, cfg: dict[str, Any], rec: dict[str, Any]) -> tuple
     cid = str(holder.get("forumChannelId") or "")
     found = next((c for c in dc.list_channels(guild) if cid and str(c.get("id")) == cid and c.get("type") == 15), None)
     if found is None:
-        found = dc.create_forum(guild, FORUM_CHANNEL, category, FORUM_TOPIC, FORUM_TAGS)
+        found = dc.create_forum(guild, FORUM_CHANNEL.format("codex" if is_codex(rec) else rec.get("project") or ""),
+                                category, FORUM_TOPIC, FORUM_TAGS)
         holder["forumChannelId"] = str(found["id"])
     tags = {str(t["name"]): str(t["id"]) for t in found.get("available_tags") or [] if t.get("name") and t.get("id")}
     if holder.get("forumChannelId") != cid or holder.get("forumTags") != tags:
