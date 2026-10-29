@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# progress(message_id, text) — 지시 메시지에 스레드를 열고 진행 기록을 쌓는다(결과는 채널에 reply).
-#  - 같은 지시면 같은 스레드에 이어 쓴다(상태 폴더 threads.json), 알림 없이(flags 4096), 멘션 알림 없음
+# progress(message_id, text) — 지시마다 프로젝트 📋작업 포럼에 글을 열고(못 열면 지시 메시지 밑 스레드) 진행 기록을 쌓는다(결과는 채널에 reply).
+#  - 포럼 글 자체(제목·태그·링크 답·폴백)는 test-forum-posts.sh. 여기는 글/스레드에 쌓이는 줄과 접기
+#  - 같은 지시면 같은 글에 이어 쓴다(상태 폴더 threads.json), 알림 없이(flags 4096), 멘션 알림 없음
 #  - 스레드 권한이 없으면 실패 대신 안내(채널에 edit 방식으로 하라고)
 #  - 개발·채팅 세션 모두 허용 목록에 있다
 # open_thread(name) — 사람과 한 주제를 이어 가는 스레드를 이름 붙여 만든다(진행 스레드와 별개, 머리 메시지 없음)
@@ -36,10 +37,11 @@ check("progress" in names, f"도구 목록: {names}")
 out1 = ms.chat_tool("progress", {"message_id": "9001", "text": "원인 찾는 중…"})
 out2 = ms.chat_tool("progress", {"message_id": "9001", "text": "테스트 통과 @everyone"})
 ms.chat_tool("progress", {"message_id": "9002", "text": "다른 지시"})
-mk = [x for x in log() if x["m"] == "POST" and x["p"].endswith("/threads")]
-check(len(mk) == 2 and mk[0]["p"] == f"/channels/{rec['channelId']}/messages/9001/threads", f"지시마다 스레드 하나: {mk}")
-check(mk and 0 < len(mk[0]["b"].get("name", "")) <= 100, "스레드 이름")
-check(mk and mk[0]["b"].get("name") == "진행 · 원인 찾는 중…", f"(a) 에이전트 없이 세션 progress 줄로 열면 '진행 · 글자': {mk[:1]}")
+fid = ms.load_config()["projects"]["proj"]["forumChannelId"]
+mk = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{fid}/threads"]
+check(len(mk) == 2, f"지시마다 포럼 글 하나: {mk}")
+check(mk and 0 < len(mk[0]["b"].get("name", "")) <= 100, "글 제목")
+check(mk and mk[0]["b"].get("name") == "[feat/p] 원인 찾는 중…", f"(a) 지시 본문을 모르면 progress 줄로 제목: {mk[:1]}")
 tid = json.loads((Path(rec["stateDir"]) / "threads.json").read_text())["9001"]
 posts = [x for x in log() if x["m"] == "POST" and x["p"] == f"/channels/{tid}/messages"]
 check(len(posts) == 2 and posts[1]["b"]["content"].startswith("테스트 통과"), f"같은 스레드에 이어 쓰기: {posts}")
@@ -248,6 +250,7 @@ except ms.SessionError as exc:
 (fd / "no_threads").unlink()
 os.environ["DISCORD_STATE_DIR"] = rec["stateDir"]
 (fd / "no_threads").write_text("1")
+(fd / "no_forum").write_text("1")          # 포럼도 못 쓰는 서버에서 옛 스레드마저 막힌 경우
 msg = ms.chat_tool("progress", {"message_id": "9003", "text": "x"})
 check("권한" in msg and "edit_message" in msg, f"권한 없을 때 안내: {msg}")
 if fails:

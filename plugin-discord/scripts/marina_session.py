@@ -450,6 +450,12 @@ class Discord:
             body["topic"] = topic
         return str(self._req("POST", f"/guilds/{guild}/channels", body)["id"])
 
+    def create_forum(self, guild: str, name: str, parent: str, topic: str, tags: "tuple[str, ...]") -> dict[str, Any]:
+        """포럼 채널(type 15) — 태그는 만들 때 같이 정한다. 돌려주는 채널에 Discord 가 붙인 태그 id 가 들어 있다."""
+        return self._req("POST", f"/guilds/{guild}/channels", {
+            "name": name, "type": 15, "parent_id": parent, "topic": topic,
+            "available_tags": [{"name": t} for t in tags]}) or {}
+
     def delete_channel(self, cid: str) -> None:
         self._req("DELETE", f"/channels/{cid}")
 
@@ -585,6 +591,38 @@ def ensure_codex_archive(dc: Discord, cfg: dict[str, Any], category: str) -> str
     cc = marina_codex.codex_cfg(cfg)
     cfg["codex"] = cc
     return _ensure_archive_in(dc, cfg, cc, category)
+
+
+FORUM_CHANNEL = "📋작업"
+FORUM_TOPIC = "지시 하나에 글 하나 — 마리나가 만들고 태그를 바꾸고 닫아. 여기선 지시하지 않아(지시는 방 채널에)"
+FORUM_TAGS = ("진행중", "답 필요", "완료", "끊김")
+FORUM_POSTS = "forum-posts.json"        # 글 id → {ref, mid, channelId} (최근 500) — 글이 어느 방의 어느 지시인지
+FORUM_POSTS_MAX = 500
+
+
+def ensure_forum(dc: Discord, cfg: dict[str, Any], rec: dict[str, Any]) -> tuple[str, dict[str, str]]:
+    """방이 속한 카테고리의 📋작업 포럼(코덱스 방은 chat-bot 의 것) — (포럼 id, 태그 이름 → id). 자료실처럼 저장된 id 가
+    Discord 에 있으면 그대로, 없으면 만들어 discord.json(forumChannelId·forumTags)에 적는다. 못 만들면 SessionError 가 그대로 올라간다."""
+    if is_codex(rec):
+        import marina_codex
+        holder = marina_codex.codex_cfg(cfg)
+        cfg["codex"] = holder
+    else:
+        holder = project_config(cfg, str(rec.get("project") or ""))
+    category = str(holder.get("categoryId") or "")
+    if not category:
+        raise SessionError("포럼을 둘 카테고리가 아직 없어")
+    guild = str(cfg["guildId"])
+    cid = str(holder.get("forumChannelId") or "")
+    found = next((c for c in dc.list_channels(guild) if cid and str(c.get("id")) == cid and c.get("type") == 15), None)
+    if found is None:
+        found = dc.create_forum(guild, FORUM_CHANNEL, category, FORUM_TOPIC, FORUM_TAGS)
+        holder["forumChannelId"] = str(found["id"])
+    tags = {str(t["name"]): str(t["id"]) for t in found.get("available_tags") or [] if t.get("name") and t.get("id")}
+    if holder.get("forumChannelId") != cid or holder.get("forumTags") != tags:
+        holder["forumTags"] = tags
+        save_config(cfg)
+    return str(holder["forumChannelId"]), tags
 
 
 def find_text_channel(dc: Discord, guild: str, parent: str, name: str) -> str | None:
@@ -4151,6 +4189,49 @@ def _maybe_rename(dc: "Discord", sd: Path, mid: str, tid: str, rank: int, name: 
         _write_kinds(sd, mid, {"k": int(cur.get("k") or 0), "retry": time.time() + RENAME_RETRY})
 
 
+def _forum_posts() -> dict[str, Any]:
+    try:
+        d = json.loads((marina_home() / FORUM_POSTS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _create_forum_post(dc: "Discord", cfg: dict[str, Any], rec: dict[str, Any], mid: str, text: str) -> str:
+    """지시 하나의 포럼 글을 만든다 — 제목 [task] 지시 첫 줄, 첫 글 = 원래 메시지 링크 + 본문, 태그 진행중.
+    형 메시지에는 알림 없는 답으로 글 링크만 남긴다. 포럼이나 글을 못 만들면(권한·커뮤니티 아닌 서버 등) ""
+    를 돌려 부르는 쪽이 옛 스레드로 가게 한다 — 진행이 사라지지 않는 게 우선."""
+    room = str(rec.get("channelId") or "")
+    try:
+        fid, tags = ensure_forum(dc, cfg, rec)
+        try:
+            body = str((dc._req("GET", f"/channels/{room}/messages/{mid}") or {}).get("content") or "").strip()
+        except SessionError:
+            body = ""                       # 지워졌거나 스레드에서 온 글 — 진행 줄로 대신한다
+        lines = [ln.strip() for ln in (body or text).splitlines() if ln.strip()] or [text]
+        title = f"[{rec.get('task')}] {' '.join(lines[0].split())}"[:100]
+        first = f"https://discord.com/channels/{cfg['guildId']}/{room}/{mid}\n" + "\n".join(lines[:6])[:1500]
+        made = dc._req("POST", f"/channels/{fid}/threads", {
+            "name": title, "auto_archive_duration": 60,
+            "applied_tags": [tags["진행중"]] if "진행중" in tags else [],
+            "message": {"content": first, "flags": 4096, "allowed_mentions": {"parse": []}}})
+        tid = str(made["id"])
+    except (SessionError, KeyError):
+        return ""
+    ref = f"{rec.get('project')}/{rec.get('task')}"
+    posts = _forum_posts()
+    posts[tid] = {"ref": ref, "mid": mid, "channelId": room}
+    _write_json(marina_home() / FORUM_POSTS, dict(list(posts.items())[-FORUM_POSTS_MAX:]))
+    try:
+        dc._req("POST", f"/channels/{room}/messages", {
+            "content": f"📋 진행 → <#{tid}>", "flags": 4096,
+            "message_reference": {"message_id": mid, "fail_if_not_exists": False},
+            "allowed_mentions": {"parse": [], "replied_user": False}})
+    except SessionError:
+        pass                                # 링크 답은 있으면 좋은 것 — 글은 이미 만들어졌다
+    return tid
+
+
 def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
     """지시 메시지에 스레드를 열고(처음 한 번) 진행 한 줄을 알림 없이 남긴다."""
     mid, text = str(args.get("message_id") or ""), str(args.get("text") or "").strip()
@@ -4168,29 +4249,31 @@ def _progress(rec: dict[str, Any], args: dict[str, Any]) -> str:
     tid = str(threads.get(mid) or "")
     sd = Path(str(rec["stateDir"]))
     rank, name = _thread_kind(sd, mid, text)
-    if not tid:
-        try:
-            tid = str(dc._req("POST", f"/channels/{rec['channelId']}/messages/{mid}/threads",
-                              {"name": name, "auto_archive_duration": 60})["id"])
-        except DiscordError as exc:
-            if exc.code == 403:
-                return ("스레드를 만들 권한이 없어(봇 역할에 '공개 스레드 만들기' 필요) — "
-                        "이번엔 채널에 진행 메시지 하나를 reply 로 보내고 edit_message 로 갱신해")
-            if exc.code == 404:
-                return ("그 메시지에는 스레드를 달 수 없어(스레드에서 온 글이거나 지워진 글) — "
-                        "진행 상황은 그 글이 온 곳에 reply 로 한 줄 보내면 돼")
-            raise
+    created = not tid
+    forum_post = bool(tid) and tid in _forum_posts()
+    if created:
+        tid = _create_forum_post(dc, cfg, rec, mid, text)        # 포럼을 못 쓰면 "" — 옛 스레드로
+        forum_post = bool(tid)
+        if not tid:
+            try:
+                tid = str(dc._req("POST", f"/channels/{rec['channelId']}/messages/{mid}/threads",
+                                  {"name": name, "auto_archive_duration": 60})["id"])
+            except DiscordError as exc:
+                if exc.code == 403:
+                    return ("스레드를 만들 권한이 없어(봇 역할에 '공개 스레드 만들기' 필요) — "
+                            "이번엔 채널에 진행 메시지 하나를 reply 로 보내고 edit_message 로 갱신해")
+                if exc.code == 404:
+                    return ("그 메시지에는 스레드를 달 수 없어(스레드에서 온 글이거나 지워진 글) — "
+                            "진행 상황은 그 글이 온 곳에 reply 로 한 줄 보내면 돼")
+                raise
+            _write_kinds(sd, mid, {"k": rank, "retry": 0})
         threads[mid] = tid
         tf.write_text(json.dumps(dict(list(threads.items())[-50:]), ensure_ascii=False) + "\n", encoding="utf-8")
-        _write_kinds(sd, mid, {"k": rank, "retry": 0})
-        created = True
-    else:
-        created = False
     af = tf.with_name("threads-archived.json")
     was_archived = mid in _json_list(af)
     dc._req("POST", f"/channels/{tid}/messages",
             {"content": text[:1900], "flags": 4096, "allowed_mentions": {"parse": []}})   # 4096 = 알림 없이
-    if not created and not was_archived:
+    if not created and not was_archived and not forum_post:      # 포럼 글 제목은 지시를 그대로 둔다
         _maybe_rename(dc, sd, mid, tid, rank, name)           # 종류가 올라갔을 때만 — 접힌 스레드는 건드리지 않는다
     af = tf.with_name("threads-archived.json")                 # 다시 열렸으니 턴이 끝나면 다시 접는다
     try:

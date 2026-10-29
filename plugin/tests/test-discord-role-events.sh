@@ -325,6 +325,8 @@ dc = DC(); ms._turn_end_archive({"stateDir": str(sd)}, sd, dc)
 check(sorted(c[1] for c in dc.calls) == ["/channels/T1", "/channels/T2", "/channels/T3"], f"(I3) 도는 게 없으면 모두 접음: {dc.calls}")
 
 # ── 스레드 이름: 종류 · 내용 (2026-10-09) ──────────────────────────────────────────────────────
+# 이름 바꾸기는 옛 스레드(포럼을 못 쓸 때의 폴백)에만 있다 — 포럼 글 제목은 지시 그대로 둔다(test-forum-posts.sh)
+(fd / "no_forum").write_text("1")
 def tname(mid):
     return next((x["b"]["name"] for x in log() if x["m"] == "POST" and x["p"].endswith(f"/messages/{mid}/threads")), None)
 def renames(mid):
@@ -393,6 +395,7 @@ check(not any(x["m"] == "PATCH" and x["b"].get("archived") is False for x in log
 kf.write_text("{깨짐")
 act("8013"); put(D("n13", 1, "developer", "깨진 상태")); mb.role_events_tick()
 check(tname("8013") == "역할 · 깨진 상태", f"(N) 깨진 종류 기록 → 빈 것: {tname('8013')}")
+(fd / "no_forum").unlink()
 
 # ── 부모 없는 에이전트는 '띄운 턴이 무엇으로 시작됐나'로 고정 (2026-10-09) ─────────────────────
 tr = proj / "S1.jsonl"

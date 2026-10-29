@@ -2,6 +2,7 @@
 """테스트용 가짜 Discord REST — marina session 이 쓰는 호출만(채널·메시지·반응·역할·봇 자신).
 사용: python3 fake_discord.py <dir>  → <dir>/port 에 포트를 쓰고, 받은 요청을 <dir>/log.jsonl 에 남긴다.
 스위치: <dir>/fail_post 가 '403' 이면 POST 를 403 으로, '429once' 면 첫 POST 만 429. <dir>/no_chat_role 이면 chat 역할 없음.
+<dir>/no_forum 이 있으면 포럼 만들기(type 15)와 포럼 글 만들기를 403 으로(커뮤니티 아닌 길드·권한 없음 흉내).
 <dir>/extra_tokens 에 적힌 토큰(공백 구분)도 통과 — 프로젝트별 봇 테스트용."""
 import json
 import sys
@@ -134,6 +135,18 @@ class H(BaseHTTPRequestHandler):
                 ch = {"id": str(next_id[0]), "name": body.get("name"), "type": 11, "parent_id": p[1], "from_msg": p[3]}
                 channels[ch["id"]] = ch
             self._send(201, ch); return
+        if len(p) == 3 and p[0] == "channels" and p[2] == "threads" and "message" in body:    # 포럼 글 = 스레드 + 첫 메시지
+            if (state / "no_forum").exists():
+                self._send(403, {"message": "Missing Permissions"}); return
+            with lock:
+                if (channels.get(p[1]) or {}).get("type") != 15:
+                    self._send(400, {"message": "Only forum channels can take a message on thread create"}); return
+                next_id[0] += 1
+                msg = {"id": str(next_id[0]), "content": (body.get("message") or {}).get("content")}
+                ch = {"id": msg["id"], "name": body.get("name"), "type": 11, "parent_id": p[1],
+                      "applied_tags": list(body.get("applied_tags") or []), "first_message": msg["content"]}
+                channels[ch["id"]] = ch
+            self._send(201, dict(ch, message=msg)); return
         if len(p) == 3 and p[0] == "channels" and p[2] == "threads":      # 머리 메시지 없는 주제 스레드(open_thread)
             if (state / "no_threads").exists():
                 self._send(403, {"message": "Missing Permissions"}); return
@@ -147,11 +160,18 @@ class H(BaseHTTPRequestHandler):
         if len(p) == 3 and p[0] == "channels" and p[2] == "messages":
             self._send(200, {"id": "m-sent", "content": body.get("content")}); return
         if len(p) == 3 and p[0] == "guilds" and p[2] == "channels":
+            if body.get("type") == 15 and (state / "no_forum").exists():
+                self._send(403, {"message": "Missing Permissions"}); return
             with lock:
                 next_id[0] += 1
                 ch = {"id": str(next_id[0]), "name": body.get("name"), "type": body.get("type", 0),
                       "parent_id": body.get("parent_id"), "guild_id": p[1],
                       "permission_overwrites": body.get("permission_overwrites") or []}
+                if body.get("type") == 15:        # 포럼 태그에는 Discord 가 id 를 붙여 돌려준다
+                    ch["available_tags"] = []
+                    for t in body.get("available_tags") or []:
+                        next_id[0] += 1
+                        ch["available_tags"].append(dict(t, id=str(next_id[0])))
                 channels[ch["id"]] = ch
             self._send(201, ch); return
         self._send(404, {"message": "404"})
@@ -184,7 +204,16 @@ class H(BaseHTTPRequestHandler):
         fb = (state / "forbid").read_text().split() if (state / "forbid").exists() else []
         if self._parts()[:2] in (["channels", f] for f in fb):
             self._send(403, {"message": "Missing Access", "code": 50001}); return
+        with lock:
+            ch = channels.get(self._parts()[-1])
+            if ch is not None and len(self._parts()) == 2:      # 포럼 글의 태그·보관·이름 변경을 기억한다
+                for k in ("applied_tags", "name"):
+                    if k in body:
+                        ch[k] = body[k]
+                if "archived" in body:
+                    ch["archived"] = bool(body["archived"])
         self._send(200, {"id": self._parts()[-1], "content": body.get("content"),
+                         "applied_tags": (ch or {}).get("applied_tags"),
                          "thread_metadata": {"archived": bool(body.get("archived"))}})
 
     def do_PUT(self):
