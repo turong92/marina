@@ -2734,7 +2734,9 @@ def cmd_status(a):
 
 def cmd_logs(a):
     name = compose_project_name(a.project_id, a.session)
-    verb = ["logs"] + ([] if a.no_follow else ["-f"]) + list(a.service)
+    # 터미널이 아니면(에이전트의 'marina logs web | rg …') 따라가지 않는다 — 안 끝나고 며칠씩 남아 원격 접속까지 붙들었다(2026-10-30)
+    follow = not a.no_follow and sys.stdout.isatty()
+    verb = ["logs"] + (["-f"] if follow else ([] if a.no_follow else ["--tail=500"])) + list(a.service)
     return subprocess.call(label_argv(name, verb),
                            env=_lifecycle_env(getattr(a, "session_dir", None), project_id=getattr(a, "project_id", None)))   # P7
 
