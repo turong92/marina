@@ -247,7 +247,8 @@ def _selector_visible(screen: str) -> bool:
 def _question_visible(screen: str, q: dict[str, Any]) -> bool:
     """이 질문의 셀렉터인가 — 문구(앞 20자)까지 맞아야 친다. '❯ 1. Yes' 권한 창 등에 치지 않게(리뷰 C2)."""
     key = " ".join(str(q.get("question") or "").split())[:20]
-    flat = " ".join(screen.split())
+    # 여러 줄 질문은 줄마다 '│ ' 테두리가 붙어 그려진다 — 앞 20자가 줄바꿈에 걸치면 '│' 가 끼어 안 맞는다(실사용 10-30)
+    flat = " ".join(screen.replace("│", " ").split())
     return _selector_visible(screen) and bool(key) and key in flat
 
 
