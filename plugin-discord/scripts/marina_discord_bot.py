@@ -1581,6 +1581,7 @@ def slash(channel: str, user: str, name: str, value: str = "", args: str = "", m
 _YES = re.compile(r"^\s*❯\s*1\.\s*Yes\s*$")
 _NO = re.compile(r"^\s*[23]\.\s*No\s*$")
 PANE_PERM_TTL = 600.0
+_COUNTDOWN = re.compile(r"\bin \d+:\d{2}\b")
 
 
 def _pane_prompt(name: str) -> "tuple[str, list[str], str, bool] | None | bool":
@@ -1607,13 +1608,15 @@ def _pane_prompt(name: str) -> "tuple[str, list[str], str, bool] | None | bool":
         if t.startswith("│"):
             cmd = t.lstrip("│ ").strip() or cmd       # 위로 올라가며 — 마지막에 남는 게 첫 줄
             continue
-        if not t or set(t) <= set("╌┄-"):
+        if not t or set(t) <= set("╌┄-") or "automatically block this request" in t:      # 초읽기 줄 — 설명이 아니다
             continue
         head.append(t[:100])
     opts = [l for l in lines[q + 1:] if re.match(r"^\s*(❯\s*)?\d+\.", l)]
     # 2지선다(Yes/No) 또는 3지선다(Yes / Yes, and don't ask again… / No) — 어느 쪽이든 1번 평범한 Yes 에서 Enter = 이번 한 번
     ok = len(opts) in (2, 3) and bool(_YES.match(opts[0])) and bool(_NO.match(opts[-1]))
-    sig = hashlib.sha1("\n".join(lines[top:]).encode("utf-8", "replace")).hexdigest()[:16]
+    # 초읽기(… block this request in 0:55)는 매초 바뀐다 — 서명에 넣으면 카드를 계속 새로 올리고 버튼도 안 먹는다(실사용 10-30)
+    stable = [_COUNTDOWN.sub("", l) for l in lines[top:]]
+    sig = hashlib.sha1("\n".join(stable).encode("utf-8", "replace")).hexdigest()[:16]
     return sig, list(reversed(head))[-3:], _clean(cmd)[:80], ok
 
 
