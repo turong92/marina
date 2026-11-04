@@ -318,4 +318,35 @@ check(r is True and pane.enters >= 1, f"쳤으면 True: {r} enters={pane.enters}
 check(time.time() - t0 < 3.5, f"친 직후 돌아와야 함: {time.time() - t0:.1f}s")
 finish()
 PY
+# ── 바쁜 클로드 방: busy_after 가 지나면 바빠도 입력창에 넣는다(클로드가 대기열로 받는다 — 30분 기다리다 버리던 것, 2026-11-04) ──
+run <<'PY'
+import os; exec(open(os.environ["TMPROOT"] + "/prelude.py").read())
+import types
+class Pane:
+    def __init__(self): self.enters = 0; self.typed = []
+    def __call__(self, *a, **k):
+        if a[0] == "send-keys" and a[-1] == "Enter": self.enters += 1
+        elif a[0] == "send-keys": self.typed.append(a[-1])
+        if a[0] == "capture-pane":
+            return types.SimpleNamespace(stdout="✢ Working… (5m · esc to interrupt)\n" + "─" * 20 + "\n❯ \n" + "─" * 20 + "\n  ⏵⏵", returncode=0)
+        return types.SimpleNamespace(stdout="", returncode=0)
+ms.tmux_alive = lambda t: True
+ms.tmux_leave_mode = lambda t: None
+os.environ["MARINA_ENTER_DELAY"] = "0"
+mb._input_empty = lambda t: True
+mb._pane_busy = lambda t: (True, True)                    # 끝내 안 쉰다
+pane = Pane(); ms._tmux = pane
+r = mb.run_slash("t", "[마리나 · a 방에서] 글", "1003", "", poll=0.05, settle=0, timeout=3, return_after_type=True, busy_after=0.2)
+check(r is True and pane.typed == ["[마리나 · a 방에서] 글"] and pane.enters >= 1, f"busy_after 뒤엔 바빠도 친다: {r} {pane.typed}")
+pane = Pane(); ms._tmux = pane
+r = mb.run_slash("t", "/compact", "1003", "", poll=0.05, settle=0, timeout=0.5)
+check(r is False and not pane.typed, f"기본(busy_after 없음)은 바쁘면 안 친다: {r} {pane.typed}")
+mb._input_empty = lambda t: False                         # 권한·선택 창(❯ 1. Yes) 또는 쓰던 글 — 바빠도 치지 않는다
+pane = Pane(); ms._tmux = pane
+r = mb.run_slash("t", "[마리나 · a 방에서] 글", "1003", "", poll=0.05, settle=0, timeout=0.6, return_after_type=True, busy_after=0.1)
+check(r is False and not pane.typed, f"입력창이 비지 않았으면 안 친다: {r} {pane.typed}")
+check(mw.ROOM_SEND_BUSY_TYPE_S > 0 and mb.room_send_busy_after("[마리나 · a 방에서] x") == mw.ROOM_SEND_BUSY_TYPE_S
+      and mb.room_send_busy_after("/compact") == 0, "room-send 글만 바빠도 친다")
+finish()
+PY
 echo "PASS test-session-room-send"

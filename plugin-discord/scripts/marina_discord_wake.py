@@ -396,6 +396,7 @@ def say(ref: str, message: str, source: str = "say") -> str:
 
 ROOM_SEND_PREFIX = "[마리나 · "      # `type` 하위명령이 이 머리말의 글을 칠 수 있다(typeable) — 대기열로 넘긴 글
 ROOM_SEND_MAX = 1200                  # 길고 오래 남을 내용은 레포 공통 파일(docs/handoff/…md)에 쓰고 알림만 보낸다 — 잘라서 보내지 않는다
+ROOM_SEND_BUSY_TYPE_S = 90.0          # 그래도 안 쉬면 바쁜 채로 빈 입력창에 친다(클로드 대기열) — 30분 기다리다 버리지 않게
 ROOM_SEND_WAIT_S = 20.0               # 클로드 방이 쉬길 기다리는 최대 — 보낸 방의 도구 호출을 오래 잡지 않는다. 넘으면 대기열
 ROOM_SEND_MARK = "marina session room-send"      # 답하는 법 꼬리에 들어가는 명령 이름
 ROOM_SEND_PREVIEW = 300
