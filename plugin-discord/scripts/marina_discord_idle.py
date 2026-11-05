@@ -90,7 +90,7 @@ def _transcript_last_ts(rec: dict[str, Any]) -> float:
             lines = fh.read().decode("utf-8", "replace").splitlines()
     except OSError:
         return 0.0
-    last, in_keep = 0.0, False
+    last, in_keep, in_compact = 0.0, False, False
     for raw in lines:
         try:
             row = json.loads(raw)
@@ -98,16 +98,25 @@ def _transcript_last_ts(rec: dict[str, Any]) -> float:
             continue
         if not isinstance(row, dict):
             continue
+        if row.get("type") == "system" and row.get("subtype") == "compact_boundary":
+            in_compact = True        # 실제 순서: 경계 → 요약 → 남긴 줄 → caveat → /compact 명령 → 출력. 출력 줄까지 컴팩트의 것
+            continue
         if row.get("type") == "user":
-            text = _user_text(row)
-            if row.get("isCompactSummary") or "<command-name>/compact" in text or "<local-command-stdout>" in text:
+            text = _user_text(row).lstrip()
+            if text.startswith("<local-command-stdout>"):
+                in_compact = False
+                continue
+            if row.get("isCompactSummary"):
+                in_compact = True
+                continue
+            if row.get("isMeta") or text.startswith(("<local-command-caveat>", "<command-name>")):
                 continue
             if text.startswith(ms.KEEPALIVE_MARK):
                 in_keep = True
                 continue
             if text.strip():
-                in_keep = False          # 사람(또는 알림)의 진짜 글 — 캐시 유지 턴은 끝났다
-        if in_keep or row.get("subtype") == "compact_boundary":
+                in_keep = in_compact = False     # 사람(또는 알림)의 진짜 글 — 캐시 유지 턴·컴팩트는 끝났다
+        if in_keep or in_compact:
             continue
         last = mb._row_time(row) or last
     return last
@@ -247,6 +256,7 @@ class Idler:
         self.last_tick = -1e18
         self.last_kill = -1e18
         self.keep_checked: dict[str, float] = {}     # 방 → 캐시 손쓰기를 마지막으로 무겁게 판정한 시각
+        self.keep_spawned: dict[str, float] = {}     # 방 → 입력 프로세스를 띄운 시각(입력 대기 120초 동안 또 띄우지 않게)
 
     def _reset(self) -> None:
         self.clear_since.clear()
@@ -298,9 +308,10 @@ class Idler:
 
     def keep_tick(self, now: float, cfg: dict[str, Any]) -> list[tuple[str, str]]:
         """모든 방을 보고 컴팩트·캐시 유지 글을 칠 방을 고른다(입력은 mb._spawn_type — 방이 쉬고 입력창이 빈 때만 친다).
-        사람이 마지막으로 말한 시각(last_activity)이 바뀌면 계획이 처음부터 다시 시작된다. 반환: [(방, 한 일)]."""
+        사람이 마지막으로 말한 시각(last_activity)이 바뀌면 계획이 처음부터 다시 시작된다. 반환: [(방, 한 일)].
+        기준 시각(compactedFor·lastKeep)은 여기서 안 적는다 — 입력 프로세스가 치는 데 성공한 뒤 keep_done 이 적는다."""
         k = keep_config(cfg)
-        if not k:
+        if not k or mb.restart_status():
             return []
         every, keep_max = k
         done: list[tuple[str, str]] = []
@@ -311,28 +322,29 @@ class Idler:
                 continue
             try:
                 last = last_activity(rec)
+                if last - mb._session_born(name) <= 1.0:
+                    continue                                   # 뜬 뒤 실제 활동이 없다 — 캐시에 데울 것이 없다
                 st = _keep_state(rec)
                 if _same(st.get("compactedFor"), last):
                     continue                                   # 이 대화 구간은 이미 컴팩트했다
                 touched = max(last, float(st.get("lastKeep") or 0.0))      # 캐시가 마지막으로 데워진 시각
-                if now - touched < every or now - self.keep_checked.get(ref, -1e18) < KEEP_RECHECK:
+                if (now - touched < every or now - self.keep_checked.get(ref, -1e18) < KEEP_RECHECK
+                        or now - self.keep_spawned.get(ref, -1e18) < KEEP_SPAWN_WAIT):
                     continue
                 self.keep_checked[ref] = now
                 if _attached(name):
                     continue                                   # 형이 터미널로 보는 중 — 끼어들지 않는다
-                if piece_done(rec, now):
-                    if now - touched < CACHE_TTL:
-                        action, text = "compact", ms.COMPACT_KEEP_TEXT
-                    else:
+                chat = rec.get("kind") in ms.CHAT_KINDS        # 채팅·로비·비서 방: 캐시 유지 글(핑) 없이 컴팩트 규칙만
+                if chat or piece_done(rec, now):
+                    if now - touched >= CACHE_TTL:
                         continue                               # 캐시가 식었다 — 지금처럼 2시간 뒤 내린다
+                    action, text = "compact", ms.COMPACT_KEEP_TEXT
                 elif now - last >= keep_max:
                     action, text = "compact", ms.COMPACT_KEEP_TEXT
                 else:
                     action, text = "keepalive", ms.KEEPALIVE_TEXT
-                if action == "compact":
-                    _keep_save(rec, compactedFor=last)
-                else:
-                    _keep_save(rec, lastKeep=now)
+                _keep_save(rec, want={"action": action, "last": last, "at": now})
+                self.keep_spawned[ref] = now
                 mb._spawn_type(name, text, str(rec.get("channelId") or ""), "")
                 _idle_log("{} {} · 쉰={:.2f}h".format("컴팩트" if action == "compact" else "캐시 유지", ref, (now - last) / 3600))
                 done.append((ref, action))
@@ -436,6 +448,7 @@ KEEP_DEFAULT_MINUTES = 50.0
 KEEP_MAX_MINUTES = 59.0           # 간격은 캐시 수명(60분) 안이어야 한다
 KEEP_DEFAULT_HOURS = 8.0
 CACHE_TTL = 3600.0                # 이 시간이 지난 캐시는 이미 식었다 — 컴팩트로 데울 것이 없다
+KEEP_SPAWN_WAIT = 150.0           # 입력 프로세스는 최대 120초 기다린다 — 그동안 같은 방에 또 띄우지 않는다
 KEEP_RECHECK = 60.0               # 한 방을 무겁게 판정하는 최소 간격(입력 못 한 방을 20초마다 다시 보지 않게)
 _OPEN_STATUS = re.compile(r"^상태:\s*(진행 중|막힘)")
 
@@ -508,3 +521,28 @@ def piece_done(rec: dict[str, Any], now: float) -> bool:
         return not blockers and not _selecting(str(rec.get("tmux") or ""))
     except Exception:
         return False
+
+
+def keep_guard(rec: dict[str, Any], text: str) -> bool:
+    """치기 직전 확인(입력 프로세스가 부른다): keep_tick 이 정할 때와 같은 일이고, 그 뒤 사람이 말하지 않았고, 터미널로 보고 있지 않다."""
+    want = _keep_state(rec).get("want")
+    if not isinstance(want, dict):
+        return False
+    action = "compact" if text == ms.COMPACT_KEEP_TEXT else "keepalive"
+    if want.get("action") != action:
+        return False
+    try:
+        return _same(want.get("last"), last_activity(rec)) and not _attached(str(rec.get("tmux") or ""))
+    except Exception:
+        return False
+
+
+def keep_done(rec: dict[str, Any]) -> None:
+    """입력에 성공했다 — 그제야 컴팩트한 대화 구간(compactedFor) 또는 캐시를 데운 시각(lastKeep)을 적는다."""
+    want = _keep_state(rec).get("want")
+    if not isinstance(want, dict):
+        return
+    if want.get("action") == "compact":
+        _keep_save(rec, compactedFor=want.get("last"), want=None)
+    else:
+        _keep_save(rec, lastKeep=want.get("at"), want=None)

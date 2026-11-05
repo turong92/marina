@@ -1807,6 +1807,14 @@ def _keepalive_flag(sd: Path) -> Path:
     return sd / "keepalive-turn"
 
 
+KEEPALIVE_FLAG_FRESH = 600.0       # 표식이 이만큼 지나면 그 턴의 Stop 은 안 온 것 — 다음 Stop 은 정상 처리
+
+
+def is_keep_prompt(text: str) -> bool:
+    """마리나가 캐시 때문에 친 글(캐시 유지 글·컴팩트) — 사람이 한 말이 아니다."""
+    return text.startswith(KEEPALIVE_MARK) or text == COMPACT_KEEP_TEXT
+
+
 def unanswered_mid(transcript: Path, channel: Any) -> str:
     """답장 없이 남은 마지막 Discord 지시의 message_id — 없으면 "".
     `unanswered()` 와 달리 **태그 없는 글로 초기화되지 않는다** — 마리나가 넣은 깨우기·브리핑이
@@ -1910,11 +1918,12 @@ def hook_prompt(payload: dict[str, Any]) -> "dict[str, Any] | None":
     """받은 순간: Discord 로 온 '/compact' 는 마리나가 세션이 쉬는 순간 입력창에 직접 친다. Claude 에겐 짧게 답만 하라고."""
     _ensure_daemon_quiet()          # 지시를 받는 순간 봇이 있어야 🛑·typing 이 된다(리뷰 I3)
     s = _session_from_env()
-    if s and s.get("stateDir") and str(payload.get("prompt") or "").startswith(KEEPALIVE_MARK):
-        try:                                      # 캐시 유지 글 — 사람이 말한 것이 아니다: turn-at 을 안 쓰고, 이 턴의 끝도 stopped-at 을 안 쓰게 표시
-            _keepalive_flag(Path(str(s["stateDir"]))).write_text(f"{time.time()}\n")
-        except OSError:
-            pass
+    if s and s.get("stateDir") and is_keep_prompt(str(payload.get("prompt") or "")):
+        if str(payload.get("prompt")).startswith(KEEPALIVE_MARK):
+            try:                                  # 캐시 유지 글 — 사람이 말한 것이 아니다: turn-at 을 안 쓰고, 이 턴의 끝도 stopped-at 을 안 쓰게 시각과 함께 표시
+                _keepalive_flag(Path(str(s["stateDir"]))).write_text(f"{time.time()}\n")
+            except OSError:
+                pass
         return None
     if s and s.get("stateDir"):                   # 턴 시작 — 안전 재시작은 턴 끝(stopped-at)까지 기다린다
         try:
@@ -2939,11 +2948,14 @@ def hook_stop(payload: dict[str, Any]) -> None:
     sync_session_id(s, payload)      # /clear 뒤 갈아탄 대화 ID 를 기록에 맞춘다(다음 wake 가 옛 대화를 되살리지 않게)
     if not s.get("channelId"):
         return
+    flag = _keepalive_flag(Path(str(s.get("stateDir") or "/nonexistent")))
     try:                             # 캐시 유지 글의 턴 끝 — 지시도 진행 표시도 없다: stopped-at(사람 활동 시각)·정리·nudge 를 건너뛴다
-        _keepalive_flag(Path(str(s.get("stateDir") or "/nonexistent"))).unlink()
-        return
-    except OSError:
-        pass
+        at = float(flag.read_text())
+        flag.unlink()
+        if time.time() - at < KEEPALIVE_FLAG_FRESH:
+            return
+    except (OSError, ValueError):
+        pass                         # 표식이 없거나 낡았다(그 턴의 Stop 이 안 왔다) — 정상 턴 끝으로
     tr = Path(str(payload.get("transcript_path") or "/nonexistent"))
     dashboard_signal()
     ids = inbound_messages(tr, room_chans(s))
@@ -3247,8 +3259,8 @@ def _activity_state(sdir: Path) -> dict[str, Any]:
 def hook_activity(payload: dict[str, Any], min_gap: float = 5.0) -> None:
     """PreToolUse(모든 도구, 5초 간격): '입력 중…' + 지시 메시지 반응을 도구 종류로 교체 +
     진행 스레드가 있으면 상태 줄 하나를 고쳐 쓴다. Claude 가 아니라 훅이 하므로 토큰 0."""
-    if str(payload.get("prompt") or "").startswith(KEEPALIVE_MARK):
-        return                                      # 캐시 유지 글 — 방에 '입력 중…'·반응·추천 지우기를 하지 않는다
+    if is_keep_prompt(str(payload.get("prompt") or "")):
+        return                                      # 캐시 유지 글·컴팩트 — 방에 '입력 중…'·반응·추천 지우기를 하지 않는다
     sdir = os.environ.get("DISCORD_STATE_DIR") or ""
     s = next((x for x in load_sessions() if sdir and x.get("stateDir") == sdir), None)
     if not s or not s.get("channelId"):

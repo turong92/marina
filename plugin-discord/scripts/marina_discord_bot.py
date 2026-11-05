@@ -3235,7 +3235,7 @@ def room_send_busy_after(text: str) -> float:
 
 def type_timeout(text: str) -> float:
     """추천은 금방 안 쉬면 포기(옛 추천을 나중에 치지 않게), 슬래시·명령은 끝날 때까지 기다린다(리뷰 I5)."""
-    return 120.0 if text.startswith((SUGGEST_MARK, ms.KEEPALIVE_MARK)) else 1800.0
+    return 120.0 if text.startswith(SUGGEST_MARK) or ms.is_keep_prompt(text) else 1800.0
 
 
 def _restore_suggest(channel: str, msg: str, text: str) -> None:
@@ -3269,7 +3269,8 @@ def input_holds(screen: str, text: str) -> "bool | None":
 
 
 def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, settle: float = 3.0,
-              timeout: float = 1800.0, return_after_type: bool = False, busy_after: float = 0.0) -> bool:
+              timeout: float = 1800.0, return_after_type: bool = False, busy_after: float = 0.0,
+              guard: "Callable[[], bool] | None" = None) -> bool:
     """Discord 로 온 /compact·/model X·/effort X: 세션이 쉬고 입력창이 정말 비었을 때만 직접 친다(허용 목록은 훅이 거른다).
     권한·선택 창이 떠 있으면 Enter 가 '승인'이 되므로 치지 않는다(리뷰 I1). 대기자끼리는 잠금으로 하나씩(리뷰 I6).
     🗜️/⚙️ → 끝나면 ✅, 못 하면 ⚠️ — 어떤 길로 끝나도 표시가 남지 않게(리뷰 I4).
@@ -3311,6 +3312,9 @@ def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, se
             if busy and busy_after > 0 and time.time() - waited_from >= busy_after:
                 busy = False                 # 빈 입력창(❯ 뒤 공백 — 권한·선택 창 '❯ 1. Yes' 는 아님)에만 친다
             if not busy and (marina_codex.input_empty(tmux) if codex else _input_empty(tmux)):
+                if guard is not None and not guard():
+                    _log(f"type {tmux}: 정할 때와 달라져 포기 {cmd[:40]!r}")
+                    return False             # 치기 직전 마지막 확인(사람이 말했거나 터미널로 봄)
                 ms._tmux("send-keys", "-t", tmux, "-l", cmd)
                 # 글과 Enter 가 한꺼번에 들어가면 붙여넣기로 보고 Enter 를 줄바꿈으로 먹는다(실사용: '입력함' 인데 안 보내짐)
                 time.sleep(float(os.environ.get("MARINA_ENTER_DELAY") or 0.6))
@@ -3853,9 +3857,17 @@ def main(argv: list[str]) -> int:
         return 0
     if a.cmd == "type":
         if typeable(a.text, a.channel):
+            keep = ms.is_keep_prompt(a.text)
+            krec = next((x for x in ms.load_sessions() if str(x.get("channelId")) == str(a.channel)), None) if keep else None
+            if keep:
+                import marina_discord_idle as mi
             typed = run_slash(a.tmux, a.text, a.channel, a.mid,
                               timeout=float(os.environ.get("MARINA_TYPE_TIMEOUT") or type_timeout(a.text)),
-                              busy_after=room_send_busy_after(a.text))
+                              busy_after=room_send_busy_after(a.text),
+                              return_after_type=keep,       # 캐시 손쓰기는 치기만 하고 끝을 기다리지 않는다(slash.lock 을 오래 쥐지 않게)
+                              guard=(lambda: bool(krec) and mi.keep_guard(krec, a.text)) if keep else None)
+            if keep and typed and krec:
+                mi.keep_done(krec)                          # 친 것까지가 성공 — 그제야 기준 시각을 적는다
             import marina_discord_wake as mw
             if not typed and a.text.startswith(mw.ROOM_SEND_PREFIX):        # room-send 글이 끝내 안 들어갔다 — 조용히 사라지지 않게 대상 채널에 알린다
                 _room_send_lost(a.channel, a.text)
