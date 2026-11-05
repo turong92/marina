@@ -239,6 +239,14 @@ def run_forever() -> int:
                 _log(f"reaper: {marina_reaper.min_age_s() / 3600:g}h 넘은 고아 정리")
         except Exception as exc:
             _log(f"reaper 기동 실패(무시): {exc!r}")
+        try:
+            import marina_remote_watch
+            if marina_remote_watch.enabled():
+                threading.Thread(target=marina_remote_watch.run_forever, kwargs={"log": _log},
+                                 daemon=True, name="marina-remote-watch").start()
+                _log("remote-watch: 원격 박스가 꺼지면 그 스택을 맥에서 다시 띄운다")
+        except Exception as exc:
+            _log(f"remote-watch 기동 실패(무시): {exc!r}")
     last_check = time.time()
     hold: "tuple[Optional[Path], float]" = (None, 0.0)   # (검증에 떨어진 설치본, 다시 볼 시각) — 매분 다시 검증하지 않는다
     while True:
