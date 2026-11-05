@@ -1914,7 +1914,39 @@ def resume_unanswered(rec: dict[str, Any]) -> None:
     mb._spawn_type(str(rec["tmux"]), RESUME_TEXT, str(rec.get("channelId") or ""), "")
 
 
+GIT_SYNC_NOTES = {
+    "rebased": "[마리나] 쉬는 동안 {base} 으로 rebase 함({n}커밋)",
+    "behind": "[마리나] {base} 이 {n}커밋 앞섬, 커밋 안 한 변경이 있어 rebase 안 함 — 필요하면 직접",
+    "conflict": "[마리나] 자동 rebase 충돌로 되돌림 — 직접 rebase 필요",
+}
+
+
+def take_git_sync_note(sd: Path) -> str:
+    """쉬는 동안 방 브랜치를 origin 에 맞춘 기록(git-sync.json, marina_discord_idle.sync_to_origin)을 한 줄로 바꾸고 지운다. 없으면 빈 문자열."""
+    p = sd / "git-sync.json"
+    try:
+        d = json.loads(p.read_text(encoding="utf-8"))
+        p.unlink()
+        return GIT_SYNC_NOTES[str(d["state"])].format(base=d.get("base") or "origin/main", n=d.get("n") or 0)
+    except (OSError, ValueError, KeyError, AttributeError, TypeError):
+        return ""
+
+
 def hook_prompt(payload: dict[str, Any]) -> "dict[str, Any] | None":
+    """사람의 입력이면 쉬는 동안 한 일(git 맞춤)을 추가 컨텍스트 한 줄로 알린다. 나머지는 _hook_prompt."""
+    out = _hook_prompt(payload)
+    if is_keep_prompt(str(payload.get("prompt") or "")):
+        return out
+    s = _session_from_env()
+    note = take_git_sync_note(Path(str(s["stateDir"]))) if s and s.get("stateDir") else ""
+    if not note:
+        return out
+    hso = (out or {}).get("hookSpecificOutput") or {"hookEventName": "UserPromptSubmit"}
+    hso["additionalContext"] = note + ("\n" + hso["additionalContext"] if hso.get("additionalContext") else "")
+    return {"hookSpecificOutput": hso}
+
+
+def _hook_prompt(payload: dict[str, Any]) -> "dict[str, Any] | None":
     """받은 순간: Discord 로 온 '/compact' 는 마리나가 세션이 쉬는 순간 입력창에 직접 친다. Claude 에겐 짧게 답만 하라고."""
     _ensure_daemon_quiet()          # 지시를 받는 순간 봇이 있어야 🛑·typing 이 된다(리뷰 I3)
     s = _session_from_env()
