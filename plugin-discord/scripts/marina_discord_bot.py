@@ -960,10 +960,26 @@ def parse_box(out: "str | None") -> "dict[str, Any] | None":
     return {"cpu": float(m.group(1)), "mem": float(m.group(2)), "heavy": int(m.group(3))} if m else None
 
 
+def _note_box_up(ssh: str) -> None:
+    """붙었다는 사실만 marina 런타임의 접속 기록(<MARINA_HOME>/remote-health)에 남긴다 — 1분마다 보는 값이라
+    기동이 '방금까지 붙던 박스'를 알고 순간 끊김에 맥으로 넘어가지 않는다(형 2026-11-05). 꺼짐 판정은 런타임이 직접 한다."""
+    host = "ssh://" + ssh
+    d = Path(os.environ.get("MARINA_HOME") or Path.home() / ".marina") / "remote-health"
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+        tmp = d / f".bot-{os.getpid()}.json"
+        tmp.write_text(json.dumps({"ts": time.time(), "up": True}), encoding="utf-8")
+        os.replace(tmp, d / (re.sub(r"[^A-Za-z0-9._-]+", "_", host) + ".json"))
+    except OSError:
+        pass
+
+
 def _box_refresh(name: str, ssh: str) -> None:
     try:
         v = parse_box(_box_probe(ssh))
         _BOX_CACHE[ssh] = (time.time(), dict({"name": name, "up": True}, **v) if v else {"name": name, "up": False})
+        if v:
+            _note_box_up(ssh)
     finally:
         _BOX_BUSY.discard(ssh)
 

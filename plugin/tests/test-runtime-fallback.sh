@@ -26,7 +26,8 @@ class FallbackTests(unittest.TestCase):
         self.up = True
         rt._HEALTH_TTL_S = 60.0
         rt._MEMO.clear()
-        rt._probe = lambda dest, port: self.calls.append((dest, port)) or self.up
+        self.waits = []
+        rt._probe = lambda dest, port, wait=3: self.waits.append(wait) or self.calls.append((dest, port)) or self.up
 
     def load(self):
         return rt.load_target(self.sess, home=self.home)
@@ -104,6 +105,27 @@ class FallbackTests(unittest.TestCase):
         self.up = False
         self.assertEqual(self.load().is_remote, a)
         self.assertEqual(len(self.calls), 1)
+
+    def test_box_that_was_up_gets_a_longer_second_look(self):
+        # 방금까지 붙던 박스(#상태가 1분마다 남긴 기록)면 순간 끊김일 수 있다 — 길게 한 번 더 보고 나서 꺼짐(형 2026-11-05)
+        rt.record_health("ssh://box", True, self.home)
+        f = next(Path(self.home, "remote-health").glob("*.json"))
+        d = json.loads(f.read_text()); d["ts"] -= 3600; f.write_text(json.dumps(d))
+        self.up = False
+        self.assertFalse(self.load().is_remote)
+        self.assertEqual(self.waits, [3, 10])
+
+    def test_known_down_box_is_not_retried(self):
+        rt.record_health("ssh://box", False, self.home)
+        f = next(Path(self.home, "remote-health").glob("*.json"))
+        d = json.loads(f.read_text()); d["ts"] -= 3600; f.write_text(json.dumps(d))
+        self.up = False
+        self.load()
+        self.assertEqual(self.waits, [3], "이미 꺼진 줄 아는 박스는 기다리지 않는다")
+
+    def test_status_ping_file_name_matches(self):
+        # Discord #상태가 쓰는 파일 이름과 같아야 한다(플러그인끼리 import 하지 않고 파일로만 잇는다)
+        self.assertEqual(rt._health_file("ssh://win-wsl", self.home).name, "ssh_win-wsl.json")
 
     def test_probe_off_switch(self):
         os.environ["MARINA_REMOTE_PROBE"] = "0"

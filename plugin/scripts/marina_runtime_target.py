@@ -289,17 +289,17 @@ def _pinned_from(session_dir: str) -> str | None:
         return None
 
 
-def _probe(dest: str, port) -> bool:
+def _probe(dest: str, port, wait: int = 3) -> bool:
     """ssh 로 한 번 붙어 본다 — heavy-remote·#상태와 같은 ControlPath 라 살아 있는 접속이 있으면 새로 안 연다.
     ssh 자신의 연결 실패만(255) 꺼짐으로 본다 — 박스 셸이 윈도우라 `true` 가 없어도 켜진 것으로(리뷰 I7)."""
     import subprocess
-    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={wait}", "-o", "ControlMaster=auto",
             "-o", "ControlPath=/tmp/hr-%C", "-o", "ControlPersist=300",
             "-o", "ServerAliveInterval=3", "-o", "ServerAliveCountMax=1"]
     if port:
         argv += ["-p", str(port)]
     try:
-        return subprocess.run(argv + [dest, "true"], capture_output=True, timeout=8,
+        return subprocess.run(argv + [dest, "true"], capture_output=True, timeout=wait + 5,
                               stdin=subprocess.DEVNULL).returncode != 255
     except (OSError, subprocess.SubprocessError):
         return False
@@ -321,25 +321,41 @@ def host_reachable(host: str, home: str | None = None) -> bool:
     m = _MEMO.get(host)
     if m and time.time() - m[0] < _MEMO_TTL_S:        # 데몬(게이트웨이·runtimed)도 5분 안엔 다시 본다
         return m[1]
-    f = Path(_home(home), "remote-health", re.sub(r"[^A-Za-z0-9._-]+", "_", host) + ".json")
+    f = _health_file(host, home)
+    was_up = None
     try:
         c = json.loads(f.read_text(encoding="utf-8"))
+        was_up = bool(c["up"])
         if time.time() - float(c["ts"]) < _HEALTH_TTL_S:
-            _MEMO[host] = (time.time(), bool(c["up"]))
-            return bool(c["up"])
+            _MEMO[host] = (time.time(), was_up)
+            return was_up
     except (OSError, ValueError, KeyError, TypeError):
         pass
     up = _probe(*d)
+    if not up and was_up is not False:
+        # 방금까지 붙던 박스면 순간 끊김일 수 있다 — 한 번 더 길게 기다려 보고 나서야 꺼짐으로 본다(형 2026-11-05)
+        up = _probe(*d, wait=10)
     _MEMO[host] = (time.time(), up)
+    record_health(host, up, home)
+    return up
+
+
+def _health_file(host: str, home: str | None = None) -> Path:
+    return Path(_home(home), "remote-health", re.sub(r"[^A-Za-z0-9._-]+", "_", host) + ".json")
+
+
+def record_health(host: str, up: bool, home: str | None = None) -> None:
+    """박스 접속 결과를 남긴다 — #상태가 1분마다 박스를 보는 결과도 여기 적어 기동 판단이 늘 새 값을 쓴다."""
+    import time
+    f = _health_file(host, home)
     try:
         f.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(f.parent), prefix=".h.")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump({"ts": time.time(), "up": up}, fh)
+            json.dump({"ts": time.time(), "up": bool(up)}, fh)
         os.replace(tmp, f)
     except OSError:
         pass
-    return up
 
 
 def pin_local(session_dir: str, target) -> None:

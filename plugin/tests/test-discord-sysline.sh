@@ -66,6 +66,8 @@ calls = []
 mb._box_probe = lambda ssh: calls.append(ssh) or "CPU=1 MEM=2 HEAVY=0"
 check(mb.box_stats({}) == [] and calls == [], "설정이 없으면 ssh 를 안 부른다")
 first = mb.box_stats({"statusBoxes": [{"name": "윈도우", "ssh": "win-x"}]}, wait=True)
+hf = Path(os.environ["MARINA_HOME"], "remote-health", "ssh_win-x.json")
+check(hf.is_file() and json.loads(hf.read_text())["up"] is True, "붙으면 런타임 접속 기록에 남긴다(순간 끊김 판단용)")
 check(first == [{"name": "윈도우", "up": True, "cpu": 1.0, "mem": 2.0, "heavy": 0}] and calls == ["win-x"], f"읽기: {first} {calls}")
 mb._box_probe = lambda ssh: None
 mb._BOX_CACHE.clear()
