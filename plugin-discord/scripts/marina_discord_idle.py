@@ -70,8 +70,16 @@ def last_activity(rec: dict[str, Any]) -> float:
     return max(vals)
 
 
+def _user_text(row: dict[str, Any]) -> str:
+    c = (row.get("message") or {}).get("content")
+    if isinstance(c, str):
+        return c
+    return "\n".join(str(b.get("text") or "") for b in c or [] if isinstance(b, dict) and b.get("type") == "text")
+
+
 def _transcript_last_ts(rec: dict[str, Any]) -> float:
-    """세션 기록 마지막 줄의 timestamp(내용). mtime 이 아니다 — 못 읽으면 0(후보에서만 빠진다)."""
+    """세션 기록 마지막 줄의 timestamp(내용). mtime 이 아니다 — 못 읽으면 0(후보에서만 빠진다).
+    마리나가 친 캐시 유지 글·그 답·/compact 기록은 사람이 한 활동이 아니라 건너뛴다(그러지 않으면 쉰 시간이 매번 리셋된다)."""
     tr = mb._session_transcript(rec)
     if not tr:
         return 0.0
@@ -82,15 +90,27 @@ def _transcript_last_ts(rec: dict[str, Any]) -> float:
             lines = fh.read().decode("utf-8", "replace").splitlines()
     except OSError:
         return 0.0
-    for raw in reversed(lines):
+    last, in_keep = 0.0, False
+    for raw in lines:
         try:
             row = json.loads(raw)
         except ValueError:
             continue
-        t = mb._row_time(row) if isinstance(row, dict) else 0.0
-        if t:
-            return t
-    return 0.0
+        if not isinstance(row, dict):
+            continue
+        if row.get("type") == "user":
+            text = _user_text(row)
+            if row.get("isCompactSummary") or "<command-name>/compact" in text or "<local-command-stdout>" in text:
+                continue
+            if text.startswith(ms.KEEPALIVE_MARK):
+                in_keep = True
+                continue
+            if text.strip():
+                in_keep = False          # 사람(또는 알림)의 진짜 글 — 캐시 유지 턴은 끝났다
+        if in_keep or row.get("subtype") == "compact_boundary":
+            continue
+        last = mb._row_time(row) or last
+    return last
 
 
 def _attached(name: str) -> bool:
@@ -144,6 +164,8 @@ def _verdict(rec: dict[str, Any], after: float, now: float, full: bool = True) -
     blockers = mb.restart_blockers(rec)
     if blockers and _work_stale(rec, now, max(after, BACKGROUND_STALE)):
         blockers = [b for b in blockers if not _BACKGROUND.match(b)]
+    if not codex and _holding(rec, now, idle):
+        out.append("하던 중(진행 문서)")
     return out + blockers
 
 
@@ -224,6 +246,7 @@ class Idler:
         self.last_sample: dict[str, float] = {}
         self.last_tick = -1e18
         self.last_kill = -1e18
+        self.keep_checked: dict[str, float] = {}     # 방 → 캐시 손쓰기를 마지막으로 무겁게 판정한 시각
 
     def _reset(self) -> None:
         self.clear_since.clear()
@@ -234,10 +257,15 @@ class Idler:
         if now - self.last_tick < IDLE_TICK_EVERY:
             return None
         try:
-            after = stop_after(ms.load_config())
+            cfg = ms.load_config()
         except ms.SessionError:
             return None
+        after = stop_after(cfg)
         self.last_tick = now
+        try:
+            self.keep_tick(now, cfg)          # 내리기와 별개 — 실패해도 내리기 판정은 계속
+        except Exception as exc:
+            mb._log(f"cache-keep 실패: {exc!r}")
         if not after or not bot_up or mb.restart_status() or mw.seen_at() <= self.started:
             self._reset()                    # 깨울 수 있는지 모르면(봇 없음·글 이벤트 수신 미확인) 내리지 않는다
             return None
@@ -267,6 +295,50 @@ class Idler:
             if done:
                 return done
         return None
+
+    def keep_tick(self, now: float, cfg: dict[str, Any]) -> list[tuple[str, str]]:
+        """모든 방을 보고 컴팩트·캐시 유지 글을 칠 방을 고른다(입력은 mb._spawn_type — 방이 쉬고 입력창이 빈 때만 친다).
+        사람이 마지막으로 말한 시각(last_activity)이 바뀌면 계획이 처음부터 다시 시작된다. 반환: [(방, 한 일)]."""
+        k = keep_config(cfg)
+        if not k:
+            return []
+        every, keep_max = k
+        done: list[tuple[str, str]] = []
+        for rec in ms.load_sessions():
+            ref = f"{rec.get('project')}/{rec.get('task')}"
+            name = str(rec.get("tmux") or "")
+            if ms.is_codex(rec) or not name or not _eligible(rec) or not rec.get("stateDir") or not ms.tmux_alive(name):
+                continue
+            try:
+                last = last_activity(rec)
+                st = _keep_state(rec)
+                if _same(st.get("compactedFor"), last):
+                    continue                                   # 이 대화 구간은 이미 컴팩트했다
+                touched = max(last, float(st.get("lastKeep") or 0.0))      # 캐시가 마지막으로 데워진 시각
+                if now - touched < every or now - self.keep_checked.get(ref, -1e18) < KEEP_RECHECK:
+                    continue
+                self.keep_checked[ref] = now
+                if _attached(name):
+                    continue                                   # 형이 터미널로 보는 중 — 끼어들지 않는다
+                if piece_done(rec, now):
+                    if now - touched < CACHE_TTL:
+                        action, text = "compact", ms.COMPACT_KEEP_TEXT
+                    else:
+                        continue                               # 캐시가 식었다 — 지금처럼 2시간 뒤 내린다
+                elif now - last >= keep_max:
+                    action, text = "compact", ms.COMPACT_KEEP_TEXT
+                else:
+                    action, text = "keepalive", ms.KEEPALIVE_TEXT
+                if action == "compact":
+                    _keep_save(rec, compactedFor=last)
+                else:
+                    _keep_save(rec, lastKeep=now)
+                mb._spawn_type(name, text, str(rec.get("channelId") or ""), "")
+                _idle_log("{} {} · 쉰={:.2f}h".format("컴팩트" if action == "compact" else "캐시 유지", ref, (now - last) / 3600))
+                done.append((ref, action))
+            except Exception as exc:
+                mb._log(f"cache-keep {ref}: {exc!r}")
+        return done
 
     def _stop(self, rec: dict[str, Any], after: float, now: float) -> "str | None":
         ref, name = f"{rec.get('project')}/{rec.get('task')}", str(rec.get("tmux") or "")
@@ -354,3 +426,85 @@ def check_all(hours: "float | None" = None) -> list[dict[str, Any]]:
         rows.append({"ref": f"{rec.get('project')}/{rec.get('task')}", "alive": alive, "idleHours": idle_h,
                      "afterHours": after / 3600, "stop": alive and not why, "why": why})
     return rows
+
+
+# ── 방 캐시(1시간) 손쓰기 ─────────────────────────────────────────────────────
+# 일 조각이 끝난 방: 캐시가 살아 있을 때(마지막 접촉 50분 뒤) /compact 한 번 → 그 뒤는 2시간 쉬면 내림.
+# 하던 중인 방: 8시간까지 50분마다 내용 없는 글로 캐시를 데운다. 8시간이 지나면 /compact 뒤 내림(그 전엔 2시간에 안 내린다).
+# 코덱스 방은 대상이 아니다(캐시 구조가 다르고 컴팩트하면 맥락을 크게 잃는다 — 형 2026-11-05).
+KEEP_DEFAULT_MINUTES = 50.0
+KEEP_MAX_MINUTES = 59.0           # 간격은 캐시 수명(60분) 안이어야 한다
+KEEP_DEFAULT_HOURS = 8.0
+CACHE_TTL = 3600.0                # 이 시간이 지난 캐시는 이미 식었다 — 컴팩트로 데울 것이 없다
+KEEP_RECHECK = 60.0               # 한 방을 무겁게 판정하는 최소 간격(입력 못 한 방을 20초마다 다시 보지 않게)
+_OPEN_STATUS = re.compile(r"^상태:\s*(진행 중|막힘)")
+
+
+def keep_config(cfg: dict[str, Any]) -> "tuple[float, float] | None":
+    """(캐시 유지 간격 초, 하던 중 방을 붙드는 최대 초). None = 끔(cacheKeep: false). 이상한 값은 기본."""
+    if cfg.get("cacheKeep", True) is False:
+        return None
+
+    def num(key: str, default: float, hi: float) -> float:
+        v = cfg.get(key)
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0 or v > hi:
+            return default
+        return float(v)
+    return (num("cacheKeepMinutes", KEEP_DEFAULT_MINUTES, KEEP_MAX_MINUTES) * 60.0,
+            num("cacheKeepHours", KEEP_DEFAULT_HOURS, 24 * 14) * 3600.0)
+
+
+def progress_open(rec: dict[str, Any]) -> bool:
+    """방 작업 폴더의 .superpowers/sdd/*/progress*.md 맨 위 다섯 줄에 '상태: 진행 중|막힘' 이 있나(shared/bin/role-hook 과 같은 규칙)."""
+    for f in sorted(Path(str(rec.get("root") or "/nonexistent")).glob(".superpowers/sdd/*/progress*.md")):
+        try:
+            with open(f, encoding="utf-8", errors="replace") as fh:
+                head = [fh.readline() for _ in range(5)]
+        except OSError:
+            continue
+        if any(_OPEN_STATUS.match(l.strip()) for l in head):
+            return True
+    return False
+
+
+def _keep_state(rec: dict[str, Any]) -> dict[str, Any]:
+    try:
+        d = json.loads((Path(str(rec.get("stateDir") or "/nonexistent")) / "keep.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def _keep_save(rec: dict[str, Any], **kw: Any) -> None:
+    ms._write_json(Path(str(rec["stateDir"])) / "keep.json", dict(_keep_state(rec), **kw))
+
+
+def _same(a: Any, b: float) -> bool:
+    return isinstance(a, (int, float)) and abs(float(a) - b) < 1.0
+
+
+def _holding(rec: dict[str, Any], now: float, idle: float) -> bool:
+    """내리기 판정용 — 진행 문서가 열린 방은 8시간까지(그리고 그때 컴팩트를 건 뒤에야) 2시간에 내리지 않는다.
+    백그라운드·질문 같은 나머지 '하던 중' 이유는 restart_blockers 가 이미 막는다."""
+    try:
+        cfg = ms.load_config()
+    except ms.SessionError:
+        return False
+    k = keep_config(cfg)
+    if not k or not progress_open(rec):
+        return False
+    return idle < k[1] or not _same(_keep_state(rec).get("compactedFor"), last_activity(rec))
+
+
+def piece_done(rec: dict[str, Any], now: float) -> bool:
+    """일 조각이 끝났나 — 백그라운드·서브에이전트·팀 에이전트·예약·질문·권한 창이 없고 진행 문서가 열려 있지 않다.
+    판정 중 예외는 '하던 중'(애매하면 하던 중 쪽)."""
+    try:
+        if progress_open(rec):
+            return False
+        blockers = [b for b in mb.restart_blockers(rec) if b not in ("방금 메시지·작업 기록이 움직임",)]
+        if blockers and _work_stale(rec, now, BACKGROUND_STALE):
+            blockers = [b for b in blockers if not _BACKGROUND.match(b)]
+        return not blockers and not _selecting(str(rec.get("tmux") or ""))
+    except Exception:
+        return False

@@ -31,6 +31,7 @@ def prep(ref, sid):
 a, sda, tra = prep("proj/feat/a", "aaaaaaaa-0000-1111-2222-333344445555")
 b, sdb, trb = prep("proj/feat/b", "bbbbbbbb-0000-1111-2222-333344445555")
 mb.live_tasks = lambda r: []
+mb._spawn_type = lambda *a, **k: None     # 캐시 손쓰기(keep_tick)가 실제 입력을 치지 않게 — 그건 test-discord-cache-keep 이 본다
 mi._work_stale = lambda *a: False     # 기록이 오래 멈춘 백그라운드는 test-discord-idle-stale 이 본다 — 여기선 '일하는 중'이 막는지만
 empty = [True]; attached = [False]
 mb._input_empty = lambda name: empty[0]
