@@ -1916,8 +1916,14 @@ def resume_unanswered(rec: dict[str, Any]) -> None:
 
 GIT_SYNC_NOTES = {
     "rebased": "[마리나] 쉬는 동안 {base} 으로 rebase 함({n}커밋)",
-    "behind": "[마리나] {base} 이 {n}커밋 앞섬, 커밋 안 한 변경이 있어 rebase 안 함 — 필요하면 직접",
-    "conflict": "[마리나] 자동 rebase 충돌로 되돌림 — 직접 rebase 필요",
+    "dirty": "[마리나] {base} 이 {n}커밋 앞섬, 커밋 안 한 변경이 있어 rebase 안 함 — 필요하면 직접",
+    "busy": "[마리나] {base} 이 {n}커밋 앞섬, 진행 중인 git 작업(rebase·merge 등)이 있어 rebase 안 함 — 필요하면 직접",
+    "pushed": "[마리나] {base} 이 {n}커밋 앞섬, 이미 push 한 브랜치라 rebase 안 함 — 필요하면 직접",
+    "derived": "[마리나] {base} 이 {n}커밋 앞섬, 이 브랜치에서 갈라진 브랜치·워크트리(서브에이전트 등)가 있어 rebase 안 함 — 필요하면 직접",
+    "conflict": "[마리나] {base} 이 {n}커밋 앞섬, rebase 하면 충돌 예상이라 안 건드림 — 필요하면 직접 rebase",
+    "gpg": "[마리나] {base} 이 {n}커밋 앞섬, 커밋 서명 설정이 켜져 있어 자동 rebase 안 함 — 필요하면 직접",
+    "submodule": "[마리나] {base} 이 {n}커밋 앞섬, .gitmodules(서브모듈)가 있어 자동 rebase 안 함 — 필요하면 직접",
+    "ignored": "[마리나] {base} 이 {n}커밋 앞섬, origin 쪽 변경이 로컬 ignored 파일과 겹쳐 rebase 안 함 — 필요하면 직접",
 }
 
 
@@ -1927,7 +1933,7 @@ def take_git_sync_note(sd: Path) -> str:
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
         p.unlink()
-        return GIT_SYNC_NOTES[str(d["state"])].format(base=d.get("base") or "origin/main", n=d.get("n") or 0)
+        return GIT_SYNC_NOTES[str(d.get("why") or d["state"])].format(base=d.get("base") or "origin/main", n=d.get("n") or 0)
     except (OSError, ValueError, KeyError, AttributeError, TypeError):
         return ""
 

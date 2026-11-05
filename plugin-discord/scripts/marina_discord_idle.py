@@ -3,10 +3,13 @@
 모르면 안 내린다: 판정 중 예외·화면을 못 읽음·tmux 가 이상함은 전부 '막는다'."""
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
 import re
+import shutil
+import signal
 import subprocess
 import threading
 import sys
@@ -257,6 +260,7 @@ class Idler:
         self.last_kill = -1e18
         self.keep_checked: dict[str, float] = {}     # 방 → 캐시 손쓰기를 마지막으로 무겁게 판정한 시각
         self.sync_checked: dict[str, float] = {}     # 방 → git 맞춤을 마지막으로 판정한 시각
+        self.sync_cleaned = False
         self.sync_inline = False                     # 시험: True 면 스레드 없이 그 자리에서
         self.keep_spawned: dict[str, float] = {}     # 방 → 입력 프로세스를 띄운 시각(입력 대기 120초 동안 또 띄우지 않게)
 
@@ -317,7 +321,11 @@ class Idler:
             return []
         every, keep_max = k
         done: list[tuple[str, str]] = []
-        for rec in ms.load_sessions():
+        recs = ms.load_sessions()
+        if not self.sync_cleaned:
+            self.sync_cleaned = True                       # 데몬이 뜬 뒤 첫 판: 봇이 중간에 죽어 남은 임시 워크트리 정리
+            cleanup_orphan_worktrees({Path(str(r["root"])) for r in recs if r.get("root") and r.get("kind") not in ms.CHAT_KINDS})
+        for rec in recs:
             ref = f"{rec.get('project')}/{rec.get('task')}"
             name = str(rec.get("tmux") or "")
             if not name or not _eligible(rec) or not rec.get("stateDir") or not ms.tmux_alive(name):
@@ -328,8 +336,8 @@ class Idler:
                 if last - mb._session_born(name) <= 1.0:
                     continue                                   # 뜬 뒤 실제 활동이 없다 — 캐시에 데울 것이 없다
                 st = _keep_state(rec)
-                if not chat:
-                    self._maybe_sync(rec, name, ref, last, st, now, every)    # 코덱스 방도(git 은 하네스 무관)
+                if not chat and not ms.is_codex(rec):          # 코덱스 방은 추가 컨텍스트 알림을 확인할 수 없어 제외(조용히 바꾸지 않는다)
+                    self._maybe_sync(rec, name, ref, last, st, now, every)
                 if ms.is_codex(rec):
                     continue                                   # 코덱스 방은 컴팩트·캐시 유지 글 대상 아님
                 if _same(st.get("compactedFor"), last):
@@ -359,29 +367,32 @@ class Idler:
         return done
 
     def _maybe_sync(self, rec: dict[str, Any], name: str, ref: str, last: float, st: dict[str, Any], now: float, every: float) -> None:
-        """일 조각이 끝나고 50분 쉰 방을 origin 기본 브랜치에 맞춘다(활동 시각당 한 번). fetch 는 느릴 수 있어 떼어 낸 스레드로."""
+        """일 조각이 끝나고 50분 쉰 방을 origin 기본 브랜치에 맞춘다(활동 시각당 한 번). 계산(fetch·임시 워크트리 rebase)은 느릴 수 있어
+        떼어 낸 스레드에서, 잠금은 적용 순간만."""
         if _same(st.get("syncedFor"), last) or now - last < every or now - self.sync_checked.get(ref, -1e18) < KEEP_RECHECK:
             return
         self.sync_checked[ref] = now
         if _attached(name) or not piece_done(rec, now):
             return
         _keep_save(rec, syncedFor=last)
+        turn = _read(Path(str(rec["stateDir"])) / "turn-at")
         if self.sync_inline:
-            self._sync_room(rec, ref)
+            self._sync_room(rec, ref, last, turn, now)
         else:
-            threading.Thread(target=self._sync_room, args=(rec, ref), daemon=True).start()
+            threading.Thread(target=self._sync_room, args=(rec, ref, last, turn, now), daemon=True).start()
 
     @staticmethod
-    def _sync_room(rec: dict[str, Any], ref: str) -> None:
+    def _sync_room(rec: dict[str, Any], ref: str, last: float, turn: str, now: float) -> None:
         sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+
+        def still_idle() -> bool:           # 적용 직전: 그 사이 사람이 말했거나(활동·turn-at) 일이 시작됐거나 터미널로 보면 그만둔다
+            return (_same(last, last_activity(rec)) and _read(sd / "turn-at") == turn
+                    and not _attached(str(rec.get("tmux") or "")) and piece_done(rec, now))
         try:
-            with ms.room_lock(sd) as got:
-                if not got:
-                    return                       # 깨우기·재시작·내리기가 이 방을 만지는 중
-                res = sync_to_origin(Path(str(rec.get("root") or "/nonexistent")))
-                if res:
-                    ms._write_json(sd / "git-sync.json", res)
-                    mb._log(f"git-sync {ref}: {res}")
+            res = sync_to_origin(Path(str(rec.get("root") or "/nonexistent")), guard=still_idle, lock=lambda: ms.room_lock(sd))
+            if res:
+                ms._write_json(sd / "git-sync.json", res)
+                mb._log(f"git-sync {ref}: {res}")
         except Exception as exc:
             mb._log(f"git-sync {ref} 실패: {exc!r}")
 
@@ -525,6 +536,13 @@ def _keep_save(rec: dict[str, Any], **kw: Any) -> None:
     ms._write_json(Path(str(rec["stateDir"])) / "keep.json", dict(_keep_state(rec), **kw))
 
 
+def _read(p: Path) -> str:
+    try:
+        return p.read_text()
+    except OSError:
+        return ""
+
+
 def _same(a: Any, b: float) -> bool:
     return isinstance(a, (int, float)) and abs(float(a) - b) < 1.0
 
@@ -581,48 +599,156 @@ def keep_done(rec: dict[str, Any]) -> None:
         _keep_save(rec, lastKeep=want.get("at"), want=None)
 
 
-def _git(root: Path, *args: str, timeout: float = 30.0) -> "subprocess.CompletedProcess[str]":
-    return subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True, timeout=timeout,
-                          env=dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_EDITOR="true"))
+# ── 쉬는 방 브랜치를 origin 기본 브랜치에 맞춤 ───────────────────────────────────
+# 형의 작업 브랜치를 건드리므로 보수적으로: 살아 있는 작업 트리에서는 rebase/abort 를 하지 않는다. 임시 워크트리에서 새 커밋을 계산하고,
+# 적용은 HEAD·index 가 계산 때와 같고 작업 트리가 깨끗할 때만 `git reset --keep <new>` 한 번(방 잠금 안에서, 직전에 활동·piece_done 재확인).
+
+def _git_env() -> dict[str, str]:
+    """묻지 않는 환경 — 인증·ssh 질문으로 멈추지 않게."""
+    return dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_EDITOR="true", GIT_SSH_COMMAND="ssh -o BatchMode=yes", GCM_INTERACTIVE="never")
 
 
-def sync_to_origin(root: Path) -> "dict[str, Any] | None":
-    """방 워크트리 브랜치를 origin 기본 브랜치(origin/HEAD, 없으면 origin/main)에 맞춘다 — 일 사이 안전한 때만 부른다.
-    깨끗하면 rebase(충돌·실패는 즉시 --abort), 더러우면(커밋 안 한 변경·gitignore 아닌 untracked·진행 중 rebase/merge) 뒤처진 수만.
-    반환: {state: rebased|behind|conflict, n: 뒤처진 커밋 수, base}. 할 일이 없거나(최신·본체 체크아웃·분리 HEAD·기본 브랜치 자체·fetch 실패) None."""
+def _run(argv: list[str], timeout: float = 30.0) -> "subprocess.CompletedProcess[str]":
+    """stdin 없이, 새 프로세스 그룹으로 — 시간이 넘으면 그룹째 죽이고 TimeoutExpired."""
+    p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                         env=_git_env(), start_new_session=True)
     try:
-        ids = _git(root, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir")
-        gd, common = (ids.stdout.split("\n") + ["", ""])[:2]
-        if ids.returncode or not gd or gd == common:
+        out, err = p.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(p.pid, signal.SIGKILL)
+        except OSError:
+            pass
+        p.communicate()
+        raise
+    return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+
+def _git(root: Path, *args: str, timeout: float = 30.0) -> "subprocess.CompletedProcess[str]":
+    return _run(["git", "-C", str(root), *args], timeout=timeout)
+
+
+def _out(root: Path, *args: str) -> str:
+    return _git(root, *args).stdout.strip()
+
+
+@contextlib.contextmanager
+def _no_lock() -> Any:
+    yield True
+
+
+SYNC_WT = "sync-wt"
+_BUSY = ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_LOG")
+
+
+def cleanup_orphan_worktrees(roots: "list[Path] | set[Path]") -> None:
+    """봇이 계산 도중 죽어 남은 임시 워크트리 — 시작 때 폴더를 지우고 각 레포의 등록을 prune 한다."""
+    shutil.rmtree(ms.marina_home() / SYNC_WT, ignore_errors=True)
+    for root in roots:
+        try:
+            _git(Path(root), "worktree", "prune")
+        except Exception:
+            pass
+
+
+def _busy(gd: str) -> bool:
+    return any(os.path.exists(os.path.join(gd, n)) for n in _BUSY)
+
+
+def _derived(root: Path, branch: str) -> bool:
+    """방 HEAD 를 기반으로 한 다른 로컬 브랜치·워크트리(서브에이전트 agent-* 포함)가 있나 — 다시 쓰면 그쪽 기반이 사라진다."""
+    refs = _out(root, "for-each-ref", "--contains", "HEAD", "--format=%(refname)", "refs/heads").split()
+    if any(r != "refs/heads/" + branch for r in refs):
+        return True
+    me = os.path.realpath(str(root))
+    for blk in _out(root, "worktree", "list", "--porcelain").split("\n\n"):
+        path = sha = ""
+        for line in blk.split("\n"):
+            if line.startswith("worktree "):
+                path = line[9:]
+            elif line.startswith("HEAD "):
+                sha = line[5:]
+        if path and sha and os.path.realpath(path) != me and _git(root, "merge-base", "--is-ancestor", "HEAD", sha).returncode == 0:
+            return True
+    return False
+
+
+def _ignored_overlap(root: Path, base: str) -> bool:
+    """origin 쪽에서 바뀐 파일이 방에 untracked(=작업 트리가 깨끗하므로 gitignore 대상)로 이미 있으면 rebase 가 덮어쓴다."""
+    mb_ = _out(root, "merge-base", "HEAD", base)
+    changed = [x for x in _git(root, "diff", "--name-only", "-z", mb_, base).stdout.split("\0") if x]
+    tracked = set(_git(root, "ls-files", "-z").stdout.split("\0"))
+    return any(c not in tracked and os.path.lexists(os.path.join(str(root), c)) for c in changed)
+
+
+def sync_to_origin(root: Path, guard: "Any" = None, lock: "Any" = None) -> "dict[str, Any] | None":
+    """방 워크트리 브랜치를 origin 기본 브랜치(origin/HEAD, 없으면 origin/main)에 맞춘다.
+    반환: {state: rebased|behind, why(behind 일 때: busy·dirty·pushed·gpg·submodule·derived·ignored·conflict), n: 뒤처진 수, base}.
+    할 일이 없거나(최신·본체 체크아웃·분리 HEAD·기본 브랜치 자체·fetch 실패·적용 직전 달라짐·잠금 실패) None. guard: 적용 직전 재확인(활동·piece_done)."""
+    guard = guard or (lambda: True)
+    lock = lock or _no_lock
+    tmp: "Path | None" = None
+    try:
+        ids = _git(root, "rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir").stdout.split("\n")
+        gd, common = ids[0], (ids[1] if len(ids) > 1 else "")
+        if not gd or gd == common:
             return None                                  # 레포가 아니거나 본체 체크아웃(워크트리가 아님)
-        branch = _git(root, "symbolic-ref", "-q", "--short", "HEAD").stdout.strip()
+        branch = _out(root, "symbolic-ref", "-q", "--short", "HEAD")
         if not branch:
             return None                                  # 분리 HEAD
         if _git(root, "fetch", "-q", "origin", timeout=60.0).returncode:
             return None                                  # 오프라인·인증 — 조용히 넘김
-        base = _git(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD").stdout.strip()
-        if not base:
-            base = "origin/main"
-        if _git(root, "rev-parse", "-q", "--verify", base + "^{commit}").returncode:
+        base = _out(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD") or "origin/main"
+        if _git(root, "rev-parse", "-q", "--verify", base + "^{commit}").returncode or branch == base.split("/", 1)[-1]:
             return None
-        if base == "origin/" + branch or branch == base.split("/", 1)[-1]:
-            return None                                  # 기본 브랜치 자체
-        behind = int(_git(root, "rev-list", "--count", f"HEAD..{base}").stdout.strip() or 0)
+        behind = int(_out(root, "rev-list", "--count", f"HEAD..{base}") or 0)
         if behind == 0:
             return None
-        res = {"state": "behind", "n": behind, "base": base}
-        busy = any(os.path.exists(os.path.join(gd, n)) for n in ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD"))
-        if busy or _git(root, "status", "--porcelain").stdout.strip():
-            return res
-        if _git(root, "rebase", base, timeout=120.0).returncode:
-            _git(root, "rebase", "--abort")
-            res["state"] = "conflict"
-        else:
-            res["state"] = "rebased"
-        return res
+
+        def res(why: str, state: str = "behind") -> dict[str, Any]:
+            return {"state": state, "why": why, "n": behind, "base": base} if why else {"state": state, "n": behind, "base": base}
+        if _busy(gd):
+            return res("busy")
+        if _out(root, "status", "--porcelain"):
+            return res("dirty")
+        ahead = int(_out(root, "rev-list", "--count", f"{base}..HEAD") or 0)
+        if ahead and int(_out(root, "rev-list", "--count", "HEAD", "--not", "--remotes") or 0) != ahead:
+            return res("pushed")                          # 이미 push 한 커밋이 있다 — 다시 쓰면 원격과 갈라진다
+        if "true" in (_out(root, "config", "--type=bool", "commit.gpgsign"), _out(root, "config", "--type=bool", "tag.gpgsign")):
+            return res("gpg")
+        if (root / ".gitmodules").exists():
+            return res("submodule")
+        if ahead and _derived(root, branch):
+            return res("derived")
+        if _ignored_overlap(root, base):
+            return res("ignored")
+        head0, tree0 = _out(root, "rev-parse", "HEAD"), _out(root, "write-tree")
+        tmp = ms.marina_home() / SYNC_WT / f"{os.getpid()}-{time.time_ns()}"
+        tmp.parent.mkdir(parents=True, exist_ok=True)
+        if _git(root, "-c", "core.hooksPath=/dev/null", "worktree", "add", "-q", "--detach", str(tmp), head0).returncode:
+            return None
+        if _git(tmp, "-c", "core.hooksPath=/dev/null", "rebase", base, timeout=120.0).returncode:
+            return res("conflict")                        # 임시만 버린다 — 방 트리는 그대로
+        new = _out(tmp, "rev-parse", "HEAD")
+        with lock() as got:
+            if not got or not guard():
+                return None
+            if (_out(root, "rev-parse", "HEAD") != head0 or _out(root, "write-tree") != tree0
+                    or _out(root, "status", "--porcelain") or _busy(gd)):
+                return None                               # 계산하는 동안 방이 움직였다
+            if _git(root, "reset", "--keep", new).returncode:
+                return None
+        return res("", "rebased")
     except (OSError, ValueError, subprocess.SubprocessError):
-        try:
-            _git(root, "rebase", "--abort")
-        except Exception:
-            pass
         return None
+    finally:
+        if tmp is not None:
+            try:
+                _git(root, "worktree", "remove", "--force", str(tmp))
+            except Exception:
+                pass
+            shutil.rmtree(tmp, ignore_errors=True)
+            try:
+                _git(root, "worktree", "prune")
+            except Exception:
+                pass
