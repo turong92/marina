@@ -60,7 +60,8 @@ check(mb.box_text(up) == "윈도우 CPU 🟢 13% · 메모리 🟢 40% · 🧪 1
 check(mb.box_text(dict(up, cpu=95.0, mem=85.0, heavy=0)) == "윈도우 CPU 🔴 95% · 메모리 🟡 85%", mb.box_text(dict(up, cpu=95.0, mem=85.0, heavy=0)))
 check(mb.box_text({"name": "윈도우", "up": False}) == "윈도우 꺼짐", mb.box_text({"name": "윈도우", "up": False}))
 line = mb.footer({"diskFree": G, "boxes": [up]})
-check(" · 윈도우 CPU 🟢 13% · 메모리 🟢 40% · 🧪 1 · <t:" in line, f"아랫줄 시각 앞: {line}")
+check(line.endswith(" 갱신\n-# 윈도우 CPU 🟢 13% · 메모리 🟢 40% · 🧪 1"), f"박스는 자기 줄로(형 2026-11-05 '줄바꿈'): {line}")
+check(line.count("\n") == 1 and line.startswith("-# 디스크"), f"맥 줄은 그대로: {line}")
 check("윈도우" not in mb.footer({"diskFree": G, "boxes": []}), "박스가 없으면 안 그린다")
 calls = []
 mb._box_probe = lambda ssh: calls.append(ssh) or "CPU=1 MEM=2 HEAVY=0"

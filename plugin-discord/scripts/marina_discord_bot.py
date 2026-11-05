@@ -1019,9 +1019,9 @@ def footer(snap: dict[str, Any]) -> str:
              cpu_text(snap.get("cpu"), snap.get("load"), snap.get("ncpu")),
              mem_text(snap.get("memUsed"), snap.get("memLevel"), snap.get("swapUsed")),
              heavy_text(snap.get("heavy")),
-             *[box_text(b) for b in snap.get("boxes") or []],
              f"<t:{int(time.time())}:R> 갱신"]
-    return "-# " + " · ".join(p for p in parts if p)
+    # 원격 박스는 자기 줄로 — 한 줄에 맥·윈도우가 섞이면 어느 기계 값인지 헷갈린다(형 2026-11-05 "줄바꿈")
+    return "\n".join(["-# " + " · ".join(p for p in parts if p)] + ["-# " + box_text(b) for b in snap.get("boxes") or []])
 
 
 # ── Discord ─────────────────────────────────────────────────────────────────
