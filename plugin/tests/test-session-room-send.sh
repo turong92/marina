@@ -141,10 +141,26 @@ PY
 [ "$before" = "$after" ] || fail "실패했는데 채널에 글이 남음($before → $after)"
 rm -f "$TMPROOT/codex-ctl/swallow"
 
-# ── 잠든 코덱스 방: 그 글을 첫 지시로 깨운다 ──
+# ── 잠든 코덱스 방: 기본은 깨우지 않고 보관함에 넣는다(형 2026-11-05 — 규칙 알림이 잠든 방 19개를 깨워 토큰을 날렸다) ──
 msess stop proj/feat/cx >/dev/null 2>&1 || fail "stop cx"
-out="$(DISCORD_STATE_DIR="$A_SD" msess room-send proj/feat/cx '깨워서 줄 글' 2>&1)" || fail "잠든 코덱스 깨우기 실패: $out"
-echo "$out" | grep -q "깨웠" || fail "깨움 안내: $out"
+out="$(DISCORD_STATE_DIR="$A_SD" msess room-send proj/feat/cx '보관될 글' 2>&1)" || fail "잠든 코덱스 보관 실패: $out"
+echo "$out" | grep -q "잠들어 있어서 보관했어" || fail "보관 안내: $out"
+echo "$out" | grep -q "깨웠" && fail "보관인데 깨웠다고 함: $out"
+run <<'PY'
+import os; exec(open(os.environ["TMPROOT"] + "/prelude.py").read())
+r = rec("proj/feat/cx")
+check(not ms.tmux_alive(r["tmux"]), "보관만 했는데 방이 켜졌다")
+inbox = Path(r["stateDir"]) / ms.ROOM_INBOX_FILE
+check(inbox.is_file() and "보관될 글" in inbox.read_text(), "보관함 파일에 글이 있어야 함")
+check(has_line(r["channelId"], "📨 proj/feat/a 방에서: 보관될 글", "📥 보관"), f"방끼리 스레드 한 줄(📥 보관): {posts(thread_of(r['channelId']) or 'x')}")
+# 7일 넘은 글은 버린다 — 오래된 알림이 몇 주 뒤 깨어난 방의 첫 지시가 되지 않게
+ms.room_inbox_add(Path(r["stateDir"]), "[마리나 · x 방에서] 오래된 글", now=time.time() - 8 * 86400)
+text, taken = ms.room_inbox_take(Path(r["stateDir"]))
+check("보관될 글" in text and "오래된 글" not in text, f"만료 글은 버림: {text!r}")
+ms.room_inbox_restore(Path(r["stateDir"]), taken)          # 못 띄웠을 때 되돌림
+check("보관될 글" in inbox.read_text(), "되돌린 보관함에 글이 남아야 함")
+finish()
+PY
 has_first() { python3 - "$@" <<'PY'
 import glob, sys
 need = sys.argv[2:]
@@ -154,18 +170,31 @@ for f in glob.glob(sys.argv[1] + "/*/argv"):
 sys.exit(1)
 PY
 }
+# --wake: 지금처럼 깨워서 첫 지시로 준다 — 보관해 둔 글도 같이 간다
+out="$(DISCORD_STATE_DIR="$A_SD" msess room-send --wake proj/feat/cx '깨워서 줄 글' 2>&1)" || fail "잠든 코덱스 깨우기 실패: $out"
+echo "$out" | grep -q "깨웠" || fail "깨움 안내: $out"
 for _ in $(seq 100); do has_first "$FAKE_CODEX_OUT" "깨워서 줄 글" && break; sleep 0.1; done
 has_first "$FAKE_CODEX_OUT" "[마리나 · proj/feat/a 방에서] 깨워서 줄 글" || fail "코덱스 첫 지시에 글이 안 들어감"
+has_first "$FAKE_CODEX_OUT" "깨워서 줄 글" "보관될 글" || fail "보관해 둔 글이 첫 지시에 같이 안 감"
+[ ! -e "$CX_SD/room-inbox.jsonl" ] || fail "전달 뒤 보관함이 안 비워짐"
 
-# ── 잠든 클로드 방: 첫 지시로 깨운다(보낸 방 = 코덱스 방) ──
+# ── 잠든 클로드 방: 보관 → 일반 start 로 뜰 때 첫 지시에 같이 간다(보낸 방 = 코덱스 방) ──
 msess stop proj/feat/b >/dev/null 2>&1 || fail "stop b"
-out="$(DISCORD_STATE_DIR="$CX_SD" msess room-send proj/feat/b '코덱스가 보내는 글' 2>&1)" || fail "잠든 클로드 깨우기 실패: $out"
+out="$(DISCORD_STATE_DIR="$CX_SD" msess room-send proj/feat/b '코덱스가 보관시키는 글' 2>&1)" || fail "잠든 클로드 보관 실패: $out"
+echo "$out" | grep -q "보관했어" || fail "클로드 보관 안내: $out"
+msess start proj/feat/b >/dev/null 2>&1 || fail "start b"
+for _ in $(seq 100); do has_first "$FAKE_OUT" "코덱스가 보관시키는 글" && break; sleep 0.1; done
+has_first "$FAKE_OUT" "[마리나 · proj/feat/cx 방에서] 코덱스가 보관시키는 글" "marina session room-send proj/feat/cx" || fail "start 로 뜬 클로드 첫 지시에 보관한 글이 안 들어감"
+# ── 잠든 클로드 방 --wake: 첫 지시로 깨운다 ──
+msess stop proj/feat/b >/dev/null 2>&1 || fail "stop b 2"
+out="$(DISCORD_STATE_DIR="$CX_SD" msess room-send --wake proj/feat/b '코덱스가 보내는 글' 2>&1)" || fail "잠든 클로드 깨우기 실패: $out"
 echo "$out" | grep -q "깨웠" || fail "클로드 깨움 안내: $out"
 for _ in $(seq 100); do has_first "$FAKE_OUT" "코덱스가 보내는 글" && break; sleep 0.1; done
 has_first "$FAKE_OUT" "[마리나 · proj/feat/cx 방에서] 코덱스가 보내는 글" "marina session room-send proj/feat/cx" || fail "클로드 첫 지시에 글·답하는 법이 안 들어감"
 run <<'PY'
 import os; exec(open(os.environ["TMPROOT"] + "/prelude.py").read())
 check(has_line(rec("proj/feat/b")["channelId"], "📨 proj/feat/cx 방에서: 코덱스가 보내는 글", "✓ 전달"), "클로드 방 채널 한 줄")
+check("--wake" in ms.ROOM_SEND_RULE and "보관" in ms.ROOM_SEND_RULE, "규칙 문구에 잠든 방은 보관·--wake 안내")
 finish()
 PY
 
@@ -244,7 +273,7 @@ settles = []
 mw._spawn_settle = lambda ch, t: settles.append((ch, t))
 mw._start_with_launch_env = lambda name, sd, text: (["x"], [])
 ms.tmux_alive = lambda t: False
-how = mw.room_send("proj/feat/a", "깨우는 글", sender_ref="proj/feat/b")
+how = mw.room_send("proj/feat/a", "깨우는 글", sender_ref="proj/feat/b", wake=True)
 ms.tmux_alive = real_alive
 check(how == "started" and len(settles) == 1 and settles[0][0] == chA, f"I2 settle: {how} {settles}")
 
@@ -253,7 +282,7 @@ def boom(*a): raise RuntimeError("터짐")
 mw._start_with_launch_env = boom
 ms.tmux_alive = lambda t: False
 try:
-    mw.room_send("proj/feat/a", "터지는 글", sender_ref="proj/feat/b")
+    mw.room_send("proj/feat/a", "터지는 글", sender_ref="proj/feat/b", wake=True)
     check(False, "M5 예외가 안 감싸짐")
 except ms.SessionError as exc:
     check("터짐" in str(exc), f"M5 안내: {exc}")

@@ -39,7 +39,7 @@ ROOM_SEND_RULE = (
     "- 다른 개발 방에 물을 게 있거나 알릴 게 있으면 Bash 로 `marina session room-send <방> \"…\"` 를 쓴다(방 목록은 `marina session ls`). "
     "알림은 짧게(한 줄) 보내고, 길고 오래 남을 내용(계약·결정·조사 결과)은 레포 공통 파일(docs/handoff/….md)에 쓰고 그 경로만 알린다. "
     "'[마리나 · <방> 방에서] …' 로 온 글은 그 방이 보낸 것이다 — 답은 글 끝에 적힌 room-send 로 그 방에 한다(사람이 직접 한 말이 아니다). "
-    "받은 글이 질문·요청일 때만 답하고, 단순 알림·확인·감사에는 답하지 않는다(서로 답만 주고받는 루프 방지 — 같은 방 쌍은 10분에 6번까지만 보낼 수 있다). "
+    "받는 방이 잠들어 있으면 깨우지 않고 보관했다가 다음에 깰 때 같이 전달된다(여러 방에 규칙·공지를 뿌려도 잠든 방은 안 깨운다) — 정말 일을 시키려고 깨워야 할 때만 `--wake` 를 붙인다(깨우면 토큰이 든다). 받은 글이 질문·요청일 때만 답하고, 단순 알림·확인·감사에는 답하지 않는다(서로 답만 주고받는 루프 방지 — 같은 방 쌍은 10분에 6번까지만 보낼 수 있다). "
     "단 '[마리나 · 메인 <방> 방의 지시] …' 는 형이 그 메인 방에 지휘를 맡긴 것이다 — 짧은 '좋아·진행해'도 일 지시로 받아 바로 하고, 끝나면 그 방에 보고한다."
 )
 
@@ -5210,6 +5210,72 @@ def idle_docker_note(sd: Path) -> str:
             f"그 밖엔 `docker compose -p <프로젝트> start`). 필요 없으면 그대로 둬.")
 
 
+ROOM_INBOX_FILE = "room-inbox.jsonl"     # 잠든 방에 room-send 로 온 글 보관함 — 한 줄에 {"ts","text"}. 방이 뜰 때(cmd_start) 첫 지시에 붙여 비운다
+ROOM_INBOX_MAX_AGE_S = 7 * 86400.0        # 이보다 오래된 글은 버린다
+ROOM_INBOX_KEEP = 30                      # 한 번에 전하는 최대 — 넘치면 최근 것만
+
+
+def room_inbox_add(sd: Path, text: str, now: "float | None" = None) -> None:
+    """보관함에 한 줄 덧붙인다(O_APPEND 한 번의 짧은 쓰기라 동시에 와도 줄이 섞이지 않는다)."""
+    line = json.dumps({"ts": time.time() if now is None else now, "text": text}, ensure_ascii=False) + "\n"
+    fd = os.open(str(sd / ROOM_INBOX_FILE), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def room_inbox_take(sd: Path) -> "tuple[str, Path | None]":
+    """보관함을 통째로 떼어 와 (첫 지시에 붙일 글, 떼어 낸 파일)을 돌려준다. 없거나 다 만료면 ("", None).
+    전달이 끝나면 room_inbox_done, 못 띄웠으면 room_inbox_restore."""
+    src, taken = sd / ROOM_INBOX_FILE, sd / f"{ROOM_INBOX_FILE}.taking.{os.getpid()}"
+    try:
+        os.replace(src, taken)
+    except OSError:
+        return "", None
+    now, msgs = time.time(), []
+    try:
+        for ln in taken.read_text(encoding="utf-8").splitlines():
+            try:
+                o = json.loads(ln)
+                if now - float(o["ts"]) < ROOM_INBOX_MAX_AGE_S and str(o["text"]).strip():
+                    msgs.append(str(o["text"]))
+            except (ValueError, KeyError, TypeError):
+                continue
+    except OSError:
+        pass
+    if not msgs:
+        room_inbox_done(taken)
+        return "", None
+    skipped = max(0, len(msgs) - ROOM_INBOX_KEEP)
+    msgs = msgs[-ROOM_INBOX_KEEP:]
+    head = f"[마리나] 이 방이 잠든 동안 다른 방이 남긴 글 {len(msgs)}개야(오래된 순" + (f", 더 오래된 {skipped}개는 뺐어" if skipped else "") + ") — 일을 시킨 게 아니면 알아만 두고, 질문·요청만 처리해:"
+    return head + "\n" + "\n".join(f"- {m}" for m in msgs), taken
+
+
+def room_inbox_done(taken: "Path | None") -> None:
+    if taken:
+        try:
+            taken.unlink()
+        except OSError:
+            pass
+
+
+def room_inbox_restore(sd: Path, taken: "Path | None") -> None:
+    """방을 못 띄웠다 — 떼어 낸 글을 보관함에 도로 붙인다."""
+    if not taken:
+        return
+    try:
+        fd = os.open(str(sd / ROOM_INBOX_FILE), os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+        try:
+            os.write(fd, taken.read_bytes())
+        finally:
+            os.close(fd)
+    except OSError:
+        return
+    room_inbox_done(taken)
+
+
 def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[str], list[str]]:
     targets = load_sessions() if all_ else [find_session(ref)]
     started: list[str] = []
@@ -5242,15 +5308,21 @@ def cmd_start(ref: str = "", all_: bool = False, first: str = "") -> tuple[list[
                 ensure_trusted(root)
             elif not codex:
                 adopt_live_session_id(s)      # /clear 로 갈아탄 대화면 지금 것으로 — 지운 대화를 되살리지 않게
-            cwd, argv = session_launch(s, resume=True, first=first)
-            t_launch = time.time()
-            if codex:
-                import marina_codex
-                acct = str(s.get("codexAccount") or marina_codex.DEFAULT_ACCOUNT)
-                tmux_start(name, cwd, argv, marina_codex.codex_env(sdir, acct), notify_ref=label, account=acct)
-            else:
-                tmux_start(name, cwd, argv,
-                           chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
+            inbox, taken = room_inbox_take(sdir) if s.get("stateDir") and sdir.is_dir() else ("", None)     # 잠든 동안 온 room-send 글 — 뜰 때 첫 지시에 같이
+            try:
+                cwd, argv = session_launch(s, resume=True, first=(first + "\n\n" + inbox) if first and inbox else (first or inbox))
+                t_launch = time.time()
+                if codex:
+                    import marina_codex
+                    acct = str(s.get("codexAccount") or marina_codex.DEFAULT_ACCOUNT)
+                    tmux_start(name, cwd, argv, marina_codex.codex_env(sdir, acct), notify_ref=label, account=acct)
+                else:
+                    tmux_start(name, cwd, argv,
+                               chat_env(sdir) if chat else session_env(sdir), notify_ref=label)
+            except BaseException:
+                room_inbox_restore(sdir, taken)
+                raise
+            room_inbox_done(taken)
             lock_root(s)
             started.append(label)
             if codex and not s.get("sessionId"):      # 훅(SessionStart)이 놓쳤을 때를 위해 띄운 뒤 rollout 에서 sid 를 찾는다
@@ -5475,7 +5547,8 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("main", help="프로젝트의 메인 방(형과 얘기하며 다른 방을 지휘)을 정한다 — 그 방의 room-send 는 '메인 지시'로 간다")
     p.add_argument("ref")
     p.add_argument("--off", action="store_true", help="메인 지정을 끈다")
-    p = sub.add_parser("room-send", help="다른 개발 방(클로드·코덱스)에 말을 건다 — 알림만 입력창으로, 긴 내용은 레포 공통 파일(docs/handoff/…md)")
+    p = sub.add_parser("room-send", help="다른 개발 방(클로드·코덱스)에 말을 건다 — 알림만 입력창으로, 긴 내용은 레포 공통 파일(docs/handoff/…md). 잠든 방은 깨우지 않고 보관(--wake 면 깨운다)")
+    p.add_argument("--wake", action="store_true", help="잠든 방이면 이 글을 첫 지시로 줘 깨운다(정말 일을 시킬 때만 — 깨우면 토큰이 든다)")
     p.add_argument("ref")
     p.add_argument("text", nargs="+")
     sub.add_parser("brief-install", help="~/.marina/brief.json 의 시각에 방에 글을 넣는 LaunchAgent(marina.brief) 설치 — 시각을 바꾸면 다시 실행")
@@ -5730,9 +5803,10 @@ def main(argv: list[str] | None = None) -> int:
         elif a.cmd == "room-send":
             import marina_discord_wake as mw
             os.environ["PATH"] = daemon_path() + ":" + os.environ.get("PATH", "")      # 띄우는 claude·codex·tmux·git 을 찾게(say 와 같다)
-            how = mw.room_send(a.ref, " ".join(a.text))
+            how = mw.room_send(a.ref, " ".join(a.text), wake=a.wake)
             s = find_session(a.ref)
             what = {"started": "잠들어 있어서 이 글을 첫 지시로 줘 깨웠어", "delivered": "입력창에 전달했어",
+                    "stored": "잠들어 있어서 보관했어 — 다음에 깰 때 같이 받는다(바로 깨워 일을 시키려면 --wake)",
                     "queued": "지금 바빠서 대기열에 넣었어(쉬는 순간·다음 도구 호출 뒤에 읽어)",
                     "typed": "입력창에 쳤지만 들어갔는지 확인하지 못했어(글이 입력창에 남아 있을 수 있어)"}[how]
             print(f"✓ {s['project']}/{s['task']} 에 글을 {what}")

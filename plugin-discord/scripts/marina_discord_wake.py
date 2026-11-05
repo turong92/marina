@@ -404,7 +404,7 @@ ROOM_SEND_LIMIT = 6                   # 같은 (보낸 방→받는 방) 쌍이 
 ROOM_SEND_WINDOW_S = 600.0
 ROOM_FROM = re.compile(r"^\[마리나 · (?:메인 )?(\S+?) 방(?:에서|의 지시)\]")     # 글 머리 → 보낸 방
 NOTICE_SENDER = "마리나"             # 마리나가 보내는 알림(배달 실패 등) — 답 꼬리를 안 붙이고, 이게 튕겨도 되돌려 보내지 않는다
-ROOM_SEND_STATUS = {"started": "✓ 전달", "delivered": "✓ 전달", "queued": "⏳ 대기열", "typed": "❔ 확인 못 함"}
+ROOM_SEND_STATUS = {"started": "✓ 전달", "delivered": "✓ 전달", "queued": "⏳ 대기열", "stored": "📥 보관", "typed": "❔ 확인 못 함"}
 
 
 def room_sender() -> str:
@@ -515,9 +515,9 @@ def _announce(rec: dict[str, Any], sender: str, body: str, how: str = "") -> Non
         print(f"marina session: 전달은 했지만 방끼리 스레드에 한 줄을 못 남겼어 — {exc}", file=sys.stderr)
 
 
-def _deliver(rec: dict[str, Any], name: str, text: str, before: "Any" = None) -> str:
+def _deliver(rec: dict[str, Any], name: str, text: str, before: "Any" = None, wake: bool = True) -> str:
     """방 하나에 글 한 줄을 넣는다(room_send·포럼 글 덧붙임 공용). 잠든 방은 이 글을 첫 지시로 깨우고(started), 떠 있으면
-    입력창에 친다(delivered | queued | typed). `before` 는 방 잠금 안에서 먼저 불린다(보낸 쪽 속도 제한 같은 검사). 못 하면 SessionError."""
+    입력창에 친다(delivered | queued | typed). wake=False 면 잠든 방을 깨우지 않고 보관함에 넣는다(stored). `before` 는 방 잠금 안에서 먼저 불린다(보낸 쪽 속도 제한 같은 검사). 못 하면 SessionError."""
     sd, tmux = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("tmux") or "")
     if not sd.is_dir():
         raise ms.SessionError(f"{name}: 상태 폴더가 없어")
@@ -527,6 +527,9 @@ def _deliver(rec: dict[str, Any], name: str, text: str, before: "Any" = None) ->
             raise ms.SessionError(f"{name}: 다른 쪽이 이 방을 켜거나 내리는 중이야 — 잠시 뒤에 다시")
         if before:
             before()
+        if not ms.tmux_alive(tmux) and not wake:      # 깨우지 않는다 — 보관함에 넣고 그 방이 다음에 뜰 때 첫 지시와 같이 간다(cmd_start)
+            ms.room_inbox_add(sd, text)
+            return "stored"
         if not ms.tmux_alive(tmux):
             woke_at = time.time()
             try:
@@ -567,9 +570,9 @@ def _deliver(rec: dict[str, Any], name: str, text: str, before: "Any" = None) ->
     return how
 
 
-def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: bool = False) -> str:
+def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: bool = False, wake: bool = False) -> str:
     """`marina session room-send` — 개발 방(클로드·코덱스)이 다른 개발 방에 말을 건다. 입력창에 '[마리나 · <보낸 방> 방에서] 글 (답은: …)' 한 줄.
-    started(잠든 방을 이 글을 첫 지시로 깨움) | delivered(입력창에 넣었고 확인) | queued(바빠서 대기열 — 코덱스는 대기 목록, 클로드는 쉬는 순간에 칠 것) |
+    stored(잠든 방 — 깨우지 않고 보관, 다음에 뜰 때 같이 전달. 기본) | started(wake=True 일 때 잠든 방을 이 글을 첫 지시로 깨움) | delivered(입력창에 넣었고 확인) | queued(바빠서 대기열 — 코덱스는 대기 목록, 클로드는 쉬는 순간에 칠 것) |
     typed(쳤지만 입력창에 남아 있음), 못 하면 SessionError. 채팅방·비서·로비는 제한 세션이라 받지 않는다."""
     rec = ms.find_session(ref)
     name = f"{rec.get('project')}/{rec.get('task')}"
@@ -592,7 +595,7 @@ def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: b
         if sender != "터미널" and not notice:      # 터미널엔 답할 방이 없다 · 마리나 알림엔 답하지 않는다(되돌이 방지)
             text += f' (답은: {ROOM_SEND_MARK} {sender} "…")'
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))
-    how = _deliver(rec, name, text, before=lambda: _rate_check(sd, sender, record=False))
+    how = _deliver(rec, name, text, before=lambda: _rate_check(sd, sender, record=False), wake=wake)
     _rate_check(sd, sender, record=True)
     _announce(rec, sender, body, how)
     return how
