@@ -127,6 +127,48 @@ import contextlib
 @contextlib.contextmanager
 def nolock(): yield False
 fresh(); check(mi.sync_to_origin(root, lock=nolock) is None, "방 잠금을 못 잡으면 적용 안 함")
+# 2-b) 바뀐 경로의 상위 경로: origin 이 x/y 를 추가, 방에는 ignored 파일 x — reset --keep 이 x 를 지운다
+fresh(); (root / ".gitignore").write_text("x\n"); git(root, "add", ".gitignore"); git(root, "commit", "-qm", "ign3"); (root / "x").write_text("로컬 ignored\n")
+(other / "x").mkdir(exist_ok=True); push("x/y", "origin\n", force=True); head = git(root, "rev-parse", "HEAD")
+r = mi.sync_to_origin(root)
+check(r and r["why"] == "ignored" and (root / "x").read_text() == "로컬 ignored\n" and git(root, "rev-parse", "HEAD") == head, f"상위 경로 x 가 ignored 파일이면 겹침: {r}")
+(root / "x").unlink()
+# 4) 방의 이전 커밋에서 갈라진 브랜치도 잡는다(첫 커밋 기준)
+fresh(); mine("second.txt"); first = git(root, "rev-list", "--reverse", f"{BASE}..HEAD").split()[0]; git(root, "branch", "extra2", first)
+check(mi.sync_to_origin(root)["why"] == "derived", "첫 커밋에서 갈라진 브랜치(HEAD 를 포함하진 않는다)")
+git(root, "branch", "-D", "extra2")
+# 3·1) 임시 rebase 는 사용자 rebase 설정을 고정하고, 적용용 reset --keep 은 타임아웃·SIGKILL 이 없다
+seen = []
+real_run0 = mi._run
+def spy(argv, **kw): seen.append((argv, kw)); return real_run0(argv, **kw)
+mi._run = spy
+fresh(); git(root, "config", "rebase.updateRefs", "true"); git(root, "config", "rebase.rebaseMerges", "true")
+r = mi.sync_to_origin(root)
+git(root, "config", "--unset", "rebase.updateRefs"); git(root, "config", "--unset", "rebase.rebaseMerges")
+mi._run = real_run0
+rb = [a for a, k in seen if "rebase" in a and "--abort" not in a]
+check(r and r["state"] == "rebased" and rb and all("rebase.updateRefs=false" in a and "rebase.rebaseMerges=false" in a for a in rb), f"사용자 rebase 설정 고정: {rb}")
+rk = [k for a, k in seen if "reset" in a and "--keep" in a]
+check(rk and rk[0].get("timeout") is None, f"reset --keep 은 타임아웃 없음: {rk}")
+# 타임아웃 시 SIGTERM 먼저(정리 기회) → 안 죽으면 SIGKILL
+flag = TMP / "term-flag"
+t0 = time.time()
+try: mi._run(["sh", "-c", f"trap 'echo t > {flag}; exit 0' TERM; sleep 30 & wait"], timeout=1.0)
+except subprocess.TimeoutExpired: pass
+check(flag.exists(), "타임아웃은 SIGTERM 을 먼저 보낸다")
+t0 = time.time()
+try: mi._run(["sh", "-c", "trap '' TERM; sleep 30"], timeout=1.0, term_grace=1.0)
+except subprocess.TimeoutExpired: pass
+check(time.time() - t0 < 10, "TERM 을 무시해도 몇 초 뒤 SIGKILL")
+# 판정용 git 호출이 실패하면 아무것도 안 한다
+fresh(); head = git(root, "rev-parse", "HEAD")
+for bad in ("status", "rev-list", "for-each-ref", "write-tree"):
+    def failing(argv, _bad=bad, **kw):
+        if _bad in argv and "--keep" not in argv: return subprocess.CompletedProcess(argv, 128, "", "boom")
+        return real_run0(argv, **kw)
+    mi._run = failing
+    check(mi.sync_to_origin(root) is None and git(root, "rev-parse", "HEAD") == head and tmp_left() == [], f"{bad} 가 실패하면 아무것도 안 함")
+mi._run = real_run0
 # 8) 제외·예외 경로
 check(mi.sync_to_origin(SRC) is None, "워크트리가 아닌 본체 체크아웃은 제외")
 fresh(); git(root, "checkout", "-q", "--detach"); check(mi.sync_to_origin(root) is None, "분리 HEAD 제외"); git(root, "checkout", "-q", "feat/a")
@@ -147,10 +189,20 @@ try:
 except subprocess.TimeoutExpired: got = True
 check(got and time.time() - t0 < 10, f"타임아웃은 빨리 끝나고 예외: {time.time() - t0:.1f}s")
 # 9) 봇이 중간에 죽어 남은 임시 워크트리는 시작 때 정리
-wt = ms.marina_home() / "sync-wt" / "orphan"; wt.parent.mkdir(parents=True, exist_ok=True)
-git(root, "worktree", "add", "-q", "--detach", str(wt), "HEAD")
+dead = 4000000
+while True:
+    try: os.kill(dead, 0); dead += 1
+    except ProcessLookupError: break
+    except PermissionError: dead += 1
+wt = ms.marina_home() / "sync-wt" / f"{dead}-1"; wt.parent.mkdir(parents=True, exist_ok=True)
+live = ms.marina_home() / "sync-wt" / f"{os.getpid()}-2"
+git(root, "worktree", "add", "-q", "--detach", str(wt), "HEAD"); git(root, "worktree", "add", "-q", "--detach", str(live), "HEAD")
+keepwt = TMP / "keep-wt"; git(root, "worktree", "add", "-q", "--detach", str(keepwt), "HEAD")
 mi.cleanup_orphan_worktrees([root])
-check(not wt.exists() and tmp_left() == [], "고아 임시 워크트리 정리")
+check(not wt.exists() and "sync-wt/%d-1" % dead not in git(root, "worktree", "list", "--porcelain"), "pid 가 죽은 고아 임시 워크트리만 정리")
+check(live.exists() and keepwt.exists(), "살아 있는 pid 의 임시·sync-wt 밖 워크트리는 안 건드린다(맨 prune 금지)")
+git(root, "worktree", "remove", "--force", str(live)); git(root, "worktree", "remove", "--force", str(keepwt))
+check('"worktree", "prune"' not in src, "맨 git worktree prune 을 부르지 않는다")
 # ── keep_tick 연결: 일 조각 끝 + 50분 쉼에서 활동 시각당 한 번 · 하던 중이면 안 함 · 채팅·코덱스 방 제외 ──
 fresh()
 T0 = time.time() + 100; H0 = T0 + 5; MIN = 60.0

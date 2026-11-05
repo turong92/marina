@@ -608,28 +608,38 @@ def _git_env() -> dict[str, str]:
     return dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_EDITOR="true", GIT_SSH_COMMAND="ssh -o BatchMode=yes", GCM_INTERACTIVE="never")
 
 
-def _run(argv: list[str], timeout: float = 30.0) -> "subprocess.CompletedProcess[str]":
-    """stdin 없이, 새 프로세스 그룹으로 — 시간이 넘으면 그룹째 죽이고 TimeoutExpired."""
+def _run(argv: list[str], timeout: "float | None" = 30.0, term_grace: float = 5.0) -> "subprocess.CompletedProcess[str]":
+    """stdin 없이, 새 프로세스 그룹으로 — 시간이 넘으면 그룹에 SIGTERM(lock 정리 기회) → term_grace 초 뒤에도 살아 있으면 SIGKILL, TimeoutExpired.
+    timeout=None 이면 기다린다(적용용 reset --keep 처럼 중간에 죽이면 안 되는 호출)."""
     p = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
                          env=_git_env(), start_new_session=True)
     try:
         out, err = p.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
-        try:
-            os.killpg(p.pid, signal.SIGKILL)
-        except OSError:
-            pass
-        p.communicate()
+        for sig, wait in ((signal.SIGTERM, term_grace), (signal.SIGKILL, None)):
+            try:
+                os.killpg(p.pid, sig)
+            except OSError:
+                pass
+            try:
+                p.communicate(timeout=wait)
+                break
+            except subprocess.TimeoutExpired:
+                continue
         raise
     return subprocess.CompletedProcess(argv, p.returncode, out, err)
 
 
-def _git(root: Path, *args: str, timeout: float = 30.0) -> "subprocess.CompletedProcess[str]":
+def _git(root: Path, *args: str, timeout: "float | None" = 30.0) -> "subprocess.CompletedProcess[str]":
     return _run(["git", "-C", str(root), *args], timeout=timeout)
 
 
-def _out(root: Path, *args: str) -> str:
-    return _git(root, *args).stdout.strip()
+def _out(root: Path, *args: str, ok: "tuple[int, ...]" = (0,)) -> str:
+    """판정용 git 호출 — 실패하면 예외(sync_to_origin 이 '아무것도 안 함'으로 접는다). 없는 설정처럼 1 이 정상인 호출만 ok 로 넓힌다."""
+    r = _git(root, *args)
+    if r.returncode not in ok:
+        raise OSError(f"git {' '.join(args[:3])} 실패({r.returncode})")
+    return r.stdout.strip()
 
 
 @contextlib.contextmanager
@@ -641,23 +651,48 @@ SYNC_WT = "sync-wt"
 _BUSY = ("rebase-merge", "rebase-apply", "MERGE_HEAD", "CHERRY_PICK_HEAD", "REVERT_HEAD", "sequencer", "BISECT_LOG")
 
 
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
+
+
 def cleanup_orphan_worktrees(roots: "list[Path] | set[Path]") -> None:
-    """봇이 계산 도중 죽어 남은 임시 워크트리 — 시작 때 폴더를 지우고 각 레포의 등록을 prune 한다."""
-    shutil.rmtree(ms.marina_home() / SYNC_WT, ignore_errors=True)
+    """봇이 계산 도중 죽어 남은 임시 워크트리 — sync-wt 아래 것 중 폴더 이름의 pid(<pid>-<시각>)가 죽은 것만 remove --force 한다.
+    그 밖의 워크트리(형의 것·살아 있는 프로세스의 임시)는 건드리지 않는다(맨 prune 도 안 한다)."""
+    base = ms.marina_home() / SYNC_WT
+    prefix = os.path.realpath(str(base)) + os.sep
+
+    def dead(path: str) -> bool:
+        head = os.path.basename(path).split("-", 1)[0]
+        return head.isdigit() and not _pid_alive(int(head))
     for root in roots:
         try:
-            _git(Path(root), "worktree", "prune")
+            for line in _git(Path(root), "worktree", "list", "--porcelain").stdout.split("\n"):
+                if line.startswith("worktree ") and os.path.realpath(line[9:]).startswith(prefix) and dead(line[9:]):
+                    _git(Path(root), "worktree", "remove", "--force", line[9:])
         except Exception:
             pass
+    try:
+        for d in base.iterdir():
+            if dead(str(d)):
+                shutil.rmtree(d, ignore_errors=True)
+    except OSError:
+        pass
 
 
 def _busy(gd: str) -> bool:
     return any(os.path.exists(os.path.join(gd, n)) for n in _BUSY)
 
 
-def _derived(root: Path, branch: str) -> bool:
-    """방 HEAD 를 기반으로 한 다른 로컬 브랜치·워크트리(서브에이전트 agent-* 포함)가 있나 — 다시 쓰면 그쪽 기반이 사라진다."""
-    refs = _out(root, "for-each-ref", "--contains", "HEAD", "--format=%(refname)", "refs/heads").split()
+def _derived(root: Path, branch: str, base: str) -> bool:
+    """방의 커밋(base 위 첫 커밋부터)을 기반으로 한 다른 로컬 브랜치·워크트리(서브에이전트 agent-* 포함)가 있나 — 다시 쓰면 그쪽 기반이 사라진다."""
+    first = (_out(root, "rev-list", "--reverse", f"{base}..HEAD").split() or ["HEAD"])[0]
+    refs = _out(root, "for-each-ref", "--contains", first, "--format=%(refname)", "refs/heads").split()
     if any(r != "refs/heads/" + branch for r in refs):
         return True
     me = os.path.realpath(str(root))
@@ -668,17 +703,27 @@ def _derived(root: Path, branch: str) -> bool:
                 path = line[9:]
             elif line.startswith("HEAD "):
                 sha = line[5:]
-        if path and sha and os.path.realpath(path) != me and _git(root, "merge-base", "--is-ancestor", "HEAD", sha).returncode == 0:
+        if path and sha and os.path.realpath(path) != me and _git(root, "merge-base", "--is-ancestor", first, sha).returncode == 0:
             return True
     return False
 
 
 def _ignored_overlap(root: Path, base: str) -> bool:
-    """origin 쪽에서 바뀐 파일이 방에 untracked(=작업 트리가 깨끗하므로 gitignore 대상)로 이미 있으면 rebase 가 덮어쓴다."""
+    """origin 쪽에서 바뀐 경로(와 그 모든 상위 경로)가 방에 untracked(=작업 트리가 깨끗하므로 gitignore 대상)로 이미 있으면 reset --keep 이 지운다."""
     mb_ = _out(root, "merge-base", "HEAD", base)
     changed = [x for x in _git(root, "diff", "--name-only", "-z", mb_, base).stdout.split("\0") if x]
-    tracked = set(_git(root, "ls-files", "-z").stdout.split("\0"))
-    return any(c not in tracked and os.path.lexists(os.path.join(str(root), c)) for c in changed)
+    tracked: set[str] = set()
+    for f in _git(root, "ls-files", "-z").stdout.split("\0"):
+        while f and f not in tracked:
+            tracked.add(f)
+            f = os.path.dirname(f)
+    for c in changed:
+        parts = c.split("/")
+        for i in range(1, len(parts) + 1):
+            p = "/".join(parts[:i])
+            if p not in tracked and os.path.lexists(os.path.join(str(root), p)):
+                return True
+    return False
 
 
 def sync_to_origin(root: Path, guard: "Any" = None, lock: "Any" = None) -> "dict[str, Any] | None":
@@ -693,12 +738,12 @@ def sync_to_origin(root: Path, guard: "Any" = None, lock: "Any" = None) -> "dict
         gd, common = ids[0], (ids[1] if len(ids) > 1 else "")
         if not gd or gd == common:
             return None                                  # 레포가 아니거나 본체 체크아웃(워크트리가 아님)
-        branch = _out(root, "symbolic-ref", "-q", "--short", "HEAD")
+        branch = _out(root, "symbolic-ref", "-q", "--short", "HEAD", ok=(0, 1))
         if not branch:
             return None                                  # 분리 HEAD
         if _git(root, "fetch", "-q", "origin", timeout=60.0).returncode:
             return None                                  # 오프라인·인증 — 조용히 넘김
-        base = _out(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD") or "origin/main"
+        base = _out(root, "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD", ok=(0, 1)) or "origin/main"
         if _git(root, "rev-parse", "-q", "--verify", base + "^{commit}").returncode or branch == base.split("/", 1)[-1]:
             return None
         behind = int(_out(root, "rev-list", "--count", f"HEAD..{base}") or 0)
@@ -714,20 +759,21 @@ def sync_to_origin(root: Path, guard: "Any" = None, lock: "Any" = None) -> "dict
         ahead = int(_out(root, "rev-list", "--count", f"{base}..HEAD") or 0)
         if ahead and int(_out(root, "rev-list", "--count", "HEAD", "--not", "--remotes") or 0) != ahead:
             return res("pushed")                          # 이미 push 한 커밋이 있다 — 다시 쓰면 원격과 갈라진다
-        if "true" in (_out(root, "config", "--type=bool", "commit.gpgsign"), _out(root, "config", "--type=bool", "tag.gpgsign")):
+        if "true" in (_out(root, "config", "--type=bool", "commit.gpgsign", ok=(0, 1)), _out(root, "config", "--type=bool", "tag.gpgsign", ok=(0, 1))):
             return res("gpg")
         if (root / ".gitmodules").exists():
             return res("submodule")
-        if ahead and _derived(root, branch):
+        if ahead and _derived(root, branch, base):
             return res("derived")
         if _ignored_overlap(root, base):
             return res("ignored")
         head0, tree0 = _out(root, "rev-parse", "HEAD"), _out(root, "write-tree")
         tmp = ms.marina_home() / SYNC_WT / f"{os.getpid()}-{time.time_ns()}"
         tmp.parent.mkdir(parents=True, exist_ok=True)
-        if _git(root, "-c", "core.hooksPath=/dev/null", "worktree", "add", "-q", "--detach", str(tmp), head0).returncode:
+        if _git(root, "-c", "core.hooksPath=/dev/null", "worktree", "add", "-q", "--detach", str(tmp), head0, timeout=120.0).returncode:
             return None
-        if _git(tmp, "-c", "core.hooksPath=/dev/null", "rebase", base, timeout=120.0).returncode:
+        if _git(tmp, "-c", "core.hooksPath=/dev/null", "-c", "rebase.updateRefs=false", "-c", "rebase.rebaseMerges=false",
+                "-c", "rebase.autoStash=false", "-c", "rebase.autoSquash=false", "rebase", base, timeout=300.0).returncode:
             return res("conflict")                        # 임시만 버린다 — 방 트리는 그대로
         new = _out(tmp, "rev-parse", "HEAD")
         with lock() as got:
@@ -736,7 +782,7 @@ def sync_to_origin(root: Path, guard: "Any" = None, lock: "Any" = None) -> "dict
             if (_out(root, "rev-parse", "HEAD") != head0 or _out(root, "write-tree") != tree0
                     or _out(root, "status", "--porcelain") or _busy(gd)):
                 return None                               # 계산하는 동안 방이 움직였다
-            if _git(root, "reset", "--keep", new).returncode:
+            if _git(root, "reset", "--keep", new, timeout=None).returncode:     # 중간에 죽이면 안 된다 — 타임아웃 없음
                 return None
         return res("", "rebased")
     except (OSError, ValueError, subprocess.SubprocessError):
@@ -748,7 +794,3 @@ def sync_to_origin(root: Path, guard: "Any" = None, lock: "Any" = None) -> "dict
             except Exception:
                 pass
             shutil.rmtree(tmp, ignore_errors=True)
-            try:
-                _git(root, "worktree", "prune")
-            except Exception:
-                pass
