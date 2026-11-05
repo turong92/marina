@@ -52,6 +52,28 @@ check(mb.heavy_counts() is None, "줄 장치가 없는 맥은 None")
 s = mb.sys_stats()
 check(set(s) == {"cpu", "ncpu", "memUsed", "memLevel", "swapUsed", "heavy"}, f"키: {s}")
 check(all(v is None or isinstance(v, (int, float)) for k, v in s.items() if k != "heavy"), f"숫자 또는 None: {s}")
+# 원격 박스(형 2026-11-05 "디스코드 상태에 윈도우도") — 설정 statusBoxes 의 ssh 별칭을 뒤에서 읽어 아랫줄에 붙인다
+check(mb.parse_box("CPU=12.5 MEM=40.2 HEAVY=1\n") == {"cpu": 12.5, "mem": 40.2, "heavy": 1}, mb.parse_box("CPU=12.5 MEM=40.2 HEAVY=1\n"))
+check(mb.parse_box("garbage") is None and mb.parse_box("") is None, "못 읽으면 None")
+up = {"name": "윈도우", "up": True, "cpu": 12.5, "mem": 40.2, "heavy": 1}
+check(mb.box_text(up) == "윈도우 CPU 🟢 13% · 메모리 🟢 40% · 🧪 1", mb.box_text(up))
+check(mb.box_text(dict(up, cpu=95.0, mem=85.0, heavy=0)) == "윈도우 CPU 🔴 95% · 메모리 🟡 85%", mb.box_text(dict(up, cpu=95.0, mem=85.0, heavy=0)))
+check(mb.box_text({"name": "윈도우", "up": False}) == "윈도우 꺼짐", mb.box_text({"name": "윈도우", "up": False}))
+line = mb.footer({"diskFree": G, "boxes": [up]})
+check(" · 윈도우 CPU 🟢 13% · 메모리 🟢 40% · 🧪 1 · <t:" in line, f"아랫줄 시각 앞: {line}")
+check("윈도우" not in mb.footer({"diskFree": G, "boxes": []}), "박스가 없으면 안 그린다")
+calls = []
+mb._box_probe = lambda ssh: calls.append(ssh) or "CPU=1 MEM=2 HEAVY=0"
+check(mb.box_stats({}) == [] and calls == [], "설정이 없으면 ssh 를 안 부른다")
+first = mb.box_stats({"statusBoxes": [{"name": "윈도우", "ssh": "win-x"}]}, wait=True)
+check(first == [{"name": "윈도우", "up": True, "cpu": 1.0, "mem": 2.0, "heavy": 0}] and calls == ["win-x"], f"읽기: {first} {calls}")
+mb._box_probe = lambda ssh: None
+mb._BOX_CACHE.clear()
+check(mb.box_stats({"statusBoxes": [{"name": "윈도우", "ssh": "win-x"}]}, wait=True) == [{"name": "윈도우", "up": False}], "연결 실패 = 꺼짐")
+import time as _t
+mb._BOX_CACHE["win-y"] = (_t.time() - 3600, {"name": "옛", "up": True, "cpu": 95.0, "mem": 1.0, "heavy": 2})
+mb._BOX_BUSY.add("win-y")      # 새로 읽는 중이라 쳐도
+check(mb.box_stats({"statusBoxes": [{"name": "옛", "ssh": "win-y"}]}) == [], "묵은 값(3분↑)은 안 그린다")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY

@@ -541,7 +541,12 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         stats = sys_stats()
     except Exception:
         stats = {}
+    try:
+        boxes = box_stats(ms.load_config())
+    except Exception:
+        boxes = []
     return {**stats, "usage": use, "accountUsage": account_usage(), "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
+            "boxes": boxes,
             "anyBusy": any(r["busy"] for r in rows)}
 
 
@@ -927,11 +932,78 @@ def heavy_text(counts: "tuple[int, int] | None") -> str:
     return f"🧪 실행 {counts[0]}" + (f" · 대기 {counts[1]}" if counts[1] else "")
 
 
+# ── 원격 박스(설정 statusBoxes: [{"name": "윈도우", "ssh": "win-wsl"}]) ── 형 2026-11-05
+# 리눅스 박스의 CPU(1초 표본)·메모리·heavy-remote 컨테이너 수를 ssh 로 읽는다. #상태 갱신을 막지 않게 뒤에서 1분마다.
+_BOX_SCRIPT = ("read -r _ a b c d e f g h _ < /proc/stat; sleep 1; read -r _ A B C D E F G H _ < /proc/stat; "
+               "t=$(( (A+B+C+D+E+F+G+H) - (a+b+c+d+e+f+g+h) )); i=$(( (D+E) - (d+e) )); "
+               "m=$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{printf \"%.1f\", (t-a)*100/t}' /proc/meminfo); "
+               "n=$(docker ps -q --filter label=purpose=heavy-remote 2>/dev/null | wc -l); "
+               "awk -v t=$t -v i=$i -v m=$m -v n=$n 'BEGIN{printf \"CPU=%.1f MEM=%s HEAVY=%d\\n\", (t>0?(t-i)*100/t:0), m, n}'")
+_BOX_TTL = 60.0
+_BOX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_BOX_BUSY: set[str] = set()
+
+
+def _box_probe(ssh: str) -> "str | None":
+    try:
+        # 접속 하나를 다시 쓴다(heavy-remote 와 같은 ControlPath) — 1분마다 새 ssh 를 열지 않게(형 2026-11-05)
+        r = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "ControlMaster=auto",
+                            "-o", "ControlPath=/tmp/hr-%C", "-o", "ControlPersist=300", ssh, _BOX_SCRIPT],
+                           capture_output=True, text=True, timeout=15, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout if r.returncode == 0 else None
+
+
+def parse_box(out: "str | None") -> "dict[str, Any] | None":
+    m = re.search(r"CPU=([\d.]+)\s+MEM=([\d.]+)\s+HEAVY=(\d+)", out or "")
+    return {"cpu": float(m.group(1)), "mem": float(m.group(2)), "heavy": int(m.group(3))} if m else None
+
+
+def _box_refresh(name: str, ssh: str) -> None:
+    try:
+        v = parse_box(_box_probe(ssh))
+        _BOX_CACHE[ssh] = (time.time(), dict({"name": name, "up": True}, **v) if v else {"name": name, "up": False})
+    finally:
+        _BOX_BUSY.discard(ssh)
+
+
+def box_stats(cfg: dict[str, Any], wait: bool = False) -> list[dict[str, Any]]:
+    """설정된 박스마다 마지막으로 읽은 값. 1분 지난 것은 뒤에서 다시 읽는다(wait=True 면 기다린다 — 시험용)."""
+    out = []
+    for b in cfg.get("statusBoxes") or []:
+        if not isinstance(b, dict) or not b.get("ssh"):
+            continue
+        name, ssh = str(b.get("name") or b["ssh"]), str(b["ssh"])
+        got = _BOX_CACHE.get(ssh)
+        if (not got or time.time() - got[0] > _BOX_TTL) and ssh not in _BOX_BUSY:
+            _BOX_BUSY.add(ssh)
+            if wait:
+                _box_refresh(name, ssh)
+            else:
+                threading.Thread(target=_box_refresh, args=(name, ssh), name=f"box-{ssh}", daemon=True).start()
+            got = _BOX_CACHE.get(ssh)
+        if got and time.time() - got[0] <= _BOX_TTL * 3:     # 오래 쉬다 처음 그릴 때 묵은 값을 지금 값처럼 보이지 않는다(리뷰 I4)
+            out.append(got[1])
+    return out
+
+
+def box_text(b: dict[str, Any]) -> str:
+    if not b.get("up"):
+        return f"{b.get('name')} 꺼짐"
+    cpu = min(100, int(float(b.get("cpu") or 0) + 0.5))
+    mem = int(float(b.get("mem") or 0) + 0.5)
+    c = "🔴" if cpu >= 90 else "🟡" if cpu >= 70 else "🟢"
+    m = "🔴" if mem >= 90 else "🟡" if mem >= 80 else "🟢"
+    return f"{b.get('name')} CPU {c} {cpu}% · 메모리 {m} {mem}%" + (f" · 🧪 {b['heavy']}" if b.get("heavy") else "")
+
+
 def footer(snap: dict[str, Any]) -> str:
     parts = [f"디스크 {snap.get('diskFree', 0) // (1 << 30)}GB 남음",
              cpu_text(snap.get("cpu"), snap.get("load"), snap.get("ncpu")),
              mem_text(snap.get("memUsed"), snap.get("memLevel"), snap.get("swapUsed")),
              heavy_text(snap.get("heavy")),
+             *[box_text(b) for b in snap.get("boxes") or []],
              f"<t:{int(time.time())}:R> 갱신"]
     return "-# " + " · ".join(p for p in parts if p)
 
