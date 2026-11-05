@@ -1450,14 +1450,17 @@ class TarInject(list):
             for i in range(have + 1, top + 1):
                 _dir("/".join(parts[:i]))
             if self.is_dir:
+                skip = _git_ignored(self.src)
                 for root, dirs, files in os.walk(self.src):
-                    dirs.sort()
                     base = os.path.relpath(root, self.src)
+                    pre = "" if base == "." else base + "/"
+                    dirs[:] = sorted(d for d in dirs if pre + d not in skip)
                     sub = rel if base == "." else rel + "/" + base
                     if base != ".":
                         _dir(sub)
                     for fn in sorted(files):
-                        _add(tf, os.path.join(root, fn), sub + "/" + fn)
+                        if pre + fn not in skip:
+                            _add(tf, os.path.join(root, fn), sub + "/" + fn)
             else:
                 _add(tf, self.src, rel)
         return buf.getvalue()
@@ -1486,6 +1489,23 @@ def container_path_exists(container, path, env=None):
     if "Could not find the file" in err:
         return False
     raise OSError(err or f"docker cp 종료 코드 {rc}")
+
+
+def _git_ignored(src):
+    """src 아래 .gitignore 로 무시되는 파일·폴더(src 기준 상대경로, 폴더는 끝 / 없이). 원격 주입에서 뺀다 —
+    작업 트리 통째(node_modules·build·out)를 tar 로 만들다 41GB 에서 끊겼다(2026-11-05 ovation).
+    src 자체가 무시 대상(build/libs 같은 산출물 폴더)이거나 git 밖이면 빈 집합 = 다 보낸다."""
+    def git(*a):
+        return subprocess.run(["git", "-C", src, *a], capture_output=True, text=True, timeout=60)
+    try:
+        if git("rev-parse", "--is-inside-work-tree").stdout.strip() != "true":
+            return set()
+        if git("check-ignore", "-q", ".").returncode == 0:
+            return set()
+        out = git("ls-files", "--others", "--ignored", "--exclude-standard", "--directory", "-z", ".").stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return {p.rstrip("/") for p in out.split("\0") if p}
 
 
 def _add(tf, path, arcname):

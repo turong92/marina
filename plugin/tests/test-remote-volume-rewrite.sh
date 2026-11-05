@@ -68,8 +68,11 @@ class RemoteRewriteTests(unittest.TestCase):
         self.assertIn("marina_user_api_app_libs:/app/libs", self.out)
         self.assertNotIn("./be-api/user-api/build/libs", self.out)
 
-    def test_readonly_mode_preserved(self):
-        self.assertIn("marina_web_app_apps_web_env_ssm_local:/app/apps/web/.env.ssm.local:ro", self.out)
+    def test_readonly_mode_dropped_for_injected_volume(self):
+        # :ro 볼륨엔 docker cp 가 'read-only file system' 으로 막혀 스택째 못 뜬다(2026-11-05 ovation s3-fonts /slices).
+        # 원격 볼륨은 맥 파일의 사본이라 쓰기를 열어도 원본은 안전하다
+        self.assertIn('"marina_web_app_apps_web_env_ssm_local:/app/apps/web/.env.ssm.local"', self.out)
+        self.assertNotIn("env_ssm_local:/app/apps/web/.env.ssm.local:ro", self.out)
 
     def test_existing_named_volume_untouched(self):
         self.assertIn("web_app_next:/app/apps/web/.next", self.out)

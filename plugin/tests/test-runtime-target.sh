@@ -87,11 +87,14 @@ class RemoteTargetTests(unittest.TestCase):
         self.assertEqual(r.volumes, [Mount("web_app_next", "/app/apps/web/.next")])
         self.assertEqual(r.injections, [])
 
-    def test_readonly_flag_is_preserved(self):
+    def test_readonly_flag_is_dropped_so_injection_can_write(self):
+        # :ro 볼륨엔 docker cp 가 막힌다(2026-11-05 ovation /slices) — 다른 옵션은 남긴다
         r = self.t.volume_rewrite("web", [Mount("./web-app-monorepo/apps/web/.env.ssm.local",
                                                 "/app/apps/web/.env.ssm.local", "ro")])
         self.assertEqual(r.volumes, [Mount("marina_web_app_apps_web_env_ssm_local",
-                                           "/app/apps/web/.env.ssm.local", "ro")])
+                                           "/app/apps/web/.env.ssm.local", "")])
+        r2 = self.t.volume_rewrite("web", [Mount("./d", "/d", "ro,z")])
+        self.assertEqual(r2.volumes[0].mode, "z")
         self.assertEqual(r.injections[0].source, "./web-app-monorepo/apps/web/.env.ssm.local")
 
     def test_absolute_host_path_also_rewritten(self):

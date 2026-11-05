@@ -97,6 +97,27 @@ class InjectTarTests(unittest.TestCase):
         self.assertIn("app/libs/sub/b.jar", m)
         self.assertTrue(m["app/libs"].isdir())
 
+    def test_dir_source_skips_gitignored_but_keeps_ignored_source_itself(self):
+        # 작업 트리 통째(41GB, node_modules·out 포함)를 메모리에 tar 로 만들다 끊겼다(2026-11-05 ovation)
+        import subprocess
+        repo = os.path.join(self.tmp, "repo")
+        web = os.path.join(repo, "apps", "web")
+        os.makedirs(os.path.join(web, "node_modules", "x")); os.makedirs(os.path.join(web, "src"))
+        _w(os.path.join(repo, ".gitignore"), "node_modules/\nbuild/\n*.log\n")
+        _w(os.path.join(web, "src", "a.ts"), "a"); _w(os.path.join(web, "node_modules", "x", "i.js"), "i")
+        _w(os.path.join(web, "debug.log"), "l"); _w(os.path.join(web, "new.ts"), "untracked 도 간다")
+        libs = os.path.join(repo, "apps", "server", "build", "libs"); os.makedirs(libs)
+        _w(os.path.join(libs, "app.jar"), "j")
+        subprocess.run(["git", "init", "-q", repo], check=True)
+        subprocess.run(["git", "-C", repo, "add", ".gitignore", "apps/web/src/a.ts"], check=True)
+        _, m, _ = self._members(Injection("web", web, "/app", "v"), is_dir=True)
+        self.assertIn("app/src/a.ts", m)
+        self.assertIn("app/new.ts", m)
+        self.assertNotIn("app/node_modules/x/i.js", m)
+        self.assertNotIn("app/debug.log", m)
+        _, m, _ = self._members(Injection("api", libs, "/app/libs", "v"), is_dir=True)
+        self.assertIn("app/libs/app.jar", m, "원본 폴더 자체가 무시 대상(build/libs)이면 그 안은 다 보낸다")
+
     def test_display_says_tar(self):
         f = os.path.join(self.tmp, "x.env"); _w(f, "k=v")
         inj = Injection("web", f, "/app/x.env", "v")

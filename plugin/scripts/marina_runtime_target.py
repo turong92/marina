@@ -130,7 +130,10 @@ class RemoteTarget:
                 mapping.append(None)
                 continue
             vol = _volume_name(service, m.target)
-            new = Mount(source=vol, target=m.target, mode=m.mode)
+            # :ro 는 뺀다 — 읽기 전용 볼륨엔 docker cp 주입이 'read-only file system' 으로 막혀 스택째 못 뜬다
+            # (2026-11-05 ovation s3-fonts /slices). 원격 볼륨은 맥 파일의 사본이라 쓰기를 열어도 원본은 안전하다
+            mode = ",".join(x for x in (m.mode or "").split(",") if x and x != "ro")
+            new = Mount(source=vol, target=m.target, mode=mode)
             out.append(new)
             mapping.append(new)
             named[vol] = None
