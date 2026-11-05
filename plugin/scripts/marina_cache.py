@@ -47,7 +47,7 @@ def docker_env(root: Path | None = None) -> dict[str, str] | None:
         return None
     try:
         from marina_runtime_target import docker_env_for_root
-        delta = docker_env_for_root(root)
+        delta = docker_env_for_root(root, fallback=False)   # 회수·GC: 꺼진 박스 대신 맥 자원을 지우지 않게(박스가 안 닿으면 호출부가 건너뛴다)
     except Exception:
         return None
     return {**os.environ, **delta} if delta else None

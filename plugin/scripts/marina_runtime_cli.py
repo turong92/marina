@@ -127,7 +127,12 @@ def _status(opts: dict, root: Path | None, home: str) -> int:
     ly = rt.layers(sess, home=home, project_id=pid)        # 한 번만 읽는다 — 깨진 설정 경고가 두 번 나오지 않게
     d = rt.describe_layers(ly)
     name = {"session": "세션", "project": f"프로젝트({pid})", "global": "전역", "default": "없음 — 기본값"}[d["scope"]]
-    print(f"런타임: 원격 ({d['host']})" if d["kind"] == "remote" else "런타임: 로컬")
+    if d["kind"] == "remote" and scope == "session" and Path(sess, rt.PIN_NAME).is_file():
+        print(f"런타임: 로컬 — 원격 {d['host']} 이 꺼져 있어 맥에서 띄움, marina stop --all 하면 다시 원격")
+    elif d["kind"] == "remote" and not rt.host_reachable(d["host"], home):
+        print(f"런타임: 원격 ({d['host']}) — 지금 닿지 않음, 띄우면 맥(로컬)으로 간다")
+    else:
+        print(f"런타임: 원격 ({d['host']})" if d["kind"] == "remote" else "런타임: 로컬")
     print(f"정한 계층: {name}")
     if scope == "session":
         print(f"  세션   : {_fmt(ly['session'], rt.inherited_host(ly, 'session'))}")

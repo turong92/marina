@@ -35,6 +35,9 @@ unset _marina_test_home_root
 # stale_test_artifacts_days 규칙이 라벨로 찾아 회수한다. 테스트가 직접 치는 `docker run` 은 --label marina.e2e=1 을 붙일 것.
 export MARINA_E2E=1
 
+# 원격 박스 접속 확인(꺼지면 로컬 폴백)을 끈다 — 시험의 가짜 주소로 진짜 ssh 를 열지 않게. 폴백 시험은 스스로 켠다
+export MARINA_REMOTE_PROBE=0
+
 # 마리나 세션 안에서 돌려도 그 세션의 상태 폴더를 물려받지 않는다 — marina_session.launched_by() 가 "session" 으로 읽는다.
 # (세션 상태를 쓰는 테스트는 스스로 세운다.)
 unset DISCORD_STATE_DIR

@@ -43,6 +43,8 @@ try:   # profile 후보 변수 판정(런타임 env 미러링용). importlib 로
     import marina_prebuild
     import marina_remote_owner
     from marina_runtime_target import LocalTarget, Mount, load_target as load_runtime_target
+    import marina_runtime_target as _rt
+    import marina_remote_owner
 except ImportError:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from marina_dockerfile import is_profile_var
@@ -60,6 +62,8 @@ except ImportError:
     from marina_logtext import redact_text
     import marina_prebuild
     from marina_runtime_target import LocalTarget, Mount, load_target as load_runtime_target
+    import marina_runtime_target as _rt
+    import marina_remote_owner
 
 
 def compose_project_name(project_id: str, session: str) -> str:
@@ -2607,6 +2611,8 @@ def cmd_up(a):
     except ValueError as e:
         sys.stderr.write(f"error: {e}\n")
         return 2
+    # 박스가 꺼져 맥으로 띄우면 내릴 때까지 맥 고정 — 기동 전에 남긴다: 일부만 떠도 맥 컨테이너를 놓치지 않게(리뷰 I6)
+    _rt.pin_local(a.session_dir, _up_target)
     rc = _run_up_locked(
         a, env, name, config, xm, overlay_text, overlay_conn, build_args,
     )
@@ -2709,9 +2715,19 @@ def cmd_down(a):  # 전체 teardown (stop --all). --volumes 요청 시 compose n
     _denied = _owner_guard(a, env, name)
     if _denied is not None:
         return _denied
-    _stop_remote_tunnel(getattr(a, "session_dir", None))     # 내려가면 터널도 같이 걷는다
+    _sd = getattr(a, "session_dir", None)
+    _t = load_runtime_target(_sd, project_id=getattr(a, "project_id", None)) if _sd else None
+    if _t is not None and getattr(_t, "fallback_from", None) and _rt._pinned_from(_sd) != _t.fallback_from \
+            and marina_remote_owner.read_owned(_sd, _t.fallback_from, name):
+        # 스택은 박스에 있는데 박스가 안 닿는다 — 맥에서 down 하고 '내렸다'고 하면 안 된다(리뷰 I4)
+        sys.stderr.write(f"error: 이 워크트리 스택은 {_t.fallback_from} 에 떠 있는데 지금 닿지 않는다 — 박스가 켜지면 다시 내려 줘\n")
+        return 4
+    _stop_remote_tunnel(_sd)     # 내려가면 터널도 같이 걷는다
     verb = ["down", "--remove-orphans"] + (["--volumes"] if getattr(a, "volumes", False) else [])
-    return subprocess.call(label_argv(name, verb), env=env)  # P7/P8
+    rc = subprocess.call(label_argv(name, verb), env=env)  # P7/P8
+    if rc == 0:
+        _rt.unpin_local(getattr(a, "session_dir", None))   # 다 내렸으니 다음 기동은 다시 설정대로(원격)
+    return rc
 
 
 def cmd_stop(a):  # 선택 서비스만 정지 — 컨테이너 유지

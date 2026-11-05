@@ -86,6 +86,9 @@ class LocalTarget:
     name = "local"
     is_remote = False
 
+    def __init__(self, fallback_from: str | None = None):
+        self.fallback_from = fallback_from      # 원격 설정인데 박스가 꺼져 맥으로 온 것이면 그 주소
+
     def docker_env(self) -> dict[str, str]:
         return {}
 
@@ -235,7 +238,7 @@ def _resolve(ly: dict):
     return None, {}, None
 
 
-def load_target(session_dir: str, home: str | None = None, project_id: str | None = None):
+def load_target(session_dir: str, home: str | None = None, project_id: str | None = None, fallback: bool = True):
     """런타임 타깃을 계층으로 해석한다: **전역 < 프로젝트 < 세션(워크트리)**. 위가 아래를 양방향으로 덮는다.
 
     - 전역     `<MARINA_HOME>/runtime-target.json`
@@ -246,7 +249,114 @@ def load_target(session_dir: str, home: str | None = None, project_id: str | Non
     전역) — 매번 IP 를 칠 일이 없게. 물려받을 주소도 없으면 로컬로 떨어진다: 어디로 가는지 모르는 채 원격을
     시도하는 것이 로컬로 도는 것보다 위험하다. `project_id` 가 None 이면 프로젝트 계층은 없는 것(옛 동작)."""
     _, _, host = _resolve(layers(session_dir, home, project_id))
-    return RemoteTarget(host) if host else LocalTarget()
+    if not host:
+        return LocalTarget()
+    if not fallback:            # 회수·GC 처럼 '설정상 어디인가'를 알아야 하는 곳 — 꺼진 박스 대신 맥 자원을 지우면 안 된다
+        return RemoteTarget(host)
+    # 박스가 꺼져 있을 수 있다(집 윈도우) — 닿지 않으면 맥으로, 그렇게 띄운 워크트리는 내릴 때까지 맥 고정(형 2026-11-05)
+    if session_dir and _pinned_from(session_dir) == host:
+        return LocalTarget(fallback_from=host)
+    if not host_reachable(host, home):
+        if host not in _WARNED:
+            _WARNED.add(host)
+            sys.stderr.write(f"warning: 원격 박스 {host} 에 닿지 않아 이 워크트리는 맥(로컬)에서 돈다"
+                             " — 띄우면 내릴(marina stop --all) 때까지 맥에 고정된다\n")
+        return LocalTarget(fallback_from=host)
+    return RemoteTarget(host)
+
+
+# ── 박스 접속 확인 + 맥 고정 ──
+PIN_NAME = "runtime-fallback.json"
+_HEALTH_TTL_S = 60.0
+_WARNED: set = set()
+
+
+def _ssh_dest(host: str):
+    """ssh://[user@]host[:port] → (dest, port|None). ssh 가 아니면 None(확인하지 않는다)."""
+    if not str(host or "").startswith("ssh://"):
+        return None
+    rest = host[len("ssh://"):].strip("/")
+    if not rest:
+        return None
+    hp, sep, port = rest.rpartition(":")
+    return (hp, port) if sep and port.isdigit() else (rest, None)
+
+
+def _pinned_from(session_dir: str) -> str | None:
+    try:
+        return str(json.loads(Path(session_dir, PIN_NAME).read_text(encoding="utf-8")).get("from") or "") or None
+    except (OSError, ValueError, AttributeError):
+        return None
+
+
+def _probe(dest: str, port) -> bool:
+    """ssh 로 한 번 붙어 본다 — heavy-remote·#상태와 같은 ControlPath 라 살아 있는 접속이 있으면 새로 안 연다.
+    ssh 자신의 연결 실패만(255) 꺼짐으로 본다 — 박스 셸이 윈도우라 `true` 가 없어도 켜진 것으로(리뷰 I7)."""
+    import subprocess
+    argv = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=3", "-o", "ControlMaster=auto",
+            "-o", "ControlPath=/tmp/hr-%C", "-o", "ControlPersist=300",
+            "-o", "ServerAliveInterval=3", "-o", "ServerAliveCountMax=1"]
+    if port:
+        argv += ["-p", str(port)]
+    try:
+        return subprocess.run(argv + [dest, "true"], capture_output=True, timeout=8,
+                              stdin=subprocess.DEVNULL).returncode != 255
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+_MEMO: dict = {}     # 한 프로세스 안에서는 답을 하나로 — up 이 타깃을 여러 번 구하다 엇갈리지 않게(리뷰 I1)
+_MEMO_TTL_S = 300.0
+
+
+def host_reachable(host: str, home: str | None = None) -> bool:
+    """박스에 닿나. 결과를 `<MARINA_HOME>/remote-health/` 에 잠깐 기억한다(훅·게이트웨이가 매번 ssh 를 열지 않게).
+    MARINA_REMOTE_PROBE=0 이면 확인하지 않고 닿는다고 본다(시험)."""
+    import time
+    if os.environ.get("MARINA_REMOTE_PROBE") == "0":
+        return True
+    d = _ssh_dest(host)
+    if d is None:
+        return True
+    m = _MEMO.get(host)
+    if m and time.time() - m[0] < _MEMO_TTL_S:        # 데몬(게이트웨이·runtimed)도 5분 안엔 다시 본다
+        return m[1]
+    f = Path(_home(home), "remote-health", re.sub(r"[^A-Za-z0-9._-]+", "_", host) + ".json")
+    try:
+        c = json.loads(f.read_text(encoding="utf-8"))
+        if time.time() - float(c["ts"]) < _HEALTH_TTL_S:
+            _MEMO[host] = (time.time(), bool(c["up"]))
+            return bool(c["up"])
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    up = _probe(*d)
+    _MEMO[host] = (time.time(), up)
+    try:
+        f.parent.mkdir(parents=True, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=str(f.parent), prefix=".h.")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump({"ts": time.time(), "up": up}, fh)
+        os.replace(tmp, f)
+    except OSError:
+        pass
+    return up
+
+
+def pin_local(session_dir: str, target) -> None:
+    """폴백으로 맥에서 띄웠으면 기록 — 박스가 돌아와도 내릴 때까지 상태·로그·도메인이 맥 컨테이너를 본다."""
+    origin = getattr(target, "fallback_from", None)
+    if not session_dir or getattr(target, "is_remote", False) or not origin:
+        return
+    try:
+        Path(session_dir).mkdir(parents=True, exist_ok=True)
+        Path(session_dir, PIN_NAME).write_text(json.dumps({"from": origin}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+def unpin_local(session_dir: str) -> None:
+    if session_dir:
+        Path(session_dir, PIN_NAME).unlink(missing_ok=True)
 
 _KINDS = ("local", "remote", "inherit")
 
@@ -262,6 +372,7 @@ def write_target(directory: str, kind: str, host: str | None) -> None:
     if kind not in _KINDS:
         raise ValueError(f"kind 는 {'|'.join(_KINDS)} 중 하나 (받은 값: {kind})")
     path = Path(directory, CONFIG_NAME)
+    Path(directory, PIN_NAME).unlink(missing_ok=True)    # 설정을 바꾸면 '꺼져서 맥 고정'도 푼다(리뷰 I5)
     if kind == "inherit":
         path.unlink(missing_ok=True)
         return
@@ -301,7 +412,7 @@ def describe_layers(ly: dict) -> dict:
     }
 
 
-def docker_env_for_root(root) -> dict:
+def docker_env_for_root(root, fallback: bool = True) -> dict:
     """워크트리 root → docker 호출에 얹을 env 델타. 로컬이면 `{}`.
 
     **라우팅 규칙은 여기 한 군데만 산다.** 호출부마다 다시 구현하면 또 빠뜨린다 — 실제로 compose
@@ -311,6 +422,6 @@ def docker_env_for_root(root) -> dict:
     try:
         import marina_paths
         return load_target(str(marina_paths.session_dir(Path(root))),
-                           project_id=project_id_for_root(root)).docker_env()
+                           project_id=project_id_for_root(root), fallback=fallback).docker_env()
     except Exception:
         return {}
