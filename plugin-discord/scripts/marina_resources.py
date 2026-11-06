@@ -219,8 +219,10 @@ def _cell(s: str, w: int) -> str:
     return s + " " * (w - _dw(s))
 
 
-def usage_text(items: list, top: int = 5) -> str:
-    """'### 🔥 자원' 제목 + 방마다 고정폭 한 줄 `이름 CPU% 막대 메모리` — CPU 순 상위(형 2026-11-06 '따로 표', 한 줄 나열은 눈에 안 들어온다)."""
+def usage_text(items: list, top: int = 5, ncpu: "int | None" = None) -> str:
+    """'### 🔥 자원' 제목 + 방마다 고정폭 한 줄 `이름 CPU% 막대 메모리` — CPU 순 상위(형 2026-11-06 '따로 표', 한 줄 나열은 눈에 안 들어온다).
+    CPU 는 맥 전체(코어 수) 대비 % — ps 의 222%(코어 2.2개)는 헷갈린다(형 2026-11-06). 막대도 맥 전체 기준(5칸 = 100%)."""
+    ncpu = max(1, int(ncpu or os.cpu_count() or 1))
     rows = []
     for it in items:
         cpu, rss = it["cpu"] + it["docker_cpu"], it["rss"] + it["docker_rss"]
@@ -230,11 +232,11 @@ def usage_text(items: list, top: int = 5) -> str:
     rows.sort(key=lambda x: (-x[0], -x[1]))
     if not rows:
         return ""
-    peak = max(rows[0][0], 1.0)
-    lines = ["### 🔥 자원 (1분마다)"]
+    lines = ["### 🔥 자원 (맥 %d코어 대비 CPU · 1분마다)" % ncpu]
     for cpu, rss, ref in rows[:top]:
-        n = max(0, min(BAR, int(cpu / peak * BAR + 0.5)))
-        lines.append("`%s %4d%% %s %5s`" % (_cell(ref, NAME_MAX), round(cpu), "█" * n + "░" * (BAR - n), _fmt_rss(rss)))
+        pct = min(100.0, cpu / ncpu)
+        n = max(0, min(BAR, int(pct / 100 * BAR + 0.5)))
+        lines.append("`%s %4d%% %s %5s`" % (_cell(ref, NAME_MAX), round(pct), "█" * n + "░" * (BAR - n), _fmt_rss(rss)))
     text = "\n".join(lines)
     while len(text) > TEXT_MAX and len(lines) > 2:
         lines.pop()

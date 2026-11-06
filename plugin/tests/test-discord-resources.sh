@@ -83,11 +83,14 @@ check(not any("python" in str(i) for i in items.values()) and calls.count("ps") 
       and sum("tmux" in c for c in calls) == 1, f"명령은 한 판에 각 1회: {calls}")
 
 # 표(형 2026-11-06 '따로 표'): 제목 한 줄 + 방마다 `이름 CPU% 막대 메모리` 고정폭 한 줄, CPU 순 상위 5
-text = mr.usage_text(list(items.values()))
+text = mr.usage_text(list(items.values()), ncpu=2)
 ls = text.split("\n")
-check(ls[0].startswith("### 🔥 자원"), f"제목: {ls[0]}")
-check(ls[1].startswith("`ovation/a2-1-plan-e…") and "252%" in ls[1] and "3.6G" in ls[1] and ls[1].endswith("`"), f"CPU 순 + 20칸 자름: {ls[1]}")
-check("█████" in ls[1] and "241%" in ls[2], f"1등 막대 가득, 2등 다음 줄: {ls[1:3]}")
+check(ls[0].startswith("### 🔥 자원") and "2코어" in ls[0], f"제목(맥 코어 수): {ls[0]}")
+# CPU 는 맥 전체 대비 %(형 2026-11-06) — 252% 를 2코어로 나누면 126 → 100 으로 막는다, 막대도 맥 전체 기준
+check(ls[1].startswith("`ovation/a2-1-plan-e…") and " 100%" in ls[1] and "3.6G" in ls[1] and ls[1].endswith("`"), f"CPU 순 + 20칸 자름: {ls[1]}")
+check("█████" in ls[1] and " 100%" in ls[2], f"꽉 찬 막대, 2등 다음 줄: {ls[1:3]}")
+t12 = mr.usage_text(list(items.values()), ncpu=12)
+check(" 21%" in t12.split("\n")[1] and "█░░░░" in t12.split("\n")[1], f"12코어면 252% → 21%·막대 1칸: {t12.split(chr(10))[1]}")
 check(len(ls) <= 6, f"상위 5개까지: {text}")
 check("ovation/main" not in text and "stray" not in text, f"문턱(5%·200MB) 미만은 뺀다: {text}")
 check(len({mr._dw(l) for l in ls[1:]}) == 1, f"줄 폭이 같다(한글 2칸): {[mr._dw(l) for l in ls[1:]]}")
