@@ -680,7 +680,7 @@ def _tasks_desc(r: dict[str, Any]) -> str:
         if x.get("state") == "stall":
             return f"⏸ {nm} · 멈춤 {_ago(x['age'])}"
         return f"{'⏳' if x['kind'] == 'shell' else '🤖'} " + (who + " " if who else "") + _clean(x["desc"] or x["id"])[:50]
-    d = " · ".join(one(x) for x in t[:4])
+    d = "\n-# ".join(one(x) for x in t[:4])      # 하위 일마다 한 줄(형 2026-11-06 "하위 애들 줄바꿈")
     return f"\n-# {d}" if d else ""
 
 

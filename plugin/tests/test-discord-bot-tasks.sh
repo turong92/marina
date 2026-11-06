@@ -78,7 +78,7 @@ def txt(cs):
     return "\n".join([c.get("content", "") for c in cs if c.get("content")] + [txt(c.get("components") or []) for c in cs])
 t = txt(comps)
 check("### ⏳ 백그라운드 1" in t and "⏳1 🤖1" in t and "### 💤 대기 0" in t, f"백그라운드 섹션: {t}")
-check("-# ⏳ prod 정리 · 🤖 코드 리뷰" in t, f"(실사용) 무슨 일인지 설명도 보인다: {t}")
+check("-# ⏳ prod 정리\n-# 🤖 코드 리뷰" in t, f"(실사용) 무슨 일인지 설명도 보인다 — 하위 일마다 한 줄(형 2026-11-06): {t}")
 views = [c for c in comps if c.get("type") == 9 and c["accessory"]["custom_id"] == f"marina-view:{ch}"]
 check(views, f"[보기] 버튼: {comps}")
 # 작업 중이면서 도는 일도 있으면: [정지] 는 그대로, [보기] 는 아래 버튼 줄
