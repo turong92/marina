@@ -104,6 +104,9 @@ def _transcript_last_ts(rec: dict[str, Any]) -> float:
         if row.get("type") == "system" and row.get("subtype") == "compact_boundary":
             in_compact = True        # 실제 순서: 경계 → 요약 → 남긴 줄 → caveat → /compact 명령 → 출력. 출력 줄까지 컴팩트의 것
             continue
+        if row.get("type") == "system" and row.get("subtype") == "local_command":
+            in_compact = False       # 로컬 명령 출력(예: 압축할 게 없을 때 'Not enough messages') — 사람 활동이 아니다(치면 50분마다 컴팩트 반복, 2026-11-06)
+            continue
         if row.get("type") == "user":
             text = _user_text(row).lstrip()
             if text.startswith("<local-command-stdout>"):
@@ -343,7 +346,9 @@ class Idler:
                 if _same(st.get("compactedFor"), last):
                     continue                                   # 이 대화 구간은 이미 컴팩트했다
                 touched = max(last, float(st.get("lastKeep") or 0.0))      # 캐시가 마지막으로 데워진 시각
-                if (now - touched < every or now - self.keep_checked.get(ref, -1e18) < KEEP_RECHECK
+                want = st.get("want")                          # 남아 있으면 지난 시도를 못 쳤다(keep_done 이 지운다) — 그 뒤 잠시 쉰다
+                tried = float(want.get("at") or 0.0) if isinstance(want, dict) and isinstance(want.get("at"), (int, float)) else -1e18
+                if (now - touched < every or now - self.keep_checked.get(ref, -1e18) < KEEP_RECHECK or now - tried < KEEP_FAIL_BACKOFF
                         or now - self.keep_spawned.get(ref, -1e18) < KEEP_SPAWN_WAIT):
                     continue
                 self.keep_checked[ref] = now
@@ -360,7 +365,7 @@ class Idler:
                 _keep_save(rec, want={"action": action, "last": last, "at": now})
                 self.keep_spawned[ref] = now
                 mb._spawn_type(name, text, str(rec.get("channelId") or ""), "")
-                _idle_log("{} {} · 쉰={:.2f}h".format("컴팩트" if action == "compact" else "캐시 유지", ref, (now - last) / 3600))
+                _idle_log("{} 시도 {} · 쉰={:.2f}h".format("컴팩트" if action == "compact" else "캐시 유지", ref, (now - last) / 3600))
                 done.append((ref, action))
             except Exception as exc:
                 mb._log(f"cache-keep {ref}: {exc!r}")
@@ -493,7 +498,8 @@ KEEP_MAX_MINUTES = 59.0           # 간격은 캐시 수명(60분) 안이어야 
 KEEP_DEFAULT_HOURS = 8.0
 CACHE_TTL = 3600.0                # 이 시간이 지난 캐시는 이미 식었다 — 컴팩트로 데울 것이 없다
 KEEP_SPAWN_WAIT = 150.0           # 입력 프로세스는 최대 120초 기다린다 — 그동안 같은 방에 또 띄우지 않는다
-KEEP_RECHECK = 60.0               # 한 방을 무겁게 판정하는 최소 간격(입력 못 한 방을 20초마다 다시 보지 않게)
+KEEP_FAIL_BACKOFF = 240.0         # 못 친 시도(방이 안 쉼) 뒤 다시 띄우기까지 — 50~60분 창 안에서 세 번쯤(2.6분마다 헛시도하던 것, 2026-11-06)
+KEEP_RECHECK = 60.0              # 한 방을 무겁게 판정하는 최소 간격(입력 못 한 방을 20초마다 다시 보지 않게)
 _OPEN_STATUS = re.compile(r"^상태:\s*(진행 중|막힘)")
 
 

@@ -75,6 +75,12 @@ tr.write_text(base + keep + comp)
 check(abs(mi.last_activity(rec) - H0) < 2, f"컴팩트 기록(실제 순서: 경계→요약→남긴 줄→caveat→명령→출력)도 활동이 아니다: {mi.last_activity(rec) - H0}")
 tr.write_text(base + keep + comp.split("\n", 3)[3])
 check(abs(mi.last_activity(rec) - H0) < 2, "경계가 창 밖으로 잘려도 caveat(isMeta)·명령·출력 줄은 활동이 아니다")
+# 압축할 게 없을 때: 경계 없이 caveat → 명령 → system(local_command) 출력 줄 — 이 출력 줄을 활동으로 치면 50분마다 컴팩트가 반복된다(2026-11-06 실측)
+noop = row({"type": "user", "timestamp": iso(H0 + 3300), "isMeta": True, "message": {"role": "user", "content": "<local-command-caveat>Caveat</local-command-caveat>"}}) \
+     + row({"type": "user", "timestamp": iso(H0 + 3299), "message": {"role": "user", "content": "<command-name>/compact</command-name>"}}) \
+     + row({"type": "system", "subtype": "local_command", "timestamp": iso(H0 + 3300), "content": "<local-command-stdout>Not enough messages to compact.</local-command-stdout>"})
+tr.write_text(base + noop)
+check(abs(mi.last_activity(rec) - H0) < 2, f"'압축할 게 없음' 출력 줄(system local_command)도 활동이 아니다: {mi.last_activity(rec) - H0}")
 tr.write_text(base + keep + row({"type": "user", "timestamp": iso(H0 + 3200), "message": {"role": "user", "content": "또 말함"}}))
 check(abs(mi.last_activity(rec) - (H0 + 3200)) < 2, "캐시 유지 뒤 사람이 말하면 그 시각")
 tr.write_text(base)
@@ -179,7 +185,12 @@ check(ks(born + 55 * MIN) == [], f"실제 활동이 없는 방은 컴팩트하�
 fresh()
 check(ks(H0 + 55 * MIN, success=False) == [ms.COMPACT_KEEP_TEXT] and "compactedFor" not in json.loads((sd / "keep.json").read_text()), "입력 성공 전엔 컴팩트했다고 적지 않는다")
 check(ks(H0 + 56 * MIN) == [], "입력을 시도한 직후엔 겹쳐 치지 않는다(대기 중)")
-check(ks(H0 + 58 * MIN) == [ms.COMPACT_KEEP_TEXT], "못 쳤으면 나중에 다시 시도")
+check(ks(H0 + 58 * MIN) == [], "못 친 뒤 4분은 다시 띄우지 않는다(2.6분마다 헛시도하던 것, 2026-11-06)")
+check(ks(H0 + 59.5 * MIN) == [ms.COMPACT_KEEP_TEXT], "4분 뒤엔 다시 시도(캐시 한 시간 안)")
+# 못 친 시도는 데몬이 다시 떠도(메모리 대기 없음) 기록(want)으로 쉰다
+fresh(); ks(H0 + 51 * MIN, success=False); K = mi.Idler(started=0.0)
+check(ks(H0 + 53 * MIN) == [], "데몬이 다시 떠도 못 친 기록으로 4분 쉰다")
+check(ks(H0 + 55.5 * MIN) == [ms.COMPACT_KEEP_TEXT], "그 뒤 다시 시도")
 # 안전 재시작 대기 중엔 건너뛴다
 fresh(); mb.restart_status = lambda: {"pid": 1, "remaining": ["x"]}
 check(ks(H0 + 55 * MIN) == [], "재시작 대기 중이면 건너뛴다")
