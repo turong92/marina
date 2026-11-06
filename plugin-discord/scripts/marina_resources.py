@@ -23,6 +23,7 @@ MAX_AGE = 180.0     # 이보다 묵은 값은 안 그린다
 MIN_CPU = 5.0       # % — 이 미만이고
 MIN_RSS = 200 * (1 << 20)   # 이 미만이면 뺀다
 NAME_MAX = 20
+TEXT_MAX = 150      # 꼬리말이 #상태 한 메시지(4000자) 안에 들게
 
 _UNITS = {"b": 1, "kb": 1000, "kib": 1 << 10, "mb": 1000 ** 2, "mib": 1 << 20, "gb": 1000 ** 3, "gib": 1 << 30,
           "tb": 1000 ** 4, "tib": 1 << 40}
@@ -39,13 +40,13 @@ def _exe(name: str, extra: tuple = ()) -> str:
     return name
 
 
-def _out(argv: list, timeout: float = 10.0) -> str:
-    """명령 stdout. 실패·시간 초과는 빈 문자열."""
+def _out(argv: list, timeout: float = 10.0, any_rc: bool = False) -> str:
+    """명령 stdout. 실패·시간 초과는 빈 문자열(any_rc 면 종료 코드를 무시 — lsof 는 죽은 pid 가 섞이면 1 로 나와도 나머지를 준다)."""
     try:
         r = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except (OSError, subprocess.SubprocessError):
         return ""
-    return r.stdout if r.returncode == 0 else ""
+    return r.stdout if (any_rc or r.returncode == 0) else ""
 
 
 def parse_ps(out: str) -> dict:
@@ -112,11 +113,29 @@ def _under(path: str, root: str) -> bool:
     return path == root or path.startswith(root + "/")
 
 
+def compose_prefix(project: str, root: str) -> str:
+    """이 방 컨테이너 이름의 앞부분 `<compose -p>-`. plugin/scripts 의 marina-compose.py compose_project_name(project_id, session_id(root))
+    와 같은 규칙을 복제한다(데몬 PYTHONPATH 에 그 모듈이 없다): 원본 체크아웃 = 'main', codex 레이아웃(root 이름이 프로젝트 root 이름)
+    = 부모 폴더 이름, 그 밖(.claude/worktrees/<name>) = 자기 폴더 이름. 이름은 소문자·[^a-z0-9_-]+ → '-'·양끝 -/_ 제거."""
+    import marina_session as ms
+    try:
+        proot = str(ms.project_root(project))
+    except Exception:
+        proot = ""
+    if proot and root == proot:
+        sid = "main"
+    elif proot and os.path.basename(root) == os.path.basename(proot):
+        sid = os.path.basename(os.path.dirname(root))
+    else:
+        sid = os.path.basename(root)
+    return (re.sub(r"[^a-z0-9_-]+", "-", ("%s-%s" % (project, sid)).lower()).strip("-_") or "marina") + "-"
+
+
 def room_usage(recs: list) -> list:
-    """방마다 {ref, cpu, rss, docker_cpu, docker_rss} + 공용 항목(ref = "공용 · <이름>")."""
+    """방마다 {ref, cpu, rss, docker_cpu, docker_rss} + 공용 항목(ref = "공용 <이름>")."""
     import marina_session as ms
     rooms: dict = {}     # ref -> item
-    roots: list = []     # (root 실경로, ref, project, 폴더 이름)
+    roots: list = []     # (root 실경로, ref, 컨테이너 접두사)
     tmux_names: dict = {}
     for rec in recs:
         if not rec.get("project") or not rec.get("task"):
@@ -127,12 +146,12 @@ def room_usage(recs: list) -> list:
             tmux_names[str(rec["tmux"])] = ref
         if rec.get("root"):
             real = os.path.realpath(os.path.expanduser(str(rec["root"])))
-            roots.append((real, ref, str(rec.get("project") or ""), os.path.basename(real)))
+            roots.append((real, ref, compose_prefix(str(rec.get("project") or ""), real)))
     roots.sort(key=lambda x: -len(x[0]))     # 메인 레포 root 안에 워크트리 root 가 있다 — 깊은 쪽이 이긴다
     shared: dict = {}
 
     def share(name: str) -> dict:
-        return shared.setdefault(name, {"ref": "공용 · " + name, "cpu": 0.0, "rss": 0, "docker_cpu": 0.0, "docker_rss": 0})
+        return shared.setdefault(name, {"ref": "공용 " + name, "cpu": 0.0, "rss": 0, "docker_cpu": 0.0, "docker_rss": 0})
 
     procs = parse_ps(_out(["/bin/ps", "-Ao", "pid=,ppid=,pcpu=,rss=,comm="]))
     kids: dict = {}
@@ -149,13 +168,15 @@ def room_usage(recs: list) -> list:
                 rooms[tmux_names[name]]["rss"] += r
 
     daemons = [pid for pid, p in procs.items()
-               if p["ppid"] == 1 and pid not in seen and os.path.basename(p["comm"]).startswith("java")]
+               if pid not in seen and os.path.basename(p["comm"]).startswith("java")]
     if daemons:
         cwds = parse_lsof_cwd(_out(["/usr/sbin/lsof" if os.access("/usr/sbin/lsof", os.X_OK) else "lsof", "-a", "-p",
-                                    ",".join(str(p) for p in daemons), "-d", "cwd", "-Fn"]))
+                                    ",".join(str(p) for p in daemons), "-d", "cwd", "-Fn"], any_rc=True))
+        # 코틀린 데몬을 먼저 — gradle 데몬의 자식으로 떠 있어도 gradle 합에 섞이지 않고 seen 에 먼저 들어간다
+        daemons.sort(key=lambda pid: "kotlin" not in cwds.get(pid, ""))
         for pid in daemons:
             cwd = cwds.get(pid, "")
-            owner = next((ref for root, ref, _, _ in roots
+            owner = next((ref for root, ref, _ in roots
                           if cwd and (_under(cwd, root) or ("/" + re.sub(r"[^A-Za-z0-9]", "-", root) + "/") in cwd + "/")), None)
             if owner:
                 item = rooms[owner]
@@ -168,7 +189,7 @@ def room_usage(recs: list) -> list:
     docker = parse_docker(_out([_exe("docker", ("/usr/local/bin/docker", "/opt/homebrew/bin/docker",
                                                  "/Applications/Docker.app/Contents/Resources/bin/docker")),
                                 "stats", "--no-stream", "--format", "{{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}"], timeout=20.0))
-    prefixes = sorted(((("%s-%s-" % (proj, folder)).lower(), ref) for _, ref, proj, folder in roots), key=lambda x: -len(x[0]))
+    prefixes = sorted(((pre.lower(), ref) for _, ref, pre in roots), key=lambda x: -len(x[0]))
     for name, cpu, rss in docker:
         owner = next((ref for pre, ref in prefixes if name.lower().startswith(pre)), None)
         item = rooms[owner] if owner else share("도커")
@@ -196,7 +217,8 @@ def usage_text(items: list, top: int = 5) -> str:
     rows.sort(key=lambda x: (-x[0], -x[1]))
     if not rows:
         return ""
-    return "🔥 " + " · ".join("%s %d%% · %s" % (_short(ref), round(cpu), _fmt_rss(rss)) for cpu, rss, ref in rows[:top])
+    text = "🔥 " + " · ".join("%s %d%% · %s" % (_short(ref), round(cpu), _fmt_rss(rss)) for cpu, rss, ref in rows[:top])
+    return text if len(text) <= TEXT_MAX else text[:TEXT_MAX - 1] + "…"
 
 
 _CACHE: list = []      # [(시각, 항목들)] — 비었거나 하나
@@ -220,7 +242,10 @@ def cached_text(recs: list, wait: bool = False) -> str:
         if wait:
             _refresh(recs)
         else:
-            threading.Thread(target=_refresh, args=(recs,), name="room-resources", daemon=True).start()
+            try:
+                threading.Thread(target=_refresh, args=(recs,), name="room-resources", daemon=True).start()
+            except Exception:
+                _BUSY.clear()        # 스레드를 못 띄웠으면 다음 판에 다시 시도
         got = _CACHE[0] if _CACHE else None
     if got and time.time() - got[0] <= MAX_AGE:
         return usage_text(got[1])

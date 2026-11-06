@@ -604,6 +604,7 @@ def _row(r: dict[str, Any], proj_w: int) -> str:
 VIEW_PREFIX = "marina-view:"
 
 
+TOTAL_MAX = 3950           # 본체 + 꼬리말 합의 상한(메시지 한도 4000)
 TEXT_MAX = 3700            # 한 메시지 text display 합 4000자 — 꼬리말 몫을 남긴다(리뷰 I2)
 
 
@@ -713,8 +714,14 @@ def _view_button(r: dict[str, Any]) -> dict[str, Any]:
 
 def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
     """글자 수가 넘치면 작업 줄의 설명(지시·도는 일)을 빼고 다시 그린다 — 넘친 채 PATCH 하면 400 으로 #상태가 멈춘다."""
+    # 꼬리말(footer)도 같은 메시지의 4000자 안이다 — 본체 + 꼬리말로 따진다. lean 으로도 넘치면 자원 줄부터 뺀다(snap 에서 지워 그리는 쪽과 맞춘다)
     out = _render(snap, lean=False)
-    return out if _chars(out) <= TEXT_MAX else _render(snap, lean=True)
+    if _chars(out) + len(footer(snap)) <= TOTAL_MAX:
+        return out
+    out = _render(snap, lean=True)
+    if _chars(out) + len(footer(snap)) > TOTAL_MAX and snap.get("resources"):
+        snap["resources"] = ""
+    return out
 
 
 def _render(snap: dict[str, Any], lean: bool) -> list[dict[str, Any]]:
