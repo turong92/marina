@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import threading
 import time
+import unicodedata
 from typing import Any
 
 TTL = 60.0          # 이만큼 지나면 뒤에서 다시 잰다
@@ -23,7 +24,8 @@ MAX_AGE = 180.0     # 이보다 묵은 값은 안 그린다
 MIN_CPU = 5.0       # % — 이 미만이고
 MIN_RSS = 200 * (1 << 20)   # 이 미만이면 뺀다
 NAME_MAX = 20
-TEXT_MAX = 150      # 꼬리말이 #상태 한 메시지(4000자) 안에 들게
+TEXT_MAX = 400      # 꼬리말 표가 #상태 한 메시지(4000자) 안에 들게 — 넘치면 render 가 표를 뺀다
+BAR = 5
 
 _UNITS = {"b": 1, "kb": 1000, "kib": 1 << 10, "mb": 1000 ** 2, "mib": 1 << 20, "gb": 1000 ** 3, "gib": 1 << 30,
           "tb": 1000 ** 4, "tib": 1 << 40}
@@ -203,11 +205,22 @@ def _fmt_rss(b: int) -> str:
     return "%.1fG" % g if g >= 1 else "%dM" % round(b / (1 << 20))
 
 
-def _short(ref: str) -> str:
-    return ref if len(ref) <= NAME_MAX else ref[:NAME_MAX - 1] + "…"
+def _dw(s: str) -> int:
+    """고정폭 글꼴에서의 칸 수 — 한글 등 넓은 글자는 2칸."""
+    return sum(2 if unicodedata.east_asian_width(c) in "WF" else 1 for c in s)
+
+
+def _cell(s: str, w: int) -> str:
+    """w 칸에 맞춰 자르고(…) 오른쪽을 빈칸으로 채운다."""
+    if _dw(s) > w:
+        while s and _dw(s) > w - 1:
+            s = s[:-1]
+        s += "…"
+    return s + " " * (w - _dw(s))
 
 
 def usage_text(items: list, top: int = 5) -> str:
+    """'### 🔥 자원' 제목 + 방마다 고정폭 한 줄 `이름 CPU% 막대 메모리` — CPU 순 상위(형 2026-11-06 '따로 표', 한 줄 나열은 눈에 안 들어온다)."""
     rows = []
     for it in items:
         cpu, rss = it["cpu"] + it["docker_cpu"], it["rss"] + it["docker_rss"]
@@ -217,8 +230,16 @@ def usage_text(items: list, top: int = 5) -> str:
     rows.sort(key=lambda x: (-x[0], -x[1]))
     if not rows:
         return ""
-    text = "🔥 " + " · ".join("%s %d%% · %s" % (_short(ref), round(cpu), _fmt_rss(rss)) for cpu, rss, ref in rows[:top])
-    return text if len(text) <= TEXT_MAX else text[:TEXT_MAX - 1] + "…"
+    peak = max(rows[0][0], 1.0)
+    lines = ["### 🔥 자원 (1분마다)"]
+    for cpu, rss, ref in rows[:top]:
+        n = max(0, min(BAR, int(cpu / peak * BAR + 0.5)))
+        lines.append("`%s %4d%% %s %5s`" % (_cell(ref, NAME_MAX), round(cpu), "█" * n + "░" * (BAR - n), _fmt_rss(rss)))
+    text = "\n".join(lines)
+    while len(text) > TEXT_MAX and len(lines) > 2:
+        lines.pop()
+        text = "\n".join(lines)
+    return text
 
 
 _CACHE: list = []      # [(시각, 항목들)] — 비었거나 하나

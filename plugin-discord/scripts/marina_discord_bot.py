@@ -1033,8 +1033,8 @@ def footer(snap: dict[str, Any]) -> str:
              heavy_text(snap.get("heavy")),
              f"<t:{int(time.time())}:R> 갱신"]
     # 원격 박스는 자기 줄로 — 한 줄에 맥·윈도우가 섞이면 어느 기계 값인지 헷갈린다(형 2026-11-05 "줄바꿈")
-    # 방별 자원 상위(형 2026-11-06)는 맥 줄 다음·박스 줄 앞
-    return "\n".join(["-# " + " · ".join(p for p in parts if p)] + (["-# " + snap["resources"]] if snap.get("resources") else [])
+    # 방별 자원 표(형 2026-11-06 '따로 표')는 맨 위 — 작은 글씨 한 줄 나열은 눈에 안 들어왔다. 그 아래 맥 줄·박스 줄
+    return "\n".join(([snap["resources"]] if snap.get("resources") else []) + ["-# " + " · ".join(p for p in parts if p)]
                      + ["-# " + box_text(b) for b in snap.get("boxes") or []])
 
 

@@ -82,17 +82,21 @@ check(items["공용 도커"]["docker_cpu"] == 31.0, f"주인 모를 컨테이너
 check(not any("python" in str(i) for i in items.values()) and calls.count("ps") == 1 and calls.count("lsof") == 1 and calls.count("docker") == 1
       and sum("tmux" in c for c in calls) == 1, f"명령은 한 판에 각 1회: {calls}")
 
+# 표(형 2026-11-06 '따로 표'): 제목 한 줄 + 방마다 `이름 CPU% 막대 메모리` 고정폭 한 줄, CPU 순 상위 5
 text = mr.usage_text(list(items.values()))
-check(text.startswith("🔥 ovation/a2-1-plan-e… 252% · 3.6G · mdc/cloud 241% · 4.5G · "), f"CPU 순 + 20자 자름: {text}")
-check(text.count("%") <= 5, f"상위 5개까지: {text}")
+ls = text.split("\n")
+check(ls[0].startswith("### 🔥 자원"), f"제목: {ls[0]}")
+check(ls[1].startswith("`ovation/a2-1-plan-e…") and "252%" in ls[1] and "3.6G" in ls[1] and ls[1].endswith("`"), f"CPU 순 + 20칸 자름: {ls[1]}")
+check("█████" in ls[1] and "241%" in ls[2], f"1등 막대 가득, 2등 다음 줄: {ls[1:3]}")
+check(len(ls) <= 6, f"상위 5개까지: {text}")
 check("ovation/main" not in text and "stray" not in text, f"문턱(5%·200MB) 미만은 뺀다: {text}")
+check(len({mr._dw(l) for l in ls[1:]}) == 1, f"줄 폭이 같다(한글 2칸): {[mr._dw(l) for l in ls[1:]]}")
 check(mr.usage_text([]) == "" and mr.usage_text([{"ref": "x/y", "cpu": 4.0, "rss": 100 * M, "docker_cpu": 0.0, "docker_rss": 0}]) == "", "아무것도 없으면 빈 글")
 many = [{"ref": f"p/t{i}", "cpu": 10.0 * (i + 1), "rss": G, "docker_cpu": 0.0, "docker_rss": 0} for i in range(8)]
-check(mr.usage_text(many).count("p/t") == 5 and mr.usage_text(many).startswith("🔥 p/t7 80% · 1.0G · p/t6"), f"상위 5: {mr.usage_text(many)}")
-check(mr.usage_text([{"ref": "p/t", "cpu": 3.0, "rss": 300 * M, "docker_cpu": 0.0, "docker_rss": 0}]) == "🔥 p/t 3% · 300M", "메모리만 커도 낀다")
-check(len(text) < 300, f"텍스트 길이: {len(text)}")
-long = [{"ref": "p/" + "x" * 15, "cpu": 100.0 + i, "rss": G, "docker_cpu": 0.0, "docker_rss": 0} for i in range(5)]
-check(len(mr.usage_text(long, top=50)) <= 150 and len(mr.usage_text(long)) <= 150, f"자원 줄은 150자 이내: {len(mr.usage_text(long))}")
+check(mr.usage_text(many).count("p/t") == 5 and mr.usage_text(many).split("\n")[1].startswith("`p/t7 "), f"상위 5: {mr.usage_text(many)}")
+check("p/t" in mr.usage_text([{"ref": "p/t", "cpu": 3.0, "rss": 300 * M, "docker_cpu": 0.0, "docker_rss": 0}]), "메모리만 커도 낀다")
+long = [{"ref": "공용 " + "가" * 15, "cpu": 100.0 + i, "rss": G, "docker_cpu": 0.0, "docker_rss": 0} for i in range(5)]
+check(len(mr.usage_text(long, top=50)) <= mr.TEXT_MAX and len(mr.usage_text(long)) <= mr.TEXT_MAX, f"표 글자 한도: {len(mr.usage_text(long))}")
 
 # docker 가 없거나 실패해도 나머지는 나온다
 def nodocker(argv, timeout=10.0, any_rc=False):
@@ -107,7 +111,7 @@ check(mr.usage_text(mr.room_usage(recs)) == "", "전부 실패해도 죽지 않�
 mr._out = fake
 mr._CACHE.clear()
 t1 = mr.cached_text(recs, wait=True)
-check(t1.startswith("🔥 "), f"처음 재기: {t1}")
+check(t1.startswith("### 🔥"), f"처음 재기: {t1}")
 n = len(calls); mr.cached_text(recs, wait=True)
 check(len(calls) == n, "60초 안엔 다시 재지 않는다")
 mr._CACHE[0] = (time.time() - 100, mr._CACHE[0][1]); mr.cached_text(recs, wait=True)
@@ -134,19 +138,19 @@ check(not mr._BUSY.is_set(), "Thread.start 실패 뒤에도 BUSY 해제")
 import marina_discord_bot as mb2
 def body_of(n): return [{"type": 10, "content": "x" * n}]
 mb2._render = lambda snap, lean: body_of(3700)
-sn = {"diskFree": G, "resources": "🔥 " + "y" * 140}
+sn = {"diskFree": G, "resources": "### 🔥 " + "y" * 140}
 out = mb2.render(sn)
 check(sn["resources"] and mb2._chars(out) + len(mb2.footer(sn)) < 4000, "한도 안이면 자원 줄을 둔다")
 mb2._render = lambda snap, lean: body_of(3880)
-sn = {"diskFree": G, "resources": "🔥 " + "y" * 140}
+sn = {"diskFree": G, "resources": "### 🔥 " + "y" * 300}
 out = mb2.render(sn)
 check(sn["resources"] == "" and mb2._chars(out) + len(mb2.footer(sn)) < 4000, f"넘치면 자원 줄을 뺀다: {mb2._chars(out) + len(mb2.footer(sn))}")
 
-# 꼬리말: 맥 줄 다음·박스 줄 앞, 없으면 안 그린다
+# 꼬리말: 자원 표가 맨 위(작은 글씨 아님), 그 아래 맥 줄·박스 줄, 없으면 안 그린다
 G_ = 1 << 30
-line = mb.footer({"diskFree": 120 * G_, "resources": "🔥 a/b 90% · 1.0G", "boxes": [{"name": "윈도우", "up": False}]})
+line = mb.footer({"diskFree": 120 * G_, "resources": "### 🔥 자원\n`a/b 90%`", "boxes": [{"name": "윈도우", "up": False}]})
 ls = line.split("\n")
-check(len(ls) == 3 and ls[1] == "-# 🔥 a/b 90% · 1.0G" and ls[2] == "-# 윈도우 꺼짐", f"줄 순서: {ls}")
+check(len(ls) == 4 and ls[0] == "### 🔥 자원" and ls[1] == "`a/b 90%`" and ls[2].startswith("-# 디스크") and ls[3] == "-# 윈도우 꺼짐", f"줄 순서: {ls}")
 check(mb.footer({"diskFree": G_}).count("\n") == 0, "값이 없으면 줄을 더하지 않는다")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
