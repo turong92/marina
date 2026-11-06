@@ -354,6 +354,8 @@ class Idler:
                 self.keep_checked[ref] = now
                 if _attached(name):
                     continue                                   # 형이 터미널로 보는 중 — 끼어들지 않는다
+                if mb._pane_busy(name)[1]:
+                    continue                                   # 턴을 도는 중 — 캐시를 스스로 쓰고, 띄워도 쉬는 순간이 안 와 헛시도만 한다(형 2026-11-06)
                 if chat or piece_done(rec, now):
                     if now - touched >= CACHE_TTL:
                         continue                               # 캐시가 식었다 — 지금처럼 2시간 뒤 내린다

@@ -191,6 +191,12 @@ check(ks(H0 + 59.5 * MIN) == [ms.COMPACT_KEEP_TEXT], "4분 뒤엔 다시 시도(
 fresh(); ks(H0 + 51 * MIN, success=False); K = mi.Idler(started=0.0)
 check(ks(H0 + 53 * MIN) == [], "데몬이 다시 떠도 못 친 기록으로 4분 쉰다")
 check(ks(H0 + 55.5 * MIN) == [ms.COMPACT_KEEP_TEXT], "그 뒤 다시 시도")
+# 방이 턴을 도는 중(입력창 위 돌아가는 표시 줄)이면 띄우지도 않는다 — 도는 방은 캐시를 스스로 쓰고, 쳐도 쉬는 순간이 안 와 헛시도(형 2026-11-06)
+fresh(); real_busy = mb._pane_busy
+mb._pane_busy = lambda n: (True, True)
+check(ks(H0 + 55 * MIN) == [] and "want" not in json.loads((sd / "keep.json").read_text() if (sd / "keep.json").exists() else "{}"), "도는 방엔 시도하지 않는다")
+mb._pane_busy = real_busy
+check(ks(H0 + 56.5 * MIN) == [ms.COMPACT_KEEP_TEXT], f"쉬면 다시 대상: {typed}")
 # 안전 재시작 대기 중엔 건너뛴다
 fresh(); mb.restart_status = lambda: {"pid": 1, "remaining": ["x"]}
 check(ks(H0 + 55 * MIN) == [], "재시작 대기 중이면 건너뛴다")
