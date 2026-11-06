@@ -545,8 +545,13 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         boxes = box_stats(ms.load_config())
     except Exception:
         boxes = []
+    try:
+        import marina_resources
+        resources = marina_resources.cached_text(ms.load_sessions())
+    except Exception:
+        resources = ""
     return {**stats, "usage": use, "accountUsage": account_usage(), "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
-            "boxes": boxes,
+            "boxes": boxes, "resources": resources,
             "anyBusy": any(r["busy"] for r in rows)}
 
 
@@ -1021,7 +1026,9 @@ def footer(snap: dict[str, Any]) -> str:
              heavy_text(snap.get("heavy")),
              f"<t:{int(time.time())}:R> 갱신"]
     # 원격 박스는 자기 줄로 — 한 줄에 맥·윈도우가 섞이면 어느 기계 값인지 헷갈린다(형 2026-11-05 "줄바꿈")
-    return "\n".join(["-# " + " · ".join(p for p in parts if p)] + ["-# " + box_text(b) for b in snap.get("boxes") or []])
+    # 방별 자원 상위(형 2026-11-06)는 맥 줄 다음·박스 줄 앞
+    return "\n".join(["-# " + " · ".join(p for p in parts if p)] + (["-# " + snap["resources"]] if snap.get("resources") else [])
+                     + ["-# " + box_text(b) for b in snap.get("boxes") or []])
 
 
 # ── Discord ─────────────────────────────────────────────────────────────────
