@@ -76,37 +76,44 @@ main = items["ovation/main"]
 check(round(main["cpu"], 1) == 2.5 and main["docker_cpu"] == 20.0, f"메인 방은 compose 이름 ovation-main-… 을 가져가고 워크트리 컨테이너는 안 가져간다: {main}")
 cloud = items["mdc/cloud"]
 check(round(cloud["cpu"], 1) == 241.0, f"cwd 가 방 root 하위인 gradle 데몬은 그 방(90+1 + 150): {cloud}")
-check(items["공용 코틀린 데몬"]["cpu"] == 210.0 and items["공용 코틀린 데몬"]["rss"] == (1048576 + 2621440 + 102400) * 1024, f"코틀린 데몬(gradle 데몬 밑 것 포함)은 공용 코틀린으로: {items.get('공용 코틀린 데몬')}")
-check(items["공용 gradle 데몬"]["cpu"] == 60.0, f"공용 gradle 데몬: {items.get('공용 gradle 데몬')}")
-check(items["공용 도커"]["docker_cpu"] == 31.0, f"주인 모를 컨테이너는 공용 도커: {items.get('공용 도커')}")
+check(items["kotlin-daemon (shared)"]["cpu"] == 210.0 and items["kotlin-daemon (shared)"]["rss"] == (1048576 + 2621440 + 102400) * 1024, f"코틀린 데몬(gradle 데몬 밑 것 포함)은 공용 코틀린으로: {items.get('kotlin-daemon (shared)')}")
+check(items["gradle-daemon (shared)"]["cpu"] == 60.0, f"공용 gradle 데몬: {items.get('gradle-daemon (shared)')}")
+check(items["docker (shared)"]["docker_cpu"] == 31.0, f"주인 모를 컨테이너는 공용 도커: {items.get('docker (shared)')}")
 check(not any("python" in str(i) for i in items.values()) and calls.count("ps") == 1 and calls.count("lsof") == 1 and calls.count("docker") == 1
       and sum("tmux" in c for c in calls) == 1, f"명령은 한 판에 각 1회: {calls}")
 
-# 표(형 2026-11-06 '따로 표'): 제목 한 줄 + 방마다 `이름 CPU% 막대 메모리` 고정폭 한 줄, CPU 순 상위 5
+# 표(형 2026-11-06 "제대로"): 제목 + 코드 블록 하나(``` 언어 없음) 안에 칸 제목 줄 + 행, CPU 순 상위 5. 표 안은 ASCII(영어 공용 이름, 자름은 ~)
 text = mr.usage_text(list(items.values()), ncpu=2)
 ls = text.split("\n")
-check(ls[0].startswith("### 🔥 자원") and "2코어" in ls[0], f"제목(맥 코어 수): {ls[0]}")
-# CPU 는 맥 전체 대비 %(형 2026-11-06) — 252% 를 2코어로 나누면 126 → 100 으로 막는다, 막대도 맥 전체 기준
-check(ls[1].startswith("`ovation/a2-1-plan-e…") and " 100%" in ls[1] and "3.6G" in ls[1] and ls[1].endswith("`"), f"CPU 순 + 20칸 자름: {ls[1]}")
-check("█████" in ls[1] and " 100%" in ls[2], f"꽉 찬 막대, 2등 다음 줄: {ls[1:3]}")
+rows = ls[3:-1]
+check(ls[0] == "### 🔥 많이 쓰는 곳 (1분마다)" and ls[1] == "```" and ls[-1] == "```" and text.count("```") == 2, f"제목 + 코드 블록 하나: {ls}")
+check(ls[2].split() == ["CPU", "MEM"], f"칸 제목 줄: {ls[2]!r}")
+# CPU 는 맥 전체 대비 %(형 2026-11-06) — 252% 를 2코어로 나누면 126 → 100 으로 막는다
+check(rows[0].startswith("ovation/a2-1-plan-exe~ ") and " 100%" in rows[0] and rows[0].endswith(" 3.6G"), f"CPU 순 + 22칸 자름(~): {rows[0]!r}")
+check(" 100%" in rows[1] and rows[1].startswith("mdc/cloud"), f"2등 다음 줄: {rows[1]!r}")
 t12 = mr.usage_text(list(items.values()), ncpu=12)
-check(" 21%" in t12.split("\n")[1] and "█░░░░" in t12.split("\n")[1], f"12코어면 252% → 21%·막대 1칸: {t12.split(chr(10))[1]}")
-check(len(ls) <= 6, f"상위 5개까지: {text}")
+check(" 21%" in t12.split("\n")[3], f"12코어면 252% → 21%: {t12.split(chr(10))[3]!r}")
+check(len(rows) <= 5, f"상위 5개까지: {text}")
 check("ovation/main" not in text and "stray" not in text, f"문턱(5%·200MB) 미만은 뺀다: {text}")
-check(len({mr._dw(l) for l in ls[1:]}) == 1, f"줄 폭이 같다(한글 2칸): {[mr._dw(l) for l in ls[1:]]}")
+check("kotlin-daemon (shared)" in text and "공용" not in text and "█" not in text and all(c.isascii() for c in "\n".join(ls[2:-1])), f"표 안은 ASCII·영어 공용 이름: {text}")
+check(len({len(l) for l in ls[2:-1]}) == 1 and len(rows) >= 2, f"칸 제목 줄과 모든 행이 같은 길이: {[len(l) for l in ls[2:-1]]}")
 check(mr.usage_text([]) == "" and mr.usage_text([{"ref": "x/y", "cpu": 4.0, "rss": 100 * M, "docker_cpu": 0.0, "docker_rss": 0}]) == "", "아무것도 없으면 빈 글")
 many = [{"ref": f"p/t{i}", "cpu": 10.0 * (i + 1), "rss": G, "docker_cpu": 0.0, "docker_rss": 0} for i in range(8)]
-check(mr.usage_text(many).count("p/t") == 5 and mr.usage_text(many).split("\n")[1].startswith("`p/t7 "), f"상위 5: {mr.usage_text(many)}")
+check(mr.usage_text(many).count("p/t") == 5 and mr.usage_text(many).split("\n")[3].startswith("p/t7 "), f"상위 5: {mr.usage_text(many)}")
 check("p/t" in mr.usage_text([{"ref": "p/t", "cpu": 3.0, "rss": 300 * M, "docker_cpu": 0.0, "docker_rss": 0}]), "메모리만 커도 낀다")
-long = [{"ref": "공용 " + "가" * 15, "cpu": 100.0 + i, "rss": G, "docker_cpu": 0.0, "docker_rss": 0} for i in range(5)]
+long = [{"ref": "x" * 40 + str(i), "cpu": 100.0 + i, "rss": G, "docker_cpu": 0.0, "docker_rss": 0} for i in range(5)]
 check(len(mr.usage_text(long, top=50)) <= mr.TEXT_MAX and len(mr.usage_text(long)) <= mr.TEXT_MAX, f"표 글자 한도: {len(mr.usage_text(long))}")
+# 방 이름에 한글이 섞여도 폭(한글 2칸)으로 맞춘다
+kr = mr.usage_text([{"ref": "p/" + "가" * 15, "cpu": 100.0, "rss": G, "docker_cpu": 0.0, "docker_rss": 0},
+                    {"ref": "p/abc", "cpu": 90.0, "rss": G, "docker_cpu": 0.0, "docker_rss": 0}], ncpu=1).split("\n")
+check(len({mr._dw(l) for l in kr[2:-1]}) == 1, f"한글 이름도 폭이 같다: {[mr._dw(l) for l in kr[2:-1]]}")
 
 # docker 가 없거나 실패해도 나머지는 나온다
 def nodocker(argv, timeout=10.0, any_rc=False):
     return "" if argv[0].endswith("docker") else fake(argv, timeout, any_rc)
 mr._out = nodocker
 no = {i["ref"]: i for i in mr.room_usage(recs)}
-check(no["ovation/a2-1-plan-execution"]["docker_cpu"] == 0 and "공용 도커" not in no and round(no["mdc/cloud"]["cpu"]) == 241, "docker 실패 = 빼고 진행")
+check(no["ovation/a2-1-plan-execution"]["docker_cpu"] == 0 and "docker (shared)" not in no and round(no["mdc/cloud"]["cpu"]) == 241, "docker 실패 = 빼고 진행")
 mr._out = lambda argv, timeout=10.0, any_rc=False: ""
 check(mr.usage_text(mr.room_usage(recs)) == "", "전부 실패해도 죽지 않고 빈 글")
 
@@ -114,7 +121,7 @@ check(mr.usage_text(mr.room_usage(recs)) == "", "전부 실패해도 죽지 않�
 mr._out = fake
 mr._CACHE.clear()
 t1 = mr.cached_text(recs, wait=True)
-check(t1.startswith("### 🔥"), f"처음 재기: {t1}")
+check(t1.startswith("### 🔥 많이 쓰는 곳"),f"처음 재기: {t1}")
 n = len(calls); mr.cached_text(recs, wait=True)
 check(len(calls) == n, "60초 안엔 다시 재지 않는다")
 mr._CACHE[0] = (time.time() - 100, mr._CACHE[0][1]); mr.cached_text(recs, wait=True)
@@ -149,12 +156,12 @@ sn = {"diskFree": G, "resources": "### 🔥 " + "y" * 300}
 out = mb2.render(sn)
 check(sn["resources"] == "" and mb2._chars(out) + len(mb2.footer(sn)) < 4000, f"넘치면 자원 줄을 뺀다: {mb2._chars(out) + len(mb2.footer(sn))}")
 
-# 꼬리말: 자원 표가 맨 위(작은 글씨 아님), 그 아래 맥 줄·박스 줄, 없으면 안 그린다
+# 꼬리말: 맥 섹션(제목 + 디스크 줄) → 박스 줄 → 많이 쓰는 곳 표, 표가 없으면 안 그린다
 G_ = 1 << 30
-line = mb.footer({"diskFree": 120 * G_, "resources": "### 🔥 자원\n`a/b 90%`", "boxes": [{"name": "윈도우", "up": False}]})
+line = mb.footer({"diskFree": 120 * G_, "resources": "### 🔥 많이 쓰는 곳\n```\na/b 90%\n```", "boxes": [{"name": "윈도우", "up": False}]})
 ls = line.split("\n")
-check(len(ls) == 4 and ls[0] == "### 🔥 자원" and ls[1] == "`a/b 90%`" and ls[2].startswith("-# 디스크") and ls[3] == "-# 윈도우 꺼짐", f"줄 순서: {ls}")
-check(mb.footer({"diskFree": G_}).count("\n") == 0, "값이 없으면 줄을 더하지 않는다")
+check(len(ls) == 7 and ls[0] == "### 🖥 맥" and ls[1].startswith("-# 디스크") and ls[2] == "-# 윈도우 꺼짐" and ls[3] == "### 🔥 많이 쓰는 곳" and ls[5] == "a/b 90%", f"줄 순서: {ls}")
+check(mb.footer({"diskFree": G_}).count("\n") == 1, "표가 없으면 줄을 더하지 않는다(맥 제목 + 디스크 줄)")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY

@@ -895,8 +895,8 @@ def heavy_counts() -> "tuple[int, int] | None":
 
 def sys_stats() -> dict[str, Any]:
     """CPU·메모리 — 못 읽은 값은 None(그 항목은 안 그린다). 맥 기준이고 리눅스에서는 CPU 만 나온다."""
-    out: dict[str, Any] = {"cpu": None, "ncpu": os.cpu_count() or None, "memUsed": None, "memLevel": None, "swapUsed": None,
-                           "heavy": heavy_counts()}
+    out: dict[str, Any] = {"cpu": None, "ncpu": os.cpu_count() or None, "memUsed": None, "memLevel": None, "memTotal": None,
+                           "swapUsed": None, "swapTotal": None, "heavy": heavy_counts()}
     try:                                   # 모든 프로세스의 %CPU 합 ÷ 코어 수 = 전체 중 몇 %
         out["cpu"] = sum(float(x) for x in _cmd_out(["ps", "-A", "-o", "%cpu="]).split()) / (out["ncpu"] or 1)
     except ValueError:
@@ -907,35 +907,57 @@ def sys_stats() -> dict[str, Any]:
     lv = _cmd_out(["sysctl", "-n", "kern.memorystatus_vm_pressure_level"]).strip()
     if lv.isdigit():
         out["memLevel"] = int(lv)          # 1 정상 · 2 경고 · 4 위험(macOS 가 스스로 매긴다)
-    m = re.search(r"used = ([\d.]+)([MG])", _cmd_out(["sysctl", "-n", "vm.swapusage"]))
+    t = _cmd_out(["sysctl", "-n", "hw.memsize"]).strip()
+    if t.isdigit():
+        out["memTotal"] = float(t)
+    m = re.search(r"total = ([\d.]+)([MG]).*?used = ([\d.]+)([MG])", _cmd_out(["sysctl", "-n", "vm.swapusage"]))
     if m:
-        out["swapUsed"] = float(m.group(1)) * (1 << 30 if m.group(2) == "G" else 1 << 20)
+        unit = lambda u: 1 << 30 if u == "G" else 1 << 20
+        out["swapTotal"] = float(m.group(1)) * unit(m.group(2))
+        out["swapUsed"] = float(m.group(3)) * unit(m.group(4))
     return out
 
 
-def _gb(n: float) -> str:
-    g = n / (1 << 30)
-    return f"{g:.0f}GB" if g >= 20 else f"{g:.1f}GB"
+def _g(n: float) -> str:
+    """바이트 → '21.3' / '36' (GB 단위, 소수 .0 은 뗀다)."""
+    s = f"{n / (1 << 30):.1f}"
+    return s[:-2] if s.endswith(".0") else s
 
 
-def cpu_text(cpu: "float | None", load: "float | None", ncpu: "int | None") -> str:
-    """부하 숫자(load) 대신: 전체 코어 중 몇 % 를 쓰나 + 코어 수보다 일이 많으면 '밀림 N배'(형 2026-10-06)."""
+def _gbar(pct: float) -> str:
+    return "`" + _bar(max(0.0, min(100.0, pct))) + "`"
+
+
+def cpu_line(cpu: "float | None", load: "float | None", ncpu: "int | None") -> str:
+    """맥 전체 중 몇 % + 코어 몇 개 분량 + 코어보다 일이 많으면 '밀림 N배'(형 2026-10-06·11-06)."""
     if cpu is None or not ncpu:
         return ""
     pct = min(100, round(cpu))
     wait = (load or 0.0) / ncpu
     light = "🔴" if pct >= 90 or wait >= 2 else "🟡" if pct >= 70 or wait >= 1 else "🟢"
-    return f"CPU {light} {pct}%" + (f" · 밀림 {wait:.1f}배" if wait >= 1 else "")
+    return (f"CPU {light} {pct}% {_gbar(pct)} {ncpu}코어 중 {pct * ncpu / 100:.1f}개"
+            + (f" · 밀림 {wait:.1f}배" if wait >= 1 else ""))
 
 
-def mem_text(used: "float | None", level: "int | None", swap: "float | None") -> str:
+def mem_line(used: "float | None", level: "int | None", total: "float | None") -> str:
+    """신호등은 macOS 가 스스로 매긴 압박 단계(모르면 사용률). 쓴 양 = 사용률 × 전체."""
     if used is None:
         return ""
     if level is None:
         light = "🔴" if used >= 90 else "🟡" if used >= 80 else "🟢"
     else:
         light = "🔴" if level >= 4 else "🟡" if level >= 2 else "🟢"
-    return f"메모리 {light} {round(used)}%" + (f" · 스왑 {_gb(swap)}" if swap and swap >= (1 << 30) else "")
+    amount = f"{_g(used / 100 * total)} / {_g(total)}GB ({round(used)}%)" if total else f"{round(used)}%"
+    return f"메모리 {light} {amount} {_gbar(used)}"
+
+
+def swap_line(used: "float | None", total: "float | None") -> str:
+    """쓴/전체 비율 ≥50% 노랑 ≥80% 빨강, 1GB 미만이면 초록. 스왑이 없으면(전체 0) 줄을 뺀다."""
+    if used is None or not total:
+        return ""
+    ratio = used / total * 100
+    light = "🟢" if used < (1 << 30) else "🔴" if ratio >= 80 else "🟡" if ratio >= 50 else "🟢"
+    return f"스왑 {light} {_g(used)} / {_g(total)}GB {_gbar(ratio)}"
 
 
 def heavy_text(counts: "tuple[int, int] | None") -> str:
@@ -1027,15 +1049,16 @@ def box_text(b: dict[str, Any]) -> str:
 
 
 def footer(snap: dict[str, Any]) -> str:
-    parts = [f"디스크 {snap.get('diskFree', 0) // (1 << 30)}GB 남음",
-             cpu_text(snap.get("cpu"), snap.get("load"), snap.get("ncpu")),
-             mem_text(snap.get("memUsed"), snap.get("memLevel"), snap.get("swapUsed")),
-             heavy_text(snap.get("heavy")),
+    """'### 🖥 맥'(CPU·메모리·스왑 줄 + 디스크·실행·시각 작은 글씨) → 원격 박스 줄 → '### 🔥 많이 쓰는 곳' 표(형 2026-11-06 "제대로").
+    원격 박스는 자기 줄로 — 맥·윈도우가 섞이면 어느 기계 값인지 헷갈린다(형 2026-11-05)."""
+    parts = [f"디스크 {snap.get('diskFree', 0) // (1 << 30)}GB 남음", heavy_text(snap.get("heavy")),
              f"<t:{int(time.time())}:R> 갱신"]
-    # 원격 박스는 자기 줄로 — 한 줄에 맥·윈도우가 섞이면 어느 기계 값인지 헷갈린다(형 2026-11-05 "줄바꿈")
-    # 방별 자원 표(형 2026-11-06 '따로 표')는 맨 위 — 작은 글씨 한 줄 나열은 눈에 안 들어왔다. 그 아래 맥 줄·박스 줄
-    return "\n".join(([snap["resources"]] if snap.get("resources") else []) + ["-# " + " · ".join(p for p in parts if p)]
-                     + ["-# " + box_text(b) for b in snap.get("boxes") or []])
+    mac = [cpu_line(snap.get("cpu"), snap.get("load"), snap.get("ncpu")),
+           mem_line(snap.get("memUsed"), snap.get("memLevel"), snap.get("memTotal")),
+           swap_line(snap.get("swapUsed"), snap.get("swapTotal"))]
+    return "\n".join(["### 🖥 맥"] + [x for x in mac if x] + ["-# " + " · ".join(p for p in parts if p)]
+                     + ["-# " + box_text(b) for b in snap.get("boxes") or []]
+                     + ([snap["resources"]] if snap.get("resources") else []))
 
 
 # ── Discord ─────────────────────────────────────────────────────────────────

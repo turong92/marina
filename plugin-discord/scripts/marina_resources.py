@@ -23,9 +23,8 @@ TTL = 60.0          # 이만큼 지나면 뒤에서 다시 잰다
 MAX_AGE = 180.0     # 이보다 묵은 값은 안 그린다
 MIN_CPU = 5.0       # % — 이 미만이고
 MIN_RSS = 200 * (1 << 20)   # 이 미만이면 뺀다
-NAME_MAX = 20
+NAME_MAX = 22
 TEXT_MAX = 400      # 꼬리말 표가 #상태 한 메시지(4000자) 안에 들게 — 넘치면 render 가 표를 뺀다
-BAR = 5
 
 _UNITS = {"b": 1, "kb": 1000, "kib": 1 << 10, "mb": 1000 ** 2, "mib": 1 << 20, "gb": 1000 ** 3, "gib": 1 << 30,
           "tb": 1000 ** 4, "tib": 1 << 40}
@@ -153,7 +152,7 @@ def room_usage(recs: list) -> list:
     shared: dict = {}
 
     def share(name: str) -> dict:
-        return shared.setdefault(name, {"ref": "공용 " + name, "cpu": 0.0, "rss": 0, "docker_cpu": 0.0, "docker_rss": 0})
+        return shared.setdefault(name, {"ref": name + " (shared)","cpu": 0.0, "rss": 0, "docker_cpu": 0.0, "docker_rss": 0})
 
     procs = parse_ps(_out(["/bin/ps", "-Ao", "pid=,ppid=,pcpu=,rss=,comm="]))
     kids: dict = {}
@@ -183,7 +182,7 @@ def room_usage(recs: list) -> list:
             if owner:
                 item = rooms[owner]
             else:
-                item = share("코틀린 데몬" if "kotlin" in cwd else "gradle 데몬" if cwd else "java 데몬")
+                item = share("kotlin-daemon" if "kotlin" in cwd else "gradle-daemon" if cwd else "java-daemon")
             c, r = _subtree(procs, kids, pid, seen)
             item["cpu"] += c
             item["rss"] += r
@@ -194,7 +193,7 @@ def room_usage(recs: list) -> list:
     prefixes = sorted(((pre.lower(), ref) for _, ref, pre in roots), key=lambda x: -len(x[0]))
     for name, cpu, rss in docker:
         owner = next((ref for pre, ref in prefixes if name.lower().startswith(pre)), None)
-        item = rooms[owner] if owner else share("도커")
+        item = rooms[owner] if owner else share("docker")
         item["docker_cpu"] += cpu
         item["docker_rss"] += rss
     return list(rooms.values()) + list(shared.values())
@@ -211,17 +210,17 @@ def _dw(s: str) -> int:
 
 
 def _cell(s: str, w: int) -> str:
-    """w 칸에 맞춰 자르고(…) 오른쪽을 빈칸으로 채운다."""
+    """w 칸에 맞춰 자르고(ASCII '~' — 폭 1 보장) 오른쪽을 빈칸으로 채운다."""
     if _dw(s) > w:
         while s and _dw(s) > w - 1:
             s = s[:-1]
-        s += "…"
+        s += "~"
     return s + " " * (w - _dw(s))
 
 
 def usage_text(items: list, top: int = 5, ncpu: "int | None" = None) -> str:
-    """'### 🔥 자원' 제목 + 방마다 고정폭 한 줄 `이름 CPU% 막대 메모리` — CPU 순 상위(형 2026-11-06 '따로 표', 한 줄 나열은 눈에 안 들어온다).
-    CPU 는 맥 전체(코어 수) 대비 % — ps 의 222%(코어 2.2개)는 헷갈린다(형 2026-11-06). 막대도 맥 전체 기준(5칸 = 100%)."""
+    """'### 🔥 많이 쓰는 곳' 제목 + 코드 블록 하나(칸 제목 줄 + 행) — CPU 순 상위(형 2026-11-06 "제대로").
+    표 안은 ASCII(공용 이름도 영어)라 글꼴이 달라도 칸이 맞는다. CPU 는 맥 전체(코어 수) 대비 %."""
     ncpu = max(1, int(ncpu or os.cpu_count() or 1))
     rows = []
     for it in items:
@@ -232,15 +231,12 @@ def usage_text(items: list, top: int = 5, ncpu: "int | None" = None) -> str:
     rows.sort(key=lambda x: (-x[0], -x[1]))
     if not rows:
         return ""
-    lines = ["### 🔥 자원 (맥 %d코어 대비 CPU · 1분마다)" % ncpu]
-    for cpu, rss, ref in rows[:top]:
-        pct = min(100.0, cpu / ncpu)
-        n = max(0, min(BAR, int(pct / 100 * BAR + 0.5)))
-        lines.append("`%s %4d%% %s %5s`" % (_cell(ref, NAME_MAX), round(pct), "█" * n + "░" * (BAR - n), _fmt_rss(rss)))
-    text = "\n".join(lines)
-    while len(text) > TEXT_MAX and len(lines) > 2:
-        lines.pop()
-        text = "\n".join(lines)
+    body = ["%s %4s %5s" % (" " * NAME_MAX, "CPU", "MEM")] + [
+        "%s %4s %5s" % (_cell(ref, NAME_MAX), "%d%%" % round(min(100.0, cpu / ncpu)), _fmt_rss(rss)) for cpu, rss, ref in rows[:top]]
+    text = "\n".join(["### 🔥 많이 쓰는 곳 (1분마다)", "```"] + body + ["```"])
+    while len(text) > TEXT_MAX and len(body) > 2:
+        body.pop()
+        text = "\n".join(["### 🔥 많이 쓰는 곳 (1분마다)", "```"] + body + ["```"])
     return text
 
 
