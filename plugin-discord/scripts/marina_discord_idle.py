@@ -334,20 +334,35 @@ class Idler:
                     self._maybe_sync(rec, name, ref, last, st, now, every)
                 if ms.is_codex(rec):
                     continue                                   # 코덱스 방은 컴팩트·캐시 유지 글 대상 아님
+                ca = st.get("continueAfter")
+                if isinstance(ca, (int, float)) and not isinstance(ca, bool):
+                    self._continue_tick(rec, name, ref, float(ca), now)      # 압축이 끝나면 '이어서' 한 줄
                 if _same(st.get("compactedFor"), last):
                     continue                                   # 이 대화 구간은 이미 컴팩트했다
                 touched = max(last, float(st.get("lastKeep") or 0.0))      # 캐시가 마지막으로 데워진 시각
                 want = st.get("want")                          # 남아 있으면 지난 시도를 못 쳤다(keep_done 이 지운다) — 그 뒤 잠시 쉰다
                 tried = float(want.get("at") or 0.0) if isinstance(want, dict) and isinstance(want.get("at"), (int, float)) else -1e18
-                if (now - touched < every or now - self.keep_checked.get(ref, -1e18) < KEEP_RECHECK or now - tried < KEEP_FAIL_BACKOFF
+                if (now - self.keep_checked.get(ref, -1e18) < KEEP_RECHECK or now - tried < KEEP_FAIL_BACKOFF
                         or now - self.keep_spawned.get(ref, -1e18) < KEEP_SPAWN_WAIT):
                     continue
                 self.keep_checked[ref] = now
+                pct = _ctx_pct(rec)                            # 컨텍스트가 차면 50분을 기다리지 않는다(방이 형에게 /compact 를 부탁하고 멈추던 것, 형 2026-11-05·11-08)
+                hard = pct >= CTX_HARD_PCT and now - last >= CTX_HARD_QUIET
+                soft = pct >= CTX_SOFT_PCT and now - last >= CTX_SOFT_QUIET
+                if now - touched < every and not (hard or soft):
+                    continue
                 if _attached(name):
                     continue                                   # 형이 터미널로 보는 중 — 끼어들지 않는다
                 if mb._pane_busy(name)[1]:
                     continue                                   # 턴을 도는 중 — 캐시를 스스로 쓰고, 띄워도 쉬는 순간이 안 와 헛시도만 한다(형 2026-11-06)
-                if chat or piece_done(rec, now):
+                extra: dict[str, Any] = {}
+                if hard and not _selecting(name):
+                    action, text, extra = "compact", ms.COMPACT_KEEP_TEXT, {"continue": True}      # 하던 중이어도 쉬는 틈에 — 끝나면 이어서
+                elif soft and (chat or piece_done(rec, now)):
+                    action, text = "compact", ms.COMPACT_KEEP_TEXT                                  # 일 조각이 끝난 방 — 이어서는 필요 없다
+                elif now - touched < every:
+                    continue
+                elif chat or piece_done(rec, now):
                     if now - touched >= CACHE_TTL:
                         continue                               # 캐시가 식었다 — 지금처럼 2시간 뒤 내린다
                     action, text = "compact", ms.COMPACT_KEEP_TEXT
@@ -355,7 +370,7 @@ class Idler:
                     action, text = "compact", ms.COMPACT_KEEP_TEXT
                 else:
                     action, text = "keepalive", ms.KEEPALIVE_TEXT
-                _keep_save(rec, want={"action": action, "last": last, "at": now})
+                _keep_save(rec, want=dict({"action": action, "last": last, "at": now}, **extra))
                 self.keep_spawned[ref] = now
                 mb._spawn_type(name, text, str(rec.get("channelId") or ""), "")
                 _idle_log("{} 시도 {} · 쉰={:.2f}h".format("컴팩트" if action == "compact" else "캐시 유지", ref, (now - last) / 3600))
@@ -363,6 +378,19 @@ class Idler:
             except Exception as exc:
                 mb._log(f"cache-keep {ref}: {exc!r}")
         return done
+
+    def _continue_tick(self, rec: dict[str, Any], name: str, ref: str, since: float, now: float) -> None:
+        """HARD 압축을 친 방: 압축 시도(since) 뒤 compact_boundary 가 생기고 방이 쉬면 '이어서' 를 한 번 친다(표시는 치기 직전에 지운다 — 두 번 안 친다).
+        CONTINUE_WAIT 안에 경계가 안 생기면(압축 실패) 표시만 지운다."""
+        if not _compact_boundary_after(rec, since):
+            if now - since > CONTINUE_WAIT:
+                _keep_save(rec, continueAfter=None)
+            return
+        if _attached(name) or mb._pane_busy(name)[1] or _selecting(name):
+            return
+        _keep_save(rec, continueAfter=None)
+        mb._spawn_type(name, ms.CONTINUE_TEXT, str(rec.get("channelId") or ""), "")
+        _idle_log(f"압축 끝 — 이어서 {ref}")
 
     def _maybe_sync(self, rec: dict[str, Any], name: str, ref: str, last: float, st: dict[str, Any], now: float, every: float) -> None:
         """일 조각이 끝나고 50분 쉰 방을 origin 기본 브랜치에 맞춘다(활동 시각당 한 번). 계산(fetch·임시 워크트리 rebase)은 느릴 수 있어
@@ -493,6 +521,11 @@ CACHE_TTL = 3600.0                # 이 시간이 지난 캐시는 이미 식었
 KEEP_SPAWN_WAIT = 150.0           # 입력 프로세스는 최대 120초 기다린다 — 그동안 같은 방에 또 띄우지 않는다
 KEEP_FAIL_BACKOFF = 240.0         # 못 친 시도(방이 안 쉼) 뒤 다시 띄우기까지 — 50~60분 창 안에서 세 번쯤(2.6분마다 헛시도하던 것, 2026-11-06)
 KEEP_RECHECK = 60.0              # 한 방을 무겁게 판정하는 최소 간격(입력 못 한 방을 20초마다 다시 보지 않게)
+CTX_HARD_PCT = 85.0               # 컨텍스트가 이만큼 차면 하던 중이어도 쉬는 틈에 압축하고 끝나면 '이어서'
+CTX_HARD_QUIET = 20.0             # 마지막 활동 뒤 이만큼 조용해야(턴 끝 직후 끼어들지 않게)
+CTX_SOFT_PCT = 60.0               # 이만큼 차고 일 조각이 끝난 방은 50분 안 기다리고 압축(이어서 없음)
+CTX_SOFT_QUIET = 60.0
+CONTINUE_WAIT = 1800.0            # 압축 시도 뒤 경계(compact_boundary)가 이 시간 안에 안 생기면 실패로 보고 '이어서' 표시를 지운다
 _OPEN_STATUS = re.compile(r"^상태:\s*(진행 중|막힘)")
 
 
@@ -573,6 +606,39 @@ def piece_done(rec: dict[str, Any], now: float) -> bool:
         return False
 
 
+def _ctx_pct(rec: dict[str, Any]) -> float:
+    """방 컨텍스트 %(#상태 줄과 같은 값). 모르면 0 — 모르는 방을 서둘러 압축하지 않는다."""
+    try:
+        v = mb._ctx_percent(rec)
+    except Exception:
+        return 0.0
+    return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
+def _compact_boundary_after(rec: dict[str, Any], since: float) -> bool:
+    """세션 기록 끝(256KB)에 since 뒤의 compact_boundary 줄이 있나 — 압축이 끝났다는 표시."""
+    tr = mb._session_transcript(rec)
+    if not tr:
+        return False
+    try:
+        with open(tr, "rb") as fh:
+            end = fh.seek(0, 2)
+            fh.seek(max(0, end - 262144))
+            data = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return False
+    for raw in data.splitlines():
+        if "compact_boundary" not in raw:
+            continue
+        try:
+            row = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("subtype") == "compact_boundary" and (mb._row_time(row) or 0.0) > since:
+            return True
+    return False
+
+
 def keep_guard(rec: dict[str, Any], text: str) -> bool:
     """치기 직전 확인(입력 프로세스가 부른다): keep_tick 이 정할 때와 같은 일이고, 그 뒤 사람이 말하지 않았고, 터미널로 보고 있지 않다."""
     want = _keep_state(rec).get("want")
@@ -593,7 +659,8 @@ def keep_done(rec: dict[str, Any]) -> None:
     if not isinstance(want, dict):
         return
     if want.get("action") == "compact":
-        _keep_save(rec, compactedFor=want.get("last"), want=None)
+        extra = {"continueAfter": want.get("at")} if want.get("continue") else {}     # HARD: 압축이 끝나면 keep_tick 이 '이어서' 를 친다
+        _keep_save(rec, compactedFor=want.get("last"), want=None, **extra)
     else:
         _keep_save(rec, lastKeep=want.get("at"), want=None)
 

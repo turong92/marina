@@ -1801,6 +1801,8 @@ KEEPALIVE_MARK = "[마리나 캐시 유지]"
 KEEPALIVE_TEXT = KEEPALIVE_MARK + " 답하지 말고 '.' 만 출력해. 도구·Discord 도 쓰지 마."
 COMPACT_KEEP_TEXT = ("/compact 지금 하던 일·형이 정한 것(원문)·건드린 파일 경로·확인한 숫자와 검증 상태·다음 할 일·막힌 것은 빠짐없이 남기고, "
                      "끝난 탐색 과정과 도구 출력은 줄여라.")
+# 컨텍스트가 차서 마리나가 압축을 친 방(HARD)에 압축이 끝난 뒤 한 번 치는 글 — 사람 글처럼 다룬다(일을 다시 시작하는 턴).
+CONTINUE_TEXT = "[마리나] 압축 끝났어 — 압축 전에 하던 일을 진행 문서·요약 기준으로 이어서 진행해. 끝나면 Discord 로 보고."
 
 
 def _keepalive_flag(sd: Path) -> Path:

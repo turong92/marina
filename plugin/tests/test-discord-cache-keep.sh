@@ -245,6 +245,66 @@ ms.hook_prompt({"hook_event_name": "UserPromptSubmit", "prompt": ms.COMPACT_KEEP
 check((sd / "turn-at").read_text() == "111", "컴팩트 입력은 turn-at 을 안 쓴다")
 ms.hook_activity({"hook_event_name": "UserPromptSubmit", "prompt": ms.COMPACT_KEEP_TEXT, "transcript_path": str(tr)})
 check(not (sd / "activity-at").exists(), "컴팩트 입력은 입력 중 표시·반응을 안 단다")
+# ── 컨텍스트 기준 자동 압축(형 2026-11-05·11-08): 방이 형에게 /compact 를 부탁하고 멈추지 않게 ──
+# HARD(85%↑): 쉬면(턴 끝) 하던 중이어도 20초 뒤 즉시 압축 + 끝나면 '이어서' · SOFT(60%↑): 일 조각이 끝났으면 60초 뒤 즉시 압축(이어서 없음)
+ctx = [None]
+mb._ctx_percent = lambda r: ctx[0]
+def reset_room():
+    (sd / "turn-at").write_text(str(T0)); (sd / "stopped-at").write_text(str(H0)); tr.write_text(base)
+    (sd / "keep.json").unlink(missing_ok=True)
+    mb._pane_busy = real_busy; mi._selecting = lambda n: False; attached[0] = False; blockers[0] = []
+    global K; K = mi.Idler(started=0.0)
+def keep_json(): return json.loads((sd / "keep.json").read_text()) if (sd / "keep.json").exists() else {}
+reset_room(); ctx[0] = 90.0; blockers[0] = ["백그라운드 셸 1"]
+check(ks(H0 + 10) == [], "HARD: 마지막 활동 뒤 20초 전엔 안 한다")
+check(ksf(H0 + 30) == [ms.COMPACT_KEEP_TEXT], f"HARD: 85%↑ 쉬는 방은 하던 중이어도 50분 안 기다리고 즉시 압축: {typed}")
+cont_at = keep_json().get("continueAfter")
+check(isinstance(cont_at, (int, float)) and abs(cont_at - (H0 + 30)) < 1, f"HARD: 이어서 표시(continueAfter=want.at): {keep_json()}")
+check(ks(H0 + 6 * MIN) == [], "같은 대화 구간엔 다시 압축하지 않는다(경계가 아직 없으면 이어서도 안 친다)")
+tr.write_text(base + row({"type": "system", "subtype": "compact_boundary", "timestamp": iso(cont_at - 5)}))
+check(ks(H0 + 7 * MIN) == [], "압축 시도 전에 생긴 옛 경계는 압축 끝으로 안 친다")
+tr.write_text(base + row({"type": "system", "subtype": "compact_boundary", "timestamp": iso(cont_at + 20)}))
+mb._pane_busy = lambda n: (True, True)
+check(ks(H0 + 8 * MIN) == [], "경계가 생겨도 방이 아직 돌면(압축 중·턴 중) 이어서를 안 친다")
+mb._pane_busy = real_busy
+check(ks(H0 + 9 * MIN) == [ms.CONTINUE_TEXT], f"압축 끝(경계)+쉼 → 이어서 한 줄: {typed}")
+check("continueAfter" not in keep_json() or keep_json().get("continueAfter") is None, "이어서를 친 뒤 표시를 지운다")
+check(ks(H0 + 10 * MIN) == [] and ks(H0 + 11 * MIN) == [], "이어서는 한 번만")
+check(mb.typeable(ms.CONTINUE_TEXT, rec["channelId"]) and not mb.typeable(ms.CONTINUE_TEXT + " 그리고 rm", rec["channelId"]), "type 이 이어서 문구를 친다(정확 일치만)")
+check(not ms.is_keep_prompt(ms.CONTINUE_TEXT), "이어서는 일을 다시 시작하는 턴 — 사람 글처럼 다룬다")
+# 30분 안에 경계가 안 생기면(압축 실패) 이어서 없이 표시만 지운다
+reset_room(); ctx[0] = 90.0
+ks(H0 + 30)
+c2 = keep_json()["continueAfter"]
+check(ks(c2 + 29 * MIN) == [] and keep_json().get("continueAfter") is not None, "30분 전엔 표시를 둔다")
+check(ks(c2 + 31 * MIN) == [] and keep_json().get("continueAfter") is None, "30분 넘게 경계가 없으면 표시만 지운다")
+# SOFT: 60%↑ + 일 조각 끝 + 60초 뒤 즉시 압축, 이어서는 없다
+reset_room(); ctx[0] = 65.0
+check(ks(H0 + 30) == [], "SOFT: 마지막 활동 뒤 60초 전엔 안 한다")
+check(ks(H0 + 90) == [ms.COMPACT_KEEP_TEXT] and keep_json().get("continueAfter") is None, f"SOFT: 일 조각이 끝난 60%↑ 방은 즉시 압축·이어서 없음: {typed} {keep_json()}")
+reset_room(); ctx[0] = 65.0; blockers[0] = ["백그라운드 셸 1"]
+check(ks(H0 + 90) == [], "SOFT: 일 조각이 안 끝났으면(하던 중) 60%대는 즉시 압축하지 않는다")
+reset_room(); ctx[0] = 50.0
+check(ks(H0 + 3 * MIN) == [] and ks(H0 + 20 * MIN) == [] and ks(H0 + 55 * MIN) == [ms.COMPACT_KEEP_TEXT], "60% 미만은 기존 50분 규칙")
+# 건너뛰는 경우: 바쁜 방·터미널 보는 중·선택 창·같은 구간·코덱스
+reset_room(); ctx[0] = 90.0; mb._pane_busy = lambda n: (True, True)
+check(ks(H0 + 30) == [], "HARD: 턴 도는 방엔 안 한다")
+reset_room(); ctx[0] = 90.0; attached[0] = True
+check(ks(H0 + 30) == [], "HARD: 형이 터미널로 보는 중이면 안 한다")
+reset_room(); ctx[0] = 90.0; mi._selecting = lambda n: True
+check(ks(H0 + 30) == [], "HARD: 선택 창이 떠 있으면 안 한다")
+reset_room(); ctx[0] = 90.0
+(sd / "keep.json").write_text(json.dumps({"compactedFor": H0}))
+check(ks(H0 + 30) == [], "HARD: 이미 압축한 대화 구간엔 다시 안 한다")
+reset_room(); ctx[0] = 90.0; ms.is_codex = lambda r: True
+check(ks(H0 + 30) == [], "코덱스 방은 컨텍스트가 커도 대상 아님")
+ms.is_codex = real_codex
+# 입력이 안 들어갔으면(success=False) 이어서 표시도 안 남고, 못 친 뒤엔 백오프
+reset_room(); ctx[0] = 90.0
+check(ks(H0 + 30, success=False) == [ms.COMPACT_KEEP_TEXT] and "continueAfter" not in keep_json(), "입력 성공 전엔 이어서 표시를 안 남긴다")
+check(ks(H0 + 2 * MIN) == [], "못 친 뒤 4분 백오프는 HARD 에도 적용")
+check(ks(H0 + 6 * MIN) == [ms.COMPACT_KEEP_TEXT], "백오프 뒤 다시 시도")
+ctx[0] = None
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY
