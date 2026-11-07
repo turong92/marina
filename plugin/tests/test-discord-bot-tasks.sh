@@ -9,6 +9,7 @@ start_fake_discord
 fail() { echo "FAIL: $*"; exit 1; }
 msess new proj feat/a --no-start >/dev/null 2>&1 || fail "new"
 export MARINA_CLAUDE_TMP="$TMPROOT/claudetmp"
+export ROLE_EVENTS="$TMPROOT/role-events.jsonl"     # 형 실제 ~/.local/state/roles/events.jsonl 을 읽으면 #상태에 실제 숫자가 섞인다
 
 PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" <<'PY'
 import json, os, subprocess, sys, time
