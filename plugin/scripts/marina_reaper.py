@@ -36,7 +36,7 @@ from pathlib import Path
 REASON_TASK_OUTPUT = "claude-task-output"
 REASON_CWD_GONE = "cwd-gone"
 REASON_VITEST_WORKER = "vitest-worker"
-_VITEST_WORKER_RE = re.compile(r"/vitest/dist/workers/(?:forks|threads)\.js")
+_VITEST_WORKER_RE = re.compile(r"/vitest/dist/workers/(?:forks|threads|vmForks|vmThreads)\.js")
 _SYSTEM_PREFIXES = ("/System/", "/usr/", "/Applications/")
 _USER_PREFIXES = ("/usr/local/",)            # 시스템 경로처럼 보이지만 사용자 설치(homebrew intel 등)
 _EXCLUDED_COMMS = {"caddy",                 # marina 게이트웨이(marina-gateway-control.sh 가 띄움)

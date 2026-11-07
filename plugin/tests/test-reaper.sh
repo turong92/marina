@@ -113,6 +113,9 @@ def clsv(argv, **kw):
                        min_age_s=H, protected={1}, argv=argv)
 check(clsv(VW) == "vitest-worker", f"orphan vitest forks worker → {clsv(VW)}")
 check(clsv(VT) == "vitest-worker", f"orphan vitest threads worker → {clsv(VT)}")
+for vm in ("vmForks", "vmThreads"):
+    check(clsv(f"node /Users/x/p/node_modules/.pnpm/vitest@4.1.8/node_modules/vitest/dist/workers/{vm}.js") == "vitest-worker", f"orphan vitest {vm} worker")
+check(clsv("node /Users/x/p/node_modules/vitest/dist/workers/runVmTests.js") is None, "runVmTests.js is not a worker entry")
 check(clsv(VW, cwd="") == "vitest-worker", "vitest worker needs no cwd judgement")
 check(clsv(VW, ppid=555) is None, "vitest worker with a live parent untouched")
 check(clsv(VW, age=H - 1) is None, "vitest worker younger than min age untouched")
