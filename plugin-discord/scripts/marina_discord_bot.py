@@ -1838,7 +1838,8 @@ def _menu_parse(box: "list[str]") -> "tuple[str, str, list[str], int] | None":
             cur = len(opts)
     if not 2 <= len(opts) <= 9 or not cur:
         return None
-    q = next((_clean(t.strip())[:200] for t in reversed(box[:first]) if t.strip() and not set(t.strip()) <= set("─━╌┄-")), "")
+    above = next((t.strip() for t in reversed(box[:first]) if t.strip() and not set(t.strip()) <= set("─━╌┄-")), "")
+    q = _clean(above)[:200] if above.endswith(("?", "？")) else ""      # 질문(?) 줄만 — 아니면 그 위 화면 줄(비밀 가능)은 안 가져간다
     sig = hashlib.sha1(("\n".join([q] + opts)).encode("utf-8", "replace")).hexdigest()[:16]
     return sig, q, opts, cur
 

@@ -95,6 +95,13 @@ pane("────\\n Bash command\\n Do you want to proceed?\\n ❯ 1. Yes\\n  
 mb.pane_ask_tick(now=t0 + 901); mb.pane_ask_tick(now=t0 + 5000)
 check(len(posts()) == n and menu_files() == [], "권한 창은 건너뛴다")
 
+# ⑦ 질문(?) 줄이 없는 창 — 그 위 화면 줄(비밀 가능)은 올리지 않는다
+pane(IDLE); mb.pane_ask_tick(now=t0 + 6000)
+pane("────\\n DB password=hunter2secret\\n ❯ 1. Retry\\n   2. Abort\\n Enter to confirm · Esc to cancel\\n"); n = len(posts())
+mb.pane_ask_tick(now=t0 + 6001); mb.pane_ask_tick(now=t0 + 6001 + mb.PANE_ASK_GRACE + 1)
+ps = posts(); body = json.dumps(ps[-1]["b"], ensure_ascii=False) if len(ps) > n else ""
+check(body and "mperm:1:" in body and "hunter2" not in body and "DB password" not in body, f"질문 줄 없으면 위 줄 안 나감: {body[:300]}")
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY
