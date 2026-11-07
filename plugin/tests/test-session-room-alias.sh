@@ -39,6 +39,23 @@ echo "$out" | grep -q "보관했어" || fail "보관 안내: $out"
 grep -q "별칭으로 보낸 글" "$A_SD/room-inbox.jsonl" || fail "별칭이 가리킨 방 보관함에 글이 없음"
 [ ! -e "$B_SD/room-inbox.jsonl" ] || fail "엉뚱한 방(보낸 방)에 보관됨"
 
+# 객체 형식 — wake 없음/false 는 보관만, wake=true 는 잠든 방을 깨워 전달(문자열 별칭은 위처럼 깨우지 않는다)
+run <<'PY'
+import json
+import marina_session as ms
+cfg = json.loads(ms.config_path().read_text())
+cfg["roomAliases"].update({"객체": {"room": "proj/feat/a"}, "객체끔": {"room": "proj/feat/a", "wake": False},
+                           "깨움": {"room": "proj/feat/a", "wake": True}})
+ms.config_path().write_text(json.dumps(cfg))
+PY
+for n in 객체 객체끔; do
+  out="$(DISCORD_STATE_DIR="$B_SD" msess room-send "$n" "$n 글" 2>&1)" || fail "$n 실패: $out"
+  echo "$out" | grep -q "보관했어" || fail "$n 은 보관이어야 함: $out"
+done
+out="$(DISCORD_STATE_DIR="$B_SD" msess room-send 깨움 '깨워서 줄 글' 2>&1)" || fail "wake 별칭 실패: $out"
+echo "$out" | grep -q "깨웠" || fail "wake 별칭은 깨워야 함: $out"
+msess stop proj/feat/a >/dev/null 2>&1 || true
+
 # 별칭이 가리키는 방이 없으면 원래 이름이 아니라 가리키는 이름으로 못 찾았다고 알린다
 out="$(DISCORD_STATE_DIR="$B_SD" msess room-send 깨진 '글' 2>&1)" && fail "깨진 별칭이 성공함"
 echo "$out" | grep -q "nope/none" || fail "깨진 별칭 안내: $out"
