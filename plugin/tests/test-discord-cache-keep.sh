@@ -304,6 +304,62 @@ reset_room(); ctx[0] = 90.0
 check(ks(H0 + 30, success=False) == [ms.COMPACT_KEEP_TEXT] and "continueAfter" not in keep_json(), "입력 성공 전엔 이어서 표시를 안 남긴다")
 check(ks(H0 + 2 * MIN) == [], "못 친 뒤 4분 백오프는 HARD 에도 적용")
 check(ks(H0 + 6 * MIN) == [ms.COMPACT_KEEP_TEXT], "백오프 뒤 다시 시도")
+# ── 리뷰 반영(C1): 압축 뒤 같은 방을 다시 압축하지 않는다 — 실제 기록 모양(원문 '/compact …' user 줄 + 경계 + 요약, 압축 뒤 assistant 없음) ──
+def boundary(t): return row({"type": "system", "subtype": "compact_boundary", "timestamp": iso(t)})
+def summary(t): return row({"type": "user", "timestamp": iso(t), "isCompactSummary": True, "message": {"role": "user", "content": "요약"}})
+def utext(t, s): return row({"type": "user", "timestamp": iso(t), "message": {"role": "user", "content": s}})
+reset_room(); ctx[0] = 90.0
+tr.write_text(base + utext(H0 + 30, ms.COMPACT_KEEP_TEXT) + boundary(H0 + 31) + summary(H0 + 32))
+check(abs(mi.last_activity(rec) - H0) < 2, f"마리나가 친 원문 '/compact …' user 줄은 사람 활동이 아니다: {mi.last_activity(rec) - H0}")
+check(mi._ctx_pct(rec) == 0.0, "마지막 usage 뒤에 경계가 있으면 컨텍스트 0(압축 전 숫자를 믿지 않는다)")
+check(ksf(H0 + 10 * MIN) == [], f"압축 한 번 뒤엔 다시 안 친다: {typed}")
+tr.write_text(base + utext(H0 + 40, "/compact") + boundary(H0 + 41) + summary(H0 + 42))
+check(abs(mi.last_activity(rec) - H0) < 2, "'/compact' 로 시작하는 user 줄 전반은 마리나 턴으로 거른다")
+check(ksf(H0 + 10 * MIN) == [], "손으로 친 /compact 뒤에도 다시 안 친다")
+tr.write_text(base + boundary(H0 + 41) + row({"type": "assistant", "timestamp": iso(H0 + 50), "message": {"role": "assistant", "content": "답", "usage": {"input_tokens": 1}}}))
+check(mi._ctx_pct(rec) == 90.0, "경계 뒤에 usage 가 새로 찍혔으면 컨텍스트 값을 쓴다")
+tr.write_text(base + utext(H0 + 60, ms.CONTINUE_TEXT))
+check(abs(mi.last_activity(rec) - (H0 + 60)) < 2, "CONTINUE_TEXT 는 사람 글처럼 활동으로 친다")
+# I2·I3·I4 + Minor: 이어서
+def after_hard(boundary_ok=True):
+    reset_room(); ctx[0] = 90.0; ks(H0 + 30)
+    t = keep_json()["continueAfter"]
+    tr.write_text(base + (boundary(t + 20) if boundary_ok else ""))
+    return t
+t = after_hard()
+(sd / "turn-at").write_text(str(t + 5))        # 압축 뒤 사람이 말했다
+check(ks(t + 5 * MIN) == [] and keep_json().get("continueAfter") is None, "I3: 압축 뒤 사람이 말했으면 이어서 없이 표시만 지운다")
+t = after_hard(False)
+mb._pane_busy = lambda n: (True, True)
+check(ks(t + 31 * MIN) == [] and keep_json().get("continueAfter") is None, "I3: 만료는 경계가 있든 없든(방이 계속 돌아도) 표시를 지운다")
+mb._pane_busy = real_busy
+t = after_hard()
+check(ks(t + 5 * MIN) == [ms.CONTINUE_TEXT], "이어서를 친다")
+check(K.keep_spawned.get("proj/feat/a") == t + 5 * MIN, "I2: 이어서를 띄울 때도 keep_spawned 를 갱신한다")
+t = after_hard()
+ks(t + 5 * MIN, success=False)
+rec_now = ms.find_session("proj/feat/a")
+check(mi.keep_guard(rec_now, ms.CONTINUE_TEXT) is True, "I3: 입력 직전 확인 — 그대로면 친다")
+attached[0] = True
+check(mi.keep_guard(rec_now, ms.CONTINUE_TEXT) is False, "I3: 입력 직전 터미널이 붙었으면 포기")
+attached[0] = False
+(sd / "turn-at").write_text(str(t + 6 * MIN))
+check(mi.keep_guard(rec_now, ms.CONTINUE_TEXT) is False, "I3: 입력 직전 사람이 말했으면 포기")
+(sd / "turn-at").write_text(str(T0))
+check(mb.type_timeout(ms.CONTINUE_TEXT) <= 120, "I4: 이어서 입력 대기 120초")
+# I2: continueAfter 가 남은 방은 압축 판정을 건너뛴다
+reset_room(); ctx[0] = 90.0
+(sd / "keep.json").write_text(json.dumps({"continueAfter": H0 + 1}))
+check(ksf(H0 + 30) == [], "I2: 이어서 표시가 남아 있으면 압축 판정을 안 한다")
+# Minor: 채팅·로비·비서 방은 HARD 여도 이어서 없이 압축만, SOFT 는 선택 창이 떠 있으면 안 한다
+real_find2 = ms.load_sessions
+ms.load_sessions = lambda: [dict(r, kind="chat") for r in real_find2()]
+reset_room(); ctx[0] = 90.0
+check(ks(H0 + 30) == [ms.COMPACT_KEEP_TEXT] and keep_json().get("continueAfter") is None, f"채팅방은 HARD 여도 압축만(이어서 없음): {keep_json()}")
+reset_room(); ctx[0] = 65.0; mi._selecting = lambda n: True
+check(ks(H0 + 90) == [], "채팅방 SOFT 도 선택 창이 떠 있으면 안 한다")
+mi._selecting = lambda n: False
+ms.load_sessions = real_find2
 ctx[0] = None
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)

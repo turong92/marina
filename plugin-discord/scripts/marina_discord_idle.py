@@ -110,7 +110,7 @@ def _transcript_last_ts(rec: dict[str, Any]) -> float:
         if row.get("type") == "user":
             text = _user_text(row).lstrip()
             if (row.get("isMeta") or row.get("isCompactSummary") or text.startswith(ms.KEEPALIVE_MARK)
-                    or text.startswith(("<local-command-stdout>", "<local-command-caveat>", "<command-name>"))):
+                    or text.startswith(("<local-command-stdout>", "<local-command-caveat>", "<command-name>", "/compact"))):
                 pending, saw_bot = 0.0, True              # 마리나·하네스가 넣은 턴 — 그 뒤 줄들은 사람 활동이 아니다
                 continue
             if text.strip():
@@ -336,7 +336,8 @@ class Idler:
                     continue                                   # 코덱스 방은 컴팩트·캐시 유지 글 대상 아님
                 ca = st.get("continueAfter")
                 if isinstance(ca, (int, float)) and not isinstance(ca, bool):
-                    self._continue_tick(rec, name, ref, float(ca), now)      # 압축이 끝나면 '이어서' 한 줄
+                    self._continue_tick(rec, name, ref, float(ca), now, last, st.get("compactedFor"))      # 압축이 끝나면 '이어서' 한 줄
+                    continue                                   # 표시가 남은 방은 압축 판정을 건너뛴다
                 if _same(st.get("compactedFor"), last):
                     continue                                   # 이 대화 구간은 이미 컴팩트했다
                 touched = max(last, float(st.get("lastKeep") or 0.0))      # 캐시가 마지막으로 데워진 시각
@@ -357,8 +358,10 @@ class Idler:
                     continue                                   # 턴을 도는 중 — 캐시를 스스로 쓰고, 띄워도 쉬는 순간이 안 와 헛시도만 한다(형 2026-11-06)
                 extra: dict[str, Any] = {}
                 if hard and not _selecting(name):
-                    action, text, extra = "compact", ms.COMPACT_KEEP_TEXT, {"continue": True}      # 하던 중이어도 쉬는 틈에 — 끝나면 이어서
-                elif soft and (chat or piece_done(rec, now)):
+                    action, text = "compact", ms.COMPACT_KEEP_TEXT                                  # 하던 중이어도 쉬는 틈에
+                    if not chat:
+                        extra = {"continue": True}                                                  # 끝나면 이어서(채팅·로비·비서 방은 압축만)
+                elif soft and ((chat and not _selecting(name)) or piece_done(rec, now)):
                     action, text = "compact", ms.COMPACT_KEEP_TEXT                                  # 일 조각이 끝난 방 — 이어서는 필요 없다
                 elif now - touched < every:
                     continue
@@ -379,16 +382,22 @@ class Idler:
                 mb._log(f"cache-keep {ref}: {exc!r}")
         return done
 
-    def _continue_tick(self, rec: dict[str, Any], name: str, ref: str, since: float, now: float) -> None:
+    def _continue_tick(self, rec: dict[str, Any], name: str, ref: str, since: float, now: float, last: float, compacted_for: Any) -> None:
         """HARD 압축을 친 방: 압축 시도(since) 뒤 compact_boundary 가 생기고 방이 쉬면 '이어서' 를 한 번 친다(표시는 치기 직전에 지운다 — 두 번 안 친다).
-        CONTINUE_WAIT 안에 경계가 안 생기면(압축 실패) 표시만 지운다."""
+        CONTINUE_WAIT 가 지나면(경계 유무와 상관없이) 표시만 지운다. 압축 뒤 사람이 말했으면(이미 일이 이어졌다) 이어서 없이 표시만 지운다."""
+        if now - since > CONTINUE_WAIT:
+            _keep_save(rec, continueAfter=None)
+            _idle_log(f"이어서 표시 만료 {ref} — 압축 뒤 {CONTINUE_WAIT / 60:.0f}분 지나 그만둔다")
+            return
         if not _compact_boundary_after(rec, since):
-            if now - since > CONTINUE_WAIT:
-                _keep_save(rec, continueAfter=None)
+            return
+        if not _same(compacted_for, last):
+            _keep_save(rec, continueAfter=None)
             return
         if _attached(name) or mb._pane_busy(name)[1] or _selecting(name):
             return
-        _keep_save(rec, continueAfter=None)
+        _keep_save(rec, continueAfter=None, want={"action": "continue", "last": last, "at": now})      # want: 입력 직전 확인(keep_guard)·keep_done 이 쓴다
+        self.keep_spawned[ref] = now
         mb._spawn_type(name, ms.CONTINUE_TEXT, str(rec.get("channelId") or ""), "")
         _idle_log(f"압축 끝 — 이어서 {ref}")
 
@@ -610,9 +619,35 @@ def _ctx_pct(rec: dict[str, Any]) -> float:
     """방 컨텍스트 %(#상태 줄과 같은 값). 모르면 0 — 모르는 방을 서둘러 압축하지 않는다."""
     try:
         v = mb._ctx_percent(rec)
+        if _boundary_after_last_usage(rec):
+            return 0.0                                 # 압축 뒤 아직 답이 없다 — 마지막 usage 는 압축 전 숫자(같은 방을 또 압축하던 것)
     except Exception:
         return 0.0
     return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else 0.0
+
+
+def _boundary_after_last_usage(rec: dict[str, Any]) -> bool:
+    """세션 기록 끝(256KB)에서 compact_boundary 가 마지막 usage 줄보다 뒤에 있나."""
+    tr = mb._session_transcript(rec)
+    if not tr:
+        return False
+    with open(tr, "rb") as fh:
+        end = fh.seek(0, 2)
+        fh.seek(max(0, end - 262144))
+        lines = fh.read().decode("utf-8", "replace").splitlines()
+    for raw in reversed(lines):
+        if '"usage"' in raw or "compact_boundary" in raw:
+            try:
+                row = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(row, dict):
+                continue
+            if row.get("subtype") == "compact_boundary":
+                return True
+            if isinstance((row.get("message") or {}).get("usage"), dict):
+                return False
+    return False
 
 
 def _compact_boundary_after(rec: dict[str, Any], since: float) -> bool:
@@ -644,7 +679,7 @@ def keep_guard(rec: dict[str, Any], text: str) -> bool:
     want = _keep_state(rec).get("want")
     if not isinstance(want, dict):
         return False
-    action = "compact" if text == ms.COMPACT_KEEP_TEXT else "keepalive"
+    action = "compact" if text == ms.COMPACT_KEEP_TEXT else "continue" if text == ms.CONTINUE_TEXT else "keepalive"
     if want.get("action") != action:
         return False
     try:
@@ -661,6 +696,8 @@ def keep_done(rec: dict[str, Any]) -> None:
     if want.get("action") == "compact":
         extra = {"continueAfter": want.get("at")} if want.get("continue") else {}     # HARD: 압축이 끝나면 keep_tick 이 '이어서' 를 친다
         _keep_save(rec, compactedFor=want.get("last"), want=None, **extra)
+    elif want.get("action") == "continue":
+        _keep_save(rec, want=None)                         # 이어서 입력 완료 — 기준 시각은 건드리지 않는다
     else:
         _keep_save(rec, lastKeep=want.get("at"), want=None)
 

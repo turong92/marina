@@ -3272,7 +3272,7 @@ def room_send_busy_after(text: str) -> float:
 
 def type_timeout(text: str) -> float:
     """추천은 금방 안 쉬면 포기(옛 추천을 나중에 치지 않게), 슬래시·명령은 끝날 때까지 기다린다(리뷰 I5)."""
-    return 120.0 if text.startswith(SUGGEST_MARK) or ms.is_keep_prompt(text) else 1800.0
+    return 120.0 if text.startswith(SUGGEST_MARK) or ms.is_keep_prompt(text) or text == ms.CONTINUE_TEXT else 1800.0
 
 
 def _restore_suggest(channel: str, msg: str, text: str) -> None:
@@ -3894,7 +3894,7 @@ def main(argv: list[str]) -> int:
         return 0
     if a.cmd == "type":
         if typeable(a.text, a.channel):
-            keep = ms.is_keep_prompt(a.text)
+            keep = ms.is_keep_prompt(a.text) or a.text == ms.CONTINUE_TEXT     # 이어서는 사람 글처럼 다루지만 입력은 같은 확인·기록 경로
             krec = next((x for x in ms.load_sessions() if str(x.get("channelId")) == str(a.channel)), None) if keep else None
             if keep:
                 import marina_discord_idle as mi
