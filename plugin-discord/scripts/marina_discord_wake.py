@@ -570,11 +570,21 @@ def _deliver(rec: dict[str, Any], name: str, text: str, before: "Any" = None, wa
     return how
 
 
+def room_alias(ref: str) -> str:
+    """discord.json 의 roomAliases {"별칭": "<프로젝트>/<작업>"} 로 대상 이름을 푼다. 설정·별칭이 없으면 그대로."""
+    try:
+        aliases = ms.load_config().get("roomAliases")
+    except ms.SessionError:
+        return ref
+    target = aliases.get(ref) if isinstance(aliases, dict) else None
+    return target if isinstance(target, str) and target else ref
+
+
 def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: bool = False, wake: bool = False) -> str:
     """`marina session room-send` — 개발 방(클로드·코덱스)이 다른 개발 방에 말을 건다. 입력창에 '[마리나 · <보낸 방> 방에서] 글 (답은: …)' 한 줄.
     stored(잠든 방 — 깨우지 않고 보관, 다음에 뜰 때 같이 전달. 기본) | started(wake=True 일 때 잠든 방을 이 글을 첫 지시로 깨움) | delivered(입력창에 넣었고 확인) | queued(바빠서 대기열 — 코덱스는 대기 목록, 클로드는 쉬는 순간에 칠 것) |
     typed(쳤지만 입력창에 남아 있음), 못 하면 SessionError. 채팅방·비서·로비는 제한 세션이라 받지 않는다."""
-    rec = ms.find_session(ref)
+    rec = ms.find_session(room_alias(ref))
     name = f"{rec.get('project')}/{rec.get('task')}"
     if rec.get("kind") and not ms.is_codex(rec):          # 허용 목록: kind 없음(클로드 개발 방) 또는 codex 만
         raise ms.SessionError(f"{name} 은 개발 방이 아니야 — room-send 는 개발 방(클로드·코덱스)끼리만 써")

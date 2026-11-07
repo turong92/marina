@@ -5883,7 +5883,7 @@ def main(argv: list[str] | None = None) -> int:
             import marina_discord_wake as mw
             os.environ["PATH"] = daemon_path() + ":" + os.environ.get("PATH", "")      # 띄우는 claude·codex·tmux·git 을 찾게(say 와 같다)
             how = mw.room_send(a.ref, " ".join(a.text), wake=a.wake)
-            s = find_session(a.ref)
+            s = find_session(mw.room_alias(a.ref))
             what = {"started": "잠들어 있어서 이 글을 첫 지시로 줘 깨웠어", "delivered": "입력창에 전달했어",
                     "stored": "잠들어 있어서 보관했어 — 다음에 깰 때 같이 받는다(바로 깨워 일을 시키려면 --wake)",
                     "queued": "지금 바빠서 대기열에 넣었어(쉬는 순간·다음 도구 호출 뒤에 읽어)",
