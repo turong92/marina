@@ -13,6 +13,8 @@ tasks/<id>.output` 에 둔 채 5일간 CPU 97%(출력 파일은 이미 삭제됨
   2) ppid==1 이고 cwd 디렉터리가 사라짐(삭제된 워크트리·/tmp 폴더). 단 marina 데몬($MARINA_HOME/
      dashboard.pid — launchd 가 띄워 ppid=1 이고 `marina reap` CLI 는 별도 프로세스라 os.getpid() 로는
      못 알아본다)·게이트웨이(caddy)·tmux 서버(방을 품고 있다)·시스템 경로(/System /usr /Applications)는 제외.
+  3) ppid==1 이고 comm 이 node, argv 가 `…/vitest/dist/workers/(forks|threads).js` — 러너가 죽어 남은
+     vitest 워커(2026-11-08 실측 25시간 CPU 90%). cwd 는 멀쩡해서 1·2 로는 안 잡힌다. argv 는 이 판정에만 쓴다.
 여기에 시작 후 N시간(기본 6h, MARINA_REAPER_MIN_AGE_H)을 넘긴 것만 SIGTERM → 10s → SIGKILL.
 
 **규칙.** 세션 liveness(marina_sessions)와 같다 — 판정에 argv 를 쓰지 않는다. ps 는 `comm=`(실행
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -32,6 +35,8 @@ from pathlib import Path
 
 REASON_TASK_OUTPUT = "claude-task-output"
 REASON_CWD_GONE = "cwd-gone"
+REASON_VITEST_WORKER = "vitest-worker"
+_VITEST_WORKER_RE = re.compile(r"/vitest/dist/workers/(?:forks|threads)\.js")
 _SYSTEM_PREFIXES = ("/System/", "/usr/", "/Applications/")
 _USER_PREFIXES = ("/usr/local/",)            # 시스템 경로처럼 보이지만 사용자 설치(homebrew intel 등)
 _EXCLUDED_COMMS = {"caddy",                 # marina 게이트웨이(marina-gateway-control.sh 가 띄움)
@@ -150,13 +155,20 @@ def _is_task_output(path: str) -> bool:
     return p.suffix == ".output" and p.parent.name == "tasks"
 
 
+def _is_vitest_worker(comm: str, argv: str) -> bool:
+    return Path(comm).name == "node" and bool(_VITEST_WORKER_RE.search(argv))
+
+
 def classify(pid: int, ppid: int, age_s: int, comm: str, fds: dict[str, str], *,
-             min_age_s: int, protected: set[int]) -> str | None:
-    """죽일 사유 또는 None. ppid==1 + 나이 조건은 두 시그니처 공통. argv 는 보지 않는다."""
+             min_age_s: int, protected: set[int], argv: str = "") -> str | None:
+    """죽일 사유 또는 None. ppid==1 + 나이 조건은 세 시그니처 공통. argv 는 vitest 워커 판정에만 쓴다
+    (node 는 comm 만으로 구분이 안 된다 — 호출자가 comm==node 일 때만 채워 준다)."""
     if ppid != 1 or pid in protected or age_s <= 0 or age_s < min_age_s:
         return None
     if _is_task_output(fds.get("1", "")) or _is_task_output(fds.get("2", "")):
         return REASON_TASK_OUTPUT           # Claude 태스크 고아는 실행파일이 무엇이든 그 자체로 근거
+    if _is_vitest_worker(comm, argv):
+        return REASON_VITEST_WORKER         # 부모 러너가 죽은 워커 — cwd 는 멀쩡해도 일이 없다
     cwd = fds.get("cwd", "")
     if not cwd:
         return None                         # lsof 가 cwd 를 못 줬으면 판단하지 않는다
@@ -202,11 +214,12 @@ def scan(min_age_s: int) -> list[Candidate]:
     for pid in orphans:
         ppid, age, comm = table[pid]
         pfd = fds.get(pid, {"cwd": "", "1": "", "2": ""})
-        reason = classify(pid, ppid, age, comm, pfd, min_age_s=min_age_s, protected=protected)
+        argv = _argv(pid) if Path(comm).name == "node" else ""
+        reason = classify(pid, ppid, age, comm, pfd, min_age_s=min_age_s, protected=protected, argv=argv)
         if reason is None:
             continue
         fd_path = next((pfd[k] for k in ("1", "2") if _is_task_output(pfd[k])), "")
-        found.append(Candidate(pid, reason, age, comm, pfd["cwd"], fd_path, _argv(pid)))
+        found.append(Candidate(pid, reason, age, comm, pfd["cwd"], fd_path, argv or _argv(pid)))
     return found
 
 

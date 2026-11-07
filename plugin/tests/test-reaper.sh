@@ -103,6 +103,25 @@ check(cls(comm="/usr/libexec/z", fd1=OUT) == "claude-task-output", "sig1 is not 
 check(cls(comm="/usr/local/bin/node", cwd=gone_cwd) == "cwd-gone", "/usr/local is user-installed, not system")
 check(cls(cwd="") is None, "empty cwd (lsof gave nothing) → no judgement")
 
+# (2026-11-08) 고아 vitest 워커 — 부모가 죽어 ppid=1, 25시간 90% CPU. cwd 는 멀쩡해서 기존 두 시그니처로는 못 잡았다.
+#  판정 함수만 시험한다(실제 프로세스를 죽이지 않는다).
+VW = "node /Users/x/proj/node_modules/vitest/dist/workers/forks.js"
+VT = "node --conditions node /Users/x/proj/node_modules/vitest/dist/workers/threads.js"
+def clsv(argv, **kw):
+    return mr.classify(kw.get("pid", 4242), kw.get("ppid", 1), kw.get("age", H + 1), kw.get("comm", "/opt/homebrew/bin/node"),
+                       {"cwd": kw.get("cwd", existing_cwd), "1": "/dev/null", "2": "/dev/null"},
+                       min_age_s=H, protected={1}, argv=argv)
+check(clsv(VW) == "vitest-worker", f"orphan vitest forks worker → {clsv(VW)}")
+check(clsv(VT) == "vitest-worker", f"orphan vitest threads worker → {clsv(VT)}")
+check(clsv(VW, cwd="") == "vitest-worker", "vitest worker needs no cwd judgement")
+check(clsv(VW, ppid=555) is None, "vitest worker with a live parent untouched")
+check(clsv(VW, age=H - 1) is None, "vitest worker younger than min age untouched")
+check(clsv(VW, pid=1) is None, "protected pid untouched even if vitest argv")
+check(clsv("node /Users/x/proj/server.js") is None, "plain orphan node (no vitest) untouched")
+check(clsv("node /Users/x/proj/node_modules/vitest/vitest.mjs watch") is None, "vitest CLI main (not a worker) untouched")
+check(clsv(VW, comm="/opt/homebrew/bin/tmux") is None, "non-node comm with vitest-like argv untouched (tmux exclusion kept)")
+check(cls() is None, "classify without argv keeps old behaviour")
+
 # ── 5) e2e: scan 이 실제 고아 둘을 찾고, dry-run 은 안 죽이고, reap 은 죽이고 로그를 남긴다 ─
 cands = {c.pid: c for c in mr.scan(min_age_s=0)}
 check(p1 in cands and cands[p1].reason == "claude-task-output", f"live orphan with deleted task output found: {cands.get(p1)}")
