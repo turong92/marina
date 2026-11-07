@@ -496,7 +496,8 @@ def _gateway_port_for_up() -> int:
     try:
         with open(pf, encoding="utf-8") as f:
             p = int(f.read().strip())
-        if 0 < p < 65536 and (gw_alive or _free(p)):
+        # 미기동이면 기본 포트(3902)가 비었을 때 기본으로 복귀(marina_lifecycle.ensure_gateway 와 같은 규칙) — 아래 선기록으로 이어진다
+        if 0 < p < 65536 and (gw_alive or (_free(p) and (p == 3902 or not _free(3902)))):
             return p
     except Exception:
         pass
