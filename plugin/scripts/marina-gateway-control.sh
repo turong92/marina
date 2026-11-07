@@ -93,6 +93,13 @@ case "${1:-}" in
   start)
     rm -f "$STOP_MARK"
     cb="$(caddy_bin)"; [[ -n "$cb" ]] || { echo "caddy 미설치 — 'brew install caddy'(mac) 또는 'apt install caddy'(linux) 후 다시. 게이트웨이 없이 나머지 marina 는 정상." >&2; exit 3; }
+    # 명시 지정이 없고 게이트웨이가 안 떠 있는데 기본 포트(3902)가 비었으면 기본으로 복귀 — port 파일이 옛 3903 을 붙잡던 것.
+    # 돌고 있는 게이트웨이는 옮기지 않는다(연결이 끊김).
+    if [[ -z "${MARINA_GATEWAY_PORT:-}" && "$PORT" != 3902 ]] && ! gw_process \
+       && python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",3902))' 2>/dev/null; then
+      echo "게이트웨이 포트 $PORT→3902, 스택 재시작 필요(주입 URL 이 옛 포트)" >&2
+      PORT=3902; echo 3902 > "$GW_DIR/port"
+    fi
     ensure_config
     MARINA_GATEWAY_ADMIN="$ADMIN" python3 "$GW" sync-admin --config "$CFG"
     if gw_process; then

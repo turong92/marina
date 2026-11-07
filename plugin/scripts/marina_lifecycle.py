@@ -804,6 +804,24 @@ def _gw_pid_alive() -> bool:
         return False
 
 
+def _port_free(p: int) -> bool:
+    import socket
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind(("127.0.0.1", p))
+            return True
+        except OSError:
+            return False
+
+
+def _port_file_reusable_raw() -> int:
+    """port 파일에 적힌 값(점유 여부 무관), 없거나 깨졌으면 0 — 포트가 바뀌었는지 알리는 용."""
+    try:
+        return int(_GW_PORT_FILE.read_text().strip())
+    except Exception:
+        return 0
+
+
 def _port_file_reusable() -> int:
     """게이트웨이 미기동 상태에서 port 파일 값이 유효 범위·빈 포트면 그 값(재사용), 아니면 0."""
     try:
@@ -866,7 +884,15 @@ def ensure_gateway() -> None:
         else:
             # port 파일 값이 아직 빈 포트면 재사용 — 먼저 돈 cmd_up(expose env 주입)이 그 파일을 읽고/선기록하므로
             # 여기서 딴 포트를 고르면 주입 URL 과 기동 포트가 어긋난다(코덱스 P2). 못 쓰면 그때만 새로.
-            port = _GATEWAY_PORT if _env("GATEWAY_PORT", "") else (_port_file_reusable() or _free_port_from(_GATEWAY_PORT))
+            # 단, 기본 포트(3902)가 비어 있으면 기본으로 복귀한다 — 한 번 3903 으로 밀리면 port 파일이 영영 붙잡던 것.
+            # 이미 돌고 있는 게이트웨이는 건드리지 않고 이 미기동 경로에서만 복귀한다(살아 있는 걸 옮기면 연결이 끊김).
+            if _env("GATEWAY_PORT", ""):
+                port = _GATEWAY_PORT
+            else:
+                prev = _port_file_reusable_raw()
+                port = _GATEWAY_PORT if _port_free(_GATEWAY_PORT) else (_port_file_reusable() or _free_port_from(_GATEWAY_PORT))
+                if prev and prev != port:
+                    sys.stderr.write(f"게이트웨이 포트 {prev}→{port}, 스택 재시작 필요(주입 URL 이 옛 포트)\n")
             _GW_DIR.mkdir(parents=True, exist_ok=True)
             _GW_PORT_FILE.write_text(str(port))
         listener_ready = running and _gateway_port_ready(port)
