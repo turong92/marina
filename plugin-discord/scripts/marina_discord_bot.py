@@ -1819,6 +1819,103 @@ PANE_ASK_GRACE = 45.0       # 질문 훅이 카드를 올릴 틈 — 그 뒤에�
 PANE_MENU_ALERT = 180.0     # 모르는 선택창은 사람이 터미널을 보고 있을 수 있어 좀 더 기다린 뒤 알린다
 _MENU_MARK = re.compile(r"Enter to (select|confirm)|Esc to cancel")
 _MENU_SEEN: dict[str, dict[str, Any]] = {}      # tmux 이름 → {"since": 처음 본 시각, "done": 이번 창은 처리함}
+_MENU_OPT = re.compile(r"^\s*([❯›])?\s*(\d{1,2})\.\s+(\S.*?)\s*$")
+
+
+def _menu_parse(box: "list[str]") -> "tuple[str, str, list[str], int] | None":
+    """마지막 구분선 아래 번호 선택창 → (서명, 질문 줄, 선택지 글자들, 커서 번호). 1부터 이어지는 2~9개 목록이 아니면, 커서(❯)가
+    없으면 None. 질문 줄·선택지 글자만 뽑는다(화면 원문은 비밀이 있을 수 있어 밖으로 안 낸다)."""
+    opts: list[str] = []
+    cur = first = 0
+    for i, l in enumerate(box):
+        m = _MENU_OPT.match(l)
+        if not m or int(m.group(2)) != len(opts) + 1:
+            continue
+        if not opts:
+            first = i
+        opts.append(_clean(m.group(3))[:60])
+        if m.group(1):
+            cur = len(opts)
+    if not 2 <= len(opts) <= 9 or not cur:
+        return None
+    q = next((_clean(t.strip())[:200] for t in reversed(box[:first]) if t.strip() and not set(t.strip()) <= set("─━╌┄-")), "")
+    sig = hashlib.sha1(("\n".join([q] + opts)).encode("utf-8", "replace")).hexdigest()[:16]
+    return sig, q, opts, cur
+
+
+def _menu_files(sd: Path) -> "list[tuple[Path, dict[str, Any]]]":
+    out = []
+    for f in sd.glob("menu-*.json"):
+        try:
+            d = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(d, dict):
+            out.append((f, d))
+    return out
+
+
+def _menu_close(sd: Path, ch: str, note: str, keep_sig: str = "") -> None:
+    """떠 있던 선택 버튼을 거둔다(keep_sig 와 같은 창의 것은 둔다)."""
+    for f, d in _menu_files(sd):
+        if keep_sig and d.get("sig") == keep_sig:
+            continue
+        for x in (f, f.with_suffix(".answer")):
+            try:
+                x.unlink()
+            except OSError:
+                pass
+        if d.get("msg"):
+            try:
+                _dc(ms.load_config())._req("PATCH", f"/channels/{ch}/messages/{d['msg']}",
+                                           {"content": str(d.get("title") or "⏸ 터미널 선택창") + f"\n-# {note}", "components": []})
+            except ms.SessionError:
+                pass
+
+
+def _menu_post(sd: Path, ch: str, menu: "tuple[str, str, list[str], int]") -> bool:
+    sig, q, opts, _ = menu
+    token = uuid.uuid4().hex[:12]
+    title = "⏸ **터미널 선택창에서 멈춤** — " + (q or "선택 필요")
+    rows = [[{"type": 2, "style": 1, "label": f"{i}. {o}"[:80], "custom_id": f"mperm:{i}:{ch}:{token}"}
+             for i, o in enumerate(opts[s:s + 5], s + 1)] for s in range(0, len(opts), 5)]
+    body = {"content": title + "\n-# 누르면 터미널에서 그 번호를 대신 골라 줘",
+            "components": [{"type": 1, "components": r} for r in rows], "allowed_mentions": {"parse": []}}
+    try:
+        msg = str(_dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", body).get("id") or "")
+    except ms.SessionError:
+        return False
+    if msg:
+        ms._write_json(sd / f"menu-{token}.json", {"token": token, "msg": msg, "sig": sig, "n": len(opts),
+                                                    "title": title, "at": time.time()})
+    return True
+
+
+def _menu_answer(rec: dict[str, Any], sd: Path, token: str, d: dict[str, Any], pick: int) -> str:
+    f = sd / f"menu-{token}.json"
+    ch, name = str(rec.get("channelId")), str(rec.get("tmux") or "")
+    if not 1 <= pick <= int(d.get("n") or 0):
+        return "없는 번호야"
+    try:                                              # 두 번 눌러도 한 번만 친다
+        os.close(os.open(str(f.with_suffix(".answer")), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
+    except OSError:
+        return "이미 결정됐어"
+    got = None
+    if name and ms.tmux_alive(name):
+        r = ms._tmux("capture-pane", "-p", "-t", f"={name}:")
+        lines = (r.stdout or "").rstrip().splitlines()[-30:] if r.returncode == 0 else []
+        sep = max((i for i, l in enumerate(lines) if (t := l.strip()) and set(t) <= set("─━")), default=-1)
+        got = _menu_parse(lines[sep + 1:])
+    if not got or got[0] != d.get("sig"):
+        _menu_close(sd, ch, "화면이 바뀌어서 안 눌렀어")
+        return "화면이 바뀌어서 안 눌렀어 — 지금 창이 있으면 새 버튼이 와"
+    ms.tmux_leave_mode(name)
+    steps = pick - got[3]
+    for k in ["Down"] * steps + ["Up"] * -steps + ["Enter"]:
+        if ms._tmux("send-keys", "-t", f"={name}:", k).returncode != 0:
+            return "터미널에 못 쳤어 — 터미널에서 직접 골라 줘"
+    _menu_close(sd, ch, f"✅ {pick}번을 골랐어: {got[2][pick - 1]}")
+    return f"{pick}번을 골랐어"
 
 
 def pane_ask_tick(names: "set[str] | None" = None, now: "float | None" = None) -> None:
@@ -1837,8 +1934,10 @@ def _pane_ask_one(rec: dict[str, Any], names: "set[str] | None", now: float) -> 
     name, ch = str(rec.get("tmux") or ""), str(rec.get("channelId") or "")
     if not name or not ch or not rec.get("stateDir") or ms.is_codex(rec) or (names is not None and name not in names):
         return
+    sd = Path(str(rec["stateDir"]))
     if not ms.tmux_alive(name):
         _MENU_SEEN.pop(name, None)
+        _menu_close(sd, ch, "방이 꺼져서 거뒀어")
         return
     r = ms._tmux("capture-pane", "-p", "-t", f"={name}:")
     if r.returncode != 0:
@@ -1848,15 +1947,17 @@ def _pane_ask_one(rec: dict[str, Any], names: "set[str] | None", now: float) -> 
     box = lines[sep + 1:]                             # 마지막 구분선 아래 = 지금 떠 있는 창(위의 지난 출력은 안 본다, 리뷰 I4)
     if not _MENU_MARK.search("\n".join(lines[-4:])) or "Do you want to " in "\n".join(box[-12:]):   # 권한 창은 pane_perm 몫
         _MENU_SEEN.pop(name, None)
+        _menu_close(sd, ch, "터미널에서 처리됨")
         return
     screen = "\n".join(lines)
     sig = hashlib.sha1("\n".join(l for l in box if not l.lstrip().startswith(("❯", "›"))).encode("utf-8", "replace")).hexdigest()[:16]
     seen = _MENU_SEEN.get(name)
     if not seen or seen["sig"] != sig:                # 다른 창이 이어서 떴으면 처음부터 다시 센다(리뷰 I3)
         seen = _MENU_SEEN[name] = {"since": now, "done": False, "sig": sig}
+    menu = _menu_parse(box)
+    _menu_close(sd, ch, "창이 바뀜", keep_sig=menu[0] if menu else "")
     if seen["done"] or now - seen["since"] < PANE_ASK_GRACE:
         return
-    sd = Path(str(rec["stateDir"]))
     st = ask._load(sd)
     if st:
         if st["questions"] and ask._question_visible(screen, st["questions"][0]):
@@ -1868,6 +1969,10 @@ def _pane_ask_one(rec: dict[str, Any], names: "set[str] | None", now: float) -> 
         ask.post_question(str(sd), ch, q, started=time.time())     # 방금 걷은 지난 카드의 done 시각보다 뒤
         seen["done"] = True
         _log(f"pane_ask {name}: 훅이 못 올린 질문 카드를 대신 올림")
+        return
+    if menu:                                          # 번호 선택창이면 버튼으로 — 화면 원문 없이 질문 줄·선택지만
+        if any(d.get("sig") == menu[0] and d.get("msg") for _, d in _menu_files(sd)) or _menu_post(sd, ch, menu):   # 앞엣것=재시작 뒤 중복 방지
+            seen["done"] = True
         return
     if waited < PANE_MENU_ALERT:
         return
@@ -2636,7 +2741,7 @@ def agent_words_tick(st: dict[str, tuple[str, float]], now: float) -> set[str]:
     return live
 
 
-def perm(channel: str, user: str, token: str, allow: bool) -> str:
+def perm(channel: str, user: str, token: str, allow: bool, pick: int = 0) -> str:
     """권한 요청 [허용]/[거부] — 기다리는 훅이 읽어 결정한다. 먼저 누른 것만(O_EXCL, 리뷰 I1).
     허용 목록이 빈 채널(역할로 보이는 누구나)은 승인 못 한다 — 메시지와 달리 실행 권한이다(리뷰 I6)."""
     rec = next((s for s in ms.load_sessions() if str(s.get("channelId")) == str(channel)), None)
@@ -2649,6 +2754,12 @@ def perm(channel: str, user: str, token: str, allow: bool) -> str:
         allow_from = []
     if not allow_from or not _allowed(rec, channel, user, _dc(ms.load_config())):
         return "누를 권한이 없어"
+    if pick:                                          # 번호 선택창 버튼(menu-*.json) — 같은 권한 확인을 거친 뒤 화면을 다시 보고 친다
+        try:
+            md = json.loads((sd / f"menu-{token}.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return "이미 끝났거나 없는 요청이야"
+        return _menu_answer(rec, sd, token, md, pick) if isinstance(md, dict) else "이미 끝났거나 없는 요청이야"
     if not (sd / f"perm-{token}.json").exists():
         return "이미 끝났거나 없는 요청이야"
     try:
@@ -3836,7 +3947,7 @@ def main(argv: list[str]) -> int:
     it.add_argument("--message", required=True)
     pm = sub.add_parser("perm")
     pm.add_argument("--channel", required=True); pm.add_argument("--user", required=True)
-    pm.add_argument("--token", required=True); pm.add_argument("--allow", action="store_true")
+    pm.add_argument("--token", required=True); pm.add_argument("--allow", action="store_true"); pm.add_argument("--pick", type=int, default=0)
     sc = sub.add_parser("slash-cmd")
     sc.add_argument("--channel", required=True); sc.add_argument("--user", required=True); sc.add_argument("--name", required=True)
     sc.add_argument("--value", default=""); sc.add_argument("--args", default=""); sc.add_argument("--message", default="")
@@ -3866,7 +3977,7 @@ def main(argv: list[str]) -> int:
         a.channel = ms.room_channel(a.channel)        # 포럼 글 안에서 누른 것 — 봇은 글 id 를 넘기고 방은 장부가 안다
     if a.cmd == "perm":
         try:
-            print(perm(a.channel, a.user, a.token, a.allow))
+            print(perm(a.channel, a.user, a.token, a.allow, a.pick))
         except ms.SessionError as exc:
             print(str(exc))
         return 0

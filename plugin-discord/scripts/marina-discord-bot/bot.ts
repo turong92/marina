@@ -217,8 +217,8 @@ client.on(Events.InteractionCreate, async (it) => {
   const [, act, ch, token] = it.customId.split(":");
   await it.deferUpdate().catch(() => {});      // 결과는 요청 메시지 자체가 '✅ 허용함/⛔ 거부함' 으로 바뀐다
   if (ch !== (await sessionChannel(it))) { it.followUp("이 채널의 요청이 아니야").catch(() => {}); return; }   // 위조 방어선
-  runPy(["perm", "--channel", ch, "--user", it.user.id, "--token", token, ...(act === "a" ? ["--allow"] : [])],
-    (out) => { if (!["허용했어", "거부했어"].includes(out)) it.followUp({ content: out || "처리 못 했어", allowedMentions: { parse: [] } }).catch(() => {}); });
+  runPy(["perm", "--channel", ch, "--user", it.user.id, "--token", token, ...(act === "a" ? ["--allow"] : /^[1-9]$/.test(act) ? ["--pick", act] : [])],   // 숫자 = 터미널 번호 선택창 버튼
+    (out) => { if (!["허용했어", "거부했어"].includes(out) && !/^\d번을 골랐어$/.test(out)) it.followUp({ content: out || "처리 못 했어", allowedMentions: { parse: [] } }).catch(() => {}); });
 });
 
 client.once(Events.ClientReady, (c) => {

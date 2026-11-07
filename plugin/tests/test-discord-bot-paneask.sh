@@ -69,7 +69,7 @@ check(len(posts()) == n, "훅 카드가 있으면 안 올린다")
 # ② 기록에 질문이 없고(이미 답함) 모르는 선택창 → 오래 떠 있으면 알림 한 번(버튼 없이)
 pane(IDLE); mb.pane_ask_tick(now=t0 + 3000)
 transcript(True)
-pane("────\\n 모델을 바꿀까?\\n ❯ 1. 바꾸기\\n   2. 그대로\\n Enter to confirm · Esc to cancel\\n")
+pane("────\\n 모델을 바꿀까?\\n ❯ 바꾸기\\n   그대로\\n Enter to confirm · Esc to cancel\\n")    # 번호 없는 창 — 번호 창은 panemenu 테스트(버튼)
 n = len(posts())
 mb.pane_ask_tick(now=t0 + 3001); mb.pane_ask_tick(now=t0 + 3001 + mb.PANE_ASK_GRACE + 1)
 check(len(posts()) == n, "모르는 창은 바로 알리지 않는다(사람이 보고 있을 수 있다)")
@@ -80,7 +80,7 @@ mb.pane_ask_tick(now=t0 + 9000)
 check(len(posts()) == n + 1, "알림은 한 번만")
 # 풀렸다가 다시 뜨면 다시 센다
 pane(IDLE); mb.pane_ask_tick(now=t0 + 9100)
-pane("────\\n 모델을 바꿀까?\\n ❯ 1. 바꾸기\\n   2. 그대로\\n Enter to confirm · Esc to cancel\\n")
+pane("────\\n 모델을 바꿀까?\\n ❯ 바꾸기\\n   그대로\\n Enter to confirm · Esc to cancel\\n")
 mb.pane_ask_tick(now=t0 + 9200); mb.pane_ask_tick(now=t0 + 9200 + mb.PANE_MENU_ALERT + 1)
 check(len(posts()) == n + 2, "새로 뜬 창은 다시 알린다")
 
@@ -114,9 +114,9 @@ check(any(x["m"] == "PATCH" and "중복" in json.dumps(x.get("b"), ensure_ascii=
 
 # (리뷰 I3) 알림 뒤 다른 창이 끊김 없이 이어 뜨면 그 창도 다시 센다
 pane(IDLE); mb.pane_ask_tick(now=t0 + 60000); transcript(True)
-pane("────\\n 모델을 바꿀까?\\n ❯ 1. 바꾸기\\n   2. 그대로\\n Enter to confirm · Esc to cancel\\n"); n = len(posts())
+pane("────\\n 모델을 바꿀까?\\n ❯ 바꾸기\\n   그대로\\n Enter to confirm · Esc to cancel\\n"); n = len(posts())
 mb.pane_ask_tick(now=t0 + 60001); mb.pane_ask_tick(now=t0 + 60001 + mb.PANE_MENU_ALERT + 1)
-pane("────\\n 정말 지울까?\\n ❯ 1. 지우기\\n   2. 두기\\n Enter to confirm · Esc to cancel\\n")
+pane("────\\n 정말 지울까?\\n ❯ 지우기\\n   두기\\n Enter to confirm · Esc to cancel\\n")
 mb.pane_ask_tick(now=t0 + 60300); mb.pane_ask_tick(now=t0 + 60300 + mb.PANE_MENU_ALERT + 1)
 check(len(posts()) == n + 2 and "정말 지울까" in json.dumps(posts()[-1]["b"], ensure_ascii=False), "이어 뜬 창도 알린다")
 if fails:
