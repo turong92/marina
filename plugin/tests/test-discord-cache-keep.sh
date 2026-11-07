@@ -81,6 +81,18 @@ noop = row({"type": "user", "timestamp": iso(H0 + 3300), "isMeta": True, "messag
      + row({"type": "system", "subtype": "local_command", "timestamp": iso(H0 + 3300), "content": "<local-command-stdout>Not enough messages to compact.</local-command-stdout>"})
 tr.write_text(base + noop)
 check(abs(mi.last_activity(rec) - H0) < 2, f"'압축할 게 없음' 출력 줄(system local_command)도 활동이 아니다: {mi.last_activity(rec) - H0}")
+# 2026-11-08 실측: 핑 턴마다 user 줄 **앞**에 api-request·attachment·system 줄이 찍힌다 — 이걸 활동으로 치면 쉰 시간이 매번 리셋돼
+# 8시간 상한(컴팩트 후 그만)에 영영 안 닿고 이틀 내내 50분마다 핑이 갔다. 읽는 창(끝 64KB)이 핑 턴 중간에서 시작해도 같아야 한다
+def ping(t):
+    return (row({"type": "api-request", "timestamp": iso(t + 0.2)})
+            + row({"type": "user", "timestamp": iso(t), "message": {"role": "user", "content": ms.KEEPALIVE_TEXT}})
+            + row({"type": "attachment", "timestamp": iso(t + 0.1), "attachment": {"type": "hook_additional_context"}})
+            + row({"type": "assistant", "timestamp": iso(t + 2), "message": {"role": "assistant", "content": [{"type": "text", "text": "."}]}})
+            + row({"type": "system", "subtype": "turn_duration", "timestamp": iso(t + 3)}))
+tr.write_text(base + "".join(ping(H0 + 3000 * k) for k in range(1, 6)))
+check(abs(mi.last_activity(rec) - H0) < 2, f"핑 턴 앞뒤 줄(api-request·attachment·system)도 활동이 아니다: {mi.last_activity(rec) - H0}")
+tr.write_text("".join(ping(H0 + 3000 * k) for k in range(1, 6))[200:])    # 창이 핑 턴 중간에서 시작(사람 글이 창 밖)
+check(mi._transcript_last_ts(rec) < H0 + 2, f"창이 핑 중간에서 시작해도 핑 시각을 활동으로 안 친다: {mi._transcript_last_ts(rec) - H0}")
 tr.write_text(base + keep + row({"type": "user", "timestamp": iso(H0 + 3200), "message": {"role": "user", "content": "또 말함"}}))
 check(abs(mi.last_activity(rec) - (H0 + 3200)) < 2, "캐시 유지 뒤 사람이 말하면 그 시각")
 tr.write_text(base)

@@ -93,39 +93,30 @@ def _transcript_last_ts(rec: dict[str, Any]) -> float:
             lines = fh.read().decode("utf-8", "replace").splitlines()
     except OSError:
         return 0.0
-    last, in_keep, in_compact = 0.0, False, False
-    for raw in lines:
+    # 끝에서 거꾸로 턴 단위로 읽는다: user·assistant 줄의 시각을 모으다가 '프롬프트'(글이 있는 user 줄)를 만나면
+    #  - 마리나가 친 것(캐시 유지 글·/compact 명령·그 caveat·출력·컴팩트 요약)이면 모은 것을 버리고 더 앞으로,
+    #  - 사람(또는 알림·방끼리 글)이면 그 턴의 가장 늦은 시각이 답.
+    # api-request·attachment·system 같은 줄은 세지 않는다 — 핑 턴의 user 줄 **앞**에도 찍혀 쉰 시간을 매번 리셋했다(2026-11-08, 8시간 상한에 영영 안 닿고 이틀 핑).
+    # 창(끝 64KB)이 핑 턴 중간에서 시작할 수 있어 앞에서부터 읽으면 상태를 모른다 — 그래서 거꾸로.
+    pending, saw_bot = 0.0, False
+    for raw in reversed(lines):
         try:
             row = json.loads(raw)
         except ValueError:
             continue
-        if not isinstance(row, dict):
+        if not isinstance(row, dict) or row.get("type") not in ("user", "assistant"):
             continue
-        if row.get("type") == "system" and row.get("subtype") == "compact_boundary":
-            in_compact = True        # 실제 순서: 경계 → 요약 → 남긴 줄 → caveat → /compact 명령 → 출력. 출력 줄까지 컴팩트의 것
-            continue
-        if row.get("type") == "system" and row.get("subtype") == "local_command":
-            in_compact = False       # 로컬 명령 출력(예: 압축할 게 없을 때 'Not enough messages') — 사람 활동이 아니다(치면 50분마다 컴팩트 반복, 2026-11-06)
-            continue
+        ts = mb._row_time(row) or 0.0
         if row.get("type") == "user":
             text = _user_text(row).lstrip()
-            if text.startswith("<local-command-stdout>"):
-                in_compact = False
-                continue
-            if row.get("isCompactSummary"):
-                in_compact = True
-                continue
-            if row.get("isMeta") or text.startswith(("<local-command-caveat>", "<command-name>")):
-                continue
-            if text.startswith(ms.KEEPALIVE_MARK):
-                in_keep = True
+            if (row.get("isMeta") or row.get("isCompactSummary") or text.startswith(ms.KEEPALIVE_MARK)
+                    or text.startswith(("<local-command-stdout>", "<local-command-caveat>", "<command-name>"))):
+                pending, saw_bot = 0.0, True              # 마리나·하네스가 넣은 턴 — 그 뒤 줄들은 사람 활동이 아니다
                 continue
             if text.strip():
-                in_keep = in_compact = False     # 사람(또는 알림)의 진짜 글 — 캐시 유지 턴·컴팩트는 끝났다
-        if in_keep or in_compact:
-            continue
-        last = mb._row_time(row) or last
-    return last
+                return max(pending, ts)                   # 사람(또는 알림)의 진짜 글
+        pending = max(pending, ts)                        # 답·도구 결과
+    return 0.0 if saw_bot else pending                    # 창 안에 사람 글이 없다 — 마리나 턴이 끼었으면 모른다(0), 아니면 긴 한 턴 안
 
 
 def _attached(name: str) -> bool:
