@@ -1583,13 +1583,20 @@ def hook_reply_to(payload: dict[str, Any]) -> "dict[str, Any] | None":
     inp = payload.get("tool_input") or {}
     if not s or s.get("kind") in CHAT_KINDS or payload.get("tool_name") != _REPLY_TOOL or not isinstance(inp, dict):
         return None
-    if inp.get("reply_to"):
-        return None
-    mid = _inferred_reply_to(s, payload)
-    if not mid:
+    new = dict(inp)
+    if not inp.get("reply_to"):
+        mid = _inferred_reply_to(s, payload)
+        if mid:
+            new["reply_to"] = mid
+    # share_file 이 내준 첨부가 빠졌으면 붙인다(최대 10개) — 모델이 잊어도 방에 그림이 간다(2026-11-09)
+    have = [str(x) for x in inp.get("files") or []] if isinstance(inp.get("files"), list) else []
+    add = [f for f in _take_share_pending(Path(str(s.get("stateDir") or "/nonexistent"))) if f not in have]
+    if add and len(have) < _REPLY_MAX_FILES:
+        new["files"] = have + add[:_REPLY_MAX_FILES - len(have)]
+    if new == inp:
         return None
     return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "allow",
-                                   "updatedInput": dict(inp, reply_to=mid)}}
+                                   "updatedInput": new}}
 
 
 def clear_suggest(sd: Path, ch: str, dc: "Discord") -> None:
@@ -4965,8 +4972,51 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
             notes.append("#자료실 에도 올렸어")
         except Exception as exc:
             notes.append(f"#자료실 올리기 실패: {exc}")
+    if rec.get("kind") not in CHAT_KINDS and not is_codex(rec):
+        _remember_share(Path(str(rec.get("stateDir") or "/nonexistent")), files)
     return "reply 의 files 로 첨부할 파일:\n" + "\n".join(str(f) for f in files) + \
         ("\n" + "\n".join(notes) if notes else "")
+
+
+_SHARE_PENDING = "share-pending.json"
+_REPLY_MAX_FILES = 10
+_REPLY_MAX_BYTES = 25 * 1024 * 1024
+
+
+def _remember_share(sd: Path, files: list) -> None:
+    """share_file 이 돌려준 첨부를 적어 둔다 — 다음 답장에 빠졌으면 훅이 붙인다(형 2026-11-09 "어디는 첨부 보이고 어디는 안 보이고":
+    방 답의 첨부를 모델에 맡겨 13/284 건이 빈손으로 나갔다)."""
+    if not sd.is_dir():
+        return
+    try:
+        old = json.loads((sd / _SHARE_PENDING).read_text(encoding="utf-8"))
+        prev = [str(x) for x in old.get("files") or []] if time.time() - float(old.get("ts") or 0) < PREVIEW_KEEP_S else []
+    except (OSError, ValueError, AttributeError, TypeError):
+        prev = []
+    merged = list(dict.fromkeys(prev + [str(f) for f in files]))
+    try:
+        _write_json(sd / _SHARE_PENDING, {"files": merged, "ts": time.time()})
+    except OSError:
+        pass
+
+
+def _take_share_pending(sd: Path) -> list[str]:
+    f = sd / _SHARE_PENDING
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        f.unlink()
+    except (OSError, ValueError):
+        return []
+    if not isinstance(d, dict) or time.time() - float(d.get("ts") or 0) >= PREVIEW_KEEP_S:
+        return []
+    out = []
+    for x in d.get("files") or []:
+        try:
+            if os.path.isfile(str(x)) and os.path.getsize(str(x)) <= _REPLY_MAX_BYTES:
+                out.append(str(x))
+        except OSError:
+            continue
+    return out
 
 
 def mcp_lobby(stdin: Any = None, stdout: Any = None) -> None:

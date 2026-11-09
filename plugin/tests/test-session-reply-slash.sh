@@ -50,6 +50,30 @@ ms.save_sessions(items)
 check(ms.hook_reply_to({"tool_name": "mcp__plugin_discord_discord__reply", "transcript_path": "/nonexistent",
                         "tool_input": {"chat_id": ch, "text": "x"}}) is None, "받은 지시가 없으면 그대로")
 
+# ── share_file 첨부가 답장에서 빠지면 붙인다(형 2026-11-09 "어디는 첨부 보이고 어디는 안 보이고") ──
+png1, png2 = sd / "p1.png", sd / "p2.png"
+png1.write_bytes(b"x"); png2.write_bytes(b"y")
+ms._remember_share(sd, [png1]); ms._remember_share(sd, [png2, png1])        # 여러 번 공유 — 합쳐서 기억
+out = ms.hook_reply_to({"tool_name": "mcp__plugin_discord_discord__reply", "transcript_path": "/nonexistent",
+                        "tool_input": {"chat_id": ch, "text": "see", "reply_to": "1", "files": [str(png2)]}})
+upd = (out or {}).get("hookSpecificOutput", {}).get("updatedInput") or {}
+check(upd.get("files") == [str(png2), str(png1)], f"빠진 첨부를 붙인다(이미 있는 건 그대로): {upd}")
+check(ms.hook_reply_to({"tool_name": "mcp__plugin_discord_discord__reply", "transcript_path": "/nonexistent",
+                        "tool_input": {"chat_id": ch, "text": "x", "reply_to": "1"}}) is None, "한 번 붙이면 잊는다")
+ms._remember_share(sd, [png1]); png1.unlink()
+check(ms.hook_reply_to({"tool_name": "mcp__plugin_discord_discord__reply", "transcript_path": "/nonexistent",
+                        "tool_input": {"chat_id": ch, "text": "x", "reply_to": "1"}}) is None, "지워진 파일은 안 붙인다")
+ms._remember_share(sd, [png2])
+d = json.loads((sd / "share-pending.json").read_text()); d["ts"] -= 7200; (sd / "share-pending.json").write_text(json.dumps(d))
+check(ms.hook_reply_to({"tool_name": "mcp__plugin_discord_discord__reply", "transcript_path": "/nonexistent",
+                        "tool_input": {"chat_id": ch, "text": "x", "reply_to": "1"}}) is None, "1시간 지난 기억은 버린다")
+many = [str(sd / f"m{i}.png") for i in range(10)]
+for m in many: Path(m).write_bytes(b"z")
+ms._remember_share(sd, [png2])
+out = ms.hook_reply_to({"tool_name": "mcp__plugin_discord_discord__reply", "transcript_path": "/nonexistent",
+                        "tool_input": {"chat_id": ch, "text": "x", "reply_to": "1", "files": many}})
+check(out is None, "이미 10개면 더 안 붙인다")
+
 # ── Discord 로 온 /compact ──
 check(ms.slash_command(tag("5002", "/compact")) == ("5002", "/compact"), "정확히 /compact")
 check(ms.slash_command(tag("5003", "  /compact  ")) == ("5003", "/compact"), "앞뒤 공백 허용")
