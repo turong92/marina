@@ -72,6 +72,15 @@ JSON
 done
 echo "PASS 중단/거절 정리: UserPromptSubmit·Stop 둘 다 상태파일 제거"
 
+# 래퍼(실제 훅 경로)도 같은 일을 해야 한다 — 질문 파일이 없을 땐 python 을 건너뛰는 빠른 길이 있다(2026-11-09).
+home_wrap="$TMP/home-wrap"; mkdir -p "$home_wrap"
+printf '%s' '{"session_id": "sess-wrap-1234", "hook_event_name": "Stop", "cwd": "/tmp"}' | MARINA_HOME="$home_wrap" bash "$SCR/marina-question-hook.sh" || { echo "FAIL: 빈 상태에서 래퍼 실패"; exit 1; }
+printf '%s' '{"session_id": "sess-wrap-1234", "hook_event_name": "PreToolUse", "tool_name": "AskUserQuestion", "cwd": "/tmp", "tool_use_id": "tu-w", "tool_input": {"questions": [{"header": "H", "question": "Q?", "options": [{"label": "A"}]}]}}' | MARINA_HOME="$home_wrap" bash "$SCR/marina-question-hook.sh"
+test -f "$home_wrap/agent-questions/claude-sess-wrap-1234.json" || { echo "FAIL: 래퍼로 PreToolUse 기록 안 됨"; exit 1; }
+printf '%s' '{"session_id": "sess-wrap-1234", "hook_event_name": "UserPromptSubmit", "cwd": "/tmp"}' | MARINA_HOME="$home_wrap" bash "$SCR/marina-question-hook.sh"
+test -f "$home_wrap/agent-questions/claude-sess-wrap-1234.json" && { echo "FAIL: 래퍼로 정리 안 됨"; exit 1; }
+echo "PASS 래퍼: 기록·정리·빈 상태 빠른 길"
+
 # 훅 등록도 같이 잠근다 — 스크립트만 고치고 hooks.json 에 안 달면 실제로는 안 돈다.
 python3 - "$HERE/../hooks/hooks.json" <<'PY'
 import json, sys

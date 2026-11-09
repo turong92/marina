@@ -15,6 +15,8 @@
 set -euo pipefail
 
 payload="$(cat)"
+# Read·Grep·Glob 마다 도는 훅이라 python 기동(~70ms)을 아낀다 — 그 글자가 없으면 볼 것도 없다(2026-11-09 점검).
+case "$payload" in *"Application Support"*) ;; *) exit 0 ;; esac
 path="$(printf '%s' "$payload" | python3 -c '
 import json, sys
 try:
