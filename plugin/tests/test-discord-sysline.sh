@@ -77,6 +77,22 @@ line = mb.footer({"diskFree": G, "boxes": [up]})
 check(line.endswith(" 갱신\n-# 윈도우 CPU 🟢 13% · 메모리 🟢 40% · 🧪 1"), f"박스는 자기 줄로(형 2026-11-05 '줄바꿈'): {line}")
 check(line.split("\n")[:2] == ["### 🖥 맥", line.split("\n")[1]] and line.split("\n")[1].startswith("-# 디스크") and line.count("\n") == 2, f"맥 섹션 아래 디스크 줄, 그 아래 박스 줄: {line}")
 check("윈도우" not in mb.footer({"diskFree": G, "boxes": []}), "박스가 없으면 안 그린다")
+# WSL 박스면 윈도우 본체 값도(형 2026-11-09 "윈도우도 상태 창에 리소스 바 그래프") — 맥처럼 제목 + CPU·메모리·스왑 바
+wout = "CPU=3.0 MEM=31.0 HEAVY=1\nWIN CPU=97 N=16 MT=32660360 MF=5288288 PT=6912 PU=544\n"
+wb = mb.parse_box(wout)
+check(wb == {"cpu": 3.0, "mem": 31.0, "heavy": 1, "win": {"cpu": 97.0, "ncpu": 16, "memTotal": 32660360 * 1024.0,
+                                                         "memFree": 5288288 * 1024.0, "swapTotal": 6912 * (1 << 20) * 1.0,
+                                                         "swapUsed": 544 * (1 << 20) * 1.0}}, str(wb))
+check("win" not in mb.parse_box("CPU=1 MEM=2 HEAVY=0\nWIN CPU= N=16"), "윈도우 줄이 깨지면 WSL 값만")
+wl = mb.box_lines(dict(wb, name="윈도우", up=True))
+check(wl[0] == "### 🪟 윈도우" and wl[1].startswith("CPU 🔴 97% `") and "16코어" in wl[1], str(wl))
+check(wl[2].startswith("메모리 🟡 26.1 / 31.1GB (84%) `"), str(wl))
+check(wl[3].startswith("스왑 🟢 0.5 / 6.8GB `"), str(wl))
+check(wl[4] == "-# WSL CPU 🟢 3% · 메모리 🟢 31% · 🧪 1", str(wl))
+check(mb.box_lines(dict(wb, name="윈도우", up=True, win=dict(wb["win"], cpu=104.0)))[1].startswith("CPU 🔴 100% "), "100 넘는 값(부스트)은 100")
+check(mb.box_lines(up) == ["-# " + mb.box_text(up)] and mb.box_lines({"name": "윈도우", "up": False}) == ["-# 윈도우 꺼짐"], "윈도우 값 없으면 옛 한 줄")
+wf = mb.footer({"diskFree": G, "boxes": [dict(wb, name="윈도우", up=True)], "resources": "R"})
+check(wf.split("\n")[-6:] == wl + ["R"], wf)
 calls = []
 mb._box_probe = lambda ssh: calls.append(ssh) or "CPU=1 MEM=2 HEAVY=0"
 check(mb.box_stats({}) == [] and calls == [], "설정이 없으면 ssh 를 안 부른다")

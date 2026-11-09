@@ -972,7 +972,15 @@ _BOX_SCRIPT = ("read -r _ a b c d e f g h _ < /proc/stat; sleep 1; read -r _ A B
                "t=$(( (A+B+C+D+E+F+G+H) - (a+b+c+d+e+f+g+h) )); i=$(( (D+E) - (d+e) )); "
                "m=$(awk '/^MemTotal/{t=$2} /^MemAvailable/{a=$2} END{printf \"%.1f\", (t-a)*100/t}' /proc/meminfo); "
                "n=$(docker ps -q --filter label=purpose=heavy-remote 2>/dev/null | wc -l); "
-               "awk -v t=$t -v i=$i -v m=$m -v n=$n 'BEGIN{printf \"CPU=%.1f MEM=%s HEAVY=%d\\n\", (t>0?(t-i)*100/t:0), m, n}'")
+               "awk -v t=$t -v i=$i -v m=$m -v n=$n 'BEGIN{printf \"CPU=%.1f MEM=%s HEAVY=%d\\n\", (t>0?(t-i)*100/t:0), m, n}'"
+               # WSL 이면 윈도우 본체도 — 위 값은 WSL VM 몫(16GB·12코어)이라 게임 등 윈도우 쪽 부하가 안 보인다(형 2026-11-09).
+               # CPU 는 작업 관리자와 같은 Processor Utility(부스트로 100 넘을 수 있음), 스왑 = 페이지 파일(MB)
+               "; p=/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe; [ -x $p ] && $p -NoProfile -NonInteractive "
+               "-Command '$o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation"
+               " | Where-Object {$_.Name -eq \"_Total\"}).PercentProcessorUtility; $f=Get-CimInstance Win32_PageFileUsage"
+               " | Measure-Object AllocatedBaseSize,CurrentUsage -Sum; $n=(Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors;"
+               " \"WIN CPU=$c N=$n MT=$($o.TotalVisibleMemorySize) MF=$($o.FreePhysicalMemory) PT=$($f[0].Sum) PU=$($f[1].Sum)\"'"
+               " | tr -d '\\r'; true")
 _BOX_TTL = 60.0
 _BOX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _BOX_BUSY: set[str] = set()
@@ -991,7 +999,15 @@ def _box_probe(ssh: str) -> "str | None":
 
 def parse_box(out: "str | None") -> "dict[str, Any] | None":
     m = re.search(r"CPU=([\d.]+)\s+MEM=([\d.]+)\s+HEAVY=(\d+)", out or "")
-    return {"cpu": float(m.group(1)), "mem": float(m.group(2)), "heavy": int(m.group(3))} if m else None
+    if not m:
+        return None
+    v: dict[str, Any] = {"cpu": float(m.group(1)), "mem": float(m.group(2)), "heavy": int(m.group(3))}
+    w = re.search(r"WIN CPU=([\d.]+) N=(\d+) MT=(\d+) MF=(\d+) PT=(\d*) PU=(\d*)", out or "")
+    if w and int(w.group(3)):
+        v["win"] = {"cpu": float(w.group(1)), "ncpu": int(w.group(2)),
+                    "memTotal": int(w.group(3)) * 1024.0, "memFree": int(w.group(4)) * 1024.0,      # KB
+                    "swapTotal": int(w.group(5) or 0) * float(1 << 20), "swapUsed": int(w.group(6) or 0) * float(1 << 20)}  # MB
+    return v
 
 
 def _note_box_up(ssh: str) -> None:
@@ -1048,6 +1064,20 @@ def box_text(b: dict[str, Any]) -> str:
     return f"{b.get('name')} CPU {c} {cpu}% · 메모리 {m} {mem}%" + (f" · 🧪 {b['heavy']}" if b.get("heavy") else "")
 
 
+def box_lines(b: dict[str, Any]) -> list[str]:
+    """윈도우 본체 값이 있으면 맥 섹션과 같은 꼴(제목 + CPU·메모리·스왑 바), 아래 작은 글씨로 WSL 값(형 2026-11-09).
+    없으면(리눅스 박스·꺼짐·윈도우 줄 못 읽음) 옛 한 줄."""
+    w = b.get("win") if b.get("up") else None
+    if not w:
+        return ["-# " + box_text(b)]
+    total = w["memTotal"]
+    used = (total - w["memFree"]) / total * 100
+    rows = [cpu_line(min(100.0, w["cpu"]), None, w["ncpu"]), mem_line(used, None, total),
+            swap_line(w["swapUsed"], w["swapTotal"])]
+    wsl = box_text(dict(b, name="WSL"))
+    return [f"### 🪟 {b.get('name')}"] + [x for x in rows if x] + ["-# " + wsl]
+
+
 def footer(snap: dict[str, Any]) -> str:
     """'### 🖥 맥'(CPU·메모리·스왑 줄 + 디스크·실행·시각 작은 글씨) → 원격 박스 줄 → '### 🔥 많이 쓰는 곳' 표(형 2026-11-06 "제대로").
     원격 박스는 자기 줄로 — 맥·윈도우가 섞이면 어느 기계 값인지 헷갈린다(형 2026-11-05)."""
@@ -1057,7 +1087,7 @@ def footer(snap: dict[str, Any]) -> str:
            mem_line(snap.get("memUsed"), snap.get("memLevel"), snap.get("memTotal")),
            swap_line(snap.get("swapUsed"), snap.get("swapTotal"))]
     return "\n".join(["### 🖥 맥"] + [x for x in mac if x] + ["-# " + " · ".join(p for p in parts if p)]
-                     + ["-# " + box_text(b) for b in snap.get("boxes") or []]
+                     + [x for b in snap.get("boxes") or [] for x in box_lines(b)]
                      + ([snap["resources"]] if snap.get("resources") else []))
 
 
