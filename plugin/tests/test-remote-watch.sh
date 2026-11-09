@@ -10,7 +10,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPTS="$ROOT/plugin/scripts"
 
 PYTHONPATH="$SCRIPTS" python3 - <<'PY'
-import json, shutil, tempfile, unittest
+import json, os, shutil, subprocess, tempfile, unittest
 from pathlib import Path
 
 import marina_paths
@@ -58,6 +58,29 @@ class WatchTests(unittest.TestCase):
         self.up = True; self.tick(m)
         self.up = False; self.tick(m)
         self.assertEqual(self.started, [], "연속이 아니면 안 옮긴다")
+
+    def test_dead_tunnel_reopened_when_box_up(self):
+        # 박스는 닿는데 터널 프로세스만 죽음 → 적어 둔 같은 명령으로 다시 연다(2026-11-09 story-chat 게이트웨이 502)
+        dead = subprocess.Popen(["true"]); dead.wait()
+        argv = ["ssh", "-N", "-L", "127.0.0.1:33025:127.0.0.1:33025", "box"]
+        (self.sd / "remote-tunnel.pid").write_text(f"{dead.pid}\n{json.dumps(argv)}\n")
+        spawned = []
+        new = w.reopen_tunnel(self.sd, spawn=lambda a, log: spawned.append(a) or 4242)
+        self.assertEqual((new, spawned), (4242, [argv]))
+        self.assertEqual((self.sd / "remote-tunnel.pid").read_text().splitlines()[0], "4242")
+        live = (self.sd / "remote-tunnel.pid")
+        live.write_text(f"{os.getpid()}\n{json.dumps(argv)}\n")
+        self.assertIsNone(w.reopen_tunnel(self.sd, spawn=lambda a, log: 1), "살아 있으면 그대로")
+        live.write_text(f"{dead.pid}\n")
+        self.assertIsNone(w.reopen_tunnel(self.sd, spawn=lambda a, log: 1), "명령 기록이 없는 옛 형식은 손대지 않는다")
+        live.write_text(f"{dead.pid}\n{json.dumps(['rm', '-rf', '/'])}\n")
+        self.assertIsNone(w.reopen_tunnel(self.sd, spawn=lambda a, log: 1), "ssh 가 아니면 안 돌린다")
+        m = {}
+        calls = []
+        w.tick([self.root], m, log=self.logs.append, reachable=lambda h: True,
+               start_local=lambda r: 0, reopen=lambda sd: calls.append(sd) or 77)
+        self.assertEqual(calls, [self.sd])
+        self.assertIn("다시 열었어", self.logs[-1])
 
     def test_not_running_stack_is_ignored(self):
         (self.sd / "remote-tunnel.pid").unlink()

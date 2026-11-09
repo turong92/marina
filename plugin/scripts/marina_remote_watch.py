@@ -59,16 +59,53 @@ def _start_local(root: Path) -> int:
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=1800)
 
 
-def tick(roots, misses: dict, log=print, reachable=None, start_local=None) -> list:
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def reopen_tunnel(sd: Path, spawn=None) -> "int | None":
+    """박스는 닿는데 맥으로 돌아오는 터널(ssh -L)만 죽었으면 적어 둔 같은 명령으로 다시 연다. 새 pid 또는 None.
+    (2026-11-09 story-chat: 터널 프로세스가 사라져 게이트웨이 502 — 다시 여는 길이 start 뿐이었다)"""
+    tun = sd / "remote-tunnel.pid"
+    try:
+        lines = tun.read_text(encoding="utf-8").splitlines()
+        pid = int(lines[0].split()[0])
+        argv = json.loads(lines[1]) if len(lines) > 1 else None
+    except (OSError, ValueError, IndexError):
+        return None
+    if _pid_alive(pid) or not (isinstance(argv, list) and argv and argv[0] == "ssh"):
+        return None
+    spawn = spawn or (lambda a, log: subprocess.Popen(a, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                                      stderr=log, start_new_session=True).pid)
+    try:
+        with open(sd / "remote-tunnel.log", "a", encoding="utf-8") as log:
+            new = spawn(argv, log)
+    except OSError:
+        return None
+    tun.write_text(f"{new}\n{json.dumps(argv)}\n", encoding="utf-8")
+    return new
+
+
+def tick(roots, misses: dict, log=print, reachable=None, start_local=None, reopen=None) -> list:
     """한 바퀴. 맥으로 옮긴 root 목록을 돌려준다. misses 는 호출자가 들고 있는 연속 실패 수."""
     import marina_runtime_target as rt
     reachable = reachable or _reachable
     start_local = start_local or _start_local
+    reopen = reopen or reopen_tunnel
     moved, seen = [], set()
     for root, sd, host in _remote_stacks(roots):
         seen.add(str(root))
         if reachable(host):
             misses.pop(str(root), None)
+            new = reopen(sd)
+            if new:
+                log(f"remote-watch: {root} 터널이 죽어 다시 열었어(pid {new})")
             continue
         misses[str(root)] = misses.get(str(root), 0) + 1
         if misses[str(root)] < MISSES:

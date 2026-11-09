@@ -1612,7 +1612,8 @@ def start_remote_tunnel(session_dir, target, project_name, env):
         sys.stderr.write(f"warning: 포트 되돌리기 실패({exc}) — 박스에서만 열 수 있습니다\n")
         return None
     print(f"tunnel: 포트 {', '.join(str(p) for p in tunnel_ports(ps))} → 맥 localhost (로그: {log_path})")
-    _tunnel_pid_file(session_dir).write_text(f"{proc.pid}\n", encoding="utf-8")
+    # 둘째 줄에 명령을 남긴다 — 박스는 살아 있는데 터널만 죽으면 remote-watch 가 같은 명령으로 다시 연다(2026-11-09)
+    _tunnel_pid_file(session_dir).write_text(f"{proc.pid}\n{json.dumps(argv)}\n", encoding="utf-8")
     return proc
 
 
