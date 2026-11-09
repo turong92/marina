@@ -42,6 +42,7 @@ _USER_PREFIXES = ("/usr/local/",)            # 시스템 경로처럼 보이지�
 _EXCLUDED_COMMS = {"caddy",                 # marina 게이트웨이(marina-gateway-control.sh 가 띄움)
                    "tmux"}                   # 방이 없으면 스스로 꺼진다 — 살아 있으면 열린 방이 있다(2026-10-29 전 방 종료 사고)
 _TERM_GRACE_S = 10.0
+_DAEMON_INTERVAL_S = 300                     # 노는 빌드 데몬은 5분마다 본다(고아 정리는 그대로 10분)
 _INTERVAL_S = 600                            # 데몬 폴링 주기 — 수 주 묵은 고아를 잡는 일이라 촘촘할 이유가 없다
 _LSOF_CHUNK = 200                            # lsof -p 목록이 너무 길면 실패한다 — 나눠서 부른다
 
@@ -286,14 +287,92 @@ def reap(min_age_s: int, dry_run: bool = False, only: set[int] | None = None) ->
     return cands
 
 
+# ── 노는 빌드 데몬(2026-11-09) ──────────────────────────────────────────────────────────
+# 빌드가 끝난 gradle·코틀린 컴파일 데몬이 메모리(각 1~5GB)를 쥔 채 논다 — gradle 은 idletimeout(15분) 설정을 프로젝트가 덮어쓰고,
+# 코틀린 데몬은 기본 2시간 버틴다(형 맥 실측: 5GB·3GB·2GB). 두 번 본 사이 CPU 를 거의 안 썼으면(빌드 중이 아니면) 끈다.
+_IDLE_DAEMON_RE = re.compile(r"\b(org\.gradle\.launcher\.daemon\.bootstrap\.GradleDaemon|org\.jetbrains\.kotlin\.daemon\.KotlinCompileDaemon)\b")
+IDLE_DAEMON_S = 900.0
+IDLE_DAEMON_CPU_S = 2.0
+_DAEMON_SEEN: dict[int, tuple[float, float]] = {}      # pid → (처음 본 시각, 그때 CPU 초)
+
+
+def parse_cputime(text: str) -> float:
+    """ps TIME('1:02.34' · '1:02:03' · '2-01:02:03') → 초."""
+    days, _, rest = text.strip().rpartition("-")
+    parts = [float(x) for x in rest.split(":")]
+    secs = 0.0
+    for p in parts:
+        secs = secs * 60 + p
+    return secs + (float(days) * 86400 if days else 0.0)
+
+
+def _daemon_table() -> "tuple[list[tuple[int, float, str]], set[int]]":
+    """내 프로세스 중 java 빌드 데몬 (pid, CPU초, 명령) 과, 자식이 있는 pid 집합(bootRun·테스트 JVM 을 돌리는 데몬은 바쁘다)."""
+    rows, parents = [], set()
+    for line in _run(["ps", "-U", str(os.getuid()), "-o", "pid=,ppid=,time=,comm=,command="], 20).splitlines():
+        bits = line.split(None, 4)
+        if len(bits) < 5 or not bits[0].isdigit() or not bits[1].isdigit():
+            continue
+        parents.add(int(bits[1]))
+        if os.path.basename(bits[3]) == "java" and _IDLE_DAEMON_RE.search(bits[4]):
+            try:
+                rows.append((int(bits[0]), parse_cputime(bits[2]), bits[4]))
+            except ValueError:
+                continue
+    return rows, parents
+
+
+def idle_daemons(now: float, table: "list[tuple[int, float, str]] | None" = None,
+                 parents: "set[int] | None" = None) -> list[tuple[int, str]]:
+    """(pid, 이름) — IDLE_DAEMON_S 넘게 지켜본 사이 CPU 를 IDLE_DAEMON_CPU_S 미만 쓴 빌드 데몬. 처음 본 데몬은 기록만.
+    자식 프로세스가 있는 데몬은 건너뛴다 — bootRun·IDE 앱·긴 테스트는 자식 JVM 에서 돌고 데몬 자신은 조용하다(리뷰 C1)."""
+    if table is None:
+        table, parents = _daemon_table()
+    parents = parents or set()
+    out, live = [], set()
+    for pid, cpu, cmd in table:
+        m = _IDLE_DAEMON_RE.search(cmd)
+        if not m:
+            continue
+        live.add(pid)
+        seen = _DAEMON_SEEN.get(pid)
+        if seen is None or pid in parents or cpu < seen[1] or cpu - seen[1] >= IDLE_DAEMON_CPU_S:
+            _DAEMON_SEEN[pid] = (now, cpu)                 # 일했다·자식이 있다·pid 가 재사용됐다(누적 CPU 가 줄었다) — 다시 재기 시작
+        elif now - seen[0] >= IDLE_DAEMON_S:
+            out.append((pid, m.group(1).rsplit(".", 1)[-1]))
+    for pid in list(_DAEMON_SEEN):
+        if pid not in live:
+            del _DAEMON_SEEN[pid]
+    return out
+
+
+def reap_idle_daemons(now: "float | None" = None) -> list[tuple[int, str]]:
+    if os.environ.get("MARINA_IDLE_DAEMON_REAP") == "0":
+        return []                                # 끄는 스위치(리뷰 C1)
+    found = idle_daemons(time.time() if now is None else now)
+    if found:
+        _log([f"SIGTERM idle-build-daemon pid={p} {name} (≥{IDLE_DAEMON_S / 60:.0f}분 CPU<{IDLE_DAEMON_CPU_S:g}s)" for p, name in found])
+        for p, _ in found:
+            _signal(p, signal.SIGTERM)           # gradle·코틀린 데몬은 SIGTERM 에 스스로 정리하고 끝난다
+            _DAEMON_SEEN.pop(p, None)
+    return found
+
+
 def run_forever() -> None:
     """데몬 폴링 스레드 본체 — 어떤 예외도 삼킨다(리퍼가 데몬을 죽이면 본말전도)."""
+    last_full = 0.0
     while True:
         try:
-            reap(min_age_s())
+            reap_idle_daemons()
         except Exception as exc:              # noqa: BLE001
-            _log([f"error {exc!r}"])
-        time.sleep(_INTERVAL_S)
+            _log([f"error idle-daemons {exc!r}"])
+        if time.time() - last_full >= _INTERVAL_S:
+            last_full = time.time()
+            try:
+                reap(min_age_s())
+            except Exception as exc:              # noqa: BLE001
+                _log([f"error {exc!r}"])
+        time.sleep(_DAEMON_INTERVAL_S)
 
 
 # ── CLI ─────────────────────────────────────────────────────────────────────────────────

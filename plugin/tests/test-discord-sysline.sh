@@ -93,6 +93,14 @@ check(mb.box_lines(dict(wb, name="윈도우", up=True, win=dict(wb["win"], cpu=1
 check(mb.box_lines(up) == ["-# " + mb.box_text(up)] and mb.box_lines({"name": "윈도우", "up": False}) == ["-# 윈도우 꺼짐"], "윈도우 값 없으면 옛 한 줄")
 wf = mb.footer({"diskFree": G, "boxes": [dict(wb, name="윈도우", up=True)], "resources": "R"})
 check(wf.split("\n")[-6:] == wl + ["R"], wf)
+# 낭비 경보(2026-11-09): 윈도우가 바쁘면 가장 바쁜 프로세스 이름을 — 코어 단위 값을 전체 대비 %로
+tb = mb.parse_box("CPU=3.0 MEM=31.0 HEAVY=0\nWIN CPU=95 N=16 MT=32660360 MF=5288288 PT=6912 PU=544 TOP=qemu-system-x86_64-headless:1488\n")
+check(tb["win"]["top"] == ("qemu-system-x86_64-headless", 1488.0), str(tb))
+tl = mb.box_lines(dict(tb, name="윈도우", up=True))
+check(any(l == "-# 🔥 가장 바쁜 것: qemu-system-x86_64-headless 93%" for l in tl), str(tl))
+quiet = mb.parse_box("CPU=3.0 MEM=31.0 HEAVY=0\nWIN CPU=12 N=16 MT=32660360 MF=5288288 PT=6912 PU=544 TOP=chrome:150\n")
+check(not any("🔥" in l for l in mb.box_lines(dict(quiet, name="윈도우", up=True))), "한가하면 안 띄운다")
+check("top" not in mb.parse_box(wout)["win"], "TOP 이 없는 옛 출력도 읽는다")
 calls = []
 mb._box_probe = lambda ssh: calls.append(ssh) or "CPU=1 MEM=2 HEAVY=0"
 check(mb.box_stats({}) == [] and calls == [], "설정이 없으면 ssh 를 안 부른다")

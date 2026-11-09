@@ -981,7 +981,10 @@ _BOX_SCRIPT = ("read -r _ a b c d e f g h _ < /proc/stat; sleep 1; read -r _ A B
                "-Command '$o=Get-CimInstance Win32_OperatingSystem; $c=(Get-CimInstance Win32_PerfFormattedData_Counters_ProcessorInformation"
                " | Where-Object {$_.Name -eq \"_Total\"}).PercentProcessorUtility; $f=Get-CimInstance Win32_PageFileUsage"
                " | Measure-Object AllocatedBaseSize,CurrentUsage -Sum; $n=(Get-CimInstance Win32_ComputerSystem).NumberOfLogicalProcessors;"
-               " \"WIN CPU=$c N=$n MT=$($o.TotalVisibleMemorySize) MF=$($o.FreePhysicalMemory) PT=$($f[0].Sum) PU=$($f[1].Sum)\"'"
+               # 가장 바쁜 프로세스(코어 하나=100) — 바쁠 때 #상태에 이름을 띄운다(형 2026-11-09 '낭비 경보': 켜 둔 에뮬이 93%)
+               " $t=Get-CimInstance Win32_PerfFormattedData_PerfProc_Process | Where-Object {$_.Name -notmatch \"^(_Total|Idle)$\"}"
+               " | Sort-Object PercentProcessorTime -Descending | Select-Object -First 1;"
+               " \"WIN CPU=$c N=$n MT=$($o.TotalVisibleMemorySize) MF=$($o.FreePhysicalMemory) PT=$($f[0].Sum) PU=$($f[1].Sum) TOP=$($t.Name):$($t.PercentProcessorTime)\"'"
                " | tr -d '\\r'; true")
 _BOX_TTL = 60.0
 _BOX_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
@@ -1009,7 +1012,13 @@ def parse_box(out: "str | None") -> "dict[str, Any] | None":
         v["win"] = {"cpu": float(w.group(1)), "ncpu": int(w.group(2)),
                     "memTotal": int(w.group(3)) * 1024.0, "memFree": int(w.group(4)) * 1024.0,      # KB
                     "swapTotal": int(w.group(5) or 0) * float(1 << 20), "swapUsed": int(w.group(6) or 0) * float(1 << 20)}  # MB
+        t = re.search(r"TOP=(\S+):(\d+)", out or "")
+        if t:
+            v["win"]["top"] = (t.group(1), float(t.group(2)))
     return v
+
+
+BUSY_ALERT_PCT = 50.0      # 윈도우 전체가 이만큼 바쁘면 가장 바쁜 프로세스 이름을 띄운다
 
 
 def _note_box_up(ssh: str) -> None:
@@ -1077,6 +1086,9 @@ def box_lines(b: dict[str, Any]) -> list[str]:
     rows = [cpu_line(min(100.0, w["cpu"]), None, w["ncpu"]), mem_line(used, None, total),
             swap_line(w["swapUsed"], w["swapTotal"])]
     wsl = box_text(dict(b, name="WSL"))
+    top = w.get("top")
+    if top and w["cpu"] >= BUSY_ALERT_PCT and w.get("ncpu"):
+        rows.append(f"-# 🔥 가장 바쁜 것: {top[0]} {round(top[1] / w['ncpu'])}%")   # 코어 단위 → 전체 대비
     return [f"### 🪟 {b.get('name')}"] + [x for x in rows if x] + ["-# " + wsl]
 
 

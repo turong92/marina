@@ -198,6 +198,40 @@ kill -0 "$P3" 2>/dev/null || { echo "FAIL: CLI dry-run killed the process"; exit
 grep -q "dry-run pid=$P3" "$MARINA_HOME/reaper.log" || { echo "FAIL: CLI dry-run should log to \$MARINA_HOME/reaper.log"; exit 1; }
 echo "PASS: marina reap --dry-run CLI lists candidates without killing"
 
+# ── 9) 노는 빌드 데몬(2026-11-09): 15분 넘게 지켜본 사이 CPU 를 거의 안 쓴 gradle·코틀린 데몬만 ──
+python3 - "$SCRIPTS" <<'PY'
+import sys
+sys.path.insert(0, sys.argv[1])
+import marina_reaper as r
+assert r.parse_cputime("1:02.50") == 62.5 and r.parse_cputime("1:02:03") == 3723 and r.parse_cputime("2-00:00:01") == 172801
+G = "/x/java -Xmx4g org.gradle.launcher.daemon.bootstrap.GradleDaemon 8.11.1"
+K = "/x/java -cp a.jar org.jetbrains.kotlin.daemon.KotlinCompileDaemon --daemon-runFilesPath x"
+OTHER = "/x/java -jar app.jar"
+r._DAEMON_SEEN.clear()
+assert r.idle_daemons(0, [(1, 10.0, G), (2, 5.0, K), (3, 1.0, OTHER)]) == [], "처음 본 건 기록만"
+assert r.idle_daemons(600, [(1, 10.5, G), (2, 50.0, K)]) == [], "15분 전엔 안 끈다"
+got = r.idle_daemons(901, [(1, 11.0, G), (2, 51.0, K)])
+assert got == [(1, "GradleDaemon")], f"노는 gradle 만(코틀린은 600초에 일해서 다시 잰다): {got}"
+assert r.idle_daemons(1600, [(2, 51.5, K)]) == [(2, "KotlinCompileDaemon")]
+assert 1 not in r._DAEMON_SEEN, "사라진 pid 는 잊는다"
+assert r.idle_daemons(1700, [(3, 1.0, OTHER)]) == [], "빌드 데몬이 아니면 안 본다"
+# 자식(bootRun·테스트 JVM)이 있는 데몬은 조용해도 안 끈다(리뷰 C1)
+r._DAEMON_SEEN.clear()
+r.idle_daemons(0, [(5, 1.0, G)], set())
+assert r.idle_daemons(1000, [(5, 1.0, G)], {5}) == [], "자식이 있으면 다시 잰다"
+assert r.idle_daemons(1500, [(5, 1.0, G)], set()) == [], "자식이 사라진 뒤 15분을 다시 채워야"
+assert r.idle_daemons(1901, [(5, 1.0, G)], set()) == [(5, "GradleDaemon")]
+# pid 재사용: 누적 CPU 가 줄면 새 데몬 — 다시 잰다(리뷰 I1)
+r._DAEMON_SEEN.clear()
+r.idle_daemons(0, [(6, 100.0, G)])
+assert r.idle_daemons(1000, [(6, 0.5, G)]) == [], "pid 가 재사용된 새 데몬은 바로 안 끈다"
+import os as _os
+_os.environ["MARINA_IDLE_DAEMON_REAP"] = "0"
+assert r.reap_idle_daemons(99999) == [], "끄는 스위치"
+del _os.environ["MARINA_IDLE_DAEMON_REAP"]
+print("PASS: idle build daemons")
+PY
+
 # ── 8) 설치 shim 경로(marina-entrypoint.sh) 로도 닿는다 — 배포 첫날 `marina reap` 이 usage 만 찍던 회귀 방지 ──
 # entrypoint 는 그룹 명령을 marina.sh 에 위임하는 허용 목록을 갖고 있어, 새 명령은 여기 빠지면 shim 에서 사라진다.
 out="$(bash "$SCRIPTS/marina-entrypoint.sh" reap --dry-run --min-age-hours 0 2>&1)" || { echo "FAIL: entrypoint reap --dry-run exit $?: $out"; exit 1; }
