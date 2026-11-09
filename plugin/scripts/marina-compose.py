@@ -1607,7 +1607,8 @@ def start_remote_tunnel(session_dir, target, project_name, env):
     log_path = Path(session_dir) / "remote-tunnel.log"
     try:
         log = open(log_path, "a", encoding="utf-8")
-        proc = subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=log)
+        # 새 세션으로 떼어 낸다 — 에이전트의 셸 도구는 명령이 끝나면 프로세스 그룹째 정리해서 터널이 같이 죽었다(2026-11-09 story-chat 502)
+        proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=log, start_new_session=True)
     except OSError as exc:
         sys.stderr.write(f"warning: 포트 되돌리기 실패({exc}) — 박스에서만 열 수 있습니다\n")
         return None

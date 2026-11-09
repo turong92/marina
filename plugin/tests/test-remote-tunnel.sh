@@ -85,6 +85,29 @@ class TunnelArgvTests(unittest.TestCase):
         self.assertIsNone(mctl.tunnel_argv("ssh://box", []))
 
 
+class StartTunnelTests(unittest.TestCase):
+    def test_detached_and_argv_recorded(self):
+        # 셸 도구가 끝나며 프로세스 그룹을 정리해도 살아남게 새 세션으로, 다시 열 수 있게 명령을 기록(2026-11-09)
+        import json, tempfile, types
+        from pathlib import Path
+        sd = tempfile.mkdtemp()
+        seen = {}
+        class P:
+            pid = 4321
+        real_co, real_po = mctl.subprocess.check_output, mctl.subprocess.Popen
+        mctl.subprocess.check_output = lambda *a, **k: PS
+        mctl.subprocess.Popen = lambda argv, **k: seen.update(argv=argv, **k) or P()
+        try:
+            t = types.SimpleNamespace(is_remote=True, host="ssh://box")
+            mctl.start_remote_tunnel(sd, t, "proj", {})
+        finally:
+            mctl.subprocess.check_output, mctl.subprocess.Popen = real_co, real_po
+        self.assertTrue(seen.get("start_new_session"), seen)
+        lines = (Path(sd) / "remote-tunnel.pid").read_text().splitlines()
+        self.assertEqual(lines[0], "4321")
+        self.assertEqual(json.loads(lines[1]), seen["argv"])
+
+
 class TunnelNeededTests(unittest.TestCase):
     def test_local_never_tunnels(self):
         self.assertFalse(mctl.tunnel_needed(LocalTarget()))
