@@ -21,6 +21,12 @@ s = json.loads(f.read_text())
 assert f == sd / "settings.json"
 assert "hook-stop" in s["hooks"]["Stop"][0]["hooks"][0]["command"], s
 assert s["enabledPlugins"] == {"discord@claude-plugins-official": True}, s
+# 개발 방: '다음엔 …할게' 하고 턴을 끝내 버리는 걸 작은 모델 판정(prompt 훅)이 한 번 되돌린다(2026-11-09 story-chat 방 1시간 멈춤)
+ph = [h for g in s["hooks"]["Stop"] for h in g["hooks"] if h.get("type") == "prompt"]
+assert len(ph) == 1 and "$ARGUMENTS" in ph[0]["prompt"] and "stop_hook_active" in ph[0]["prompt"], s
+cf = ms.write_settings(sd, chat_root=tmp / "chatroom")         # 채팅·로비 방은 대화라 걸지 않는다
+assert not [h for g in json.loads(cf.read_text())["hooks"]["Stop"] for h in g["hooks"] if h.get("type") == "prompt"]
+f = ms.write_settings(sd)
 argv = ms.claude_argv("proj", "st")
 i = argv.index("--settings")
 assert argv[i + 1] == str(sd / "settings.json") and "AskUserQuestion" not in argv, argv   # 질문은 Discord 버튼으로(봇 3)

@@ -2138,6 +2138,18 @@ exec "$D/marina-session-hook" "$@"
 """
 
 
+# 개발 방이 '다음엔 …할게' 하고 턴을 끝내 그대로 서는 것(2026-11-09 story-chat 방이 1시간 멈춤)을 Claude Code 공식 prompt 훅으로 잡는다.
+# 작은 모델이 마지막 답만 보고 판정 — 큰 방 문맥을 다시 읽지 않는다. stop_hook_active 면 통과(한 턴에 한 번만 되돌린다).
+# Claude Code 는 이 글을 '멈춰도 되는 조건'으로 감싸 묻는다(ok=true → 멈춤 허용) — 이중 부정으로 쓰면 작은 모델이 뒤집는다(실측 2026-11-09).
+STOP_CHECK_PROMPT = """The agent is allowed to stop. This condition is MET if ANY of these is true, and NOT met only if none is:
+(a) stop_hook_active is true;
+(b) the agent's last message does not announce further work the agent itself is about to do (phrases like "Next I'll…", "Now I will…", "다음엔 …할게", "이제 …하겠다", or a plan whose remaining steps it owns);
+(c) the last message asks the user or another room a question, or says it is waiting for a person's / another room's answer or approval, or for a running background job or agent to finish;
+(d) the last message reports the work as done, blocked, or failed.
+Hook input JSON (last_assistant_message is the agent's last message): $ARGUMENTS
+When NOT met, give this reason: "방금 말한 다음 할 일이 남아 있다 — 턴을 끝내지 말고 지금 이어서 해라. 형이나 다른 방의 답이 필요하면 그걸 묻고 끝내라." """
+
+
 def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = False, room: str = "") -> Path:
     """채널 세션 전용 설정(--settings). 사용자 설정과 합쳐진다.
     Stop 훅 = 턴이 끝나면 진행 표시를 뗀다. enabledPlugins = 사용자 범위에서 플러그인을 꺼도 이 세션에서만 켜지게."""
@@ -2200,6 +2212,7 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
     settings["hooks"].setdefault("PostToolUse", []).append(
         {"matcher": _REPLY_TOOL, "hooks": [{"type": "command", "command": done_hook, "timeout": 20}]})
     if chat_root is None:
+        settings["hooks"]["Stop"].append({"hooks": [{"type": "prompt", "prompt": STOP_CHECK_PROMPT, "timeout": 30}]})
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
         settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__ask_terminal"]}
         entry = _hook_entry(fast=True)
