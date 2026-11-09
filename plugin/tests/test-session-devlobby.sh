@@ -22,7 +22,7 @@ out="$(msess lobby proj 2>&1)" && fail "개발 로비가 두 개"
 for _ in $(seq 50); do ls "$FAKE_OUT"/*/argv >/dev/null 2>&1 && break; sleep 0.1; done
 
 PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 - "$FD" "$SRC" "$FAKE_OUT" <<'PY'
-import json, os, subprocess, sys
+import json, os, subprocess, sys, time
 from pathlib import Path
 import marina_session as ms
 fd, src, out = Path(sys.argv[1]), Path(sys.argv[2]).resolve(), Path(sys.argv[3])
@@ -88,6 +88,10 @@ check(up and "[로그인 버그] 로그인 화면" in up[-1]["b"]["payload"]["co
 prev = Path(os.environ["MARINA_HOME"]) / "share-previews" / "proj-login-fix" / "shot.png"
 check(not (wt / "미리보기").exists() and not (sd2 / "미리보기").exists() and prev.is_file(),
       "개발 세션 미리보기는 레포·상태 폴더 밖(공식 플러그인이 상태 폴더 첨부를 거부)")
+# 미리보기 그림은 다 쓴 중간 파일 — 1시간 지난 것은 지운다(형 2026-11-09 "파일로 던지고 지우면")
+old_png = prev.with_name("old.png"); old_png.write_bytes(b"x")
+os.utime(old_png, (time.time() - 7200, time.time() - 7200))
+check(ms.prune_previews() == 1 and not old_png.exists() and prev.is_file(), "1시간 지난 미리보기만 지운다")
 # 로비가 있어도 main 체크아웃에서 하던 대화는 옮길 수 있다
 import re as _re
 SID = "77777777-8888-9999-aaaa-bbbbbbbbbbbb"

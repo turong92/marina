@@ -4824,6 +4824,29 @@ def _ask_terminal(rec: dict[str, Any], args: dict[str, Any]) -> str:
     return "버튼 보냈어 — 명령이 끝나면 알림이 와. 결과는 형이 넘겨 줄 때까지 기다려."
 
 
+PREVIEW_KEEP_S = 3600.0
+
+
+def prune_previews(max_age: float = PREVIEW_KEEP_S) -> int:
+    """개발 방 미리보기 그림은 디스코드 첨부로 올라가면(사본이 디스코드에) 다 쓴 중간 파일 — 1시간 지난 것은 지운다.
+    정리 없이 1001장·511MB 가 쌓였다(형 2026-11-09 "파일로 던지고 지우면"). 새 미리보기를 만들 때마다 전체를 한 번 훑는다."""
+    base = marina_home() / "share-previews"
+    cut, n = time.time() - max_age, 0
+    try:
+        dirs = list(base.iterdir())
+    except OSError:
+        return 0
+    for d in dirs:
+        try:
+            for f in d.iterdir():
+                if f.is_file() and f.stat().st_mtime < cut:
+                    f.unlink()
+                    n += 1
+        except OSError:
+            continue
+    return n
+
+
 def _dev_preview_dir(rec: dict[str, Any]) -> Path:
     """개발 세션 미리보기 폴더 — 워크트리 밖(git add 로 딸려 가지 않게) + 상태 폴더 밖(공식 Discord 플러그인이 자기 상태 폴더 안
     파일 첨부를 'refusing to send channel state' 로 거부한다, 2026-10-05 실측)."""
@@ -4884,6 +4907,8 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
     rec, path, serve_root, block = _shared_target(args)
     root = Path(os.path.realpath(str(rec["root"])))
     files, notes = [path], []
+    if rec.get("kind") not in CHAT_KINDS:
+        prune_previews()
     if path.suffix.lower() in (".html", ".htm"):
         # 개발 세션은 레포 밖(상태 폴더)에 — 워크트리에 두면 git add 로 커밋에 딸려 간다(리뷰)
         # 채팅방 미리보기는 아직 방 폴더 밖(맨 위)이라 다른 방이 읽을 수 있다 — make_image·make_pdf 는 rooms/<방>/ 안으로 옮겼다(별건)
