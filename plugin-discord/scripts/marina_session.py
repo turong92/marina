@@ -2128,7 +2128,8 @@ if [ -f "$D/marina-session-hook.path" ]; then
   { IFS= read -r FB; IFS= read -r T; } < "$D/marina-session-hook.path"
   # 파이썬은 느린 입구와 같은 순서 — 흔한 고정 경로부터, 적힌 것(쓴 프로세스의 venv 일 수 있다)은 마지막(리뷰 I5)
   PY=""
-  for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 "$FB"; do
+  # CLT 파이썬을 /usr/bin 보다 먼저 — /usr/bin/python3 는 xcode-select 를 따라가는 껍데기라 Xcode 라이선스가 풀리면(업데이트) 모든 훅이 죽었다(2026-11-09)
+  for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /Library/Developer/CommandLineTools/usr/bin/python3 /usr/bin/python3 "$FB"; do
     [ -n "$c" ] && [ -x "$c" ] && PY="$c" && break
   done
   if [ -n "$PY" ] && [ -n "$T" ] && [ -f "$T" ]; then exec "$PY" "$T" "$@"; fi
