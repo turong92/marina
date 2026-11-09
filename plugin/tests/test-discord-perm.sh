@@ -52,6 +52,12 @@ th.join(5)
 check((res.get("out") or {}).get("hookSpecificOutput", {}).get("decision", {}).get("behavior") == "allow", f"허용 결정: {res}")
 check(any(x["m"] == "PATCH" and x["p"].startswith(f"/channels/{ch}/messages/") for x in log()), "메시지에 결과 표시(버튼 뗌)")
 check(not list(sd.glob("perm-*.json")), "요청 기록 지움")
+# 무시 모드에서도 뜨는 권한 요청의 범인 모으기(형 2026-11-09) — 맥 안 파일에만, 원문 그대로
+pl = ms.marina_home() / "perm-requests.jsonl"
+rows = [json.loads(l) for l in pl.read_text().splitlines()] if pl.exists() else []
+check(rows and rows[-1]["tool"] == "Bash" and "rm -rf /secret/path" in rows[-1]["input"] and rows[-1]["room"] == "proj/feat/a",
+      f"권한 요청 기록: {rows}")
+check(pl.exists() and (pl.stat().st_mode & 0o077) == 0, "기록은 나만 읽게(600)")
 check("없" in mb.perm(ch, "U1", token, True), "이미 끝난 요청")
 
 # 거부

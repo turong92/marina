@@ -1689,6 +1689,21 @@ def _turn_from_terminal(transcript: Path, ch: Any) -> bool:
     return False
 
 
+def _log_perm_request(s: dict[str, Any], payload: dict[str, Any]) -> None:
+    """무시 모드에서도 뜨는 권한 요청의 범인을 모은다(형 2026-11-09) — 맥 안 파일(600)에만 원문. 실패해도 요청은 그대로."""
+    try:
+        inp = payload.get("tool_input") or {}
+        row = {"at": time.strftime("%m-%d %H:%M:%S"), "room": f"{s.get('project')}/{s.get('task')}",
+               "tool": str(payload.get("tool_name") or ""), "mode": payload.get("permission_mode"),
+               "agent": payload.get("agent_type") or "", "input": str(inp.get("command") or inp.get("file_path") or json.dumps(inp, ensure_ascii=False))[:2000]}
+        p = marina_home() / "perm-requests.jsonl"
+        fd = os.open(str(p), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(fd, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
 def hook_permission(payload: dict[str, Any], wait: float = PERM_WAIT, poll: float = 1.0) -> "dict[str, Any] | None":
     """권한 창 대신 채널에 [허용][거부]. 누를 때까지 기다린다(그동안 터미널 창은 숨겨짐 — 하네스 문서). 시간이 지나면 결정 없이
     돌려줘 원래 권한 창으로. 명령 원문은 안 보낸다(도구 이름·설명만). AskUserQuestion 은 질문 버튼이,
@@ -1701,6 +1716,7 @@ def hook_permission(payload: dict[str, Any], wait: float = PERM_WAIT, poll: floa
     sd, ch = Path(str(s["stateDir"])), str(s["channelId"])
     if _turn_from_terminal(Path(str(payload.get("transcript_path") or "/nonexistent")), room_chans(s)):
         return None
+    _log_perm_request(s, payload)
     _, label, what = tool_activity(tool, payload.get("tool_input") or {})
     token = uuid.uuid4().hex[:12]
     f, ans = sd / f"perm-{token}.json", sd / f"perm-{token}.answer"
