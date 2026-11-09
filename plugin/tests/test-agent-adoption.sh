@@ -48,6 +48,21 @@ assert not (d / "claude-sid-dead-0002.json").exists(), "죽은 기록이 정리�
 records = ap.live_records()
 assert [r["sid"] for r in records] == ["sid-live-0001"], records
 print("ok agent-procs keeps only live records")
+
+# 같은 세션을 방금 적었고 살아 있으면 ps 를 다시 훑지 않는다(2026-11-09 점검) — 오래됐거나 죽었으면 다시 적는다
+import time as _t
+assert ap._fresh_record("claude", "sid-live-0001") is True
+(d / "claude-sid-live-0001.json").write_text(json.dumps(dict(live, ts=_t.time() - 700)), encoding="utf-8")
+assert ap._fresh_record("claude", "sid-live-0001") is False, "10분 지나면 다시"
+(d / "claude-sid-dead-0003.json").write_text(json.dumps(dict(live, sid="sid-dead-0003", pid=dead.pid)), encoding="utf-8")
+assert ap._fresh_record("claude", "sid-dead-0003") is False, "죽은 pid 면 다시"
+assert ap._fresh_record("claude", "sid-none-0004") is False, "기록이 없으면 다시"
+_calls = []; _real = ap.ps_table; ap.ps_table = lambda: _calls.append(1) or _real()
+(d / "claude-sid-live-0001.json").write_text(json.dumps(live), encoding="utf-8")
+ap.record_from_hook({"session_id": "sid-live-0001", "cwd": "/tmp"}, source="claude")
+assert _calls == [], "새 기록이면 ps 를 안 부른다"
+ap.ps_table = _real
+print("ok agent-procs skips ps when fresh")
 PY
 
 PYTHONPATH="$SCR" python3 - <<'PY'

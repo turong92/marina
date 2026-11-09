@@ -25,18 +25,32 @@ ms.write_settings(sd)
 st = json.loads((sd / "settings.json").read_text())
 cmds = [h["command"] for ev in st["hooks"].values() for e in ev for h in e["hooks"]]
 shim = ms.marina_home() / "bin" / "marina-session-hook"
+quick = shim.with_name("marina-hook")
 check(shim.is_file() and os.access(shim, os.X_OK), "고정 입구 생성")
-check(cmds and all(str(shim) in c for c in cmds), f"훅이 전부 고정 입구를 부른다: {cmds}")
+check(quick.is_file() and os.access(quick, os.X_OK), "훅 빠른 입구 생성(2026-11-09)")
+check(cmds and all(str(quick) in c for c in cmds), f"훅이 전부 빠른 입구를 부른다: {cmds}")
 check(str(Path(ms.__file__).resolve().parent) not in " ".join(cmds), "버전 폴더 경로가 박히지 않는다")
 mcp = json.loads((sd / "mcp.json").read_text())["mcpServers"]["marina"]
-check(mcp["command"] == str(shim), f"MCP 도 같은 입구: {mcp}")
+check(mcp["command"] == str(quick), f"MCP 도 같은 입구: {mcp}")
+check(ms._hook_entry() == [str(shim)], "훅 밖(데몬 띄우기 등)은 늘 최신을 찾는 느린 입구")
+r = subprocess.run([str(quick), "hook-stop"], input="{}", text=True, capture_output=True, env=dict(os.environ, DISCORD_STATE_DIR=str(sd)))
+check(r.returncode == 0, f"빠른 입구로 훅 실행: {r.stderr}")
 r = subprocess.run([str(shim), "hook-stop"], input="{}", text=True, capture_output=True, env=dict(os.environ, DISCORD_STATE_DIR=str(sd)))
 check(r.returncode == 0, f"입구로 훅 실행: {r.stderr}")
 # 입구 본문은 배포마다 바뀌면 안 된다 — macOS 가 "백그라운드 항목이 추가됨" 알림을 띄운다(LaunchAgent 가 이 파일을 실행). 바뀌는 값은 옆 파일로
 body0 = shim.read_text(); side = shim.with_name("marina-session-hook.path")
 check(side.is_file(), "바뀌는 값(폴백 경로·파이썬)은 옆 파일 marina-session-hook.path 에")
 check(str(Path(ms.__file__).resolve()) not in body0 and sys.executable not in body0, "입구 본문에 설치 버전 폴더·파이썬 경로가 박히지 않는다")
-v9 = tmp / "v9"; (v9 / "scripts").mkdir(parents=True)
+v9 = tmp / "v9"; (v9 / "scripts").mkdir(parents=True); (v9 / "scripts" / "marina_session.py").write_text("")
+# 옛 설치본에서 도는 프로세스는 .path 를 되돌리지 않는다 — 빠른 입구가 바로 쓰는 파일이라(2026-11-09)
+side_before = side.read_text()
+old = tmp / "old"; (old / "scripts").mkdir(parents=True); (old / "scripts" / "marina_session.py").write_text("")
+ms.__file__ = str(old / "scripts" / "marina_session.py")
+(chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"marina-discord@test-market": [
+    {"installPath": str(old), "scope": "user", "lastUpdated": "2026-01-01"}, {"installPath": str(V1), "scope": "user", "lastUpdated": "2026-11-09"}]}}))
+ms._hook_entry()
+check(side.read_text() == side_before, f"옛 설치본은 .path 를 안 쓴다: {side.read_text()!r}")
+ms.__file__ = str(Path(V1) / "scripts" / "marina_session.py")
 real_file, real_exe = ms.__file__, sys.executable
 ms.__file__ = str(v9 / "scripts" / "marina_session.py"); sys.executable = "/other/python9"
 (chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"marina-discord@test-market": [{"installPath": str(v9)}]}}))
@@ -60,6 +74,15 @@ check(r.stdout.strip() == "V2 ['hook-stop']", f"새 버전을 부른다: {r.stdo
 (chome / "plugins" / "installed_plugins.json").write_text("broken")
 r = subprocess.run([str(shim), "hook-stop"], input="{}", text=True, capture_output=True, env=dict(os.environ, DISCORD_STATE_DIR=str(sd)))
 check(r.returncode == 0 and "V2" not in r.stdout, f"폴백: {r.stdout!r} {r.stderr!r}")
+# 빠른 입구: .path 의 대상이 사라졌으면(옛 설치본 정리) 느린 입구로 넘긴다
+(chome / "plugins" / "installed_plugins.json").write_text(json.dumps({"version": 2, "plugins": {"marina-discord@test-market": [{"installPath": str(v2.parent)}]}}))
+side.write_text(f"{sys.executable}\n{tmp}/gone/marina_session.py\n")
+r = subprocess.run([str(quick), "hook-stop"], input="{}", text=True, capture_output=True)
+check(r.stdout.strip() == "V2 ['hook-stop']", f"대상 없으면 느린 입구로: {r.stdout!r} {r.stderr!r}")
+side.write_text(f"{sys.executable}\n{v2}/marina_session.py\n")
+r = subprocess.run([str(quick), "hook-stop"], input="{}", text=True, capture_output=True)
+check(r.stdout.strip() == "V2 ['hook-stop']", f".path 대상을 바로 실행: {r.stdout!r} {r.stderr!r}")
+(chome / "plugins" / "installed_plugins.json").write_text("broken")
 # 설치 목록도 폴백 경로도 없으면 빈 인자로 python 을 돌리지 않는다 — 조용히 0 으로 끝
 side.write_text("\n\n")
 (chome / "plugins" / "installed_plugins.json").write_text("broken")

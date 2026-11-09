@@ -2016,7 +2016,20 @@ def _drop_ack_reaction(path: Path) -> None:
 _PLUGIN_KEYS = ("marina-discord@", "marina@")    # 분리 D: discord 는 자기 플러그인(marina-discord), 옛 설치(marina)도 허용
 
 
-def _hook_entry() -> list[str]:
+def _shim_choice(plugins: dict[str, Any]) -> str:
+    """느린 입구가 고를 marina_session.py — 키 marina-discord@ → marina@, user 범위·최근 것, 파일이 있는 첫 설치본(입구 셸과 같은 규칙)."""
+    for pre in _PLUGIN_KEYS:
+        for k in [k for k in plugins if str(k).startswith(pre)]:
+            es = [e for e in plugins[k] if isinstance(e, dict)] if isinstance(plugins[k], list) else []
+            es.sort(key=lambda e: (e.get("scope") == "user", str(e.get("lastUpdated") or "")), reverse=True)
+            for e in es[:1]:
+                f = os.path.join(str(e.get("installPath") or ""), "scripts", "marina_session.py")
+                if os.path.isfile(f):
+                    return str(Path(f).resolve())
+    return ""
+
+
+def _hook_entry(fast: bool = False) -> list[str]:
     """세션이 부를 마리나 명령의 머리. 계약: hook-* 하위명령 이름·인자는 하위 호환으로만 바꾼다 — 떠 있는 세션의 옛 설정이
     새 코드를 부른다(리뷰 I7). 설치본에서 돌면 고정 입구(~/.marina/bin/marina-session-hook) — 입구가 부를 때마다
     설치 목록에서 지금 깔린 마리나를 찾으므로 새 버전을 깔면 떠 있는 세션도 재시작 없이 새 코드를 쓴다(형 요청: 재시작 걱정 줄이기).
@@ -2077,25 +2090,56 @@ exec "$PY" "$target" "$@"
             os.chmod(tmp, 0o755)
             os.replace(tmp, shim)
         side_body = f"{sys.executable}\n{me}\n"
-        if not side.is_file() or side.read_text() != side_body:      # 같으면 쓰지 않는다(cmp)
+        # 빠른 입구가 이 파일을 바로 쓰므로 지금 깔린 최신 설치본만 적는다 — 옛 설치본에서 도는 프로세스가 되돌리지 않게
+        if _shim_choice(plugins) == str(me) and (not side.is_file() or side.read_text() != side_body):      # 같으면 쓰지 않는다(cmp)
             tmp = side.with_name(f"{side.name}.{os.getpid()}.tmp")
             tmp.write_text(side_body)
             os.replace(tmp, side)
     except OSError:
         return [sys.executable, str(me)]
-    return [str(shim)]
+    if not fast:
+        return [str(shim)]
+    quick = shim.with_name("marina-hook")
+    try:
+        if not quick.is_file() or quick.read_text() != _FAST_HOOK_BODY:
+            tmp = quick.with_name(f"{quick.name}.{os.getpid()}.tmp")
+            tmp.write_text(_FAST_HOOK_BODY)
+            os.chmod(tmp, 0o755)
+            os.replace(tmp, quick)
+    except OSError:
+        return [str(shim)]
+    return [str(quick)]
+
+
+# 훅 전용 빠른 입구(2026-11-09 점검) — 느린 입구는 부를 때마다 python 을 한 번 더 띄워 설치 목록을 읽는다(도구 호출마다 ~30ms × 여러 훅).
+# 이쪽은 설치본 마리나가 돌 때마다 적어 두는 .path(파이썬·marina_session.py)를 바로 쓰고, 그 파일이 사라졌으면 느린 입구로 넘긴다.
+# 배포(데몬 재시작)가 .path 를 새 설치본으로 고친다(데몬 기동 때 _hook_entry 를 부른다). LaunchAgent 가 부르는 파일이 아니라 본문이 바뀌어도 알림이 없다.
+_FAST_HOOK_BODY = """#!/bin/sh
+# 마리나 훅 빠른 입구 — 옆 파일 marina-session-hook.path 의 경로를 바로 쓴다. 없거나 사라졌으면 느린 입구(marina-session-hook)로.
+D=$(dirname "$0")
+if [ -f "$D/marina-session-hook.path" ]; then
+  { IFS= read -r FB; IFS= read -r T; } < "$D/marina-session-hook.path"
+  # 파이썬은 느린 입구와 같은 순서 — 흔한 고정 경로부터, 적힌 것(쓴 프로세스의 venv 일 수 있다)은 마지막(리뷰 I5)
+  PY=""
+  for c in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 "$FB"; do
+    [ -n "$c" ] && [ -x "$c" ] && PY="$c" && break
+  done
+  if [ -n "$PY" ] && [ -n "$T" ] && [ -f "$T" ]; then exec "$PY" "$T" "$@"; fi
+fi
+exec "$D/marina-session-hook" "$@"
+"""
 
 
 def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = False, room: str = "") -> Path:
     """채널 세션 전용 설정(--settings). 사용자 설정과 합쳐진다.
     Stop 훅 = 턴이 끝나면 진행 표시를 뗀다. enabledPlugins = 사용자 범위에서 플러그인을 꺼도 이 세션에서만 켜지게."""
     # 버전 캐시 경로가 지워지면 exit 2 가 claude 종료를 막는다 → 실패해도 0(최종 리뷰 I2). start 가 다시 쓴다.
-    cmd = shlex.join(_hook_entry() + ["hook-stop"]) + " || true"
+    cmd = shlex.join(_hook_entry(fast=True) + ["hook-stop"]) + " || true"
     settings = {"enabledPlugins": {"discord@claude-plugins-official": True},
                 "hooks": {"Stop": [{"hooks": [{"type": "command", "command": cmd, "timeout": 15}]}]}}
     if chat_root is not None:
         # 플러그인은 첨부 경로에서 자기 상태 폴더만 막는다 — 폴더 밖 파일은 훅으로 막는다(실측).
-        guard = shlex.join(_hook_entry() + ["hook-chat-guard",
+        guard = shlex.join(_hook_entry(fast=True) + ["hook-chat-guard",
                             str(chat_root), str(sdir / "inbox")] + (["--room", str(room)] if room else []))
         # 판정기가 어떤 이유로든 죽으면(파이썬 경로 바뀜 등) exit 2 = 도구 호출을 막는다(리뷰 I1)
         guard += " || exit 2"
@@ -2116,45 +2160,45 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
         settings["hooks"]["PreToolUse"] = [{"matcher": f"{_REPLY_TOOL}|WebFetch|Write|Edit|Read|Glob|Grep",
                                             "hooks": [{"type": "command", "command": guard, "timeout": 15}]}]
     # 작업 중 표시: 도구를 쓸 때마다 채널에 '입력 중…'(8초에 한 번) — 👀 만으론 진행 여부를 알 수 없다(형 요청)
-    typing = shlex.join(_hook_entry() + ["hook-typing"]) + " || true"
+    typing = shlex.join(_hook_entry(fast=True) + ["hook-typing"]) + " || true"
     settings["hooks"].setdefault("PreToolUse", []).append(       # 첨부 가드(있으면) 뒤에 붙인다 — 가드를 덮지 않게
         {"matcher": "*", "hooks": [{"type": "command", "command": typing, "timeout": 10}]})
     # 받은 순간 👀 — 플러그인은 도착만 해도 👀 를 달아 안 읽은 걸 읽은 것처럼 보였다(형 결정: 실제로 받은 것만)
-    prompt_hook = shlex.join(_hook_entry() + ["hook-prompt"]) + " || true"
+    prompt_hook = shlex.join(_hook_entry(fast=True) + ["hook-prompt"]) + " || true"
     settings["hooks"]["UserPromptSubmit"] = [{"hooks": [{"type": "command", "command": typing, "timeout": 10},
                                                         {"type": "command", "command": prompt_hook, "timeout": 10}]}]
     if chat_root is None:
         # 질문 버튼(봇 3단계): 질문이 뜨면 채널에 올리고, 어디서든 답하면 정리한다. 떼어 내서 질문 창을 막지 않는다
-        q_hook = shlex.join(_hook_entry() + ["hook-question"]) + " || true"
-        qd_hook = shlex.join(_hook_entry() + ["hook-question-done"]) + " || true"
+        q_hook = shlex.join(_hook_entry(fast=True) + ["hook-question"]) + " || true"
+        qd_hook = shlex.join(_hook_entry(fast=True) + ["hook-question-done"]) + " || true"
         settings["hooks"]["PreToolUse"].append({"matcher": "AskUserQuestion",
                                                 "hooks": [{"type": "command", "command": q_hook, "timeout": 60}]})   # 과부하 땐 파이썬 기동만 10초를 넘겨 카드가 죽었다(2026-10-23) — 늦어도 질문 창이 조금 늦게 뜰 뿐
         settings["hooks"].setdefault("PostToolUse", []).append(
             {"matcher": "AskUserQuestion", "hooks": [{"type": "command", "command": qd_hook, "timeout": 15}]})
         # 권한 승인 버튼(봇 4): 채널에서 누를 때까지 기다린다 — 훅 제한은 기다림보다 넉넉히
-        p_hook = shlex.join(_hook_entry() + ["hook-permission"]) + " || true"
+        p_hook = shlex.join(_hook_entry(fast=True) + ["hook-permission"]) + " || true"
         settings["hooks"]["PermissionRequest"] = [{"hooks": [{"type": "command", "command": p_hook,
                                                               "timeout": int(PERM_WAIT) + 30}]}]
     # 변수 경로 rm 은 실행 전에 돌려보낸다 — 우회 모드에서도 뜨는 확인 창을 미리 없앤다(서브에이전트 포함)
-    rm_hook = shlex.join(_hook_entry() + ["hook-rm-guard"]) + " || true"
+    rm_hook = shlex.join(_hook_entry(fast=True) + ["hook-rm-guard"]) + " || true"
     settings["hooks"]["PreToolUse"].append({"matcher": "Bash",
                                             "hooks": [{"type": "command", "command": rm_hook, "timeout": 10}]})
     # 답장 = 끝 표시: reply_to 가 빠지면 훅이 채운다(규칙만으론 잊는다, 실사용)
-    reply_hook = shlex.join(_hook_entry() + ["hook-reply-to"]) + " || true"
+    reply_hook = shlex.join(_hook_entry(fast=True) + ["hook-reply-to"]) + " || true"
     settings["hooks"]["PreToolUse"].append({"matcher": _REPLY_TOOL,
                                             "hooks": [{"type": "command", "command": reply_hook, "timeout": 10}]})
     # 답이 나가면 그 지시의 포럼 글을 완료로 — 답 본문을 글에 복사하고 닫는다(Discord 왕복이라 넉넉한 제한)
-    done_hook = shlex.join(_hook_entry() + ["hook-reply-done"]) + " || true"
+    done_hook = shlex.join(_hook_entry(fast=True) + ["hook-reply-done"]) + " || true"
     settings["hooks"].setdefault("PostToolUse", []).append(
         {"matcher": _REPLY_TOOL, "hooks": [{"type": "command", "command": done_hook, "timeout": 20}]})
     if chat_root is None:
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
         settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__ask_terminal"]}
-        entry = _hook_entry()
+        entry = _hook_entry(fast=True)
         mcp = {"mcpServers": {"marina": {"command": entry[0], "args": entry[1:] + ["mcp-chat"]}}}
         (sdir / "mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     if chat_root is not None:
-        entry = _hook_entry()
+        entry = _hook_entry(fast=True)
         mcp = {"mcpServers": {"marina": {"command": entry[0], "args": entry[1:] + ["mcp-lobby" if lobby else "mcp-chat"]}}}
         (sdir / "mcp.json").write_text(json.dumps(mcp, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     f = sdir / "settings.json"
@@ -5904,6 +5948,7 @@ def main(argv: list[str] | None = None) -> int:
             if _daemon_adopt_launchd():
                 return 0                     # launchd 가 띄운 데몬이 맡는다
             _trim_daemon_log()
+            _hook_entry(fast=True)           # 배포 뒤 첫 기동 — 훅 빠른 입구가 쓸 .path 를 새 설치본으로(2026-11-09)
             daemon_pid_path().write_text(f"{os.getpid()}\n")
             import marina_discord_bot
             marina_discord_bot.run_forever(stop=_daemon_stop_check)

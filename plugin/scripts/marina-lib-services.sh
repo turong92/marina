@@ -19,11 +19,18 @@ def norm(p): return os.path.realpath(os.path.expanduser(p))
 pid = ""; proot = source_root
 try:
     data = json.load(open(projects_file, encoding="utf-8"))
-    tgt = {norm(source_root), norm(root)}
+    # 가장 구체적인 프로젝트 — ROOT 가 맞는 쪽을 SOURCE_ROOT 보다, 그 안에선 가장 긴 루트를(중첩 프로젝트에서 상위가 먼저 잡히던 것, 2026-11-09)
+    best = None
     for p in data.get("projects", []):
         pr = norm(p.get("root", ""))
-        if pr in tgt or any(t == pr or t.startswith(pr + os.sep) for t in tgt):
-            pid = p.get("id", ""); proot = p.get("root", ""); break
+        for rank, t in ((1, norm(root)), (0, norm(source_root))):
+            if t == pr or t.startswith(pr + os.sep):
+                key = (rank, len(pr))
+                if best is None or key > best[0]:
+                    best = (key, p)
+                break
+    if best:
+        pid = best[1].get("id", ""); proot = best[1].get("root", "")
 except Exception:
     pass
 merged = {}
@@ -82,12 +89,14 @@ except Exception:
 root = os.path.realpath(os.path.expanduser(sys.argv[2]))
 source = os.path.realpath(os.path.expanduser(sys.argv[3]))
 norm = lambda p: os.path.realpath(os.path.expanduser(p.get("root", "")))
-tgt = {root, source}
-match = None
-for p in data.get("projects", []):
+match = None; best = None
+for p in data.get("projects", []):        # 가장 구체적인 프로젝트(위 merged_services_json 과 같은 규칙)
     pr = norm(p)
-    if pr in tgt or any(t == pr or t.startswith(pr + os.sep) for t in tgt):
-        match = p; break
+    for rank, t in ((1, root), (0, source)):
+        if t == pr or t.startswith(pr + os.sep):
+            if best is None or (rank, len(pr)) > best:
+                best = (rank, len(pr)); match = p
+            break
 if match is None:
     print("{}"); sys.exit(0)
 print(json.dumps({

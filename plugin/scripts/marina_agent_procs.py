@@ -41,6 +41,21 @@ def _record_path(source: str, sid: str) -> Path:
     return _dir() / f"{source}-{sid}.json"
 
 
+FRESH_RECORD_S = 600.0
+
+
+def _fresh_record(source: str, sid: str) -> bool:
+    try:
+        rec = json.loads(_record_path(source, sid).read_text(encoding="utf-8"))
+        pid = int(rec.get("pid") or 0)
+        if pid <= 1 or time.time() - float(rec.get("ts") or 0) > FRESH_RECORD_S:
+            return False
+        os.kill(pid, 0)
+        return True
+    except (OSError, ValueError, TypeError, AttributeError):
+        return False
+
+
 def _pid_start(pid: int) -> str:
     """pid 재사용 방어용 시작시각 지문 — marina_term._pid_start 와 같은 방식."""
     try:
@@ -125,6 +140,8 @@ def record_from_hook(payload: Any, source: str = "") -> None:
             return
         if source not in _AGENT_COMMS:
             source = "codex" if payload.get("thread_id") and not payload.get("session_id") else "claude"
+        if _fresh_record(source, sid):
+            return          # 같은 세션을 방금(10분 안) 적었고 그 프로세스가 살아 있다 — 턴마다 ps 전체를 훑지 않는다(2026-11-09 점검, 훅 50ms)
         table = ps_table()
         pid = _agent_pid(source, table)
         if pid <= 1:

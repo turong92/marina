@@ -24,11 +24,14 @@ def norm(p): return os.path.realpath(os.path.expanduser(p))
 pid = ""
 try:
     data = json.load(open(projects_file, encoding="utf-8"))
-    tgt = {norm(source_root), norm(root)}
+    best = None                     # 가장 구체적인 프로젝트(marina-lib-services.sh 와 같은 규칙 — ROOT 우선, 긴 루트)
     for p in data.get("projects", []):
         pr = norm(p.get("root", ""))
-        if pr in tgt or any(t == pr or t.startswith(pr + os.sep) for t in tgt):
-            pid = p.get("id", ""); break
+        for rank, t in ((1, norm(root)), (0, norm(source_root))):
+            if t == pr or t.startswith(pr + os.sep):
+                if best is None or (rank, len(pr)) > best:
+                    best = (rank, len(pr)); pid = p.get("id", "")
+                break
 except Exception:
     pass
 out = {}

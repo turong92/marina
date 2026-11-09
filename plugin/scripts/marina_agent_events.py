@@ -563,15 +563,17 @@ def poke_daemon() -> bool:
 
     훅은 턴을 붙잡고 도는 코드다. 그래서 **절대 기다리지 않고, 실패해도 무시한다** —
     데몬이 꺼져 있든 느리든 훅이 대화를 지연시키면 안 된다. 놓쳐도 감시 루프가 곧 잡는다."""
+    # urllib 은 불러오는 데만 20ms, 대시보드가 꺼져 있으면 localhost 두 주소를 차례로 두드려 40ms 가 갔다(2026-11-09 점검).
+    # 소켓으로 요청만 보내고 응답 첫 줄만 읽는다 — 꺼져 있으면 바로 거절된다.
     try:
-        import urllib.request
+        import socket
 
         from marina_state import HOST, PORT
 
-        request = urllib.request.Request(f"http://{HOST}:{PORT}/api/events-poke",
-                                         data=b"", method="POST")
-        with urllib.request.urlopen(request, timeout=POKE_TIMEOUT_S):
-            return True
+        host = "127.0.0.1" if HOST == "localhost" else HOST
+        with socket.create_connection((host, PORT), timeout=POKE_TIMEOUT_S) as sock:
+            sock.sendall(f"POST /api/events-poke HTTP/1.0\r\nHost: {HOST}:{PORT}\r\nContent-Length: 0\r\n\r\n".encode())
+            return sock.recv(12).startswith(b"HTTP/1.")
     except Exception:
         return False
 

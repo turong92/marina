@@ -65,11 +65,30 @@ def _git_main_checkout(root: Path) -> Path | None:
             return candidate
     return None
 
+_PROJECTS_STAMP: list = [None]
+
+
+def _projects_stamp() -> Any:
+    try:
+        st = PROJECTS_FILE.stat()
+        return (st.st_mtime_ns, st.st_size, st.st_ino)
+    except OSError:
+        return None
+
+
 def load_projects() -> list[dict[str, Any]]:
     # ~/.marina/projects.json — 명시 등록(marina project add)된 프로젝트만 읽는다.
     # 비면 빈 목록(대시보드 빈 상태) — 현재 체크아웃을 추측하지 않는다(명시 등록 marina project add 필요).
-    if _projects_cache:
+    # 파일이 바뀌면 다시 읽는다 — 상주 프로세스(runtimed 게이트웨이 갱신)가 기동 뒤 등록한 프로젝트를 영영 못 보던 것(2026-11-09)
+    stamp = _projects_stamp()
+    if _projects_cache and stamp == _PROJECTS_STAMP[0]:
         return _projects_cache
+    if _projects_cache:
+        _projects_cache.clear()
+        _source_root_cache.clear()
+        _session_id_cache.clear()
+        _roots_cache.clear()
+    _PROJECTS_STAMP[0] = stamp
     items: list[dict[str, Any]] = []
     try:
         data = json.loads(PROJECTS_FILE.read_text(encoding="utf-8"))
