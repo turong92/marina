@@ -297,6 +297,9 @@ def _wake_locked(rec: dict[str, Any], cfg: dict[str, Any], sd: Path, message: st
         msgs, older = missed(rec, dc, since, trigger=message, thread=thread)
     except ms.SessionError as exc:
         mb._log(f"wake {ch}: Discord 읽기 실패 {exc}")
+        if getattr(exc, "code", 0) == 404 and not message:     # 지워진 채널(훑기 — 트리거 글 404 는 글만 지워진 것일 수 있다) — 다시 훑어도 영영 없다. 쿨다운만 남기고 재시도하지 않는다(2026-11-09 점검: 재시작마다 4채널×6번)
+            _save_woke(sd, at=now, ok=False, why="channel gone (404)")
+            return "failed:gone"
         return "failed:discord"
     if not msgs:
         return "nothing"

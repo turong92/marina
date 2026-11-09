@@ -390,6 +390,9 @@ class _Handler(BaseHTTPRequestHandler):
     timeout = 30                      # 느린 연결(slowloris)이 스레드를 오래 붙잡지 않게
 
     def log_message(self, fmt: str, *args: Any) -> None:
+        # 정상 접속(2xx·3xx) 줄은 남기지 않는다 — 데몬 로그를 5천 줄 넘게 채워 쓸 만한 줄이 묻혔다(2026-11-09 점검)
+        if fmt.startswith('"%s" %s') and len(args) >= 2 and str(args[1])[:1] in ("2", "3"):
+            return
         sys.stderr.write("[view] " + redact_log(fmt % args) + "\n")
 
     def _send(self, status: int, ctype: str, data: bytes, csp: str = "", cors: bool = False, location: str = "",

@@ -346,6 +346,8 @@ def marina_codex_terms(name: str) -> int:
 
 
 def _session_born(name: str) -> float:
+    if name and getattr(ms._TICK, "cache", None) is not None:      # 판 안에선 list-sessions 한 번에서(2026-11-09 점검)
+        return ms.tick_sessions().get(name, 0.0)
     r = ms._tmux("display-message", "-p", "-t", name, "#{session_created}") if name else None
     try:
         return float((r.stdout or "").strip()) if r else 0.0

@@ -27,6 +27,11 @@ with ms.tmux_tick_cache():
     a = ms._tmux("capture-pane", "-p", "-t", "tc-a").stdout
     b = ms._tmux("capture-pane", "-p", "-t", "tc-a").stdout
     check(a == b and "one" in a and n[0] == first + 1, f"같은 화면 읽기는 한 번: {n[0]}")
+    e = ms._tmux("capture-pane", "-p", "-t", "=tc-a:").stdout
+    check(e == a and n[0] == first + 1, f"'-t 이름'·'-t =이름:' 은 같은 화면 — 한 번만 읽는다(2026-11-09): {n[0]}")
+    import marina_discord_bot as mb
+    born = mb._session_born("tc-a")
+    check(born > 0 and n[0] == first + 1, f"판 안의 만든 시각은 세션 목록에서(따로 안 묻는다): {born} {n[0]}")
     ms._tmux("send-keys", "-t", "tc-a", "-l", "two"); ms._tmux("send-keys", "-t", "tc-a", "Enter"); time.sleep(0.3)
     c = ms._tmux("capture-pane", "-p", "-t", "tc-a").stdout
     check("two" in c, f"키 입력이 끼면 다시 읽는다: {c!r}")

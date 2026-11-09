@@ -25,6 +25,22 @@ tr = sd / "t.jsonl"
 tag = f'<channel source="plugin:discord:discord" chat_id="{ch}" message_id="7001" user="u">\nfix\n</channel>'
 tr.write_text(json.dumps({"type": "user", "message": {"role": "user", "content": tag}}) + "\n")
 
+# hook-typing 빠른 길(2026-11-09): 5초 안에 표시했으면 떼어 낼 프로세스를 안 띄운다 — 새 지시는 늘 띄운다
+pre = {"hook_event_name": "PreToolUse", "transcript_path": str(tr)}
+(sd / "activity-at").unlink(missing_ok=True)
+(sd / "activity.json").write_text(json.dumps({"mid": "7001"}))
+check(ms._activity_fresh(pre) is False, "표시한 적 없으면 띄운다")
+(sd / "activity-at").touch()
+check(ms._activity_fresh(pre) is True, "방금 같은 지시에 표시했으면 건너뛴다")
+check(ms._activity_fresh(dict(pre, hook_event_name="UserPromptSubmit")) is False, "새 지시는 늘 띄운다")
+_tr0 = tr.read_text()
+with tr.open("a") as fh:      # 도구 중간에 끼어든 글 — 기록에만 들어온다(리뷰 I1)
+    fh.write(json.dumps({"type": "user", "message": {"role": "user", "content": tag.replace("7001", "7002")}}) + "\n")
+check(ms._activity_fresh(pre) is False, "끼어든 글이 있으면 5초 안이라도 띄운다")
+tr.write_text(_tr0)
+os.utime(sd / "activity-at", (time.time() - 6, time.time() - 6))
+check(ms._activity_fresh(pre) is False, "5초 지나면 띄운다")
+(sd / "activity-at").unlink(); (sd / "activity.json").unlink()
 check(ms.tool_activity("Read", {"file_path": "/a/b/app.py"}) == ("📖", "파일 읽는 중", "app.py"), "Read")
 check(ms.tool_activity("Bash", {"command": "bash plugin/tests/run-affected.sh", "description": "영향 테스트"})[:2] == ("🧪", "테스트 중"), "테스트 명령")
 check(ms.tool_activity("Bash", {"command": "git status"})[0] == "🔧", "일반 명령")

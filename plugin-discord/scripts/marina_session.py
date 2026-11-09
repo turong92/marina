@@ -36,12 +36,12 @@ _KEEP_ENV = ("HOME", "PATH", "USER", "LOGNAME", "SHELL", "LANG", "LC_ALL", "JAVA
 
 # 개발 방(클로드·코덱스) 공통 — 방끼리 소통(room-send). 코덱스 규칙(marina_codex.CODEX_RULES)도 이 문구를 쓴다
 ROOM_SEND_RULE = (
-    "- 다른 개발 방에 물을 게 있거나 알릴 게 있으면 Bash 로 `marina session room-send <방> \"…\"` 를 쓴다(방 목록은 `marina session ls`). "
-    "다른 방 일은 그 방에 **직접** 보낸다 — 제3의 방을 거쳐 중계하지 않는다. 마리나 인프라(게이트웨이·heavy·원격/윈도우 박스·#상태) 문제만 `터미널`(지휘 방)로 보낸다(형 2026-11-08). "
-    "알림은 짧게(한 줄) 보내고, 길고 오래 남을 내용(계약·결정·조사 결과)은 레포 공통 파일(docs/handoff/….md)에 쓰고 그 경로만 알린다. "
-    "'[마리나 · <방> 방에서] …' 로 온 글은 그 방이 보낸 것이다 — 답은 글 끝에 적힌 room-send 로 그 방에 한다(사람이 직접 한 말이 아니다). "
-    "받는 방이 잠들어 있으면 깨우지 않고 보관했다가 다음에 깰 때 같이 전달된다(여러 방에 규칙·공지를 뿌려도 잠든 방은 안 깨운다) — 정말 일을 시키려고 깨워야 할 때만 `--wake` 를 붙인다(깨우면 토큰이 든다). 받은 글이 질문·요청일 때만 답하고, 단순 알림·확인·감사에는 답하지 않는다(서로 답만 주고받는 루프 방지 — 같은 방 쌍은 10분에 6번까지만 보낼 수 있다). "
-    "단 '[마리나 · 메인 <방> 방의 지시] …' 는 형이 그 메인 방에 지휘를 맡긴 것이다 — 짧은 '좋아·진행해'도 일 지시로 받아 바로 하고, 끝나면 그 방에 보고한다."
+    "- 다른 개발 방에 묻거나 알릴 게 있으면 Bash 로 `marina session room-send <방> \"…\"`(방 목록 `marina session ls`). "
+    "다른 방 일은 그 방에 **직접** 보낸다(제3의 방 중계 금지). 마리나 인프라(게이트웨이·heavy·원격/윈도우 박스·#상태) 문제만 `터미널`(지휘 방)로(형 2026-11-08). "
+    "알림은 한 줄로, 길고 오래 남을 내용(계약·결정·조사 결과)은 레포 공통 파일(docs/handoff/….md)에 쓰고 경로만 알린다. "
+    "'[마리나 · <방> 방에서] …' 는 그 방이 보낸 글이다(사람 말 아님) — 답은 글 끝의 room-send 로 그 방에. "
+    "잠든 방엔 깨우지 않고 보관했다 다음에 깰 때 전달된다 — 정말 일을 시킬 때만 `--wake`(토큰이 든다). 질문·요청에만 답하고 알림·확인·감사엔 답하지 않는다(루프 방지 — 같은 방 쌍은 10분에 6번까지). "
+    "단 '[마리나 · 메인 <방> 방의 지시] …' 는 형이 그 메인 방에 지휘를 맡긴 것 — 짧은 '좋아·진행해'도 일 지시로 받아 바로 하고 끝나면 그 방에 보고한다."
 )
 
 # (형 2026-10-28) 줄글 기술 보고가 대화를 덮어 읽히지 않았다 — 클로드·코덱스 개발 방 공통 보고 형식
@@ -700,6 +700,8 @@ def _tmux(*args: str) -> subprocess.CompletedProcess:
     if not args or args[0] not in _TICK_READS:
         cache.clear()                    # 키 입력·종료가 끼면 이 판에 읽은 것은 버린다
         return _run_tmux(args)
+    if args[:3] == ("capture-pane", "-p", "-t") and len(args) == 4 and not args[3].startswith("="):
+        args = ("capture-pane", "-p", "-t", f"={args[3]}:")   # 같은 화면을 '-t 이름'·'-t =이름:' 두 꼴로 따로 읽던 것(2026-11-09 점검)
     hit = cache.get(args)
     if hit is None or time.monotonic() - hit[0] > TICK_TTL:
         hit = cache[args] = (time.monotonic(), _run_tmux(args))
@@ -717,9 +719,23 @@ def tmux_alive(name: str) -> bool:
     if not name or not _tmux_exe():
         return False
     if getattr(_TICK, "cache", None) is not None:         # 판 안에선 세션 목록 한 번으로 전부 답한다
-        r = _tmux("list-sessions", "-F", "#{session_name}")
-        return r.returncode == 0 and name in r.stdout.splitlines()
+        return name in tick_sessions()
     return _tmux("has-session", "-t", f"={name}").returncode == 0
+
+
+def tick_sessions() -> dict[str, float]:
+    """세션 이름 → 만든 시각. 판 안에선 list-sessions 한 번으로 살았나·언제 떴나를 다 답한다(방마다 display-message 를 따로 부르던 것)."""
+    r = _tmux("list-sessions", "-F", "#{session_name}\t#{session_created}")
+    out: dict[str, float] = {}
+    if r.returncode != 0:
+        return out
+    for line in r.stdout.splitlines():
+        n, _, t = line.partition("\t")
+        try:
+            out[n] = float(t)
+        except ValueError:
+            out[n] = 0.0
+    return out
 
 
 def clean_env_prefix(extra: dict[str, str]) -> list[str]:
@@ -3415,6 +3431,29 @@ def _ask_line(prompt: str, mid: str) -> str:
     return line if len(line) <= ASK_MAX else line[:ASK_MAX - 1] + "…"
 
 
+_LAST_MID = re.compile(r'message_id=\\?"(\d+)\\?"')
+
+
+def _activity_fresh(payload: dict[str, Any], min_gap: float = 5.0) -> bool:
+    """도구 호출마다 뜨는 hook-typing 이 떼어 낼 프로세스(python 하나 더)를 띄울 필요가 없는가 — 방금(5초 안) 같은 지시에 표시했으면.
+    새 지시(UserPromptSubmit)와 도구 중간에 끼어든 글(기록 끝의 마지막 message_id 가 표시한 것과 다름)은 늘 띄운다(2026-11-09 점검)."""
+    sdir = os.environ.get("DISCORD_STATE_DIR") or ""
+    if not sdir or payload.get("hook_event_name") == "UserPromptSubmit":
+        return False
+    sd = Path(sdir)
+    try:
+        if time.time() - (sd / "activity-at").stat().st_mtime >= min_gap:
+            return False
+        with open(str(payload.get("transcript_path") or "/nonexistent"), "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 65536))
+            tail = fh.read().decode("utf-8", "replace")
+    except OSError:
+        return False
+    mids = _LAST_MID.findall(tail)
+    return bool(mids) and mids[-1] == str(_activity_state(sd).get("mid") or "")
+
+
 def _hook_activity_locked(payload: dict[str, Any], s: dict[str, Any], sd: Path, ch: str, min_gap: float) -> None:
     at = float(payload.get("_at") or time.time())
     if _stopped_after(sd, at):      # 턴이 끝나기 전에 떠난 훅이 늦게 도착했다 — 끝난 지시에 다시 달지 않는다(실사용)
@@ -5726,9 +5765,12 @@ def main(argv: list[str] | None = None) -> int:
         # 표시용 — 도구 실행을 기다리게 하지 않는다: 입력만 넘기고 떼어 낸 프로세스가 Discord 를 부른다(리뷰 1)
         try:
             try:
-                data = json.dumps(dict(json.loads(sys.stdin.read() or "{}"), _at=time.time()))
+                pl = dict(json.loads(sys.stdin.read() or "{}"), _at=time.time())
             except (ValueError, TypeError):
-                data = "{}"
+                pl = {}
+            data = json.dumps(pl)
+            if pl and _activity_fresh(pl):
+                return 0
             p = subprocess.Popen([sys.executable, str(Path(__file__).resolve()), "hook-activity-run"],
                                  stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                                  start_new_session=True)

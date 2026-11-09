@@ -433,6 +433,22 @@ n[0] = -100; slept.clear()
 mw.wake = lambda *a, **k: (n.__setitem__(0, n[0] + 1), "failed:discord")[1]
 up.clear(); mw.run_sweep(now - 600)
 check(n[0] == -100 + 6 and slept == [60.0] * 5, f"계속 실패해도 다시는 최대 5번: {n[0] + 100} {slept}")
+# 지워진 채널(404)은 다시 훑지 않는다 — 재시작마다 같은 GET 을 6번씩 하던 것(2026-11-09 점검)
+slept.clear(); mw.wake = lambda *a, **k: "failed:gone"
+up.clear(); mw.run_sweep(now - 600)
+check(slept == [], f"404 는 재시도 없음: {slept}")
+gone_sd = Path(os.environ["TMPROOT"]) / "gone"; gone_sd.mkdir(exist_ok=True)
+_dc0, _missed0 = mw.mb._dc, mw.missed
+mw.mb._dc = lambda cfg: object()
+def _raise404(*a, **k):
+    raise ms.DiscordError(404, "Discord 에서 대상을 찾지 못했어(404)")
+mw.missed = _raise404
+r404 = mw._wake_locked({"channelId": "999", "tmux": "x"}, {}, gone_sd, "", "", None)
+check(r404 == "failed:gone", f"404 → failed:gone: {r404}")
+check((gone_sd / "woke.json").exists() and json.loads((gone_sd / "woke.json").read_text()).get("ok") is False
+      and json.loads((gone_sd / "woke.json").read_text()).get("at"), "404 → 쿨다운 기록")
+check(mw._wake_locked({"channelId": "999", "tmux": "x"}, {}, gone_sd, "123", "", None) == "failed:discord", "트리거 글 404 는 채널이 지워진 게 아닐 수 있다 — 옛 처리")
+mw.mb._dc, mw.missed = _dc0, _missed0
 # 재부팅 뒤 끊긴 방이 5개여도 같은 run_sweep 안에서 전부 켠다(첫 패스 3방에만 resume 을 주지 않는다)
 fake_recs[:] = [{"project": "proj", "task": f"r{i}", "channelId": str(900 + i), "tmux": f"no-such-{i}", "stateDir": "/nonexistent"} for i in range(5)]
 up.clear(); slept.clear()
