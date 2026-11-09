@@ -79,7 +79,7 @@ def _mcp_env(sdir: Path) -> dict[str, str]:
 
 
 def mcp_args(sdir: Path) -> list[str]:
-    entry = ms._hook_entry()
+    entry = ms._hook_entry(fast=True)
     args = ", ".join(_q(a) for a in entry[1:] + ["mcp-chat"])
     env = ", ".join(f"{k}={_q(v)}" for k, v in _mcp_env(sdir).items())
     return ["-c", f"mcp_servers.marina={{command={_q(entry[0])},args=[{args}],env={{{env}}}}}"]
@@ -97,7 +97,7 @@ def rules_args() -> list[str]:
 
 def _hook_cmd(*names: str) -> list[str]:
     """훅 명령 하나씩 — 실패해도 코덱스를 막지 않는다(|| true)."""
-    return [" ".join(shlex.quote(a) for a in ms._hook_entry() + [n]) + " || true" for n in names]
+    return [" ".join(shlex.quote(a) for a in ms._hook_entry(fast=True) + [n]) + " || true" for n in names]
 
 
 def hook_args(sdir: Path) -> list[str]:
