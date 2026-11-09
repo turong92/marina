@@ -371,6 +371,9 @@ class Idler:
                     action, text = "compact", ms.COMPACT_KEEP_TEXT
                 elif now - last >= keep_max:
                     action, text = "compact", ms.COMPACT_KEEP_TEXT
+                elif pct >= CTX_SOFT_PCT and not _selecting(name):
+                    action, text = "compact", ms.COMPACT_KEEP_TEXT                                  # 큰 문맥을 데우느니 압축 + 이어서(2026-11-09 mdc 84% 방이 캐시 유지만 반복)
+                    extra = {"continue": True}
                 else:
                     action, text = "keepalive", ms.KEEPALIVE_TEXT
                 _keep_save(rec, want=dict({"action": action, "last": last, "at": now}, **extra))
