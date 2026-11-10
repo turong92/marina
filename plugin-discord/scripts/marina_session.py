@@ -2168,6 +2168,17 @@ Hook input JSON (last_assistant_message is the agent's last message): $ARGUMENTS
 When NOT met, give this reason: "방금 말한 다음 할 일이 남아 있다 — 턴을 끝내지 말고 지금 이어서 해라. 형이나 다른 방의 답이 필요하면 그걸 묻고 끝내라." """
 
 
+# 서브에이전트가 자기 빌드·테스트를 백그라운드로 걸어 두고 '끝나면 이어가겠다' 하고 끝내면 다시 안 깨어난다(2026-11-09 homeserver ads-kt 가
+# 네이티브 빌드를 걸고 쉬어 4시간 멈춤 — 지침에 금지가 있어도 지키지 않았다). 자기가 부른 에이전트를 기다리는 건 완료 알림이 깨우니 통과(2026-11-10 실측).
+SUBAGENT_STOP_CHECK_PROMPT = """The subagent is allowed to stop. This condition is MET if ANY of these is true, and NOT met only if none is:
+(a) stop_hook_active is true;
+(b) the subagent's last message does not say that a build, test, script, shell command or other job it started itself is still running and that it will check, wait or continue later;
+(c) the last message already contains that job's result (pass/fail, numbers, error), or reports the task as done, blocked or failed;
+(d) the only things it is waiting for are other agents it launched (their completion wakes it up), not its own commands.
+Hook input JSON (last_assistant_message is the subagent's last message; background_tasks lists in-flight background work): $ARGUMENTS
+When NOT met, give this reason: "네가 건 작업이 아직 돈다고 하고 끝내려 했다 — 서브에이전트는 끝내면 다시 깨어나지 않는다. 지금 그 작업이 끝날 때까지 기다려(상태를 다시 확인) 결과까지 정리한 뒤 끝내라." """
+
+
 def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = False, room: str = "") -> Path:
     """채널 세션 전용 설정(--settings). 사용자 설정과 합쳐진다.
     Stop 훅 = 턴이 끝나면 진행 표시를 뗀다. enabledPlugins = 사용자 범위에서 플러그인을 꺼도 이 세션에서만 켜지게."""
@@ -2231,6 +2242,7 @@ def write_settings(sdir: Path, chat_root: Path | None = None, lobby: bool = Fals
         {"matcher": _REPLY_TOOL, "hooks": [{"type": "command", "command": done_hook, "timeout": 20}]})
     if chat_root is None:
         settings["hooks"]["Stop"].append({"hooks": [{"type": "prompt", "prompt": STOP_CHECK_PROMPT, "timeout": 30}]})
+        settings["hooks"]["SubagentStop"] = [{"hooks": [{"type": "prompt", "prompt": SUBAGENT_STOP_CHECK_PROMPT, "timeout": 30}]}]
         # 개발 세션: share_file 만 더한다(권한 모드는 형 설정 그대로 — 이 도구만 허용 목록에)
         settings["permissions"] = {"allow": ["mcp__marina__share_file", "mcp__marina__progress", "mcp__marina__ask_terminal"]}
         entry = _hook_entry(fast=True)

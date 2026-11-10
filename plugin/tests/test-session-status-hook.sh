@@ -24,8 +24,12 @@ assert s["enabledPlugins"] == {"discord@claude-plugins-official": True}, s
 # 개발 방: '다음엔 …할게' 하고 턴을 끝내 버리는 걸 작은 모델 판정(prompt 훅)이 한 번 되돌린다(2026-11-09 story-chat 방 1시간 멈춤)
 ph = [h for g in s["hooks"]["Stop"] for h in g["hooks"] if h.get("type") == "prompt"]
 assert len(ph) == 1 and "$ARGUMENTS" in ph[0]["prompt"] and "stop_hook_active" in ph[0]["prompt"], s
+# 서브에이전트: 자기 빌드를 걸어 두고 '끝나면 이어가겠다' 하고 끝내면 다시 안 깨어난다 — 한 번 되돌린다(2026-11-09 homeserver ads-kt 4시간 멈춤)
+sh = [h for g in s["hooks"].get("SubagentStop", []) for h in g["hooks"] if h.get("type") == "prompt"]
+assert len(sh) == 1 and "$ARGUMENTS" in sh[0]["prompt"] and "stop_hook_active" in sh[0]["prompt"] and "background_tasks" in sh[0]["prompt"], s
 cf = ms.write_settings(sd, chat_root=tmp / "chatroom")         # 채팅·로비 방은 대화라 걸지 않는다
 assert not [h for g in json.loads(cf.read_text())["hooks"]["Stop"] for h in g["hooks"] if h.get("type") == "prompt"]
+assert not json.loads(cf.read_text())["hooks"].get("SubagentStop")
 f = ms.write_settings(sd)
 argv = ms.claude_argv("proj", "st")
 i = argv.index("--settings")
