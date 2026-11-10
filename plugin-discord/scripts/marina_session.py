@@ -4954,7 +4954,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         if not prev:
             notes.append(f"미리보기를 만들지 못했어({why}) — HTML 파일만 보내")
         else:
-            files = [prev] + files
+            files = [marina_share.compact_image(prev)] + files     # 보기용이라 WebP·JPEG 로 줄여 보낸다(4MB PNG)
             if why:
                 notes.append(why)
     if path.suffix.lower() in (".md", ".markdown"):
@@ -4963,7 +4963,7 @@ def chat_tool(name: str, args: dict[str, Any]) -> str:
         if not imgs:
             notes.append(f"미리보기를 만들지 못했어({why}) — md 파일만 보내")
         else:
-            files = imgs + files
+            files = [marina_share.compact_image(i) for i in imgs] + files
             if why:
                 notes.append(why)
     cfg = load_config()

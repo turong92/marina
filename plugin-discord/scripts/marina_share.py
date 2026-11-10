@@ -285,6 +285,31 @@ def render_html(page: Path, root: Path, outdir: Path, timeout: float = 45, block
         srv.stop()
 
 
+def compact_image(png: Path, quality: int = 82) -> Path:
+    """보기용 미리보기 PNG → WebP(cwebp), 안 되면 JPEG(sips). 더 작아졌을 때만 바꾸고 원본은 지운다 — 폰 폭 2배
+    PNG 는 4MB 까지 커져 폰에서 늦게 뜬다(2026-11-10). 도구가 없거나 실패하면 원본 그대로. 올릴 이미지(export)엔 쓰지 않는다."""
+    if png.suffix.lower() != ".png" or not png.is_file():
+        return png
+    before = png.stat().st_size
+    tools = []
+    if shutil.which("cwebp"):        # WebP 는 한 변 16383px 까지 — 넘으면 실패하고 JPEG 로 간다
+        tools.append((png.with_suffix(".webp"), ["cwebp", "-quiet", "-q", str(quality), str(png), "-o"]))
+    if shutil.which("sips"):
+        tools.append((png.with_suffix(".jpg"), ["sips", "-s", "format", "jpeg", "-s", "formatOptions", str(quality),
+                                                str(png), "--out"]))
+    for out, argv in tools:
+        try:
+            ok = subprocess.run(argv + [str(out)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                                timeout=60).returncode == 0
+        except (OSError, subprocess.TimeoutExpired):
+            ok = False
+        if ok and out.is_file() and 0 < out.stat().st_size < before:
+            png.unlink()
+            return out
+        out.unlink(missing_ok=True)
+    return png
+
+
 # ── 올릴 이미지: 미리보기(폰 폭 확인용)와 달리 쇼핑몰·인쇄에 그대로 쓰는 제 크기 PNG
 UPLOAD_WIDTH = 860      # 네이버 스마트스토어 기준(만드는법/상세페이지.md). 쿠팡은 780
 UPLOAD_SLICE = 3000     # 한 장의 최대 높이 — 넘으면 섹션 경계에서 나눈다
