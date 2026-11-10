@@ -46,7 +46,9 @@ def keys_for(questions: list[dict[str, Any]], answers: list[Any]) -> list[Any]:
             for t in picks:
                 keys += ["Down"] * max(0, t - cur) + ["Enter"]
                 cur = max(cur, t)
-            keys += ["Right", "Enter"]
+            # 맨 끝 질문이면 → 가 Submit 칸이라 Enter 로 낸다. 뒤에 질문이 남았으면 → 가 다음 질문 칸이라 Enter 를 치면
+            # 그 질문 1번이 골라져 한 칸씩 밀린다(실사용 2026-11-10 ovation) — 넘어가기만 한다
+            keys += ["Right"] + (["Enter"] if i == len(answers) - 1 else [])
     if len(answers) > 1:
         keys += ["WAIT", "Enter"]
     return keys

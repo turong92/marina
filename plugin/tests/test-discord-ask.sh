@@ -33,6 +33,10 @@ check(ask.keys_for([Q2], [{"text": "직접\n여러 줄"}]) == ["Down", "Down", "
       "기타(다중): Tab→Submit→확인 · 줄바꿈은 공백(중간 제출 막기) · '-' 로 시작해도 글로(리뷰 I5)")
 check(ask.keys_for([Q1, Q2], [[1], [0]]) == ["Down", "Enter", "WAIT", "Enter", "Right", "Enter", "WAIT", "Enter"],
       f"여러 질문: 사이마다 다시 그림 기다림 + 마지막 Submit Enter: {ask.keys_for([Q1, Q2], [[1], [0]])}")
+# 다중 고르기가 맨 끝이 아니면 → 는 Submit 이 아니라 다음 질문 칸으로 간다 — 거기서 Enter 를 치면 다음 질문의 1번이 골라져
+# 한 칸씩 밀리고 셋째 질문에서 멈췄다(실사용 2026-11-10 ovation 두 번). 다음 질문으로 넘어가기만 한다.
+check(ask.keys_for([Q2, Q1], [[0, 2], [1]]) == ["Enter", "Down", "Down", "Enter", "Right", "WAIT", "Down", "Enter", "WAIT", "Enter"],
+      f"다중이 앞 질문: → 로 다음 질문만: {ask.keys_for([Q2, Q1], [[0, 2], [1]])}")
 
 # ── 질문 메시지 ──
 st = json.loads((sd / "settings.json").read_text())
