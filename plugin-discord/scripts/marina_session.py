@@ -9,7 +9,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import datetime
+import io
 import ipaddress
+import itertools
 import json
 import os
 import re
@@ -5073,13 +5075,73 @@ def mcp_chat(stdin: Any = None, stdout: Any = None) -> None:
     mcp_serve(chat_tools_for(rec), chat_tool, stdin, stdout)
 
 
+def _mcp_lines() -> Any:
+    """stdin 을 미리 읽지 않고 한 줄씩(갈아탈 때 버퍼에 남은 요청을 잃지 않게)."""
+    raw = io.FileIO(sys.stdin.fileno(), "rb", closefd=False)
+    while True:
+        b = raw.readline()
+        if not b:
+            return
+        yield b.decode("utf-8", "replace")
+
+
+def _mcp_replay() -> list[str]:
+    """갈아타기 전 프로세스가 넘긴 요청 줄 — 새 코드가 먼저 처리한다."""
+    p = os.environ.pop("MARINA_MCP_REPLAY", "")
+    if not p:
+        return []
+    try:
+        text = Path(p).read_text(encoding="utf-8")
+        Path(p).unlink()
+    except OSError:
+        return []
+    return [text]
+
+
+def _mcp_hop(line: str) -> None:
+    """방(MCP 서버)은 뜰 때 읽은 코드로 계속 돌아 배포가 방을 새로 띄워야 먹혔다(2026-11-10 형 "새로 굳이 떠야되냐고").
+    서버는 상태가 없으니 도구 호출이 올 때 설치본이 바뀌었으면 같은 stdin/stdout 그대로 새 코드로 exec 한다.
+    단 도구 목록(tools/list)은 처음 받은 것 그대로라 도구 추가·이름 변경은 여전히 방을 새로 띄워야 보인다.
+    새 코드가 import 되지 않거나(깨진 배포) 넘긴 줄을 받을 줄 모르면(이 기능 전 버전으로 되돌림) 넘어가지 않는다 — 리뷰 I1·I2."""
+    new = _newest_scripts()
+    if new is None:
+        return
+    ok = _HOP_OK.get(str(new))
+    if ok is None:
+        try:
+            ok = "MARINA_MCP_REPLAY" in (new / "marina_session.py").read_text(encoding="utf-8") and _preflight(new)[0]
+        except OSError:
+            ok = False
+        _HOP_OK[str(new)] = ok
+    if not ok:
+        return
+    tmp = ""
+    try:
+        fd, tmp = tempfile.mkstemp(prefix="mcp-replay-", dir=str(marina_home()))
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(line)
+        os.environ["MARINA_MCP_REPLAY"] = tmp
+        sys.stdout.flush()
+        os.execv(sys.executable, [sys.executable, str(new / "marina_session.py")] + sys.argv[1:])
+    except OSError:
+        os.environ.pop("MARINA_MCP_REPLAY", None)        # 못 넘어가면 옛 코드로라도 처리한다
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
+
+
+_HOP_OK: "dict[str, bool]" = {}
+
+
 def mcp_serve(tools: list[dict[str, Any]], handler: Any, stdin: Any = None, stdout: Any = None) -> None:
     """최소 MCP 서버(stdio, 한 줄 JSON-RPC)."""
+    real = stdin is None                                  # 진짜 stdio 일 때만 새 코드로 갈아탄다(테스트가 넘긴 스트림은 그대로)
     stdin, stdout = stdin or sys.stdin, stdout or sys.stdout
     def send(obj: dict[str, Any]) -> None:
         stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
         stdout.flush()
-    for line in stdin:
+    for line in itertools.chain(_mcp_replay(), _mcp_lines() if real else stdin):
+        if real and '"tools/call"' in line:
+            _mcp_hop(line)                                # 배포된 새 코드가 있으면 이 줄을 들고 그쪽으로 넘어간다(돌아오지 않음)
         try:
             msg = json.loads(line)
         except ValueError:
