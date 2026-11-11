@@ -85,7 +85,14 @@ refresh_compose_watch() {
     echo "warning: active build 확인 실패 — Compose Watch refresh 건너뜀" >&2
     return 0
   fi
-  if ! running_output="$(docker compose -p "$cname" ps --services --status running 2>/dev/null)"; then
+  # 원격 박스(ssh) 조회는 순간 삐끗한다 — 한 번 실패로 옛 목록 watcher 를 되살리면 새 감시 대상이 빠진다(2026-11-11 ovation)
+  local ps_try
+  for ps_try in 1 2 3; do
+    running_output="$(docker compose -p "$cname" ps --services --status running 2>/dev/null)" && break
+    running_output=$'\x01'
+    [[ "$ps_try" -lt 3 ]] && sleep "${MARINA_WATCH_PS_RETRY_S:-2}"
+  done
+  if [[ "$running_output" == $'\x01' ]]; then
     echo "warning: Compose Watch 실행 서비스 조회 실패 — 기존 watcher 유지 또는 복구" >&2
     restore_compose_watch_after_refresh_failure "$stored" "$cp" "$project_root" "$sd" "$project_id" "$sid" "$cname" \
       ${envargs[@]+"${envargs[@]}"}

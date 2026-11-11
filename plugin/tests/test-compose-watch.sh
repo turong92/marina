@@ -37,6 +37,7 @@ case "$*" in
     ;;
   *"ps --services --status running"*)
     [[ "${WATCH_PS_FAIL:-}" == "1" ]] && exit 9
+    if [[ -n "${WATCH_PS_FAIL_ONCE:-}" && ! -e "$WATCH_PS_FAIL_ONCE" ]]; then : > "$WATCH_PS_FAIL_ONCE"; exit 9; fi
     printf '%s\n' "${DOCKER_RUNNING_SERVICES-web
 be}" ;;
   *"ps --all --services"*) printf 'web\noptional\nbe\n' ;;
@@ -300,7 +301,11 @@ WATCH_CONFIG_FAIL_AFTER_UP=1 mrun start --web >/dev/null
 [[ "$(head -n 1 "$WATCH_PID_FILE")" == "$second_pid" ]] || { echo "FAIL: config failure replaced project watcher"; exit 1; }
 kill -0 "$second_pid" 2>/dev/null || { echo "FAIL: config failure killed project watcher"; exit 1; }
 
-DOCKER_RUNNING_SERVICES=$'web\noptional\nbe' mrun start --optional >/dev/null
+# 원격 박스 조회가 한 번 삐끗해도 다시 물어 새 목록으로 교체한다 — 2026-11-11 ovation: 첫 조회 실패로
+# 옛 목록(web)만으로 watcher 가 복구돼 새로 감시 대상이 된 server 가 빠졌다
+WATCH_PS_FAIL_ONCE="$TMP/ps-fail-once" MARINA_WATCH_PS_RETRY_S=0 \
+  DOCKER_RUNNING_SERVICES=$'web\noptional\nbe' mrun start --optional >/dev/null
+[[ -e "$TMP/ps-fail-once" ]] || { echo "FAIL: ps-fail-once knob not exercised"; exit 1; }
 wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: multi-service watcher not running"; exit 1; }
 multi_pid="$(head -n 1 "$WATCH_PID_FILE")"
 [[ "$multi_pid" != "$second_pid" ]] || { echo "FAIL: multi-service watcher pid not replaced"; exit 1; }
