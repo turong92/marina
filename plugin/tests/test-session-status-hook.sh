@@ -50,8 +50,11 @@ hook() { DISCORD_STATE_DIR="$1" PYTHONPATH="$DSCRIPTS:$SCRIPTS" python3 "$DSCRIP
 # 진행 훅이 달아 둔 표시(activity.json marked) — 턴 끝은 이 기록대로 뗀다(추론하지 않음, 리뷰 B-I1~I4)
 seed() { printf '{"mid":"%s","marked":%s}' "$1" "$2" > "$SD/activity.json"; }
 
-seed M2 '{"M2":["👀","🛑"]}'
+printf '{"mid":"M2","marked":{"M2":["👀","🛑"]},"since":%s,"status_tid":"T9","status_msg":"S9"}' "$(date +%s)" > "$SD/activity.json"
 printf '{"cwd":"%s","transcript_path":"%s"}' "$SRC" "$TMPROOT/t.jsonl" | hook "$SD" || fail "훅이 0 이 아닌 코드로 끝남"
+# 스레드 상태 줄('💬 답장 쓰는 중 · 2분째')이 턴 끝에 그대로 남으면 끝난 일이 진행 중으로 보인다(2026-11-11 형)
+grep -q "\"PATCH\", \"p\": \"/channels/T9/messages/S9\".*\\\\ub05d" "$FD/log.jsonl" || fail "턴 끝에 상태 줄을 '끝'으로 안 바꿈"
+python3 -c "import json,sys;d=json.load(open(sys.argv[1]));assert 'status_msg' not in d,d" "$SD/activity.json" || fail "상태 줄 기록이 남음"
 grep -q "\"DELETE\", \"p\": \"/channels/$CH/messages/M2/reactions/%F0%9F%9B%91/@me\"" "$FD/log.jsonl" || fail "🛑 제거 요청 없음"
 [ "$(cat "$SD/acked")" = "M2" ] || fail "끝 표시: $(cat "$SD/acked")"
 grep -q "%E2%9C%85" "$FD/log.jsonl" && fail "✅ 는 달지 않는다(답장이 끝 표시)"

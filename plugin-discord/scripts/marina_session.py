@@ -3156,6 +3156,15 @@ def _clear_locked(s: dict[str, Any], sd: Path, dc: "Discord", ids: list[str]) ->
             (sd / "acked").write_text(ids[-1] + "\n")
     st = _activity_state(sd)
     clear_marks(dc, ch, st)
+    # 스레드의 '지금 하는 일' 줄을 끝으로 바꾼다 — 안 그러면 '💬 답장 쓰는 중 · 2분째'가 영원히 남아 진행 중으로 보인다(2026-11-11 형)
+    tid, smsg = str(st.pop("status_tid", "") or ""), str(st.pop("status_msg", "") or "")
+    if tid and smsg:
+        mins = int((time.time() - float(st.get("since") or time.time())) // 60)
+        try:
+            dc._req("PATCH", f"/channels/{tid}/messages/{smsg}",
+                    {"content": "✔ 끝" + (f" · {mins}분" if mins else ""), "allowed_mentions": {"parse": []}})
+        except SessionError:
+            pass
     if sd.is_dir():
         _write_json(sd / "activity.json", st)
 
