@@ -11,10 +11,11 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPTS="$ROOT/plugin/scripts"
 
 PYTHONPATH="$SCRIPTS" python3 - <<'PY'
-import json, tempfile, unittest
+import json, os, tempfile, unittest
 from pathlib import Path
 
 import marina_memory as mm
+import marina_ssh_mux as mux
 from marina_runtime_target import LocalTarget, RemoteTarget
 
 
@@ -40,12 +41,19 @@ class DockerEnvRoutingTests(unittest.TestCase):
             self.assertTrue(env is None or "DOCKER_HOST" not in env, f"로컬인데 DOCKER_HOST: {args}")
 
     def test_remote_routes_every_docker_call_to_the_box(self):
+        # 소켓 경로가 길면 멀티플렉싱이 스스로 꺼진다 — 짧은 홈으로 켠 상태를 본다
+        tmp = tempfile.TemporaryDirectory(dir="/tmp", prefix="mm"); self.addCleanup(tmp.cleanup)
+        home = mux.MARINA_HOME; mux.MARINA_HOME = Path(tmp.name); mux._reset_for_tests()
+        self.addCleanup(lambda: (setattr(mux, "MARINA_HOME", home), mux._reset_for_tests()))
+        self.assertTrue(mux._shim_dir(), "이 시험의 전제(멀티플렉싱 켜짐)가 깨졌다")
         mm.memory_snapshot(force=True, target=RemoteTarget("ssh://crabs@box"))
         docker_calls = [(a, e) for a, e in self.calls if "docker" in a[0]]
         self.assertTrue(docker_calls, "docker 호출이 없었다")
         for args, env in docker_calls:
             self.assertIsNotNone(env, f"원격인데 env 없음: {args}")
             self.assertEqual(env.get("DOCKER_HOST"), "ssh://crabs@box", f"라우팅 안 됨: {args}")
+            # 읽기만 하는 조회라 접속 하나를 나눠 쓴다(marina_ssh_mux) — 호출마다 새 ssh 면 박스에 접속이 쌓인다(2026-11-11)
+            self.assertEqual(env.get("PATH", "").split(os.pathsep)[0], mux._shim_dir(), f"ssh 접속 재사용 안 함: {args}")
 
     def test_remote_also_reads_the_box_meminfo(self):
         # 호스트 여유는 ssh 로 박스에서 읽는다(docker 명령이 아니라 DOCKER_HOST 는 불필요).

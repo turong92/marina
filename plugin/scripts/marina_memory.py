@@ -17,7 +17,7 @@ from typing import Any
 
 from marina_paths import session_id
 from marina_registry import project_for
-from marina_ssh_mux import ssh_options
+from marina_ssh_mux import mux_env, ssh_options
 from marina_state import _bin, _env, _mc
 
 
@@ -67,7 +67,10 @@ def _ssh_args(docker_host: str) -> list[str] | None:
 
 
 def _target_env(target) -> dict | None:
-    return target.docker_env() if target is not None and getattr(target, "is_remote", False) else None
+    """원격이면 docker env. 읽기만 하는 조회라 접속 하나를 나눠 쓴다(호출마다 새 ssh 금지, 2026-11-11)."""
+    if target is None or not getattr(target, "is_remote", False):
+        return None
+    return mux_env(target.docker_env())
 
 
 def _docker(*args: str) -> list[str]:
