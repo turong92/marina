@@ -77,6 +77,9 @@ def _gateway_signature() -> str:
         env = dict(os.environ)
         if host:
             env["DOCKER_HOST"] = host
+            # 5초마다 새 ssh 면 박스 sshd 에 시간당 수백 번 새 접속(2026-11-11 실측 528/h) — 접속 하나를 나눠 쓴다
+            from marina_ssh_mux import mux_env
+            env = mux_env(env)
         r = subprocess.run(["docker", "ps", "--no-trunc", "--format", "{{.ID}} {{.State}} {{.Ports}}"],
                            env=env, capture_output=True, text=True, timeout=30)
         h.update(f"{host}|{r.returncode}|{''.join(sorted(r.stdout.splitlines(True)))}".encode())
