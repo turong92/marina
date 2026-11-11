@@ -19,6 +19,62 @@ from pathlib import Path
 
 EVERY_S = 60.0
 MISSES = 2                       # 연속 이만큼 안 닿아야 맥으로 — 순간 끊김에 넘어가지 않게
+RETURN_HITS = 3                  # 맥 고정인데 박스가 이만큼 연속 닿으면 돌아온 것으로(형 2026-11-11 "붙으면 다시 이사")
+
+
+def _pinned_stacks(roots):
+    """(root, session_dir, host, compose 이름) — 박스에 띄웠다가 박스가 안 닿아 맥 고정된 워크트리."""
+    import marina_paths
+    import marina_runtime_target as rt
+    out = []
+    for root in roots:
+        try:
+            sd = marina_paths.session_dir(Path(root))
+        except Exception:
+            continue
+        host = rt._pinned_from(str(sd))
+        if not host or not host.startswith("ssh://"):
+            continue
+        try:
+            name = str(json.loads((sd / "remote-owned.json").read_text(encoding="utf-8")).get("project") or "")
+        except (OSError, ValueError, AttributeError):
+            name = ""
+        out.append((Path(root), sd, host, name))
+    return out
+
+
+def _owned_name(sd: Path) -> str:
+    try:
+        return str(json.loads((sd / "remote-owned.json").read_text(encoding="utf-8")).get("project") or "")
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def _local_running(name: str) -> bool:
+    """맥(로컬 도커)에 그 스택 컨테이너가 하나라도 도는가. 모르면 돈다고 본다(자동으로 풀지 않게)."""
+    if not name:
+        return True
+    env = {k: v for k, v in os.environ.items() if k != "DOCKER_HOST"}
+    try:
+        r = subprocess.run(["docker", "ps", "-q", "--filter", f"label=com.docker.compose.project={name}"],
+                           env=env, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return True
+    return r.returncode != 0 or bool(r.stdout.strip())
+
+
+def _notify(root: Path, msg: str) -> None:
+    """그 워크트리의 방에 한 줄 남긴다(잠든 방은 보관 — 깨우지 않는다). 방이 없으면 로그만."""
+    entry = Path(__file__).resolve().parent / "marina-entrypoint.sh"
+    try:
+        out = subprocess.run([str(entry), "session", "ls"], capture_output=True, text=True, timeout=30).stdout
+        room = next((ln.split("\t")[0] for ln in out.splitlines()
+                     if ln.split("\t")[-1:] == [str(root)]), None)
+        if room:
+            subprocess.run([str(entry), "session", "room-send", room, msg],
+                           capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def enabled() -> bool:
@@ -92,13 +148,34 @@ def reopen_tunnel(sd: Path, spawn=None) -> "int | None":
     return new
 
 
-def tick(roots, misses: dict, log=print, reachable=None, start_local=None, reopen=None) -> list:
-    """한 바퀴. 맥으로 옮긴 root 목록을 돌려준다. misses 는 호출자가 들고 있는 연속 실패 수."""
+def tick(roots, misses: dict, log=print, reachable=None, start_local=None, reopen=None,
+         local_running=None, notify=None) -> list:
+    """한 바퀴. 맥으로 옮긴 root 목록을 돌려준다. misses 는 호출자가 들고 있는 연속 실패·성공 수."""
     import marina_runtime_target as rt
     reachable = reachable or _reachable
     start_local = start_local or _start_local
     reopen = reopen or reopen_tunnel
+    local_running = local_running or _local_running
+    notify = notify or _notify
     moved, seen = [], set()
+    # 맥 고정된 스택: 박스가 몇 분 연속 닿으면 돌아온 것 — 맥이 비었으면 고정을 풀고, 돌고 있으면 방에 한 번 알린다
+    for root, sd, host, name in _pinned_stacks(roots):
+        k = "ret:" + str(root)
+        seen.add(k)
+        if not reachable(host):
+            misses.pop(k, None)
+            continue
+        misses[k] = misses.get(k, 0) + 1
+        if misses[k] < RETURN_HITS:
+            continue
+        if not local_running(name):
+            rt.unpin_local(str(sd))
+            misses.pop(k, None)
+            log(f"remote-watch: {host} 박스가 돌아왔고 맥엔 {root} 스택이 없어 맥 고정을 풀었어 — 다음 start 부터 박스")
+        elif misses[k] == RETURN_HITS:
+            notify(root, f"[마리나] 박스({host})가 돌아왔어. 이 워크트리는 지금 맥에서 도는 중 — 쉬는 틈에 "
+                         "'marina stop --all' 뒤 'marina start …' 하면 박스로 옮겨져(맥 DB 내용은 안 따라감).")
+            log(f"remote-watch: {host} 박스가 돌아왔지만 {root} 가 맥에서 돌아 방에 알림")
     for root, sd, host in _remote_stacks(roots):
         seen.add(str(root))
         if reachable(host):
@@ -115,6 +192,9 @@ def tick(roots, misses: dict, log=print, reachable=None, start_local=None, reope
         (sd / "remote-tunnel.pid").unlink(missing_ok=True)            # 죽은 터널 기록(다시 감시하지 않게)
         rc = start_local(root)
         log(f"remote-watch: {host} 가 {MISSES}분째 안 닿아 {root} 를 맥에서 다시 띄움(rc={rc})")
+        if rc != 0 and not local_running(_owned_name(sd)):
+            rt.unpin_local(str(sd))      # 맥에 아무것도 안 떴다 — 고정을 남기면 박스가 멀쩡해져도 다음 start 가 맥 빌드로 빠진다
+            log(f"remote-watch: 맥 기동 실패·맥에 뜬 것 없음 — {root} 맥 고정을 남기지 않음")
         moved.append(root)
     for k in list(misses):
         if k not in seen:
