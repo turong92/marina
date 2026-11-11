@@ -1040,8 +1040,8 @@ def _watch_override_lines(svc: dict, injections: list) -> list:
     시점 파일이 들어가 있어 restart 만으론 예전 JAR 을 다시 읽는다 — 개발 루프가 끊긴다. sync 는 돌고
     있는 컨테이너의 그 경로(=볼륨 마운트 지점)에 쓰므로 볼륨에 남고, 이어지는 restart 가 새 파일을 읽는다.
 
-    범위는 **경로가 정확히 일치하는 규칙**뿐이다. 부모/자식을 추측하면 프로젝트가 선언하지 않은 동작을
-    만들어낸다. 일치하는 규칙이 없으면 아무것도 바꾸지 않는다(로컬에서도 그 경로는 수동이었다는 뜻).
+    restart→sync+restart 변환은 **경로가 정확히 일치하는 규칙**뿐이다. 그와 별개로, 프로젝트가 동기화하지 않는
+    바인드 폴더에는 sync 규칙을 덧붙인다(아래 — 맥 바인드의 '고치면 바로 보임'을 원격에서도 지키려고).
     compose 의 리스트 병합 규칙에 기대지 않으려고 목록 전체를 !override 로 대체한다."""
     rules = ((svc or {}).get("develop") or {}).get("watch")
     if rules is None:
@@ -1059,18 +1059,23 @@ def _watch_override_lines(svc: dict, injections: list) -> list:
             r["target"] = by_source[r["path"]]
             changed = True
         out.append(r)
-    # 바인드 디렉터리인데 프로젝트가 그 폴더(또는 그 아래)를 하나도 감시하지 않으면 sync 를 붙인다 —
-    # 맥은 바인드라 고치면 바로 보이는데, 원격은 기동 때 한 번 주입하고 끝나 개발 루프가 끊긴다(형 2026-11-11).
-    # initial_sync 는 안 건다: 기동 때 이미 통째로 넣었다.
+    # 바인드 디렉터리를 프로젝트가 동기화하지 않으면 sync 를 붙인다(형 2026-11-11 "동적 반영") —
+    # 맥은 바인드라 고치면 바로 보이는데, 원격은 기동 때 한 번 주입하고 끝나 개발 루프가 끊긴다.
+    # 빼는 것은 기동 주입과 같은 기준(.gitignore·info/exclude)에 기본 산출물 목록을 더한 것.
+    # initial_sync 는 안 건다: 기동 때 이미 통째로 넣었다(주입~watcher 기동 사이 변경은 다시 건드려야 간다).
+    declared = [(str(r.get("path") or "").rstrip("/"), str(r.get("target") or "").rstrip("/")) for r in out
+                if str(r.get("action") or "").startswith("sync") and r.get("path")]   # rebuild·restart 는 파일을 안 옮긴다
     for i in injections:
-        if not i.volume or not os.path.isdir(i.source):   # 실제 폴더만 — 파일(.env 등)·맥에 없는 경로는 추측하지 않는다
+        src, tgt = i.source.rstrip("/"), i.target.rstrip("/")
+        if not i.volume or not os.path.isabs(src) or not os.path.isdir(src):   # 실제 폴더만(파일·없는 경로는 추측 안 함)
             continue
-        src = i.source.rstrip("/")
-        synced = [str(r.get("path") or "").rstrip("/") for r in out
-                  if str(r.get("action") or "").startswith("sync")]       # rebuild·restart 는 파일을 옮기지 않는다
-        if any(p == src or p.startswith(src + "/") or src.startswith(p + "/") for p in synced if p):
-            continue                                    # 프로젝트가 그 폴더·하위·상위를 이미 동기화한다
-        out.append({"action": "sync", "path": i.source, "target": i.target, "ignore": list(_AUTO_SYNC_IGNORE)})
+        if any((p == src and t == tgt)
+               or (src.startswith(p + "/") and tgt == t + src[len(p):])    # 상위 폴더 규칙이 이 마운트까지 덮는다
+               or (p.startswith(src + "/") and t == tgt + p[len(src):])    # 프로젝트가 이 마운트의 하위를 골라 동기화한다
+               for p, t in declared):
+            continue
+        ignore = list(_AUTO_SYNC_IGNORE) + sorted(_git_ignored(src))
+        out.append({"action": "sync", "path": i.source, "target": i.target, "ignore": ignore})
         changed = True
     if not changed:
         return []

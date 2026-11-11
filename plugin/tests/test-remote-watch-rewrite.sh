@@ -147,11 +147,43 @@ class RemoteTests(unittest.TestCase):
 
     def test_declared_sync_under_source_means_project_handles_it(self):
         # 프로젝트가 그 폴더(또는 하위)를 이미 동기화하면 추측해 덧붙이지 않는다
+        src = self._dir()
         cfg = {"services": {"web": {"image": "x",
-            "volumes": [{"type": "bind", "source": "/p/web", "target": "/app"}],
-            "develop": {"watch": [{"path": "/p/web/src", "action": "sync", "target": "/app/src"}]}}}}
+            "volumes": [{"type": "bind", "source": src, "target": "/app"}],
+            "develop": {"watch": [{"path": src + "/src", "action": "sync", "target": "/app/src"}]}}}}
         out = mctl.build_overlay(cfg, target=RemoteTarget("ssh://box"))
         self.assertNotIn("develop:", out)
+
+    def test_gitignored_paths_are_not_synced(self):
+        # 기동 주입은 .gitignore 대상을 뺀다 — sync 도 같은 기준이어야 .env·워크트리 폴더가 박스로 흘러가지 않는다
+        import subprocess
+        src = tempfile.mkdtemp(); self.addCleanup(__import__("shutil").rmtree, src, True)
+        subprocess.run(["git", "init", "-q", src], check=True)
+        open(os.path.join(src, ".gitignore"), "w").write(".env\nout/\n")
+        open(os.path.join(src, ".env"), "w").write("x")
+        os.mkdir(os.path.join(src, "out")); open(os.path.join(src, "out", "a"), "w").write("x")
+        cfg = {"services": {"server": {"image": "x",
+            "volumes": [{"type": "bind", "source": src, "target": "/workspace"}]}}}
+        r = mctl.load_compose(mctl.build_overlay(cfg, target=RemoteTarget("ssh://box")))["services"]["server"]["develop"]["watch"][0]
+        self.assertIn(".env", r["ignore"]); self.assertIn("out", r["ignore"])
+
+    def test_overlapping_binds_each_get_their_own_sync(self):
+        # 루트와 하위가 서로 다른 볼륨이면 각자 동기화해야 한다 — 순서에 따라 하나가 조용히 낡으면 안 된다
+        root = self._dir(); sub = os.path.join(root, "web"); os.mkdir(sub); self.addCleanup(os.rmdir, sub)
+        for order in ([root, sub], [sub, root]):
+            vols = [{"type": "bind", "source": s, "target": "/workspace" if s == root else "/app"} for s in order]
+            cfg = {"services": {"svc": {"image": "x", "volumes": vols}}}
+            rules = mctl.load_compose(mctl.build_overlay(cfg, target=RemoteTarget("ssh://box")))["services"]["svc"]["develop"]["watch"]
+            self.assertEqual(sorted((r["path"], r["target"]) for r in rules),
+                             sorted([(root, "/workspace"), (sub, "/app")]), f"순서 {order}")
+
+    def test_declared_sync_to_other_target_does_not_count(self):
+        src = self._dir()
+        cfg = {"services": {"svc": {"image": "x",
+            "volumes": [{"type": "bind", "source": src, "target": "/w"}],
+            "develop": {"watch": [{"path": src, "action": "sync", "target": "/elsewhere"}]}}}}
+        rules = mctl.load_compose(mctl.build_overlay(cfg, target=RemoteTarget("ssh://box")))["services"]["svc"]["develop"]["watch"]
+        self.assertIn((src, "/w"), [(r["path"], r["target"]) for r in rules])
 
     def test_missing_or_file_source_gets_nothing(self):
         cfg = {"services": {"svc": {"image": "x",
