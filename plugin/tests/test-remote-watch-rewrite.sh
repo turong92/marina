@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 SCRIPTS="$ROOT/plugin/scripts"
 
 PYTHONPATH="$SCRIPTS" python3 - "$SCRIPTS/marina-compose.py" <<'PY'
-import importlib.util, sys, unittest
+import importlib.util, os, sys, tempfile, unittest
 
 spec = importlib.util.spec_from_file_location("mctl", sys.argv[1])
 mctl = importlib.util.module_from_spec(spec)
@@ -125,6 +125,47 @@ class RemoteTests(unittest.TestCase):
             got = mctl.load_compose(out)["services"]["svc"]["develop"]["watch"][0]
             self.assertEqual(got["path"], bad, f"경로가 깨짐: {bad}")
             self.assertEqual(got["target"], "/app/libs")
+
+    # ── 동기화 선언 없는 바인드 디렉터리도 원격에선 바로 반영(형 2026-11-11 "동적 반영 되게") ──
+    # ovation server 는 '.:/workspace' 바인드만 있고 develop.watch 가 없어, 박스에선 기동 때 한 번 복사로 끝났다.
+    def _dir(self):
+        d = tempfile.mkdtemp(); self.addCleanup(os.rmdir, d); return d
+
+    def test_uncovered_dir_bind_gets_sync_rule(self):
+        src = self._dir()
+        cfg = {"services": {"server": {"image": "x",
+            "volumes": [{"type": "bind", "source": src, "target": "/workspace"}]}}}
+        out = mctl.build_overlay(cfg, target=RemoteTarget("ssh://box"))
+        rules = mctl.load_compose(out)["services"]["server"]["develop"]["watch"]
+        self.assertEqual(len(rules), 1, rules)
+        r = rules[0]
+        self.assertEqual((r["action"], r["path"], r["target"]), ("sync", src, "/workspace"))
+        for pat in ("**/build/", "**/node_modules/", ".git/"):
+            self.assertIn(pat, r["ignore"], "빌드 산출물·의존성·git 은 덮지 않는다")
+        self.assertNotIn("initial_sync", r, "기동 때 이미 통째로 주입했다")
+        self.assertNotIn("develop:", mctl.build_overlay(cfg, target=LocalTarget()), "맥은 바인드 그대로")
+
+    def test_declared_sync_under_source_means_project_handles_it(self):
+        # 프로젝트가 그 폴더(또는 하위)를 이미 동기화하면 추측해 덧붙이지 않는다
+        cfg = {"services": {"web": {"image": "x",
+            "volumes": [{"type": "bind", "source": "/p/web", "target": "/app"}],
+            "develop": {"watch": [{"path": "/p/web/src", "action": "sync", "target": "/app/src"}]}}}}
+        out = mctl.build_overlay(cfg, target=RemoteTarget("ssh://box"))
+        self.assertNotIn("develop:", out)
+
+    def test_missing_or_file_source_gets_nothing(self):
+        cfg = {"services": {"svc": {"image": "x",
+            "volumes": [{"type": "bind", "source": "/no/such/dir", "target": "/w"}]}}}
+        self.assertNotIn("develop:", mctl.build_overlay(cfg, target=RemoteTarget("ssh://box")),
+                         "맥에 없는 경로(파일 추정 포함)는 추측해 붙이지 않는다")
+
+    def test_existing_rules_kept_when_sync_added(self):
+        src = self._dir()
+        cfg = {"services": {"svc": {"image": "x",
+            "volumes": [{"type": "bind", "source": src, "target": "/w"}],
+            "develop": {"watch": [{"path": src + "/Dockerfile", "action": "rebuild"}]}}}}
+        rules = mctl.load_compose(mctl.build_overlay(cfg, target=RemoteTarget("ssh://box")))["services"]["svc"]["develop"]["watch"]
+        self.assertEqual([r["action"] for r in rules], ["rebuild", "sync"])
 
     def test_watch_list_uses_override_tag(self):
         self.assertIn("watch: !override", self._service_block("user-api"))

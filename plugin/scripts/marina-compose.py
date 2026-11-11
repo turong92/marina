@@ -1029,6 +1029,10 @@ def injection_plan_for(config: dict, target, services=None) -> list:
 _WATCH_KEYS = ("action", "path", "target", "initial_sync", "ignore")   # resolved config 의 exec 기본값 부산물은 버린다
 
 
+# 자동 sync 가 덮지 않을 것 — 컨테이너가 스스로 만드는 빌드 산출물·의존성, 그리고 git·marina 작업 폴더
+_AUTO_SYNC_IGNORE = (".git/", ".workspace/", "**/node_modules/", "**/build/", "**/.gradle/", "**/.next/")
+
+
 def _watch_override_lines(svc: dict, injections: list) -> list:
     """원격 전용: 주입된 경로의 `action: restart` 를 `sync+restart` 로 바꾼 watch 목록을 낸다.
 
@@ -1040,7 +1044,9 @@ def _watch_override_lines(svc: dict, injections: list) -> list:
     만들어낸다. 일치하는 규칙이 없으면 아무것도 바꾸지 않는다(로컬에서도 그 경로는 수동이었다는 뜻).
     compose 의 리스트 병합 규칙에 기대지 않으려고 목록 전체를 !override 로 대체한다."""
     rules = ((svc or {}).get("develop") or {}).get("watch")
-    if not isinstance(rules, list) or not rules:
+    if rules is None:
+        rules = []
+    if not isinstance(rules, list):
         return []
     by_source = {i.source: i.target for i in injections}
     changed, out = False, []
@@ -1053,6 +1059,19 @@ def _watch_override_lines(svc: dict, injections: list) -> list:
             r["target"] = by_source[r["path"]]
             changed = True
         out.append(r)
+    # 바인드 디렉터리인데 프로젝트가 그 폴더(또는 그 아래)를 하나도 감시하지 않으면 sync 를 붙인다 —
+    # 맥은 바인드라 고치면 바로 보이는데, 원격은 기동 때 한 번 주입하고 끝나 개발 루프가 끊긴다(형 2026-11-11).
+    # initial_sync 는 안 건다: 기동 때 이미 통째로 넣었다.
+    for i in injections:
+        if not i.volume or not os.path.isdir(i.source):   # 실제 폴더만 — 파일(.env 등)·맥에 없는 경로는 추측하지 않는다
+            continue
+        src = i.source.rstrip("/")
+        synced = [str(r.get("path") or "").rstrip("/") for r in out
+                  if str(r.get("action") or "").startswith("sync")]       # rebuild·restart 는 파일을 옮기지 않는다
+        if any(p == src or p.startswith(src + "/") or src.startswith(p + "/") for p in synced if p):
+            continue                                    # 프로젝트가 그 폴더·하위·상위를 이미 동기화한다
+        out.append({"action": "sync", "path": i.source, "target": i.target, "ignore": list(_AUTO_SYNC_IGNORE)})
+        changed = True
     if not changed:
         return []
     lines = ["    develop:", "      watch: !override"]
