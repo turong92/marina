@@ -142,11 +142,22 @@ refresh_compose_watch() {
     _compose_watch_stop compose
     return 0
   fi
+  # 컨테이너가 새로 만들어지면 watcher 도 새로 — compose watch 의 initial_sync 는 watcher 가 뜰 때 한 번뿐이라,
+  # 옛 watcher 를 두면 새 컨테이너엔 이미지 빌드 뒤 바뀐 파일이 안 들어간다(2026-11-11 story-chat 사무실 web-m2).
+  local watch_cids cids_known=1
+  if watch_cids="$(docker compose -p "$cname" ps -q "${watch_services[@]}" 2>/dev/null)"; then
+    desired_signature="${desired_signature}|cids:$(printf '%s\n' "$watch_cids" | sed '/^$/d' | sort | tr '\n' ',')"
+  else
+    cids_known=0                                 # 조회 실패 — 컨테이너는 비교하지 않는다(멀쩡한 watcher 를 갈지 않게)
+  fi
   if [[ -s "$sd/compose.watch.pid" && -s "$sd/compose.watch.services" \
     && -s "$sd/compose.watch.signature" ]]; then
     current_services="$(sort -u "$sd/compose.watch.services")"
     desired_services="$(printf '%s\n' "${watch_services[@]}" | sort -u)"
     current_signature="$(cat "$sd/compose.watch.signature")"
+    if [[ "$cids_known" -eq 0 && "${current_signature%%|cids:*}" == "$desired_signature" ]]; then
+      desired_signature="$current_signature"
+    fi
     watch_pid="$(sed -n '1p' "$sd/compose.watch.pid" 2>/dev/null || true)"
     watch_stamp="$(sed -n '2p' "$sd/compose.watch.pid" 2>/dev/null || true)"
     if [[ "$current_services" == "$desired_services" && "$current_signature" == "$desired_signature" ]] \

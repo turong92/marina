@@ -41,6 +41,7 @@ case "$*" in
 be}" ;;
   *"ps --all --services"*) printf 'web\noptional\nbe\n' ;;
   *"ps --format json"*) echo '[]' ;;
+  *"ps -q "*) [[ "${WATCH_CID_FAIL:-}" == "1" ]] && exit 9; echo "${DOCKER_WEB_CID:-cid1}" ;;
   *"images --format json web"*)
     echo '[{"ID":"sha256:watch-image","Repository":"web-image","Tag":"latest"}]' ;;
   *"logs -f"*) exec sleep 30 ;;
@@ -170,6 +171,20 @@ wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher missing after fast Start
 second_pid="$(head -n 1 "$WATCH_PID_FILE")"
 [[ "$first_pid" == "$second_pid" ]] || { echo "FAIL: fast Start replaced unchanged watcher"; exit 1; }
 kill -0 "$first_pid" 2>/dev/null || { echo "FAIL: fast Start stopped watcher"; exit 1; }
+
+# 컨테이너 조회가 잠깐 실패해도 멀쩡한 watcher 를 갈지 않는다
+WATCH_CID_FAIL=1 mrun start --all >/dev/null
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher missing after container-id lookup failure"; exit 1; }
+[[ "$(head -n 1 "$WATCH_PID_FILE")" == "$second_pid" ]] || { echo "FAIL: container-id lookup failure replaced watcher"; exit 1; }
+
+# 컨테이너가 새로 만들어지면(env 변경 등) watcher 를 새로 띄워 initial_sync 를 다시 돌린다 —
+# 옛 watcher 는 새 컨테이너에 처음 동기화를 안 해서 이미지 빌드 뒤 바뀐 파일이 빠졌다(2026-11-11 story-chat 사무실 web-m2).
+DOCKER_WEB_CID=cid2 mrun start --all >/dev/null
+wait_for_pid "$WATCH_PID_FILE" || { echo "FAIL: watcher missing after container recreate"; exit 1; }
+recreate_pid="$(head -n 1 "$WATCH_PID_FILE")"
+[[ "$recreate_pid" != "$second_pid" ]] || { echo "FAIL: container recreate kept stale watcher (no initial_sync)"; exit 1; }
+second_pid="$recreate_pid"
+export DOCKER_WEB_CID=cid2
 
 perl -0pi -e 's#/tmp/src#/tmp/src-v2#g' "$DOCKER_CONFIG_FIXTURE"
 cp "$DOCKER_CONFIG_FIXTURE" "$P/docker-compose.yml"
