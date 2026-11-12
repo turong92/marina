@@ -6118,7 +6118,7 @@ def main(argv: list[str] | None = None) -> int:
             if not refs:
                 raise SessionError("restart <작업…> 또는 restart --all")
             if a.account_switch:
-                return 0 if all(mb.account_switch_restart(r) for r in refs) else 1
+                return 0 if all([mb.account_switch_restart(r) for r in refs]) else 1      # 하나 실패해도 나머지는 띄운다
             if a.force:
                 done, failed = mb.force_restart(refs, log=print)
                 for x in failed:

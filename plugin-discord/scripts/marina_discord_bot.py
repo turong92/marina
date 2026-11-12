@@ -3357,6 +3357,118 @@ def account_switch_restart(ref: str, grace: float = ACCOUNT_TURN_GRACE, poll: fl
     return True
 
 
+ACCOUNT_FAILOVER_COOLDOWN = 1800.0     # 같은 방은 30분에 한 번 — 둘 다 바닥인 두 계정 사이를 오가지 않게
+_FAILOVER_KEYS = ("fiveHour", "weekly")  # 모델 전용 창(fableWeekly 등)은 다른 모델로 돌면 상관없어 판정에서 뺀다
+
+
+_SENT_PROMPT = re.compile(r"^❯\s+\S")
+
+
+def limit_is_latest(lines: list[str]) -> bool:
+    """한도 문구가 마지막으로 보낸 입력(❯ …) **뒤에** 있나 — 다시 띄운 뒤 대화 기록에 남은 옛 한도 문구로 또 바꾸지 않게."""
+    hit = max((i for i, l in enumerate(lines) if _LIMIT_DIALOG.search(l)), default=-1)
+    sent = max((i for i, l in enumerate(lines) if _SENT_PROMPT.match(l)), default=-1)
+    return hit > sent
+
+
+def _pane_limit_latest(name: str) -> bool:
+    if not name or not ms.tmux_alive(name):
+        return False
+    return limit_is_latest((ms._tmux("capture-pane", "-p", "-t", name).stdout or "").rstrip().splitlines()[-40:])
+
+
+def _exhausted(windows: "list[dict[str, Any]] | None") -> bool:
+    return any(str(w.get("key")) in _FAILOVER_KEYS and float(w.get("usedPercent") or 0) >= 98.0 for w in windows or [])
+
+
+def _all_account_usage() -> dict[str, list[dict[str, Any]]]:
+    return dict(account_usage(), **{ms.ACCOUNT_DEFAULT: _usage()})
+
+
+def _say_channel(ch: str, text: str) -> None:
+    if not ch:
+        return
+    try:
+        _dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", {"content": text[:1900], "allowed_mentions": {"parse": []}})
+    except ms.SessionError as exc:
+        _log(f"account_failover say {ch}: {type(exc).__name__}")
+
+
+def _free_at(windows: "list[dict[str, Any]] | None") -> float:
+    """이 계정을 다시 쓸 수 있는 때 = 바닥난 창들 중 가장 늦게 풀리는 것(5시간 창이 풀려도 주간이 바닥이면 못 쓴다)."""
+    ts = [float(w.get("resetsAt") or 0) for w in windows or []
+          if str(w.get("key")) in _FAILOVER_KEYS and float(w.get("usedPercent") or 0) >= 98.0 and w.get("resetsAt")]
+    return max(ts) if ts else 0.0
+
+
+def _spawn_account_restart_many(refs: list[str]) -> None:
+    """한 tick 에 바꾼 방들을 재시작 한 번으로 — 방마다 따로 띄우면 재시작 잠금 하나를 두고 서로 실패한다(리뷰 I1)."""
+    log = ms.marina_home() / "account-restart.log"
+    with open(log, "a") as fh:
+        subprocess.Popen([sys.executable, str(Path(ms.__file__).resolve()), "restart", *refs, "--account-switch"],
+                         stdin=subprocess.DEVNULL, stdout=fh, stderr=fh, start_new_session=True)
+
+
+def account_failover_tick(now: "float | None" = None, limited=None, usage=None, spawn=None, say=None,
+                          busy=None, restarting=None) -> list[str]:
+    """계정 상호보완(형 2026-11-12): 사용량 한도에 멈춘 클로드 방을 여유 있는 다른 계정으로 바꿔 같은 대화로 다시 띄운다.
+    화면 문구만 믿지 않는다 — 지금 계정의 사용량이 실제로 바닥이고, 방이 일하는 중이 아닐 때만(리뷰 C1·C2: 코드·로그에
+    찍힌 같은 문구나 다시 띄운 뒤 남은 옛 문구로 멀쩡한 방을 끊지 않게). 다른 계정도 바닥이면 바꾸지 않고 풀리는 때만,
+    그 시각이 바뀔 때만 알린다. 바꾼 계정은 한도가 풀려도 그대로(되돌리면 대화가 또 끊긴다)."""
+    now = time.time() if now is None else now
+    limited = limited or _pane_limit_latest
+    spawn = spawn or _spawn_account_restart_many
+    say = say or _say_channel
+    busy = busy or (lambda name: _pane_busy(name)[1])
+    restarting = restarting or restart_status
+    if restarting():
+        return []                 # 다른 재시작(안전 재시작 대기 등)이 잠금을 쥐고 있다 — 다음 tick 에
+    by: "dict[str, list[dict[str, Any]]] | None" = None
+    moved: list[str] = []
+    for rec in ms.load_sessions():
+        if ms.is_codex(rec):
+            continue
+        sd, name = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("tmux") or "")
+        if not sd.is_dir() or not limited(name) or busy(name):
+            continue
+        mark = sd / "account-failover-at"
+        try:
+            last = float(mark.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            last = 0.0
+        if now - last < ACCOUNT_FAILOVER_COOLDOWN:
+            continue
+        if by is None:
+            by = (usage or _all_account_usage)() or {}
+        cur, ch = ms.running_account(sd), str(rec.get("channelId") or "")
+        if not _exhausted(by.get(cur)):
+            continue              # 화면엔 한도 문구가 보여도 지금 계정은 여유 — 옛 문구거나 출력 속 같은 글자다
+        mark.write_text(f"{now}\n", encoding="utf-8")
+        others = [n for n in ms.accounts() if n != cur and (n == ms.ACCOUNT_DEFAULT or ms.account_token_file(n) is not None)]
+        free = [n for n in others if not _exhausted(by.get(n))]
+        if not free:
+            ats = [t for t in (_free_at(by.get(n)) for n in [cur] + others) if t]
+            when = time.strftime("%m-%d %H:%M", time.localtime(min(ats))) if ats else "알 수 없음"
+            wait = sd / "account-failover-wait"
+            try:
+                told = wait.read_text(encoding="utf-8").strip()
+            except OSError:
+                told = ""
+            if told != when:
+                say(ch, f"⏳ {cur.upper()} 계정 한도에 걸렸는데 다른 계정도 바닥이야 — 다시 쓸 수 있는 가장 빠른 때: {when}")
+                wait.write_text(when + "\n", encoding="utf-8")
+            continue
+        to = free[0]
+        ms.set_account(sd, to)
+        ref = f"{rec.get('project')}/{rec.get('task')}"
+        say(ch, f"🔑 {cur.upper()} 계정 한도라 {to.upper()} 계정으로 바꿔 같은 대화를 이어 띄울게")
+        moved.append(ref)
+        _log(f"account_failover {ref}: {cur} → {to}")
+    if moved:
+        spawn(moved)
+    return moved
+
+
 def _drop_pending_prompts(rec: dict[str, Any]) -> None:
     """죽은 세션이 남긴 질문·권한 버튼과 기록을 정리한다(기존 정리 함수 — 버튼은 늦게 눌러도 소용없다)."""
     sd, ch = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("channelId") or "")
@@ -3891,6 +4003,10 @@ class Loop:
                 account_tick()
             except Exception as exc:
                 _log(f"account_tick failed: {type(exc).__name__}")
+            try:
+                account_failover_tick(now)
+            except Exception as exc:
+                _log(f"account_failover failed: {type(exc).__name__}: {exc}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
