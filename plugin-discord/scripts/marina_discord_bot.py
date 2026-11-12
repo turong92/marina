@@ -3401,6 +3401,18 @@ def _free_at(windows: "list[dict[str, Any]] | None") -> float:
     return max(ts) if ts else 0.0
 
 
+def write_account_state(by: "dict[str, list[dict[str, Any]]]", now: float) -> None:
+    """계정마다 '다시 쓸 수 있는 때'(바닥 아니면 0)를 accounts/state.json 에 — 방을 띄울 때 바닥난 계정을 피하려고 읽는다."""
+    d = {"at": now, "freeAt": {n: ((_free_at(w) or now + 3600.0) if _exhausted(w) else 0.0) for n, w in by.items()}}
+    try:
+        ms.accounts_dir().mkdir(parents=True, exist_ok=True)
+        tmp = ms.accounts_dir() / "state.json.tmp"
+        tmp.write_text(json.dumps(d), encoding="utf-8")
+        tmp.replace(ms.accounts_dir() / "state.json")
+    except OSError as exc:
+        _log(f"account state write: {type(exc).__name__}")
+
+
 def _spawn_account_restart_many(refs: list[str]) -> None:
     """한 tick 에 바꾼 방들을 재시작 한 번으로 — 방마다 따로 띄우면 재시작 잠금 하나를 두고 서로 실패한다(리뷰 I1)."""
     log = ms.marina_home() / "account-restart.log"
@@ -4003,6 +4015,10 @@ class Loop:
                 account_tick()
             except Exception as exc:
                 _log(f"account_tick failed: {type(exc).__name__}")
+            try:
+                write_account_state(_all_account_usage(), now)    # 깨는 방이 바닥난 계정을 피하게(사용량은 캐시라 싸다)
+            except Exception as exc:
+                _log(f"account_state failed: {type(exc).__name__}")
             try:
                 account_failover_tick(now)
             except Exception as exc:

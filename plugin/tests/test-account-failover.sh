@@ -86,6 +86,25 @@ check(not mb.limit_is_latest(["  ⎿  You've hit your weekly limit · resets 12a
                               "⏺ Reading brand/README.md", "❯ "]), "한도 뒤에 새 입력이 있으면 한도 아님")
 check(mb.limit_is_latest(["❯ 일 해", "Stop and wait for limit to reset"]), "한도 선택 창")
 
+# 띄울 때도 고른다 — 바닥난 계정이면 여유 있는 계정으로 띄우고 방에 적는다(2026-11-12 image-admin-assets: a 한도로 멈췄다가
+# 쉬어 내려간 방이 깨면 또 a 로 떠 같은 자리에 멈춘다). 상태는 봇이 tick 마다 accounts/state.json 에 적는다.
+import json as _j
+st = ms.marina_home() / "accounts" / "state.json"
+ms.set_account(sd, "a")
+check(ms.session_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE") is None, "상태 기록 없으면 정한 대로 a")
+gone_now = [{"key": "weekly", "usedPercent": 100.0, "resetsAt": time.time() + 86400}]
+mb.write_account_state({"a": gone_now, "b": ok}, time.time())
+check(ms.session_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE"), "a 가 바닥이면 b 로 띄운다")
+check(ms.account_of(sd) == "b", f"고른 계정을 방에 적는다: {ms.account_of(sd)}")
+ms.clear_account(sd)
+check(ms.chat_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE"), "채팅방도 a 가 바닥이면 b 로")
+ms.clear_account(sd)
+mb.write_account_state({"a": gone_now, "b": gone_now}, time.time())
+check(ms.session_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE") is None, "둘 다 바닥이면 정한 대로")
+mb.write_account_state({"a": gone_now, "b": ok}, time.time() - 3600)
+check(ms.session_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE") is None, "오래된 상태 기록은 안 믿는다")
+st.unlink()
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY

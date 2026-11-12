@@ -2488,14 +2488,52 @@ def room_mcp_servers(room_dir: "Path | None") -> list[str]:
     return [n for n in _room_mcp_names(room_dir) if n != "marina"]
 
 
-def session_env(sdir: Path) -> dict[str, str]:
+ACCOUNT_STATE_MAX_AGE = 900.0      # 봇이 30초마다 적는다 — 15분 넘게 낡았으면 봇이 죽은 것, 안 믿는다
+
+
+def _account_free_at() -> dict[str, float]:
+    """봇이 적은 계정별 '다시 쓸 수 있는 때'(바닥 아니면 0). 없거나 낡았으면 빈 dict."""
+    try:
+        d = json.loads((accounts_dir() / "state.json").read_text(encoding="utf-8"))
+        if time.time() - float(d.get("at") or 0) > ACCOUNT_STATE_MAX_AGE:
+            return {}
+        return {str(k): float(v or 0) for k, v in (d.get("freeAt") or {}).items()}
+    except (OSError, ValueError, TypeError, AttributeError):
+        return {}
+
+
+def launch_account(sdir: Path, base: str) -> str:
+    """띄울 계정 — base 가 사용량 바닥이고 다른 계정에 여유가 있으면 그쪽으로 바꿔 방에 적는다(형 2026-11-12 상호보완:
+    한도로 멈췄다 쉬어 내려간 방이 깨면 또 같은 계정으로 떠 같은 자리에 멈췄다)."""
+    free_at, now = _account_free_at(), time.time()
+    def gone(n: str) -> bool:
+        return free_at.get(n, 0.0) > now
+    if not gone(base):
+        return base
+    for n in accounts():
+        if n != base and not gone(n) and (n == ACCOUNT_DEFAULT or account_token_file(n) is not None):
+            try:
+                set_account(sdir, n)
+            except (OSError, SessionError):
+                pass
+            return n
+    return base
+
+
+def session_env(sdir: Path, chat: bool = False) -> dict[str, str]:
     """claude 는 깨끗한 env 로 뜨므로, 훅·알림이 마리나 상태를 찾을 변수를 넣어 준다.
-    방 계정이 토큰 계정이면 토큰 **파일 경로**만 넣는다 — tmux_start 의 셸이 읽어 CLAUDE_CODE_OAUTH_TOKEN 으로 넘긴다."""
+    방 계정이 토큰 계정이면 토큰 **파일 경로**만 넣는다 — tmux_start 의 셸이 읽어 CLAUDE_CODE_OAUTH_TOKEN 으로 넘긴다.
+    chat=True(채팅방·로비): 전체 기본 계정은 안 따라가고 방·프로젝트에 콕 집은 계정만 — 형이 바꾸는 기본 계정이 비서 방까지
+    옮기지 않게(2026-11-12 비서 방은 프로젝트 계정 b 를 따르게)."""
     env = {"DISCORD_STATE_DIR": str(sdir), "MARINA_HOME": str(marina_home())}
     for k in ("MARINA_DISCORD_API", "MARINA_CHANNELS_DIR"):
         if os.environ.get(k):
             env[k] = os.environ[k]
-    tok = account_token_file(account_of(sdir))
+    if chat:
+        base = _read_name(Path(sdir) / "account") or project_account(_project_of(Path(sdir))) or ACCOUNT_DEFAULT
+    else:
+        base = account_of(sdir)
+    tok = account_token_file(launch_account(Path(sdir), base))
     if tok is not None:
         env[ACCOUNT_TOKEN_ENV] = str(tok)
     return env
@@ -4153,15 +4191,7 @@ def new_task_first_prompt(text: str, who: str = "형", channel: str = "", mid: s
 
 
 def chat_env(sdir: Path) -> dict[str, str]:
-    env = dict(session_env(sdir), ENABLE_CLAUDEAI_MCP_SERVERS="false")   # 형의 claude.ai 커넥터 끔
-    # 채팅방·로비는 전체 기본 계정을 안 따라간다(형이 바꾸는 기본 계정이 비서 방까지 옮기지 않게).
-    # 방·프로젝트에 콕 집은 계정은 따른다 — 2026-11-12 비서 방을 b 로 돌리려 했는데 늘 a 로 떠 a 한도에 막혔다
-    pinned = _read_name(Path(sdir) / "account") or project_account(_project_of(Path(sdir)))
-    tok = account_token_file(pinned) if pinned else None
-    env.pop(ACCOUNT_TOKEN_ENV, None)
-    if tok is not None:
-        env[ACCOUNT_TOKEN_ENV] = str(tok)
-    return env
+    return dict(session_env(sdir, chat=True), ENABLE_CLAUDEAI_MCP_SERVERS="false")   # 형의 claude.ai 커넥터 끔
 
 
 TAKE_MAX_FILE = 20 * 1024 * 1024          # 첨부 한 개 — 열어보기 서버 상한(marina_view.MAX_BYTES)과 같다(넘으면 페이지에 못 싣는다, 테스트가 강제)
