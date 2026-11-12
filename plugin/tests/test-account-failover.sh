@@ -116,7 +116,12 @@ try:
     n = len(sent)
     check(revive(9e12 + 500, {"a": 0.0, "b": 9e12 * 2}) == [] and len(sent) == n, "떠 있는 방은 지금 계정이 풀려야(다른 계정은 failover 몫)")
     check(revive(9e12 + 600, {"b": 0.0}, limited=True) == [] and restarted == ["proj/feat/a"], f"한도 창이 남았으면 다시 띄운다(리뷰 I3): {restarted}")
-    check(revive(9e12 + 700, {"b": 0.0}) == ["proj/feat/a"], "다시 뜬 뒤 글을 넣는다")
+    # 다시 뜬 화면엔 대화 기록의 옛 한도 문구가 그대로 남는다 — 또 띄우지 말고 글을 넣는다(2026-11-13 qwen 방 1분마다 세 번)
+    check(revive(9e12 + 700, {"b": 0.0}, limited=True) == ["proj/feat/a"] and restarted == ["proj/feat/a"],
+          f"다시 띄운 뒤엔 옛 한도 문구로 또 안 띄우고 글을 넣는다: {restarted}")
+    (sd / "limit-stalled").write_text('{"freeAt": 0, "restarted": true}')
+    check(revive(9e12 + 750, {"b": 0.0}, limited=True) == ["proj/feat/a"] and restarted == ["proj/feat/a"],
+          "계정 바꿔 띄운 방(failover)도 옛 한도 문구로 또 안 띄운다")
     (sd / "limit-stalled").write_text('{"freeAt": 0}')
     n = len(sent)
     check(revive(9e12 + 800, {"b": 0.0}, busy=True) == [] and len(sent) == n and not (sd / "limit-stalled").exists(), "일하는 중이면 안 깨우고 표시만 지움")
@@ -141,6 +146,7 @@ for f in ("limit-stalled", "account-failover-at", "account-failover-wait"):
     (sd / f).unlink(missing_ok=True)
 tick(400000.0, usage={"a": ok, "b": gone})
 check((sd / "limit-stalled").exists(), "계정 바꿔 띄운 방도 표시")
+check(__import__("json").loads((sd / "limit-stalled").read_text()).get("restarted") is True, "계정 바꿔 띄운 방은 '이미 다시 띄움' 표시")
 
 # 띄울 때도 고른다 — 바닥난 계정이면 여유 있는 계정으로 띄우고 방에 적는다(2026-11-12 image-admin-assets: a 한도로 멈췄다가
 # 쉬어 내려간 방이 깨면 또 a 로 떠 같은 자리에 멈춘다). 상태는 봇이 tick 마다 accounts/state.json 에 적는다.

@@ -3476,7 +3476,7 @@ def account_failover_tick(now: "float | None" = None, limited=None, usage=None, 
         ms.set_account(sd, to)
         ref = f"{rec.get('project')}/{rec.get('task')}"
         say(ch, f"🔑 {cur.upper()} 계정 한도라 {to.upper()} 계정으로 바꿔 같은 대화를 이어 띄울게")
-        _mark_stalled(sd, 0.0)        # 다시 뜬 뒤 '이어서 해' 를 넣는다 — 재시작만으론 멈췄던 일이 다시 안 굴러간다
+        _mark_stalled(sd, 0.0, restarted=True)   # 다시 뜬 뒤 '이어서 해' 를 넣는다 — 재시작만으론 멈췄던 일이 다시 안 굴러간다
         moved.append(ref)
         _log(f"account_failover {ref}: {cur} → {to}")
     if moved:
@@ -3489,9 +3489,11 @@ LIMIT_REVIVE_MSG = ("[마리나] 사용량 한도가 풀렸어. 한도로 멈췄
                     "SendMessage 로 이어 가거나 다시 맡겨. 할 일이 없으면 아무것도 하지 마.")
 
 
-def _mark_stalled(sd: Path, free_at: float) -> None:
+def _mark_stalled(sd: Path, free_at: float, restarted: bool = False) -> None:
+    """restarted: 이미 같은 대화로 다시 띄웠다 — 다시 뜬 화면엔 대화 기록의 옛 한도 문구가 그대로 보여
+    '한도 창이 남았다'로 또 띄우면 1분마다 되풀이한다(2026-11-13 00:20 qwen 방 B→A 뒤 세 번)."""
     try:
-        (sd / LIMIT_STALLED).write_text(json.dumps({"freeAt": free_at}), encoding="utf-8")
+        (sd / LIMIT_STALLED).write_text(json.dumps({"freeAt": free_at, "restarted": restarted}), encoding="utf-8")
     except OSError:
         pass
 
@@ -3546,9 +3548,10 @@ def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=
         if not mark.is_file():
             continue
         try:
-            at = float(json.loads(mark.read_text(encoding="utf-8")).get("freeAt") or 0)
+            info = json.loads(mark.read_text(encoding="utf-8"))
+            at, restarted = float(info.get("freeAt") or 0), bool(info.get("restarted"))
         except (OSError, ValueError, AttributeError, TypeError):
-            at = 0.0
+            at, restarted = 0.0, False
         if now < at:
             continue
         name = str(rec.get("tmux") or "")
@@ -3560,8 +3563,8 @@ def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=
             if busy(name):
                 mark.unlink(missing_ok=True)
                 continue              # 누가 먼저 말을 걸어 이미 굴러간다
-            if limited(name):
-                _mark_stalled(sd, now + 60.0)
+            if not restarted and limited(name):
+                _mark_stalled(sd, now + 60.0, restarted=True)
                 restart([ref])        # 한도 창이 남아 있다 — 같은 대화로 다시 띄우고 다음 tick 에 글을 넣는다
                 _log(f"limit_revive {ref}: 한도 창이 남아 다시 띄움")
                 continue
