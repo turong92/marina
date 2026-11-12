@@ -3467,18 +3467,110 @@ def account_failover_tick(now: "float | None" = None, limited=None, usage=None, 
             except OSError:
                 told = ""
             if told != when:
-                say(ch, f"⏳ {cur.upper()} 계정 한도에 걸렸는데 다른 계정도 바닥이야 — 다시 쓸 수 있는 가장 빠른 때: {when}")
+                say(ch, f"⏳ {cur.upper()} 계정 한도에 걸렸는데 다른 계정도 바닥이야 — 다시 쓸 수 있는 가장 빠른 때: {when}"
+                        " (풀리면 내가 이 방을 깨워 이어서 하게 할게)")
                 wait.write_text(when + "\n", encoding="utf-8")
+            _mark_stalled(sd, min(ats) if ats else now + 3600.0)
             continue
         to = free[0]
         ms.set_account(sd, to)
         ref = f"{rec.get('project')}/{rec.get('task')}"
         say(ch, f"🔑 {cur.upper()} 계정 한도라 {to.upper()} 계정으로 바꿔 같은 대화를 이어 띄울게")
+        _mark_stalled(sd, 0.0)        # 다시 뜬 뒤 '이어서 해' 를 넣는다 — 재시작만으론 멈췄던 일이 다시 안 굴러간다
         moved.append(ref)
         _log(f"account_failover {ref}: {cur} → {to}")
     if moved:
         spawn(moved)
     return moved
+
+
+LIMIT_STALLED = "limit-stalled"
+LIMIT_REVIVE_MSG = ("[마리나] 사용량 한도가 풀렸어. 한도로 멈췄던 일을 바로 이어서 해 줘 — 한도로 끊긴 서브에이전트가 있으면 "
+                    "SendMessage 로 이어 가거나 다시 맡겨. 할 일이 없으면 아무것도 하지 마.")
+
+
+def _mark_stalled(sd: Path, free_at: float) -> None:
+    try:
+        (sd / LIMIT_STALLED).write_text(json.dumps({"freeAt": free_at}), encoding="utf-8")
+    except OSError:
+        pass
+
+
+REVIVE_RETRY_S = 120.0         # 깨우기 글을 뒤에서 보내는 동안 다시 안 보내고, 실패하면 이만큼 뒤에 다시
+
+
+def revive_deliver(sd: str, ref: str, kind: str, text: str) -> None:
+    """뒤 프로세스: 글을 넣고 **성공했을 때만** 표시를 지운다 — 재시작이 방 잠금을 쥐고 있어 실패하면 표시가 남아 다음에 다시(리뷰 I1)."""
+    os.environ["PATH"] = ms.daemon_path() + ":" + os.environ.get("PATH", "")
+    import marina_discord_wake as mw
+    try:
+        how = mw.say(ref, text, source="say") if kind == "chat" else mw.room_send(ref, text, wake=True)
+    except Exception as exc:
+        _log(f"limit_revive {ref}: 전달 실패 — {exc}")
+        return
+    Path(sd, LIMIT_STALLED).unlink(missing_ok=True)
+    _log(f"limit_revive {ref}: {how}")
+
+
+def _spawn_revive(rec: dict[str, Any], text: str) -> None:
+    """깨우기는 뒤에서 — 방이 바쁘면 쉬는 틈을 기다리므로 봇 루프를 막지 않게. 채팅방은 say, 개발 방은 room-send --wake."""
+    here = str(Path(__file__).resolve().parent)
+    args = [str(rec.get("stateDir")), f"{rec.get('project')}/{rec.get('task')}", str(rec.get("kind") or ""), text]
+    with open(ms.marina_home() / "account-restart.log", "a") as fh:
+        subprocess.Popen([sys.executable, "-c", "import sys, marina_discord_bot as mb; mb.revive_deliver(*sys.argv[1:])", *args],
+                         cwd=here, stdin=subprocess.DEVNULL, stdout=fh, stderr=fh, start_new_session=True)
+
+
+def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=None, limited=None, restart=None) -> list[str]:
+    """한도로 멈춘 방을 한도가 풀리면 깨워 이어서 하게 한다(형 2026-11-12: 멈춘 방이 사람이 말 걸 때까지 하루를 놀았다).
+    표시(limit-stalled)는 account_failover_tick 이 남긴다.
+    - 떠 있는 방: 지금 계정이 풀렸을 때. 화면에 한도 창이 남아 있으면 글이 안 들어가니 먼저 다시 띄우고 다음에(리뷰 I3).
+    - 잠든 방: 어느 계정이든 풀리면 — 깨울 때 launch_account 가 여유 계정을 고른다(리뷰 I2).
+    - 이미 일하는 중이면 표시만 지운다. 보낸 표시는 뒤 프로세스가 성공했을 때 지운다(리뷰 I1)."""
+    now = time.time() if now is None else now
+    fa = (free_at or ms._account_free_at)() or {}
+    busy = busy or (lambda name: _pane_busy(name)[1])
+    send = send or _spawn_revive
+    limited = limited or _pane_limit_latest
+    restart = restart or _spawn_account_restart_many
+    def usable(n: str) -> bool:
+        return fa.get(n, 0.0) <= now and (n == ms.ACCOUNT_DEFAULT or ms.account_token_file(n) is not None)
+    woke: list[str] = []
+    for rec in ms.load_sessions():
+        kind = str(rec.get("kind") or "")
+        if ms.is_codex(rec) or kind.endswith("lobby"):
+            continue
+        sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+        mark = sd / LIMIT_STALLED
+        if not mark.is_file():
+            continue
+        try:
+            at = float(json.loads(mark.read_text(encoding="utf-8")).get("freeAt") or 0)
+        except (OSError, ValueError, AttributeError, TypeError):
+            at = 0.0
+        if now < at:
+            continue
+        name = str(rec.get("tmux") or "")
+        alive = ms.tmux_alive(name) if name else False
+        ref = f"{rec.get('project')}/{rec.get('task')}"
+        if alive:
+            if not usable(ms.running_account(sd)):
+                continue              # 떠 있는 계정이 아직 바닥 — 다른 계정이 풀렸으면 failover 가 바꿔 띄운다
+            if busy(name):
+                mark.unlink(missing_ok=True)
+                continue              # 누가 먼저 말을 걸어 이미 굴러간다
+            if limited(name):
+                _mark_stalled(sd, now + 60.0)
+                restart([ref])        # 한도 창이 남아 있다 — 같은 대화로 다시 띄우고 다음 tick 에 글을 넣는다
+                _log(f"limit_revive {ref}: 한도 창이 남아 다시 띄움")
+                continue
+        elif not any(usable(n) for n in ms.accounts()):
+            continue
+        _mark_stalled(sd, now + REVIVE_RETRY_S)
+        send(rec, LIMIT_REVIVE_MSG)
+        woke.append(ref)
+        _log(f"limit_revive {ref}: 깨우기 보냄")
+    return woke
 
 
 def _drop_pending_prompts(rec: dict[str, Any]) -> None:
@@ -4023,6 +4115,10 @@ class Loop:
                 account_failover_tick(now)
             except Exception as exc:
                 _log(f"account_failover failed: {type(exc).__name__}: {exc}")
+            try:
+                limit_revive_tick(now)
+            except Exception as exc:
+                _log(f"limit_revive failed: {type(exc).__name__}: {exc}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)

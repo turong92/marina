@@ -86,6 +86,61 @@ check(not mb.limit_is_latest(["  ⎿  You've hit your weekly limit · resets 12a
                               "⏺ Reading brand/README.md", "❯ "]), "한도 뒤에 새 입력이 있으면 한도 아님")
 check(mb.limit_is_latest(["❯ 일 해", "Stop and wait for limit to reset"]), "한도 선택 창")
 
+# 한도가 풀리면 멈췄던 방을 다시 깨운다 — 2026-11-12 형: ovation 방이 한도로 멈춘 채 하루를 놀다 형이 'ㄱㄱ' 해서야 이어 갔다
+for f in ("limit-stalled", "account-failover-at", "account-failover-wait"):
+    (sd / f).unlink(missing_ok=True)
+(sd / "account-running").write_text("b\n"); ms.set_account(sd, "b")
+said.clear()
+tick(300000.0, usage={"a": gone, "b": gone})
+check((sd / "limit-stalled").exists(), "둘 다 바닥이면 '한도로 멈춤' 표시를 남긴다")
+sent, restarted = [], []
+orig_alive0 = ms.tmux_alive; ms.tmux_alive = lambda n: False      # 잠든 방부터
+def revive(now, fa, busy=False, limited=False):
+    return mb.limit_revive_tick(now, free_at=lambda: fa, busy=lambda n: busy, send=lambda rec, t: sent.append((rec, t)),
+                                limited=lambda n: limited, restart=restarted.extend)
+check(revive(300100.0, {"a": 9e12, "b": 9e12}) == [] and not sent, "아직 바닥이면 안 깨운다")
+# 잠든 방: 방 계정(b)이 바닥이어도 다른 계정(a)이 풀렸으면 깨운다 — 깨울 때 여유 계정으로 뜬다(리뷰 I2)
+check(revive(9e12 + 10, {"a": 0.0, "b": 9e12 * 2}) == ["proj/feat/a"], f"다른 계정이 풀리면 잠든 방을 깨운다: {sent}")
+check(sent and "이어서" in sent[-1][1] and "SendMessage" in sent[-1][1], f"이어서 하라는 글(서브에이전트 포함): {sent}")
+check((sd / "limit-stalled").exists(), "보낸 표시는 뒤 프로세스가 성공해야 지운다(리뷰 I1)")
+check(revive(9e12 + 20, {"b": 0.0}) == [], "보내는 중엔 다시 안 보낸다")
+check(revive(9e12 + 10 + mb.REVIVE_RETRY_S + 1, {"b": 0.0}) == ["proj/feat/a"], "전달이 실패해 표시가 남으면 잠시 뒤 다시")
+(sd / "limit-stalled").unlink(); ms.tmux_alive = orig_alive0
+# 떠 있는 방
+orig_alive = ms.tmux_alive
+ms.tmux_alive = lambda n: True
+try:
+    (sd / "account-running").write_text("b\n")
+    (sd / "limit-stalled").write_text('{"freeAt": 0}')
+    n = len(sent)
+    check(revive(9e12 + 500, {"a": 0.0, "b": 9e12 * 2}) == [] and len(sent) == n, "떠 있는 방은 지금 계정이 풀려야(다른 계정은 failover 몫)")
+    check(revive(9e12 + 600, {"b": 0.0}, limited=True) == [] and restarted == ["proj/feat/a"], f"한도 창이 남았으면 다시 띄운다(리뷰 I3): {restarted}")
+    check(revive(9e12 + 700, {"b": 0.0}) == ["proj/feat/a"], "다시 뜬 뒤 글을 넣는다")
+    (sd / "limit-stalled").write_text('{"freeAt": 0}')
+    n = len(sent)
+    check(revive(9e12 + 800, {"b": 0.0}, busy=True) == [] and len(sent) == n and not (sd / "limit-stalled").exists(), "일하는 중이면 안 깨우고 표시만 지움")
+finally:
+    ms.tmux_alive = orig_alive
+# 뒤 프로세스: 성공하면 표시를 지우고, 실패하면 남긴다
+import marina_discord_wake as mw
+(sd / "limit-stalled").write_text('{"freeAt": 0}')
+orig_rs = mw.room_send
+try:
+    def boom(*a, **k): raise ms.SessionError("잠금")
+    mw.room_send = boom
+    mb.revive_deliver(str(sd), "proj/feat/a", "", "x")
+    check((sd / "limit-stalled").exists(), "전달 실패면 표시를 남긴다")
+    mw.room_send = lambda *a, **k: "delivered"
+    mb.revive_deliver(str(sd), "proj/feat/a", "", "x")
+    check(not (sd / "limit-stalled").exists(), "전달 성공이면 표시를 지운다")
+finally:
+    mw.room_send = orig_rs
+# 다른 계정으로 바꿔 다시 띄운 방도 표시를 남긴다(다시 뜬 뒤 '이어서 해' 를 넣으려고)
+for f in ("limit-stalled", "account-failover-at", "account-failover-wait"):
+    (sd / f).unlink(missing_ok=True)
+tick(400000.0, usage={"a": ok, "b": gone})
+check((sd / "limit-stalled").exists(), "계정 바꿔 띄운 방도 표시")
+
 # 띄울 때도 고른다 — 바닥난 계정이면 여유 있는 계정으로 띄우고 방에 적는다(2026-11-12 image-admin-assets: a 한도로 멈췄다가
 # 쉬어 내려간 방이 깨면 또 a 로 떠 같은 자리에 멈춘다). 상태는 봇이 tick 마다 accounts/state.json 에 적는다.
 import json as _j
