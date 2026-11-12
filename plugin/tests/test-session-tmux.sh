@@ -60,6 +60,30 @@ except ms.SessionError as exc:
 check(not ms.tmux_alive("proj-dies"), "죽은 세션이 남지 않음")
 (tmproot / "claude-fail").unlink()
 
+# tmux 서버가 지워진 폴더(옛 플러그인 캐시)에서 떠 있으면 -c 가 안 먹어 새 창이 '폴더 없음'으로 죽었다(2026-11-12 실측).
+# 방은 tmux 의 -c 에 기대지 않고 스스로 그 폴더로 들어가 떠야 한다.
+ms.tmux_stop("proj-feat-one")
+subprocess.run(ms._tmux_base() + ["kill-server"], capture_output=True)
+gone = tmproot / "gone-cwd"; gone.mkdir()
+subprocess.run(ms._tmux_base() + ["new-session", "-d", "-s", "keep", "sleep 60"], cwd=gone, check=True)
+gone.rmdir()
+for p in out.iterdir():
+    if (p / "argv").exists(): (p / "argv").unlink()
+os.environ["MARINA_SESSION_BOOT_WAIT"] = "1"
+try:
+    ms.tmux_start("proj-gone", src, argv, {"DISCORD_STATE_DIR": "/state/x"})
+except ms.SessionError as exc:
+    check(False, f"지워진 폴더의 tmux 서버에서도 방이 떠야 함: {exc}")
+call = None
+for _ in range(100):
+    call = last_call()
+    if call is not None and (call / "cwd").exists():
+        break
+    time.sleep(0.1)
+check(call is not None and (call / "cwd").read_text().strip() == str(src.resolve()),
+      "지워진 폴더의 tmux 서버에서도 워크트리에서 실행")
+ms.tmux_stop("proj-gone"); ms.tmux_stop("keep")
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

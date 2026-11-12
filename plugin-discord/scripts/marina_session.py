@@ -951,6 +951,9 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
         # Claude Code 는 Bash 도구의 env 에서 이 변수를 뺀다(실측 2026-10-18). 파일이 비었으면 export 하지 않는다(= a 로 뜬다)
         run = ["/bin/sh", "-c", f'if [ -s "${ACCOUNT_TOKEN_ENV}" ]; then CLAUDE_CODE_OAUTH_TOKEN="$(cat "${ACCOUNT_TOKEN_ENV}")"; '
                f'export CLAUDE_CODE_OAUTH_TOKEN; fi; unset {ACCOUNT_TOKEN_ENV}; exec "$@"', "sh"] + run
+    # tmux 서버가 지워진 폴더(옛 플러그인 캐시)에서 떠 있으면 -c 가 안 먹어 새 창이 '폴더 없음'으로 바로 죽는다
+    # (2026-11-12 실측: 10/29 에 뜬 서버의 폴더가 업데이트 정리로 지워져 꺼진 방이 하나도 못 떴다). 스스로 들어간다.
+    run = ["/bin/sh", "-c", 'cd "$1" || exit 1; shift; exec "$@"', "sh", str(cwd)] + run
     cmd = shlex.join(clean_env_prefix(env_extra) + run)
     r = _tmux("new-session", "-d", "-s", name, "-x", "200", "-y", "50", "-c", str(cwd), cmd)
     first = ""
