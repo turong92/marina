@@ -80,6 +80,16 @@ check((sd / "account-running").read_text().strip() == "a", "토큰 없이 뜨면
 ms.tmux_stop(rec["tmux"])
 check("MARINA_ACCOUNT_TOKEN_FILE" not in ms.chat_env(sd), "채팅방·로비는 늘 a")
 os.rename(ms.marina_home() / "accounts" / "b.gone", ms.marina_home() / "accounts" / "b.token")
+# 채팅방(비서 등)은 전체 기본 계정은 안 따라가고, 방·프로젝트에 콕 집은 계정만 따른다 — 2026-11-12 형
+# "비서쪽 채널들 클로드 b로" 를 프로젝트 계정으로 넣었는데 채팅방이 늘 a 로 떠 a 한도에 막혀 답을 못 했다
+ms.set_account(sd, "b")
+check(ms.chat_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE"), "채팅방도 방에 정한 계정(b)으로")
+ms.clear_account(sd); ms.set_default_account("b")
+check("MARINA_ACCOUNT_TOKEN_FILE" not in ms.chat_env(sd), "전체 기본 계정은 채팅방까지 옮기지 않는다")
+ms.set_default_account("a"); ms.set_project_account("proj", "b")
+check(ms.chat_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE"), "채팅방도 프로젝트에 정한 계정(b)으로")
+(ms.marina_home() / "accounts" / "projects.json").unlink()
+ms.set_account(sd, "b")
 
 # ── /account ──
 restarted = []

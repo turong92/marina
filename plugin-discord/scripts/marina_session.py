@@ -4154,7 +4154,13 @@ def new_task_first_prompt(text: str, who: str = "형", channel: str = "", mid: s
 
 def chat_env(sdir: Path) -> dict[str, str]:
     env = dict(session_env(sdir), ENABLE_CLAUDEAI_MCP_SERVERS="false")   # 형의 claude.ai 커넥터 끔
-    env.pop(ACCOUNT_TOKEN_ENV, None)      # 채팅방·로비는 늘 a — /account 는 개발 방에만(형이 바꾸는 기본 계정이 비서 방까지 옮기지 않게)
+    # 채팅방·로비는 전체 기본 계정을 안 따라간다(형이 바꾸는 기본 계정이 비서 방까지 옮기지 않게).
+    # 방·프로젝트에 콕 집은 계정은 따른다 — 2026-11-12 비서 방을 b 로 돌리려 했는데 늘 a 로 떠 a 한도에 막혔다
+    pinned = _read_name(Path(sdir) / "account") or project_account(_project_of(Path(sdir)))
+    tok = account_token_file(pinned) if pinned else None
+    env.pop(ACCOUNT_TOKEN_ENV, None)
+    if tok is not None:
+        env[ACCOUNT_TOKEN_ENV] = str(tok)
     return env
 
 
