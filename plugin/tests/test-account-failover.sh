@@ -93,15 +93,16 @@ for f in ("limit-stalled", "account-failover-at", "account-failover-wait"):
 said.clear()
 tick(300000.0, usage={"a": gone, "b": gone})
 check((sd / "limit-stalled").exists(), "둘 다 바닥이면 '한도로 멈춤' 표시를 남긴다")
-sent, restarted = [], []
+sent, restarted, told = [], [], []
 orig_alive0 = ms.tmux_alive; ms.tmux_alive = lambda n: False      # 잠든 방부터
 def revive(now, fa, busy=False, limited=False):
     return mb.limit_revive_tick(now, free_at=lambda: fa, busy=lambda n: busy, send=lambda rec, t: sent.append((rec, t)),
-                                limited=lambda n: limited, restart=restarted.extend)
+                                limited=lambda n: limited, restart=restarted.extend, say=lambda c, t: told.append((c, t)))
 check(revive(300100.0, {"a": 9e12, "b": 9e12}) == [] and not sent, "아직 바닥이면 안 깨운다")
 # 잠든 방: 방 계정(b)이 바닥이어도 다른 계정(a)이 풀렸으면 깨운다 — 깨울 때 여유 계정으로 뜬다(리뷰 I2)
 check(revive(9e12 + 10, {"a": 0.0, "b": 9e12 * 2}) == ["proj/feat/a"], f"다른 계정이 풀리면 잠든 방을 깨운다: {sent}")
 check(sent and "이어서" in sent[-1][1] and "SendMessage" in sent[-1][1], f"이어서 하라는 글(서브에이전트 포함): {sent}")
+check(told and told[-1][0] == ch and "깨워" in told[-1][1], f"형이 보게 방 채널에도 한 줄(2026-11-12 '도는지도 모르겠고'): {told}")
 check((sd / "limit-stalled").exists(), "보낸 표시는 뒤 프로세스가 성공해야 지운다(리뷰 I1)")
 check(revive(9e12 + 20, {"b": 0.0}) == [], "보내는 중엔 다시 안 보낸다")
 check(revive(9e12 + 10 + mb.REVIVE_RETRY_S + 1, {"b": 0.0}) == ["proj/feat/a"], "전달이 실패해 표시가 남으면 잠시 뒤 다시")

@@ -3521,7 +3521,8 @@ def _spawn_revive(rec: dict[str, Any], text: str) -> None:
                          cwd=here, stdin=subprocess.DEVNULL, stdout=fh, stderr=fh, start_new_session=True)
 
 
-def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=None, limited=None, restart=None) -> list[str]:
+def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=None, limited=None, restart=None,
+                      say=None) -> list[str]:
     """한도로 멈춘 방을 한도가 풀리면 깨워 이어서 하게 한다(형 2026-11-12: 멈춘 방이 사람이 말 걸 때까지 하루를 놀았다).
     표시(limit-stalled)는 account_failover_tick 이 남긴다.
     - 떠 있는 방: 지금 계정이 풀렸을 때. 화면에 한도 창이 남아 있으면 글이 안 들어가니 먼저 다시 띄우고 다음에(리뷰 I3).
@@ -3568,6 +3569,8 @@ def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=
             continue
         _mark_stalled(sd, now + REVIVE_RETRY_S)
         send(rec, LIMIT_REVIVE_MSG)
+        # 형이 방 채널만 봐도 알게 — 방 안 입력창 글은 Discord 에 안 보인다(2026-11-12 "도는데 도는지도 모르겠고")
+        (say or _say_channel)(str(rec.get("channelId") or ""), "🔄 사용량 한도가 풀려서 이 방을 깨워 멈췄던 일을 이어서 하게 했어")
         woke.append(ref)
         _log(f"limit_revive {ref}: 깨우기 보냄")
     return woke
