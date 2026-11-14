@@ -3426,7 +3426,7 @@ def account_failover_tick(now: "float | None" = None, limited=None, usage=None, 
     """계정 상호보완(형 2026-11-12): 사용량 한도에 멈춘 클로드 방을 여유 있는 다른 계정으로 바꿔 같은 대화로 다시 띄운다.
     화면 문구만 믿지 않는다 — 지금 계정의 사용량이 실제로 바닥이고, 방이 일하는 중이 아닐 때만(리뷰 C1·C2: 코드·로그에
     찍힌 같은 문구나 다시 띄운 뒤 남은 옛 문구로 멀쩡한 방을 끊지 않게). 다른 계정도 바닥이면 바꾸지 않고 풀리는 때만,
-    그 시각이 바뀔 때만 알린다. 바꾼 계정은 한도가 풀려도 그대로(되돌리면 대화가 또 끊긴다)."""
+    그 시각이 바뀔 때만 알린다. 바꾼 계정은 잠시다 — 원래 계정이 풀리면 account_return_tick 이 방이 쉴 때 되돌린다."""
     now = time.time() if now is None else now
     limited = limited or _pane_limit_latest
     spawn = spawn or _spawn_account_restart_many
@@ -3473,7 +3473,7 @@ def account_failover_tick(now: "float | None" = None, limited=None, usage=None, 
             _mark_stalled(sd, min(ats) if ats else now + 3600.0)
             continue
         to = free[0]
-        ms.set_account(sd, to)
+        ms.fallback_account(sd, to)
         ref = f"{rec.get('project')}/{rec.get('task')}"
         say(ch, f"🔑 {cur.upper()} 계정 한도라 {to.upper()} 계정으로 바꿔 같은 대화를 이어 띄울게")
         _mark_stalled(sd, 0.0, restarted=True)   # 다시 뜬 뒤 '이어서 해' 를 넣는다 — 재시작만으론 멈췄던 일이 다시 안 굴러간다
@@ -3482,6 +3482,77 @@ def account_failover_tick(now: "float | None" = None, limited=None, usage=None, 
     if moved:
         spawn(moved)
     return moved
+
+
+# 원래 계정이 이만큼 아래여야 되돌린다 — 막 풀려 거의 찬 계정으로 갔다 또 넘어오지 않게. 주간은 더 낮게: 남은 몇 %는
+# 바쁜 날 반나절이면 닳아 되돌림 한 번이 한도 한 번을 부른다(리뷰 I4).
+ACCOUNT_RETURN_MAX_USED = {"fiveHour": 90.0, "weekly": 80.0}
+
+
+def _roomy(windows: "list[dict[str, Any]] | None") -> bool:
+    ws = [w for w in windows or [] if str(w.get("key")) in _FAILOVER_KEYS]
+    return bool(ws) and all(float(w.get("usedPercent") or 0) < ACCOUNT_RETURN_MAX_USED[str(w.get("key"))] for w in ws)
+
+
+def _spawn_safe_restart(refs: list[str]) -> None:
+    """되돌림은 급하지 않다 — 안전 재시작(조용한 시간을 재고 죽이기 직전에 다시 본다)으로, 2분 안에 안 쉬면 포기한다
+    (리뷰 I2: 강제 경로는 그 사이 시작된 일을 끊는다). 오래 쥐면 한도 재시작이 잠금을 못 잡으니 짧게."""
+    log = ms.marina_home() / "account-restart.log"
+    with open(log, "a") as fh:
+        subprocess.Popen([sys.executable, str(Path(ms.__file__).resolve()), "restart", *refs, "--wait", "120"],
+                         stdin=subprocess.DEVNULL, stdout=fh, stderr=fh, start_new_session=True)
+
+
+def account_return_tick(now: "float | None" = None, usage=None, blockers=None, limited=None, spawn=None, say=None,
+                        restarting=None) -> list[str]:
+    """한도로 잠시 옮긴 방을 원래 계정이 풀리면 되돌린다(2026-11-15 형: b 가 풀렸는데 한도 때 옮긴 a 에 박혀 a 만 닳았다).
+    떠 있는 방은 일을 안 할 때만(뒤 셸·에이전트도 없을 때) 같은 대화로 다시 띄운다 — 급한 일이 아니라 끊지 않는다.
+    잠든 방은 고정만 되돌린다(깰 때 원래 계정으로 뜬다). 사용량을 모르거나 거의 찼으면 그대로."""
+    now = time.time() if now is None else now
+    blockers = blockers or restart_blockers
+    limited = limited or _pane_limit_latest
+    spawn = spawn or _spawn_safe_restart
+    say = say or _say_channel
+    restarting = restarting or restart_status
+    by: "dict[str, list[dict[str, Any]]] | None" = None
+    back: list[str] = []
+    recs = [r for r in ms.load_sessions() if not ms.is_codex(r)]
+    if any(Path(str(r.get("stateDir") or "/nonexistent"), LIMIT_STALLED).is_file() for r in recs):
+        return back                       # 한도 처리(바꿔 띄우기·깨우기) 중인 방이 있다 — 재시작 잠금을 두고 다투지 않게 미룬다(리뷰 I1)
+    for rec in recs:
+        sd = Path(str(rec.get("stateDir") or "/nonexistent"))
+        origin = ms.account_origin(sd, chat=str(rec.get("kind") or "") in ms.CHAT_KINDS) if sd.is_dir() else ""
+        if not origin:
+            continue
+        cur = ms.account_of(sd)
+        if origin == cur:
+            ms.restore_account(sd)        # 그새 원래 계정으로 다시 옮겨졌다 — 기억만 정리
+            continue
+        try:
+            last = float((sd / "account-failover-at").read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            last = 0.0
+        if now - last < ACCOUNT_FAILOVER_COOLDOWN:
+            continue                      # 막 옮겼다
+        if by is None:
+            by = (usage or _all_account_usage)() or {}
+        if not _roomy(by.get(origin)):
+            continue
+        name = str(rec.get("tmux") or "")
+        ref, ch = f"{rec.get('project')}/{rec.get('task')}", str(rec.get("channelId") or "")
+        if not (name and ms.tmux_alive(name)):
+            ms.restore_account(sd)
+            _log(f"account_return {ref}: {cur} → {origin} (잠든 방, 고정만)")
+            continue
+        if back or restarting() or limited(name) or blockers(rec):
+            continue                      # 한 tick 에 한 방만 — 재시작 잠금 하나를 두고 다투지 않게
+        ms.restore_account(sd)
+        say(ch, f"🔑 원래 {origin.upper()} 계정이 풀려서 {cur.upper()} 에서 되돌려 같은 대화로 다시 띄울게")
+        back.append(ref)
+        _log(f"account_return {ref}: {cur} → {origin}")
+    if back:
+        spawn(back)
+    return back
 
 
 LIMIT_STALLED = "limit-stalled"
@@ -4117,10 +4188,16 @@ class Loop:
                 write_account_state(_all_account_usage(), now)    # 깨는 방이 바닥난 계정을 피하게(사용량은 캐시라 싸다)
             except Exception as exc:
                 _log(f"account_state failed: {type(exc).__name__}")
+            moved: "list[str] | None" = None
             try:
-                account_failover_tick(now)
+                moved = account_failover_tick(now)
             except Exception as exc:
                 _log(f"account_failover failed: {type(exc).__name__}: {exc}")
+            try:
+                if not moved:             # 같은 tick 에 바꿔 띄운 방이 있으면 다음에 — 재시작 잠금 다툼(리뷰 I1)
+                    account_return_tick(now)
+            except Exception as exc:
+                _log(f"account_return failed: {type(exc).__name__}: {exc}")
             try:
                 limit_revive_tick(now)
             except Exception as exc:

@@ -2516,7 +2516,7 @@ def launch_account(sdir: Path, base: str) -> str:
     for n in accounts():
         if n != base and not gone(n) and (n == ACCOUNT_DEFAULT or account_token_file(n) is not None):
             try:
-                set_account(sdir, n)
+                fallback_account(sdir, n)
             except (OSError, SessionError):
                 pass
             return n
@@ -2620,12 +2620,55 @@ def _check_account(name: str) -> str:
     return name
 
 
+ACCOUNT_ORIGIN = "account-origin"   # 한도로 잠시 옮기기 전 방 고정('-' = 고정 없음) — 원래 계정이 풀리면 되돌린다
+
+
 def set_account(sdir: Path, name: str) -> None:
+    """사람이 정한 방 고정 — 한도로 잠시 옮긴 기억은 지운다(되돌리지 않는다)."""
     (Path(sdir) / "account").write_text(_check_account(name) + "\n", encoding="utf-8")
+    (Path(sdir) / ACCOUNT_ORIGIN).unlink(missing_ok=True)
 
 
 def clear_account(sdir: Path) -> None:
     (Path(sdir) / "account").unlink(missing_ok=True)
+    (Path(sdir) / ACCOUNT_ORIGIN).unlink(missing_ok=True)
+
+
+def fallback_account(sdir: Path, name: str) -> None:
+    """한도로 잠시 옮긴다 — 옮기기 전 고정을 처음 한 번만 기억해 두고, 원래 계정이 풀리면 봇이 되돌린다
+    (2026-11-15 형: 한도 때 옮긴 a 에 박혀 b 가 풀려도 a 만 닳았다)."""
+    o = Path(sdir) / ACCOUNT_ORIGIN
+    try:
+        keep = o.read_text(encoding="utf-8").strip()
+    except OSError:
+        keep = ""
+    keep = keep or _read_name(Path(sdir) / "account") or "-"
+    set_account(sdir, name)
+    o.write_text(keep + "\n", encoding="utf-8")
+
+
+def account_origin(sdir: Path, chat: bool = False) -> str:
+    """한도로 옮기기 전 쓰던 계정 = 되돌리면 실제로 뜰 계정. 고정이 없었으면(또는 그 계정이 사라졌으면) session_env 와
+    같은 규칙 — 개발 방은 프로젝트 → 전체 기본, 채팅방·로비(chat)는 프로젝트 → a(전체 기본을 안 따른다). 잠시 옮긴 게 아니면 ''."""
+    try:
+        keep = (Path(sdir) / ACCOUNT_ORIGIN).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if keep in accounts():
+        return keep
+    return project_account(_project_of(Path(sdir))) or (ACCOUNT_DEFAULT if chat else default_account())
+
+
+def restore_account(sdir: Path) -> None:
+    """잠시 옮긴 계정을 옮기기 전 고정으로 되돌린다(고정이 없었으면 고정을 지운다)."""
+    try:
+        keep = (Path(sdir) / ACCOUNT_ORIGIN).read_text(encoding="utf-8").strip()
+    except OSError:
+        return
+    if keep in accounts():
+        set_account(sdir, keep)
+    else:
+        clear_account(sdir)
 
 
 def set_default_account(name: str) -> None:

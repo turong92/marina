@@ -167,6 +167,71 @@ mb.write_account_state({"a": gone_now, "b": ok}, time.time() - 3600)
 check(ms.session_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE") is None, "오래된 상태 기록은 안 믿는다")
 st.unlink()
 
+# 한도로 옮긴 계정은 잠시 — 원래 계정이 풀리고 방이 쉴 때 되돌린다(2026-11-15 형: b 가 풀렸는데 ovation·별 방이
+# 한도 때 옮긴 a 에 박혀 a 만 닳았다 "b 아닌거같은데 5시간 안 오르는게")
+for f in ("limit-stalled", "account-failover-at", "account-failover-wait", "account-origin"):
+    (sd / f).unlink(missing_ok=True)
+ms.clear_account(sd); (sd / "account-running").write_text("a\n")
+spawned.clear(); said.clear()
+check(tick(500000.0, usage={"a": gone, "b": ok}) == ["proj/feat/a"], "옮김(고정 없던 방)")
+check(ms.account_of(sd) == "b" and ms.account_origin(sd) == "a", f"원래 계정을 기억: {ms.account_origin(sd)!r}")
+(sd / "account-running").write_text("b\n"); (sd / "limit-stalled").unlink(missing_ok=True)
+roomy = [{"key": "fiveHour", "usedPercent": 5.0}, {"key": "weekly", "usedPercent": 40.0}]
+back_sp, back_said = [], []
+orig_alive1 = ms.tmux_alive; ms.tmux_alive = lambda n: True
+def back(now, usage, blockers=(), limited=False, restarting=None):
+    return mb.account_return_tick(now, usage=lambda: usage, blockers=lambda rec: list(blockers), limited=lambda n: limited,
+                                  spawn=back_sp.extend, say=lambda c, t: back_said.append((c, t)), restarting=lambda: restarting)
+try:
+    later = 500000.0 + 4000
+    check(back(later, {"a": gone, "b": ok}) == [], "원래 계정이 아직 바닥이면 그대로")
+    check(back(later, {"a": [{"key": "fiveHour", "usedPercent": 92.0}], "b": ok}) == [], "원래 계정이 막 풀려 거의 찼으면 그대로(오가지 않게)")
+    check(back(later, {"b": ok}) == [], "원래 계정 사용량을 모르면 그대로")
+    check(back(later, {"a": roomy, "b": ok}, blockers=["턴 진행 중"]) == [], "방이 일하는 중이면 그대로")
+    check(back(later, {"a": roomy, "b": ok}, limited=True) == [], "한도 창이 떠 있으면 그대로(깨우기 몫)")
+    check(back(later, {"a": roomy, "b": ok}, restarting={"refs": ["x"]}) == [], "다른 재시작 중이면 다음에")
+    check(back(500000.0 + 600, {"a": roomy, "b": ok}) == [], "옮긴 지 30분 안엔 그대로")
+    check(back(later, {"a": [{"key": "fiveHour", "usedPercent": 5.0}, {"key": "weekly", "usedPercent": 85.0}], "b": ok}) == [],
+          "주간이 80% 넘은 계정으론 안 되돌린다(남은 몇 %로 갔다 또 한도 — 리뷰 I4)")
+    (sd / "limit-stalled").write_text("{}")
+    check(back(later, {"a": roomy, "b": ok}) == [], "한도 처리 중인 방이 있으면 되돌림은 미룬다(재시작 잠금 다툼 — 리뷰 I1)")
+    (sd / "limit-stalled").unlink()
+    check(not back_sp and ms.account_of(sd) == "b", "안 되돌린 tick 은 아무것도 안 바꾼다")
+    check(back(later, {"a": roomy, "b": ok}) == ["proj/feat/a"], "원래 계정이 풀리고 방이 쉬면 되돌림")
+    check(ms.account_of(sd) == "a" and not (sd / "account").exists(), "원래대로(고정 없음)")
+    check(ms.account_origin(sd) == "", "기억은 지운다")
+    check(back_sp == ["proj/feat/a"] and back_said and "A" in back_said[-1][1], f"다시 띄우고 알림: {back_sp} {back_said}")
+    # 원래 방 고정이 있었으면 그 고정으로 돌아간다
+    ms.set_account(sd, "a"); (sd / "account-running").write_text("a\n"); (sd / "account-failover-at").unlink()
+    tick(600000.0, usage={"a": gone, "b": ok}); (sd / "limit-stalled").unlink()   # 깨우기가 끝난 뒤
+    check(ms.account_of(sd) == "b" and ms.account_origin(sd) == "a", "고정 a 를 기억")
+    check(back(600000.0 + 4000, {"a": roomy, "b": ok}) == ["proj/feat/a"] and (sd / "account").read_text().strip() == "a",
+          "고정 a 로 되돌림")
+    # 사람이 정한 고정은 되돌리지 않는다
+    ms.set_account(sd, "b"); (sd / "account-failover-at").unlink(missing_ok=True)
+    check(ms.account_origin(sd) == "" and back(700000.0, {"a": roomy, "b": ok}) == [], "사람이 정한 고정은 그대로")
+    # 잠든 방은 다시 띄우지 않고 고정만 되돌린다(깰 때 원래 계정으로 뜬다)
+    ms.clear_account(sd); (sd / "account-running").write_text("a\n")
+    tick(800000.0, usage={"a": gone, "b": ok}); (sd / "limit-stalled").unlink()
+    ms.tmux_alive = lambda n: False
+    n = len(back_sp)
+    check(back(800000.0 + 4000, {"a": roomy, "b": ok}) == [] and len(back_sp) == n, "잠든 방은 다시 안 띄움")
+    check(ms.account_of(sd) == "a" and ms.account_origin(sd) == "", "잠든 방도 고정은 되돌림")
+finally:
+    ms.tmux_alive = orig_alive1
+# 원래 계정 풀이 = 되돌리면 실제로 뜰 계정(리뷰 I3·M2): 전체 기본이 b 면 개발 방은 b, 채팅방은 a(전체 기본을 안 따른다)
+ms.clear_account(sd); ms.set_default_account("b")
+ms.fallback_account(sd, "a")
+check(ms.account_origin(sd) == "b" and ms.account_origin(sd, chat=True) == "a", f"'-' 풀이: {ms.account_origin(sd)} {ms.account_origin(sd, chat=True)}")
+(sd / "account-origin").write_text("zz\n")
+check(ms.account_origin(sd) == "b", "사라진 계정이 기억돼 있으면 기본으로")
+(ms.accounts_dir() / "default").unlink(); ms.clear_account(sd)
+# 띄울 때 바닥이라 고른 계정도 잠시로 기억한다
+ms.clear_account(sd)
+mb.write_account_state({"a": gone_now, "b": ok}, time.time())
+check(ms.session_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE") and ms.account_origin(sd) == "a", "띄울 때 고른 계정도 기억")
+st.unlink(); ms.clear_account(sd)
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY
