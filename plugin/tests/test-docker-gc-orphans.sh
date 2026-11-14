@@ -63,7 +63,7 @@ class Fake:
         raise AssertionError(f"예상 밖 docker 호출: {a}")
 
 def orphans_only(policy):
-    return {**policy, "build_cache_keep_days": 0, "dangling_images": False, "anonymous_volumes": False, "stale_test_artifacts_days": 0}
+    return {**policy, "build_cache_keep_days": 0, "dangling_images": False, "anonymous_volumes": False, "stale_test_artifacts_days": 0, "unused_image_days": 0}
 
 policy = orphans_only(gc.load_policy())
 assert gc.load_policy()["orphan_worktree_days"] == 7

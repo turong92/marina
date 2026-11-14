@@ -64,12 +64,16 @@ E2E_LABEL = "marina.e2e"          # 테스트 하네스가 e2e 산출물에 붙�
 DEFAULT_POLICY: dict[str, Any] = {
     "enabled": True,
     "interval_hours": 24,
-    "build_cache_keep_days": 7,
+    # 3일: 7일이면 늘 20GB 넘게 남아 있었다(2026-11-13 실측 22GB, 형 "날려버려").
+    "build_cache_keep_days": 3,
     "dangling_images": True,
+    # 컨테이너가 안 쓰는 이름 붙은 이미지 — 지운 워크트리·옛 실험·한 번 받은 베이스 이미지가 쌓인다(2026-11-13 41GB). 0 = 끔.
+    "unused_image_days": 14,
     "anonymous_volumes": True,
     "anonymous_volume_grace_days": 3,
     "stale_test_artifacts_days": 3,
-    "stale_test_artifact_names": ["marina-*-e2e-*"],
+    # *-e2e-<숫자>*: 다른 레포 e2e 하네스가 compose 프로젝트를 `<이름>-e2e-<난수>` 로 만든다(react-skeleton-e2e-94757 등 18GB).
+    "stale_test_artifact_names": ["marina-*-e2e-*", "*-e2e-[0-9]*"],
     "orphan_worktree_days": 7,
     "worktree_auto_days": 7,
 }
@@ -78,6 +82,7 @@ _POLICY_TYPES: dict[str, str] = {
     "interval_hours": "int",
     "build_cache_keep_days": "int",
     "dangling_images": "bool",
+    "unused_image_days": "int",
     "anonymous_volumes": "bool",
     "anonymous_volume_grace_days": "int",
     "stale_test_artifacts_days": "int",
@@ -314,7 +319,7 @@ def _save_volumes_seen(seen: dict[str, float]) -> None:
 
 _RUN_LOCK = threading.Lock()          # 데몬 자동 + 대시보드 "지금" 겹침 방지(같은 프로세스 안)
 _RUNNING = {"active": False}
-_STEP_NAMES = ("build-cache", "dangling", "volumes", "e2e", "orphans")
+_STEP_NAMES = ("build-cache", "dangling", "volumes", "e2e", "orphans", "unused-images")
 
 
 def _step(name: str) -> dict[str, Any]:
@@ -364,6 +369,19 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
     dk = _Docker(run)
     steps: list[dict[str, Any]] = []
     globs = list(policy.get("stale_test_artifact_names") or DEFAULT_POLICY["stale_test_artifact_names"])
+    # 지금 있는 워크트리의 compose 프로젝트 — e2e 글롭·안 쓰는 이미지가 살아 있는 워크트리를 잡지 않게(리뷰 I1:
+    # 세션 해시가 숫자로 시작하면 'mdc-main-fix-e2e-3a9f1c' 가 *-e2e-[0-9]* 에 걸린다). 발견은 비싸서 한 번만.
+    live_info: Any = None
+    if any(int(policy.get(k) or 0) > 0 for k in ("stale_test_artifacts_days", "orphan_worktree_days", "unused_image_days")):
+        try:
+            live_info = _live_compose_projects()
+        except Exception as exc:
+            live_info = exc
+    live_names: set[str] = set(live_info[0]) if isinstance(live_info, tuple) else set()
+
+    def of_live(name: str) -> bool:
+        n = name.lstrip("/")
+        return any(n == p or n.startswith(p + "-") or n.startswith(p + "_") for p in live_names)
 
     # ① 빌드캐시 — InUse 아니고 keep_days 넘게 안 쓴 것(LastUsedAt, 없으면 CreatedAt)
     st = _step("build-cache"); steps.append(st)
@@ -473,7 +491,8 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
             doomed = [c for c in containers
                       if c["status"] not in ("running", "paused", "restarting")
                       and c["created"] is not None and c["created"] < cutoff
-                      and _is_e2e(c["name"], c["labels"], globs)]
+                      and _is_e2e(c["name"], c["labels"], globs)
+                      and not of_live(c["name"]) and c["labels"].get("com.docker.compose.project", "") not in live_names]
             for c in doomed:
                 st["items"].append(f"container {c['name'].lstrip('/')} ({c['status']})")
                 if not dry_run:
@@ -488,7 +507,8 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
                 is_e2e = any(iid.startswith(l) or l.startswith(iid) for l in labeled) \
                     or any(fnmatch.fnmatchcase(str(img.get("Repository") or ""), g) or fnmatch.fnmatchcase(ref, g) for g in globs)
                 ts = parse_docker_time(img.get("CreatedAt"))
-                if not iid or not is_e2e or ts is None or ts >= cutoff or _image_used(iid, remaining):
+                if (not iid or not is_e2e or ts is None or ts >= cutoff or _image_used(iid, remaining)
+                        or of_live(str(img.get("Repository") or ""))):
                     continue
                 size = _size_mb(img.get("Size"))
                 st["items"].append(f"image {ref} {fmt_mb(size)}")
@@ -498,6 +518,7 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
                 st["counts"]["images"] += 1
             nets = [n for n in _ndjson(run(["network", "ls", "--format", "json"]))
                     if _is_e2e(str(n.get("Name") or ""), _labels_of(n.get("Labels")), globs)
+                    and not of_live(str(n.get("Name") or ""))
                     and (parse_docker_time(n.get("CreatedAt")) or now) < cutoff]
             if nets:
                 attached: dict[str, int] = {}
@@ -530,7 +551,9 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
         st["skipped"] = True
     else:
         try:
-            live = _live_compose_projects()
+            live = live_info
+            if isinstance(live, Exception):
+                raise live
             if live is None:
                 st["skipped"] = True
                 st["note"] = "등록 프로젝트를 읽지 못해 건너뜀"
@@ -583,6 +606,51 @@ def _run_steps(policy: dict[str, Any], dry_run: bool, now: float, run: Runner) -
                     st["counts"]["images"] += 1
                     projects.add(proj)
                 st["counts"]["projects"] = len(projects)
+        except Exception as exc:
+            st["error"] = str(exc)
+
+    # ⑥ 안 쓰는 이름 붙은 이미지 — 어떤 컨테이너(정지 포함)도 안 쓰고, 빌드·받은(태그 붙은) 때가 days 넘은 것.
+    #    `image prune -a --filter until=` 은 쓰지 않는다(리뷰 I2): 생성 시각만 봐서 어제 받은 오래된 베이스 이미지나,
+    #    컨테이너를 내려 둔 살아 있는 워크트리 이미지까지 지운다. 직접 골라 이름으로 -f 없이 지운다.
+    #    앞 단계(e2e·고아)가 이미 고른 이미지는 빼고 센다 — 두 번 세지 않게.
+    st = _step("unused-images"); steps.append(st)
+    days = int(policy.get("unused_image_days") or 0)
+    if days <= 0:
+        st["skipped"] = True
+    else:
+        try:
+            cutoff = now - days * 86400
+            claimed = [i for s2 in steps[:-1] for i in s2["items"] if i.startswith("image ")]
+            containers = dk.containers()
+            cands = []
+            for img in _ndjson(run(["images", "--format", "json"])):
+                iid, repo = str(img.get("ID") or ""), str(img.get("Repository") or "")
+                ref = f"{repo}:{img.get('Tag')}"
+                ts = parse_docker_time(img.get("CreatedAt"))
+                if (not iid or repo in ("", "<none>") or img.get("Tag") in (None, "", "<none>") or ts is None or ts >= cutoff
+                        or _image_used(iid, containers) or of_live(repo) or any(i.startswith(f"image {ref} ") for i in claimed)):
+                    continue
+                cands.append((iid, ref, _size_mb(img.get("Size"))))
+            tagged: dict[str, float] = {}
+            if cands:
+                for line in run(["image", "inspect", "--format", "{{.Id}}\t{{.Metadata.LastTagTime}}",
+                                 *dict.fromkeys(c[0] for c in cands)]).splitlines():
+                    parts = line.split("\t")
+                    t = parse_docker_time(parts[1]) if len(parts) >= 2 else None
+                    if t is not None:
+                        tagged[parts[0].removeprefix("sha256:")] = t
+            for iid, ref, size in cands:
+                t = next((v for k, v in tagged.items() if k.startswith(iid) or iid.startswith(k)), None)
+                if t is not None and t >= cutoff:
+                    continue                      # 최근에 받았거나 태그를 다시 붙였다 — 생성은 오래전이어도 쓰려고 둔 것
+                if not dry_run:
+                    try:
+                        run(["image", "rm", ref])  # -f 없음 — 그 사이 컨테이너가 쓰면 도커가 거부한다
+                    except Exception as exc:
+                        st.setdefault("note", f"일부 못 지움: {str(exc)[:80]}")
+                        continue
+                st["items"].append(f"image {ref} {fmt_mb(size)}")
+                st["reclaimedMb"] += size
         except Exception as exc:
             st["error"] = str(exc)
     return steps
@@ -647,7 +715,7 @@ def _append_log(line: str) -> None:
 
 def collect(policy: dict[str, Any], source: str = "cli", dry_run: bool = False,
             now: float | None = None, run: Runner | None = None) -> dict[str, Any]:
-    """네 단계를 순서대로. 단계 하나가 실패해도 다음으로 간다. dry_run 이면 삭제 명령 0회·상태 파일 무변경."""
+    """여섯 단계를 순서대로. 단계 하나가 실패해도 다음으로 간다. dry_run 이면 삭제 명령 0회·상태 파일 무변경."""
     run = run or _docker_run
     started = time.time() if now is None else now
     with _RUN_LOCK, _file_lock():          # 프로세스 안(스레드) + 프로세스 간(flock) — 같은 대상을 두 번 지우려다 한쪽이 오류로 남지 않게

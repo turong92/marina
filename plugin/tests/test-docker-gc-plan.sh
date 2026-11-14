@@ -9,7 +9,10 @@ PYTHONPATH="$HERE/../scripts" python3 - <<'PY'
 import json, os
 from datetime import datetime, timezone
 import marina_docker_gc as gc
-gc._live_compose_projects = lambda: None      # 이 파일은 네 단계만 본다 — 고아 단계는 test-docker-gc-orphans
+# 고아 단계는 test-docker-gc-orphans — 여기선 접두사를 비워 고아 0. 살아 있는 워크트리 하나는 e2e 글롭(*-e2e-[0-9]*)에
+# 걸리는 이름이다(세션 해시가 숫자로 시작) — e2e·안 쓰는 이미지 단계가 건드리면 안 된다(리뷰 I1).
+LIVE = "mdc-main-fix-e2e-3a9f1c"
+gc._live_compose_projects = lambda: ({LIVE}, [])
 
 NOW = datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc).timestamp()
 OLD, RECENT, ANCIENT = "2026-09-01T00:00:00Z", "2026-09-13T06:00:00Z", "2026-08-01T00:00:00Z"
@@ -36,17 +39,19 @@ class FakeDocker:
             "c3": ("running", SHA("222222222222"), "/marina-x-e2e-y", {"marina.e2e": "1"}, ANCIENT),
             "c4": ("exited", SHA("cccccccccccc"), "/mdce2e9-featbr-web-1", {"marina.e2e": "1"}, RECENT),
             "c5": ("exited", SHA("dddddddddddd"), "/old-e2e-thing", {"marina.e2e": "1"}, OLD),
+            "c6": ("exited", SHA("555555555555"), f"/{LIVE}-web-1", {"com.docker.compose.project": LIVE}, OLD),
         }
     def __call__(self, args):
         a = list(args); self.calls.append(a); s = " ".join(a)
         if s == "system df -v --format json": return json.dumps(DF)
-        if s == "builder prune --all -f --filter until=168h":
+        if s == "builder prune --all -f --filter until=72h":
             if self.fail_builder: raise RuntimeError("Cannot connect to the Docker daemon")
             return "ID\t\t\t\t\t\tRECLAIMABLE\tSIZE\t\tLAST ACCESSED\nbcA\ttrue\t2.5GB\t2 weeks ago\nTotal:\t2.5GB\n"   # 실측 형식
         if s == "images -f dangling=true --format json":
             return nd([{"ID": "aaaaaaaaaaaa", "Repository": "<none>", "Tag": "<none>", "Size": "400MB", "CreatedAt": dk(OLD)},
                        {"ID": "bbbbbbbbbbbb", "Repository": "<none>", "Tag": "<none>", "Size": "600MB", "CreatedAt": dk(OLD)}])
         if s == "image prune -f": return "Total reclaimed space: 400MB\n"
+        if s == "image prune -a -f --filter until=336h": return "Total reclaimed space: 40MB\n"
         if s == "volume ls -f dangling=true --format json":
             return nd([{"Name": "a" * 64, "Driver": "local"}, {"Name": "proj_data", "Driver": "local"}])
         if s == "volume prune -f": raise AssertionError("volume prune 은 유예를 못 가리므로 쓰면 안 된다")
@@ -64,7 +69,16 @@ class FakeDocker:
                        {"ID": "dddddddddddd", "Repository": "proj-9-weaveapp", "Tag": "latest", "Size": "300MB", "CreatedAt": dk(OLD)},
                        {"ID": "eeeeeeeeeeee", "Repository": "young-e2e", "Tag": "latest", "Size": "50MB", "CreatedAt": dk(RECENT)},
                        {"ID": "ffffffffffff", "Repository": "marina-foo-e2e-bar", "Tag": "latest", "Size": "700MB", "CreatedAt": dk(ANCIENT)},
-                       {"ID": "999999999999", "Repository": "redis", "Tag": "7-alpine", "Size": "40MB", "CreatedAt": dk(ANCIENT)}])
+                       {"ID": "999999999999", "Repository": "redis", "Tag": "7-alpine", "Size": "40MB", "CreatedAt": dk(ANCIENT)},
+                       {"ID": "777777777777", "Repository": "react-skeleton-e2e-94757-video-worker", "Tag": "latest", "Size": "1GB", "CreatedAt": dk(ANCIENT)},
+                       {"ID": "666666666666", "Repository": "fresh-web", "Tag": "latest", "Size": "80MB", "CreatedAt": dk(RECENT)},
+                       {"ID": "555555555555", "Repository": f"{LIVE}-web", "Tag": "latest", "Size": "900MB", "CreatedAt": dk(ANCIENT)},
+                       {"ID": "444444444444", "Repository": f"{LIVE}-worker", "Tag": "latest", "Size": "800MB", "CreatedAt": dk(ANCIENT)},
+                       {"ID": "333333333333", "Repository": "postgres", "Tag": "16", "Size": "400MB", "CreatedAt": dk(ANCIENT)}])
+        if a[:3] == ["image", "inspect", "--format"]:     # 받은(태그 붙은) 시각 — postgres 는 오래전 빌드지만 어제 받았다
+            tag = {"333333333333": dk(RECENT)}
+            return "".join(f"{SHA(i)}\t{tag.get(i, '0001-01-01 00:00:00 +0000 UTC')}\n" for i in a[4:])
+        if s == "image ls --filter label=com.docker.compose.project --format json": return ""   # 고아 단계(접두사 없음)
         if s == "images --filter label=marina.e2e=1 -q": return "cccccccccccc\ndddddddddddd\neeeeeeeeeeee\n"
         if a[:2] == ["image", "rm"]:
             assert len(a) == 3, a; return "Deleted: " + a[2] + "\n"
@@ -97,24 +111,32 @@ fake = FakeDocker()
 rep = gc.plan(policy, now=NOW, run=fake)
 assert rep["dryRun"] is True and mutating(fake.calls) == [], mutating(fake.calls)
 steps = {s["name"]: s for s in rep["steps"]}
-assert list(steps) == ["build-cache", "dangling", "volumes", "e2e", "orphans"], list(steps)
-assert steps["orphans"]["skipped"], "레지스트리 이음매를 None 으로 막았으니 건너뛴다"
+assert list(steps) == ["build-cache", "dangling", "volumes", "e2e", "orphans", "unused-images"], list(steps)
+assert steps["orphans"]["items"] == [], "접두사가 없으니 고아 0"
 assert steps["build-cache"]["reclaimedMb"] == 2048 + 300, steps["build-cache"]        # InUse·최근 제외, LastUsedAt 없으면 CreatedAt
 assert steps["dangling"]["reclaimedMb"] == 400 and len(steps["dangling"]["items"]) == 1, steps["dangling"]   # 컨테이너가 쓰는 bbbb 제외
 assert steps["volumes"]["reclaimedMb"] == 0 and steps["volumes"]["items"] == [] and steps["volumes"]["waiting"] == 1, steps["volumes"]   # 처음 본 익명 볼륨은 유예(3일) 대기
 seen = json.loads(gc.VOLUMES_SEEN_FILE.read_text())
 assert set(seen) == {"a" * 64} and seen["a" * 64] == NOW, seen                                             # 명명 볼륨(proj_data)은 기록조차 안 함
 e2e = steps["e2e"]
-assert e2e["counts"] == {"containers": 2, "images": 2, "networks": 1}, e2e["counts"]
+assert e2e["counts"] == {"containers": 2, "images": 3, "networks": 1}, e2e["counts"]
 items = "\n".join(e2e["items"])
 assert "marina-weave-e2e-redis-123" in items and "old-e2e-thing" in items, items           # 이름 글롭 + 라벨
 assert "marina-x-e2e-y" not in items, items                                                  # 실행 중
 assert "mdce2e9-featbr-web-1" not in items and "mdce2e9-featbr-web:latest" not in items, items   # 어린 컨테이너 + 그 이미지
 assert "proj-9-weaveapp" in items and "marina-foo-e2e-bar" in items, items                 # 지워질 컨테이너가 쓰던 이미지는 회수, 글롭 이미지
 assert "young-e2e" not in items and "redis:7-alpine" not in items, items
+assert "react-skeleton-e2e-94757-video-worker:latest" in items, items                      # 기본 글롭 *-e2e-[0-9]* (다른 레포 e2e 하네스 잔재)
+assert not any(gc.fnmatch.fnmatchcase(n, g) for g in policy["stale_test_artifact_names"]
+               for n in ("dev-tts-e2e-prod-check", "mdc-main-weather-web", "redis")), "실 워크트리 이름은 안 잡는다"
+assert LIVE not in items, items                                                             # 살아 있는 워크트리는 글롭에 걸려도 제외(리뷰 I1)
+un = steps["unused-images"]
+assert [i.split()[1] for i in un["items"]] == ["redis:7-alpine"], un                       # 컨테이너가 안 쓰고 14일 넘은 이름 붙은 이미지만
+# 살아 있는 워크트리 이미지(컨테이너를 내려 둔 worker 도)·오래전 빌드지만 최근에 받은 베이스(postgres:16)는 제외(리뷰 I2)
+assert un["reclaimedMb"] == 40, un                                                          # e2e 가 가져간 것·어린 것(fresh-web)·쓰는 것(cccc) 제외
 assert "marina-a-e2e-b_default" in items and "mdce2e9-featbr_default" not in items, items   # 사용 중 네트워크 제외
-assert e2e["reclaimedMb"] == 300 + 700, e2e
-assert rep["reclaimedMb"] == 2348 + 400 + 0 + 1000, rep["reclaimedMb"]
+assert e2e["reclaimedMb"] == 300 + 700 + 1024, e2e
+assert rep["reclaimedMb"] == 2348 + 400 + 0 + 2024 + 40, rep["reclaimedMb"]
 assert not gc.STATE_FILE.exists()                                                           # dry-run 은 상태 안 씀
 assert "would reclaim" in gc.LOG_FILE.read_text() and "cli/dry" in gc.LOG_FILE.read_text(), gc.LOG_FILE.read_text()
 
@@ -132,7 +154,7 @@ assert {s["name"]: s for s in rep["steps"]}["volumes"]["reclaimedMb"] == 100
 
 # ── 단계 끄기 ──
 fake = FakeDocker()
-rep = gc.plan({**policy, "build_cache_keep_days": 0, "dangling_images": False, "anonymous_volumes": False, "stale_test_artifacts_days": 0}, now=NOW, run=fake)
+rep = gc.plan({**policy, "build_cache_keep_days": 0, "dangling_images": False, "anonymous_volumes": False, "stale_test_artifacts_days": 0, "unused_image_days": 0, "orphan_worktree_days": 0}, now=NOW, run=fake)
 assert all(s["skipped"] for s in rep["steps"]) and rep["reclaimedMb"] == 0, rep
 assert fake.calls == [], fake.calls                                                         # 전부 꺼지면 도커도 안 부른다
 
@@ -141,16 +163,17 @@ fake = FakeDocker()
 rep = gc.collect(policy, source="auto", now=NOW, run=fake)
 assert rep["dryRun"] is False and rep["error"] is None, rep
 got = mutating(fake.calls)
-assert got == [["builder", "prune", "--all", "-f", "--filter", "until=168h"], ["image", "prune", "-f"], ["volume", "rm", "a" * 64],
-               ["rm", "c2"], ["rm", "c5"], ["image", "rm", "dddddddddddd"], ["image", "rm", "ffffffffffff"], ["network", "rm", "n2"]], got
+assert got == [["builder", "prune", "--all", "-f", "--filter", "until=72h"], ["image", "prune", "-f"], ["volume", "rm", "a" * 64],
+               ["rm", "c2"], ["rm", "c5"], ["image", "rm", "dddddddddddd"], ["image", "rm", "ffffffffffff"], ["image", "rm", "777777777777"],
+               ["network", "rm", "n2"], ["image", "rm", "redis:7-alpine"]], got   # prune -a 아님 — 고른 것만 이름으로(-f 없음)
 assert all("-f" not in c for c in got if c[0] in ("rm",) or c[:2] in (["image", "rm"], ["network", "rm"])), got
 steps = {s["name"]: s for s in rep["steps"]}
 assert steps["build-cache"]["reclaimedMb"] == 2560 and steps["dangling"]["reclaimedMb"] == 400 and steps["volumes"]["reclaimedMb"] == 100, steps
-assert rep["reclaimedMb"] == 2560 + 400 + 100 + 1000, rep["reclaimedMb"]
+assert rep["reclaimedMb"] == 2560 + 400 + 100 + 2024 + 40, rep["reclaimedMb"]
 state = json.loads(gc.STATE_FILE.read_text())
 assert state["finishedAt"] >= NOW and state["reclaimedMb"] == rep["reclaimedMb"] and state["source"] == "auto" and state["error"] is None, state
 log = gc.LOG_FILE.read_text().splitlines()
-assert log[-1].split()[1] == "auto" and "reclaimed 4.0GB" in log[-1] and "e2e" in log[-1], log[-1]
+assert log[-1].split()[1] == "auto" and "reclaimed 5.0GB" in log[-1] and "e2e" in log[-1], log[-1]
 assert gc.due(policy, state, now=NOW + 3600) is False and gc.due(policy, state, now=NOW + 25 * 3600) is True
 assert json.loads(gc.VOLUMES_SEEN_FILE.read_text()) == {}, "지운 볼륨은 기록에서도 빠진다"
 

@@ -36,13 +36,14 @@
 |---|---|---|
 | `enabled` | `true` | 데몬 자동 실행 on/off (CLI `--now`·대시보드 "지금 정리" 는 무시하고 돈다) |
 | `interval_hours` | `24` | 자동 실행 주기 |
-| `build_cache_keep_days` | `7` | 이보다 오래 안 쓴(LastUsedAt) 빌드캐시를 지운다. `0` = 이 단계 끔 |
+| `build_cache_keep_days` | `3` (2026-11-15, 원래 7) | 이보다 오래 안 쓴(LastUsedAt) 빌드캐시를 지운다. `0` = 이 단계 끔 |
 | `dangling_images` | `true` | `<none>:<none>` 이미지 중 어떤 컨테이너도 안 쓰는 것 |
 | `anonymous_volumes` | `true` | 어떤 컨테이너에도 안 붙은 **익명** 볼륨만(명명 볼륨은 절대 아님) |
 | `anonymous_volume_grace_days` | `3` | 익명 볼륨이 이 일수 넘게 **계속** dangling 이어야 지운다. `marina stop`(compose down) 직후엔 살아 있는 서비스의 익명 볼륨도 잠깐 dangling 으로 보이기 때문(코드리뷰 지적). 0=즉시 |
 | `stale_test_artifacts_days` | `3` | e2e 산출물(컨테이너·이미지·네트워크) 중 이보다 오래된 것. `0` = 끔 |
 | `orphan_worktree_days` | `7` | marina 밖에서 지운 워크트리의 compose 이미지·정지 컨테이너(⑤, 명명 볼륨 제외). 0=끔 |
-| `stale_test_artifact_names` | `["marina-*-e2e-*"]` | e2e 산출물로 보는 이름 글롭. 라벨 `marina.e2e=1` 은 항상 포함 |
+| `stale_test_artifact_names` | `["marina-*-e2e-*", "*-e2e-[0-9]*"]` | e2e 산출물로 보는 이름 글롭. 라벨 `marina.e2e=1` 은 항상 포함. 지금 있는 워크트리의 compose 프로젝트는 글롭에 걸려도 제외 |
+| `unused_image_days` | `14` | ⑥ 이름 붙은 이미지 중 어떤 컨테이너(정지 포함)도 안 쓰고, 빌드·받은(LastTagTime) 때가 이보다 오래된 것. 지금 있는 워크트리 이미지는 제외. `image prune -a` 대신 골라서 이름으로 `image rm`(-f 없음). 0=끔 |
 
 읽기: 파일 없음/깨짐/모르는 키/틀린 타입 → 그 키만 기본값(경고를 실행 로그에 남김). 쓰기: 원자적(`tempfile+os.replace`),
 값은 타입 검증(bool·int≥0·글롭 목록). 한 키만 바꾸는 `set_policy(key, value)` 가 CLI·API 공용 진입.

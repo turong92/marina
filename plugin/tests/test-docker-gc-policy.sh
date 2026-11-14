@@ -16,9 +16,9 @@ assert gc.LOG_FILE == home / "docker-gc.log"
 
 # ── 파일 없음 → 기본값 ──
 p = gc.load_policy()
-assert p["enabled"] is True and p["interval_hours"] == 24 and p["build_cache_keep_days"] == 7, p
+assert p["enabled"] is True and p["interval_hours"] == 24 and p["build_cache_keep_days"] == 3 and p["unused_image_days"] == 14, p
 assert p["dangling_images"] is True and p["anonymous_volumes"] is True and p["anonymous_volume_grace_days"] == 3
-assert p["stale_test_artifacts_days"] == 3 and p["stale_test_artifact_names"] == ["marina-*-e2e-*"], p
+assert p["stale_test_artifacts_days"] == 3 and p["stale_test_artifact_names"] == ["marina-*-e2e-*", "*-e2e-[0-9]*"], p
 assert p["orphan_worktree_days"] == 7, p
 assert p["warnings"] == [], p
 
