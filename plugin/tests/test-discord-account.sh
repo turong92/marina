@@ -71,6 +71,10 @@ check(any(x["m"] == "POST" and "B 계정" in json.dumps(x["b"], ensure_ascii=Fal
       and any(x["m"] == "PATCH" and str((x["b"] or {}).get("topic", "")).startswith("🔑 B · ") for x in new), f"전환 알림·주제: {new}")
 n = len(fdlog()); mb.account_tick()
 check(len(fdlog()) == n, "같은 계정이면 다시 안 알림")
+# Discord 는 주제 끝 공백을 잘라 '🔑 B ·' 로 저장한다 — A 로 돌아갈 때 그것도 지워야 한다(2026-11-16 qwen-claude-a-dev 가 A 인데 B 로 보임)
+check(mb._TOPIC_ACCOUNT.sub("", "🔑 B ·") == "", "끝 공백 잘린 표시도 지움")
+check(mb._TOPIC_ACCOUNT.sub("", "🔑 B · 방 설명") == "방 설명", "설명 앞 표시 지움")
+check(mb._TOPIC_ACCOUNT.sub("", "🔑 코덱스 ·") == "", "코덱스 표시도")
 ms.tmux_stop(rec["tmux"])
 # 토큰 파일이 사라졌으면 a 로 뜨고 기록도 a
 os.rename(ms.marina_home() / "accounts" / "b.token", ms.marina_home() / "accounts" / "b.gone")

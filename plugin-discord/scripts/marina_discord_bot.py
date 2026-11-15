@@ -106,7 +106,7 @@ def _row_account(rec: dict[str, Any], alive: bool) -> str:
     return n if ms.account_token_file(n) is not None else ms.ACCOUNT_DEFAULT
 
 
-_TOPIC_ACCOUNT = re.compile(r"^🔑 \S+ · ")
+_TOPIC_ACCOUNT = re.compile(r"^🔑 \S+ ·(?: |$)")     # Discord 가 끝 공백을 잘라 "🔑 B ·" 로 저장한다 — 그것도 잡는다
 
 
 def account_tick() -> None:
