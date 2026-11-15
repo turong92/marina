@@ -405,7 +405,7 @@ ROOM_SEND_MARK = "marina session room-send"      # 답하는 법 꼬리에 들�
 ROOM_SEND_PREVIEW = 300
 ROOM_SEND_LIMIT = 6                   # 같은 (보낸 방→받는 방) 쌍이 이 시간 안에 보낼 수 있는 횟수 — 핑퐁(서로 답하고 또 답하는 루프) 차단
 ROOM_SEND_WINDOW_S = 600.0
-ROOM_FROM = re.compile(r"^\[마리나 · (?:메인 )?(\S+?) 방(?:에서|의 지시)\]")     # 글 머리 → 보낸 방
+ROOM_FROM = re.compile(r"^\[마리나 · (?:메인 )?(\S+?)(?:\([^()\[\]]*\))? 방(?:에서|의 지시)\]")     # 글 머리 → 보낸 방(괄호 별칭 꼬리는 버린다)
 NOTICE_SENDER = "마리나"             # 마리나가 보내는 알림(배달 실패 등) — 답 꼬리를 안 붙이고, 이게 튕겨도 되돌려 보내지 않는다
 ROOM_SEND_STATUS = {"started": "✓ 전달", "delivered": "✓ 전달", "queued": "⏳ 대기열", "stored": "📥 보관", "typed": "❔ 확인 못 함"}
 
@@ -609,12 +609,13 @@ def room_send(ref: str, message: str, sender_ref: "str | None" = None, notice: b
         raise ms.SessionError("보낼 글이 비었어")
     if len(body) > ROOM_SEND_MAX:
         raise ms.SessionError(f"글이 너무 길어({len(body)}자 > {ROOM_SEND_MAX}) — 길고 오래 남을 내용은 레포 공통 파일(docs/handoff/…md)에 쓰고 알림만 보내")
+    label = sender if sender == "터미널" else ms.room_label(sender)     # 꼬리표엔 별칭도(누가 보냈는지 알아보게) — 답 주소는 ref 그대로
     if not notice and sender != "터미널" and ms.main_room(str(rec.get("project") or "")) == sender:
         # (형 2026-10-28) 메인 지시가 '옆 방 잡담'으로 읽혀 '좋아·진행해'가 확인 인사로 넘어갔다 — 위계를 글에 박는다
-        text = (f"{ROOM_SEND_PREFIX}메인 {sender} 방의 지시] {body} (형이 메인 방에 지휘를 맡겼다 — 짧아도 일 지시다. "
+        text = (f"{ROOM_SEND_PREFIX}메인 {label} 방의 지시] {body} (형이 메인 방에 지휘를 맡겼다 — 짧아도 일 지시다. "
                 f'바로 하고, 끝나면 보고: {ROOM_SEND_MARK} {sender} "…")')
     else:
-        text = f"{ROOM_SEND_PREFIX}{sender} 방에서] {body}"
+        text = f"{ROOM_SEND_PREFIX}{label} 방에서] {body}"
         if sender != "터미널" and not notice:      # 터미널엔 답할 방이 없다 · 마리나 알림엔 답하지 않는다(되돌이 방지)
             text += f' (답은: {ROOM_SEND_MARK} {sender} "…")'
     sd = Path(str(rec.get("stateDir") or "/nonexistent"))

@@ -368,11 +368,96 @@ def save_sessions(items: list[dict[str, Any]]) -> None:
     os.replace(tmp, p)
 
 
+ROOM_ALIAS_MAX = 40       # marina_paths.write_meta 와 같은 한도
+
+
+def _is_dev_room(rec: dict[str, Any]) -> bool:
+    """개발 방(kind 없음 = 클로드, 또는 코덱스) — 채팅·비서·로비는 폴더 하나를 여럿이 같이 써서 별칭 자리가 없다."""
+    return not rec.get("kind") or is_codex(rec)
+
+
+def _room_meta_file(rec: dict[str, Any]) -> "Path | None":
+    """개발 방 워크트리의 meta.json — marina 런타임(대시보드·폰 rename)이 별칭을 두는 자리(marina_paths.session_dir).
+    런타임을 import 하지 않고(플러그인 독립) 같은 규칙으로 정한다: <root>/.workspace/marina(없고 dev-sessions 가 있으면 그쪽)/<세션 id>/meta.json,
+    세션 id 는 프로젝트 루트 자체면 main(projects.json 기준 — .git 유무로 보지 않는다), .claude/worktrees/<이름> 이면 이름, 코덱스 <id>/<레포> 면 id."""
+    root = str(rec.get("root") or "")
+    if not root or not _is_dev_room(rec):
+        return None
+    r = Path(root)
+    try:
+        main = os.path.realpath(root) == str(project_root(str(rec.get("project") or "")))
+    except SessionError:
+        main = False
+    sid = "main" if main else (r.name if r.parent.name == "worktrees" else r.parent.name)
+    ws = r / ".workspace"
+    base = ws / "marina"
+    if not base.is_dir() and (ws / "dev-sessions").is_dir():
+        base = ws / "dev-sessions"
+    return base / sid / "meta.json"
+
+
+def room_alias_of(rec: dict[str, Any]) -> str:
+    f = _room_meta_file(rec)
+    try:
+        return str(json.loads(f.read_text(encoding="utf-8")).get("alias") or "").strip() if f else ""
+    except (OSError, ValueError, AttributeError):
+        return ""
+
+
+def room_label(ref: str, rec: "dict[str, Any] | None" = None, alias: "str | None" = None) -> str:
+    """꼬리표·목록에 쓰는 이름 — '<프로젝트>/<작업>(별칭)'. 별칭 없거나 방을 못 찾으면 ref 그대로.
+    괄호·대괄호는 빼서 넣는다(꼬리표를 읽는 ROOM_FROM 이 깨지지 않게)."""
+    if alias is None:
+        if rec is None:
+            rec = next((s for s in load_sessions() if f"{s.get('project')}/{s.get('task')}" == ref), None)
+        alias = room_alias_of(rec) if rec else ""
+    alias = "".join(c for c in alias if c not in "()[]").strip()
+    return f"{ref}({alias})" if alias else ref
+
+
+def set_room_alias(ref: str, name: str) -> tuple[dict[str, Any], str]:
+    """방 별칭을 meta.json 에 쓴다(빈 이름 = 지움). 개발 방만. 다른 방이 이미 쓰는 별칭·작업 이름·roomAliases 와 겹치면 거부."""
+    items = load_sessions()
+    rec = find_session(ref, items)
+    if not _is_dev_room(rec):
+        raise SessionError(f"{rec.get('project')}/{rec.get('task')} 은 개발 방이 아니야 — 별칭은 개발 방(클로드·코덱스)만")
+    alias = " ".join(str(name).split())[:ROOM_ALIAS_MAX]
+    if alias:
+        if "/" in alias:
+            raise SessionError("별칭에 '/' 는 못 써 — <프로젝트>/<작업> 주소와 헷갈린다")
+        try:
+            cfg_aliases = load_config().get("roomAliases")
+        except SessionError:
+            cfg_aliases = None
+        if isinstance(cfg_aliases, dict) and alias in cfg_aliases:
+            raise SessionError(f"'{alias}' 는 discord.json roomAliases 에 이미 있어")
+        for s in items:
+            if s is rec:
+                continue
+            if alias == s.get("task") or alias == room_alias_of(s):
+                raise SessionError(f"'{alias}' 는 이미 {s.get('project')}/{s.get('task')} 가 쓰고 있어")
+            if str(s.get("root") or "") == str(rec.get("root") or "") and _is_dev_room(s):
+                raise SessionError(f"{s.get('project')}/{s.get('task')} 도 같은 폴더를 써서 별칭이 같이 바뀐다 — 워크트리를 나눠서 써")
+    f = _room_meta_file(rec)
+    if f is None:
+        raise SessionError(f"{rec.get('project')}/{rec.get('task')}: 워크트리 폴더를 몰라 별칭을 둘 곳이 없어")
+    try:
+        meta = json.loads(f.read_text(encoding="utf-8"))
+        meta = meta if isinstance(meta, dict) else {}
+    except (OSError, ValueError):
+        meta = {}
+    meta["alias"] = alias
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return rec, alias
+
+
 def find_session(ref: str, items: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-    """'<프로젝트>/<작업>' 정확 일치를 먼저, 없으면 작업 이름 일치. 여러 개면 모호."""
+    """'<프로젝트>/<작업>' 정확 일치를 먼저, 없으면 작업 이름 일치, 그다음 방 별칭(meta.json alias) 일치. 여러 개면 모호."""
     items = load_sessions() if items is None else items
     hits = [s for s in items if f"{s.get('project')}/{s.get('task')}" == ref] \
-        or [s for s in items if s.get("task") == ref]
+        or [s for s in items if s.get("task") == ref] \
+        or ([s for s in items if room_alias_of(s) == ref] if ref and "/" not in ref else [])
     if not hits:
         raise SessionError(f"세션을 찾지 못했어: {ref} ('marina session ls' 로 확인)")
     if len(hits) > 1:
@@ -5540,7 +5625,7 @@ def cmd_ls() -> list[dict[str, Any]]:
             ids = channel_ids(Discord(read_token(cfg)), cfg["guildId"])
         except SessionError:
             ids = None                       # Discord 를 못 봐도 목록은 보여준다
-    return [dict(s, alive=tmux_alive(str(s.get("tmux") or "")),
+    return [dict(s, alive=tmux_alive(str(s.get("tmux") or "")), alias=room_alias_of(s),
                  channel=None if ids is None else str(s.get("channelId")) in ids) for s in items]
 
 
@@ -5980,6 +6065,9 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("main", help="프로젝트의 메인 방(형과 얘기하며 다른 방을 지휘)을 정한다 — 그 방의 room-send 는 '메인 지시'로 간다")
     p.add_argument("ref")
     p.add_argument("--off", action="store_true", help="메인 지정을 끈다")
+    p = sub.add_parser("rename", help="방 별칭을 정한다(빈 이름 = 지움) — 꼬리표·ls 에 같이 보이고 room-send 주소로도 쓴다. 대시보드·폰 rename 과 같은 자리")
+    p.add_argument("ref")
+    p.add_argument("name")
     p = sub.add_parser("room-send", help="다른 개발 방(클로드·코덱스)에 말을 건다 — 알림만 입력창으로, 긴 내용은 레포 공통 파일(docs/handoff/…md). 잠든 방은 깨우지 않고 보관(--wake 면 깨운다)")
     p.add_argument("--wake", action="store_true", help="잠든 방이면 이 글을 첫 지시로 줘 깨운다(정말 일을 시킬 때만 — 깨우면 토큰이 든다)")
     p.add_argument("ref")
@@ -6153,7 +6241,12 @@ def main(argv: list[str] | None = None) -> int:
                 print("세션 없음")
             for s in ([] if a.json else rows):
                 ch = "채널 ?" if s["channel"] is None else ("채널 있음" if s["channel"] else "채널 없음")
-                print(f"{s['project']}/{s['task']}\t{'켜짐' if s['alive'] else '꺼짐'}\t{ch}\t{s['root']}")
+                name = room_label(f"{s['project']}/{s['task']}", alias=s.get("alias") or "")
+                print(f"{name}\t{'켜짐' if s['alive'] else '꺼짐'}\t{ch}\t{s['root']}")
+        elif a.cmd == "rename":
+            s, alias = set_room_alias(a.ref, a.name)
+            ref = f"{s['project']}/{s['task']}"
+            print(f"✓ {ref} 별칭: {alias}" if alias else f"✓ {ref} 별칭을 지웠어")
         elif a.cmd == "attach":
             s = find_session(a.ref)
             os.execvp("tmux", _tmux_base() + ["attach", "-t", f"={s['tmux']}"])
