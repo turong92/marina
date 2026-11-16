@@ -1054,9 +1054,10 @@ def tmux_start(name: str, cwd: Path, argv: list[str], env_extra: dict[str, str],
     sdir = env_extra.get("DISCORD_STATE_DIR") or ""
     if sdir and Path(sdir).is_dir():
         try:
-            (Path(sdir) / "account-running").write_text(
-                (account or (Path(tok).stem if tok and Path(tok).is_file() and Path(tok).stat().st_size > 0 else ACCOUNT_DEFAULT)) + "\n",
-                encoding="utf-8")
+            ran = account or (Path(tok).stem if tok and Path(tok).is_file() and Path(tok).stat().st_size > 0 else ACCOUNT_DEFAULT)
+            (Path(sdir) / "account-running").write_text(ran + "\n", encoding="utf-8")
+            if not account:     # 클로드 방만 — 다음에 깰 때 이 계정으로(_last_account)
+                (Path(sdir) / ACCOUNT_LAST).write_text(ran + "\n", encoding="utf-8")
         except OSError:
             pass
     dashboard_signal()
@@ -2618,7 +2619,8 @@ def session_env(sdir: Path, chat: bool = False) -> dict[str, str]:
         if os.environ.get(k):
             env[k] = os.environ[k]
     if chat:
-        base = _read_name(Path(sdir) / "account") or project_account(_project_of(Path(sdir))) or ACCOUNT_DEFAULT
+        base = (_read_name(Path(sdir) / "account") or _last_account(Path(sdir))
+                or project_account(_project_of(Path(sdir))) or ACCOUNT_DEFAULT)
     else:
         base = account_of(sdir)
     tok = account_token_file(launch_account(Path(sdir), base))
@@ -2693,10 +2695,34 @@ def _project_of(sdir: Path) -> str:
 
 
 def account_of(sdir: "Path | None") -> str:
-    """방 지정(<상태 폴더>/account) → 프로젝트 기본(accounts/projects.json) → 전체 기본(accounts/default) → a."""
+    """방 지정(<상태 폴더>/account) → 쓰던 계정(_last_account) → 프로젝트 기본(accounts/projects.json) → 전체 기본(accounts/default) → a."""
     if not sdir:
         return default_account()
-    return _read_name(Path(sdir) / "account") or project_account(_project_of(Path(sdir))) or default_account()
+    return (_read_name(Path(sdir) / "account") or _last_account(Path(sdir))
+            or project_account(_project_of(Path(sdir))) or default_account())
+
+
+ACCOUNT_LAST = "account-last"   # 고정 없는 방이 마지막으로 뜬 클로드 계정('-' = 설정을 따른다)
+
+
+def _last_account(sdir: Path) -> str:
+    """고정 없는 방은 내리기 전에 쓰던 계정으로 다시 뜬다(형 2026-11-16: 밤글 방이 A 로 돌다 쉬어 내린 뒤 프로젝트 기본 B 로 깼다).
+    그 뒤에 프로젝트·기본 계정을 새로 정했으면 설정을 따른다. 기록이 아직 없는 방은 account-running 으로 대신한다."""
+    f = Path(sdir) / ACCOUNT_LAST
+    if not f.exists():
+        if (Path(sdir) / "account-failover-at").exists():
+            return ""           # 배포 전에 한도로 옮겼다 되돌린 방은 account-running 에 옮긴 계정이 남아 있다(리뷰 I1)
+        f = Path(sdir) / "account-running"
+    name = _read_name(f)
+    if not name or name not in accounts():
+        return ""
+    try:
+        at = f.stat().st_mtime
+        changed = max((p.stat().st_mtime for p in (accounts_dir() / "projects.json", accounts_dir() / "default") if p.exists()),
+                      default=0.0)
+    except OSError:
+        return ""
+    return name if at > changed else ""
 
 
 def _check_account(name: str) -> str:
@@ -2712,11 +2738,14 @@ def set_account(sdir: Path, name: str) -> None:
     """사람이 정한 방 고정 — 한도로 잠시 옮긴 기억은 지운다(되돌리지 않는다)."""
     (Path(sdir) / "account").write_text(_check_account(name) + "\n", encoding="utf-8")
     (Path(sdir) / ACCOUNT_ORIGIN).unlink(missing_ok=True)
+    (Path(sdir) / ACCOUNT_LAST).write_text("-\n", encoding="utf-8")
 
 
 def clear_account(sdir: Path) -> None:
+    """고정을 지운다 — 쓰던 계정도 잊고 프로젝트·기본 설정을 따른다(한도로 옮겼다 되돌릴 때 옮긴 계정에 남지 않게)."""
     (Path(sdir) / "account").unlink(missing_ok=True)
     (Path(sdir) / ACCOUNT_ORIGIN).unlink(missing_ok=True)
+    (Path(sdir) / ACCOUNT_LAST).write_text("-\n", encoding="utf-8")
 
 
 def fallback_account(sdir: Path, name: str) -> None:
