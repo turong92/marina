@@ -2599,8 +2599,8 @@ def launch_account(sdir: Path, base: str) -> str:
         return free_at.get(n, 0.0) > now
     if not gone(base):
         return base
-    for n in accounts():
-        if n != base and not gone(n) and (n == ACCOUNT_DEFAULT or account_token_file(n) is not None):
+    for n in failover_order(base):
+        if not gone(n):
             try:
                 fallback_account(sdir, n)
             except (OSError, SessionError):
@@ -2643,6 +2643,18 @@ def accounts() -> list[str]:
     """쓸 수 있는 계정: a + 토큰 파일이 있는 이름들."""
     names = sorted(f.stem for f in accounts_dir().glob("*.token") if _ACCOUNT_NAME.match(f.stem) and f.stem != ACCOUNT_DEFAULT)
     return [ACCOUNT_DEFAULT] + names
+
+
+def failover_order(cur: str) -> list[str]:
+    """cur 가 바닥일 때 넘어갈 계정 순서 — accounts/order 에 적힌 순서가 먼저, 안 적힌 계정은 이름 순으로 그 뒤
+    (형 2026-11-17 "A 토큰 다 쓰면 B 쓰지말고 C로"). 쓸 수 없는 계정(토큰 없음)은 뺀다."""
+    have = [n for n in accounts() if n == ACCOUNT_DEFAULT or account_token_file(n) is not None]
+    try:
+        want = (accounts_dir() / "order").read_text(encoding="utf-8").split()
+    except OSError:
+        want = []
+    first = [n for n in dict.fromkeys(want) if n in have]
+    return [n for n in first + [n for n in have if n not in first] if n != cur]
 
 
 def account_token_file(name: str) -> "Path | None":

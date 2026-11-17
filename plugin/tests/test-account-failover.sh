@@ -232,6 +232,30 @@ mb.write_account_state({"a": gone_now, "b": ok}, time.time())
 check(ms.session_env(sd).get("MARINA_ACCOUNT_TOKEN_FILE") and ms.account_origin(sd) == "a", "띄울 때 고른 계정도 기억")
 st.unlink(); ms.clear_account(sd)
 
+# 넘어갈 순서(형 2026-11-17 "A 토큰 다 쓰면 B 쓰지말고 C로"): accounts/order 에 적힌 순서가 먼저, 안 적힌 계정은 그 뒤
+cf = ms.accounts_dir() / "c.token"; cf.write_text("sk-ant-oat-TEST-C\n"); cf.chmod(0o600)
+order = ms.accounts_dir() / "order"
+def fresh():
+    for f in ("limit-stalled", "account-failover-at", "account-failover-wait", "account-origin"):
+        (sd / f).unlink(missing_ok=True)
+    ms.clear_account(sd); (sd / "account-running").write_text("a\n")
+fresh()
+check(tick(900000.0, usage={"a": gone, "b": ok, "c": ok}) == ["proj/feat/a"] and ms.account_of(sd) == "b", "순서 없으면 이름 순(b)")
+order.write_text("c b\n")
+check(ms.failover_order("a") == ["c", "b"], f"순서: {ms.failover_order('a')}")
+check(ms.failover_order("c") == ["b", "a"], f"c 에서 넘어갈 때(적힌 순서 뒤에 안 적힌 a): {ms.failover_order('c')}")
+fresh()
+check(tick(910000.0, usage={"a": gone, "b": ok, "c": ok}) == ["proj/feat/a"] and ms.account_of(sd) == "c", f"a 바닥 → c: {ms.account_of(sd)}")
+fresh()
+check(tick(920000.0, usage={"a": gone, "b": ok, "c": gone}) == ["proj/feat/a"] and ms.account_of(sd) == "b", "c 도 바닥이면 b")
+fresh()
+mb.write_account_state({"a": gone_now, "b": ok, "c": ok}, time.time())
+ms.session_env(sd)
+check(ms.account_of(sd) == "c", f"띄울 때도 순서대로 c: {ms.account_of(sd)}")
+order.write_text("zz c\n")
+check(ms.failover_order("a") == ["c", "b"], f"없는 계정 이름은 건너뜀: {ms.failover_order('a')}")
+st.unlink(); order.unlink(); cf.unlink(); ms.clear_account(sd)
+
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); raise SystemExit(1)
 PY

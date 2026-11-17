@@ -3456,7 +3456,7 @@ def account_failover_tick(now: "float | None" = None, limited=None, usage=None, 
         if not _exhausted(by.get(cur)):
             continue              # 화면엔 한도 문구가 보여도 지금 계정은 여유 — 옛 문구거나 출력 속 같은 글자다
         mark.write_text(f"{now}\n", encoding="utf-8")
-        others = [n for n in ms.accounts() if n != cur and (n == ms.ACCOUNT_DEFAULT or ms.account_token_file(n) is not None)]
+        others = ms.failover_order(cur)
         free = [n for n in others if not _exhausted(by.get(n))]
         if not free:
             ats = [t for t in (_free_at(by.get(n)) for n in [cur] + others) if t]
