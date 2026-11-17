@@ -870,6 +870,13 @@ def chat_argv(project: str, task: str, session_id: str, resume: bool = False, fr
     from_id = 기존 대화의 복사본으로 시작(--fork-session — 원본을 다른 곳이 열고 있어도 안전, 실측).
     first = 첫 지시. 가변 인자 옵션(--disallowedTools)이 뒤따르는 글을 도구 이름으로 삼키므로 `--` 뒤에 둔다(실측 2026-10-07)."""
     sdir = state_dir(project, task)
+    # --add-dir 한 폴더도 신뢰해 둔다 — 안 하면 클로드가 뜰 때마다 'Adding a new directory' 확인창에서 멈춘다
+    # (2026-11-17 비서 방: 알림에 깨다 7시간 멈춤). 띄우는 길(새로·start·깨우기·로비)이 모두 이 함수를 지난다
+    try:
+        (sdir / "inbox").mkdir(parents=True, exist_ok=True)
+        ensure_trusted(sdir / "inbox")
+    except (OSError, SessionError) as exc:
+        print(f"[marina] inbox 신뢰 등록 실패(뜰 때 확인창에서 멈출 수 있어): {exc}", file=sys.stderr)
     argv = ["claude"]
     if resume:
         argv += ["--resume", session_id]

@@ -66,6 +66,9 @@ d = json.loads(cj.read_text())
 check(d["projects"].get(str((mh / "chat").resolve()), {}).get("hasTrustDialogAccepted") is True, f"chat 폴더 신뢰(실제 경로): {d}")
 check(stat.S_IMODE(cj.stat().st_mode) == 0o600, "claude.json 권한 600")
 check(d["keep"] == 1 and d["projects"]["/elsewhere"]["hasTrustDialogAccepted"] is True, "다른 설정 보존")
+# --add-dir 로 더한 inbox 도 신뢰해 둔다 — 안 하면 클로드 2.1.3xx 가 뜰 때마다 'Adding a new directory' 확인창에서 멈춘다
+# (2026-11-17 비서 방: 10:30 알림에 깨다 확인창에서 7시간 멈춤)
+check(d["projects"].get(os.path.realpath(str(sd / "inbox")), {}).get("hasTrustDialogAccepted") is True, f"inbox 신뢰: {list(d['projects'])}")
 
 # 인자
 calls = sorted((p for p in out.iterdir() if (p / "argv").exists()), key=lambda p: p.stat().st_mtime)

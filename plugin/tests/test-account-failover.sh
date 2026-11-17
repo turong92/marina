@@ -120,8 +120,10 @@ try:
     check(revive(9e12 + 700, {"b": 0.0}, limited=True) == ["proj/feat/a"] and restarted == ["proj/feat/a"],
           f"다시 띄운 뒤엔 옛 한도 문구로 또 안 띄우고 글을 넣는다: {restarted}")
     (sd / "limit-stalled").write_text('{"freeAt": 0, "restarted": true}')
+    nt = len(told)
     check(revive(9e12 + 750, {"b": 0.0}, limited=True) == ["proj/feat/a"] and restarted == ["proj/feat/a"],
           "계정 바꿔 띄운 방(failover)도 옛 한도 문구로 또 안 띄운다")
+    check(len(told) == nt, f"계정 바꿔 띄운 방엔 '한도가 풀려서' 를 채널에 안 쓴다(failover 가 이미 알림, 2026-11-17): {told[nt:]}")
     (sd / "limit-stalled").write_text('{"freeAt": 0}')
     n = len(sent)
     check(revive(9e12 + 800, {"b": 0.0}, busy=True) == [] and len(sent) == n and not (sd / "limit-stalled").exists(), "일하는 중이면 안 깨우고 표시만 지움")

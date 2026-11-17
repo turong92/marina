@@ -86,6 +86,10 @@ cfg = json.loads(cfgp.read_text()); saved_cat = cfg["codex"].pop("categoryId"); 
 n = len(log()); mb.dashboard_tick({}, codex=True)
 check(len(log()) == n, "카테고리 없으면 요청 0")
 cfg["codex"]["categoryId"] = saved_cat; cfgp.write_text(json.dumps(cfg))
+# 코덱스 판엔 클로드 계정 로그인 만료(🔑)를 붙이지 않는다(리뷰 2026-11-17)
+import time as _t
+cs = mb.board_snap({"sessions": [], "usage": [], "accountUsage": {}, "loginExpiry": {"a": _t.time() + 60}}, codex=True)
+check(not cs.get("loginExpiry") and "🔑" not in json.dumps(mb.render(cs), ensure_ascii=False), "코덱스 판엔 🔑 없음")
 if fails:
     print("FAIL:\n  " + "\n  ".join(fails)); sys.exit(1)
 PY

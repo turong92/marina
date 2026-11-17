@@ -135,8 +135,9 @@ def account_tick() -> None:
             topic = str((dc._req("GET", f"/channels/{ch}") or {}).get("topic") or "")
             rest = _TOPIC_ACCOUNT.sub("", topic)
             dc._req("PATCH", f"/channels/{ch}", {"topic": ((f"🔑 {label} · " if codex or cur != ms.ACCOUNT_DEFAULT else "") + rest)[:1024]})
-            dc._req("POST", f"/channels/{ch}/messages", {"content": f"🔑 이 방은 이제 **{label} 계정**으로 떠 있어",
-                                                          "allowed_mentions": {"parse": []}})
+            if not _recent_failover(sd):     # 한도로 바꾼 직후면 failover 알림이 이미 같은 말을 했다(형 2026-11-17 '상황에 안 맞는 메시지 남발')
+                dc._req("POST", f"/channels/{ch}/messages", {"content": f"🔑 이 방은 이제 **{label} 계정**으로 떠 있어",
+                                                              "allowed_mentions": {"parse": []}})
         except ms.SessionError as exc:
             _log(f"account_tick {ch}: {type(exc).__name__}")
             continue
@@ -155,6 +156,76 @@ def account_usage() -> dict[str, list[dict[str, Any]]]:
     except Exception as exc:
         _log(f"account_usage failed: {type(exc).__name__}")
     return out
+
+
+LOGIN_WARN_S = 3 * 86400     # 로그인 만료가 이만큼 안으로 오면 #상태 사용량 줄에 🔑(형 2026-11-17 "갱신해야되는거도 상태 채널에")
+LOGIN_TTL = 600.0            # claude auth status 는 프로세스 하나 — 10분에 한 번만
+TOKEN_LIFE_S = 365 * 86400   # claude setup-token 토큰은 1년
+_login_cache: dict[str, Any] = {"at": 0.0, "a": 0.0}
+
+
+def _parse_login_expiry(out: str) -> float:
+    """claude auth status(JSON)의 loginExpiresAt → epoch. 모르면 0."""
+    try:
+        v = json.loads(out).get("loginExpiresAt")
+        return datetime.datetime.fromisoformat(str(v).replace("Z", "+00:00")).timestamp() if v else 0.0
+    except (ValueError, TypeError, AttributeError):
+        return 0.0
+
+
+def login_expiry() -> dict[str, float]:
+    """계정별 로그인 만료 시각. a = claude auth status(10분 캐시), 토큰 계정 = 토큰 파일 만든 때 + 1년."""
+    now = time.time()
+    if now - _login_cache["at"] > LOGIN_TTL:
+        _login_cache["at"] = now
+        def probe() -> None:      # 뒤에서 — #상태 갱신 루프를 claude 기동(수 초)만큼 막지 않게. 이번 판은 지난 값
+            try:
+                env = {k: v for k, v in os.environ.items() if k not in ("CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT")}
+                r = subprocess.run(["claude", "auth", "status"], capture_output=True, text=True, timeout=20,
+                                   cwd=str(Path.home()), env=env)
+                _login_cache["a"] = _parse_login_expiry(r.stdout)
+            except (OSError, subprocess.SubprocessError):
+                pass
+        _spawn_bg(probe)
+    out = {ms.ACCOUNT_DEFAULT: float(_login_cache["a"])}
+    for n in ms.accounts()[1:]:
+        f = ms.account_token_file(n)
+        if f is not None:
+            try:
+                out[n] = f.stat().st_mtime + TOKEN_LIFE_S
+            except OSError:
+                pass
+    return out
+
+
+LOGIN_RENEW_RETRY_S = 6 * 3600   # 자동 연장이 실패하면(Aside 꺼짐 등) 이만큼 뒤에 다시 — 🔑 경고는 #상태에 계속 남는다
+_renew_state: dict[str, Any] = {"at": float("-inf"), "running": False}
+
+
+def _run_login_renew() -> bool:
+    """marina_login_renew.sh — claude auth login 을 tmux 에 띄우고 Aside(u0) 로 승인해 코드를 붙인다(2026-11-17 실측 성공)."""
+    r = subprocess.run(["bash", str(Path(__file__).with_name("marina_login_renew.sh"))], capture_output=True, text=True, timeout=300)
+    _log(f"login_renew: rc={r.returncode} {(r.stdout or '').strip()[-120:]}")
+    return r.returncode == 0
+
+
+def login_renew_tick(now: float, expiry=None, run=None, spawn=None) -> bool:
+    """A 계정 로그인 만료가 사흘 안이면 묻지 않고 자동으로 연장한다(형 2026-11-17 "나한테 물어보지말고 너가 자동으로 연장").
+    뒤 스레드에서 한 번에 하나, 실패하면 6시간 뒤 다시. 성공하면 만료 캐시를 비워 #상태 🔑 가 바로 사라지게."""
+    exp = float(((expiry or login_expiry)() or {}).get(ms.ACCOUNT_DEFAULT) or 0)
+    if not exp or exp - now > LOGIN_WARN_S or _renew_state["running"] or now - _renew_state["at"] < LOGIN_RENEW_RETRY_S:
+        return False
+    _renew_state.update(at=now, running=True)
+    def job() -> None:
+        try:
+            if (run or _run_login_renew)():
+                _login_cache["at"] = 0.0
+        except Exception as exc:
+            _log(f"login_renew job failed: {type(exc).__name__}")
+        finally:
+            _renew_state["running"] = False
+    (spawn or _spawn_bg)(job)
+    return True
 
 
 def _usage() -> list[dict[str, Any]]:
@@ -552,7 +623,11 @@ def snapshot(full: bool = True) -> dict[str, Any]:
         resources = marina_resources.cached_text(ms.load_sessions())
     except Exception:
         resources = ""
-    return {**stats, "usage": use, "accountUsage": account_usage(), "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
+    try:
+        expiry = login_expiry()
+    except Exception:
+        expiry = {}
+    return {**stats, "usage": use, "accountUsage": account_usage(), "loginExpiry": expiry, "roleUsage": ru, "diskFree": free, "load": load, "sessions": rows,
             "boxes": boxes, "resources": resources,
             "anyBusy": any(r["busy"] for r in rows)}
 
@@ -729,15 +804,19 @@ def render(snap: dict[str, Any]) -> list[dict[str, Any]]:
 def _render(snap: dict[str, Any], lean: bool) -> list[dict[str, Any]]:
     """#상태 메시지(Components V2). 섹션: 작업 중(줄마다 정지 버튼) · 대기 · 잠듦(글을 쓰면 깨어남) · 꺼짐. 같으면 고쳐 쓰지 않는다.
     디스크·부하·시각은 꼬리말로 따로 — 매번 바뀌는 값이 비교를 흔들지 않게."""
-    def line(ws: list[dict[str, Any]], tag: str = "") -> str:
+    expiry, now = snap.get("loginExpiry") or {}, time.time()
+    def line(ws: list[dict[str, Any]], tag: str = "", acct: str = ms.ACCOUNT_DEFAULT) -> str:
         # 리셋 시각은 Discord 시간 표시(<t:…:R> — 보는 사람 언어로 'N시간 후', 저절로 줄어든다)
         use = [f"{tag}{w.get('label')} `{_bar(float(w.get('usedPercent') or 0))}` {round(float(w.get('usedPercent') or 0))}%"
                + (f" ↻ <t:{int(w['resetsAt'])}:R>" if isinstance(w.get("resetsAt"), (int, float)) and w["resetsAt"] > 0 else "")
                for w in ws if w.get("key") in ("fiveHour", "weekly")]
-        return "  ·  ".join(use) or (tag + "알 수 없음")
+        exp = float(expiry.get(acct) or 0)
+        warn = ("" if not exp or exp - now > LOGIN_WARN_S else
+                "  ·  🔑 로그인 만료됨 — 갱신 필요" if exp <= now else f"  ·  🔑 로그인 만료 <t:{int(exp)}:R>")
+        return ("  ·  ".join(use) or (tag + "알 수 없음")) + warn
     others = snap.get("accountUsage") or {}
     if others:      # 계정이 둘 이상이면 계정마다 한 줄(A = 키체인 로그인)
-        body = "\n".join([line(snap["usage"], "A ")] + [line(ws, f"{n.upper()} ") for n, ws in sorted(others.items())])
+        body = "\n".join([line(snap["usage"], "A ")] + [line(ws, f"{n.upper()} ", n) for n, ws in sorted(others.items())])
     else:
         body = line(snap["usage"])
     out: list[dict[str, Any]] = [_text("### 사용량\n" + body)]
@@ -1136,7 +1215,7 @@ def board_snap(snap: dict[str, Any], codex: bool) -> dict[str, Any]:
     if codex:
         import marina_codex
         out.update(usage=marina_codex.rate_windows(ms.load_sessions(), marina_codex.codex_cfg(ms.load_config())["account"]),
-                   accountUsage={}, roleUsage=[])
+                   accountUsage={}, loginExpiry={}, roleUsage=[])
     return out
 
 
@@ -3353,8 +3432,18 @@ def account_switch_restart(ref: str, grace: float = ACCOUNT_TURN_GRACE, poll: fl
     if failed:
         say(f"🔑 계정 바꾸는 재시작 실패 — {'; '.join(failed)}")
         return False
+    if note.startswith("사용량 한도") and _recent_failover(Path(str(rec.get("stateDir") or "/nonexistent"))):
+        return True       # 한도 바꿈은 failover 가 이미 한 줄로 알렸다 — 한도 창에선 '끊은 것' 신호도 다 낡은 값이라 덧붙이면 헷갈린다(형 2026-11-17)
     say(f"🔑 {note}다시 띄웠어 ✓" + (f" (끊은 것: {'·'.join(cut)})" if cut else ""))
     return True
+
+
+def _recent_failover(sd: Path, within: float = 600.0) -> bool:
+    """한도로 계정을 바꾼 지 within 초 안인가(account-failover-at)."""
+    try:
+        return time.time() - float((sd / "account-failover-at").read_text(encoding="utf-8").strip() or 0) < within
+    except (OSError, ValueError):
+        return False
 
 
 ACCOUNT_FAILOVER_COOLDOWN = 1800.0     # 같은 방은 30분에 한 번 — 둘 다 바닥인 두 계정 사이를 오가지 않게
@@ -3643,8 +3732,10 @@ def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=
             continue
         _mark_stalled(sd, now + REVIVE_RETRY_S)
         send(rec, LIMIT_REVIVE_MSG)
-        # 형이 방 채널만 봐도 알게 — 방 안 입력창 글은 Discord 에 안 보인다(2026-11-12 "도는데 도는지도 모르겠고")
-        (say or _say_channel)(str(rec.get("channelId") or ""), "🔄 사용량 한도가 풀려서 이 방을 깨워 멈췄던 일을 이어서 하게 했어")
+        # 형이 방 채널만 봐도 알게 — 방 안 입력창 글은 Discord 에 안 보인다(2026-11-12 "도는데 도는지도 모르겠고").
+        # 계정을 바꿔 띄운 방은 한도가 풀린 게 아니고 failover 가 이미 알렸다 — 안 붙인다(2026-11-17)
+        if not restarted:
+            (say or _say_channel)(str(rec.get("channelId") or ""), "🔄 사용량 한도가 풀려서 이 방을 깨워 멈췄던 일을 이어서 하게 했어")
         woke.append(ref)
         _log(f"limit_revive {ref}: 깨우기 보냄")
     return woke
@@ -4202,6 +4293,10 @@ class Loop:
                 limit_revive_tick(now)
             except Exception as exc:
                 _log(f"limit_revive failed: {type(exc).__name__}: {exc}")
+            try:
+                login_renew_tick(now)
+            except Exception as exc:
+                _log(f"login_renew failed: {type(exc).__name__}: {exc}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)

@@ -71,6 +71,11 @@ check(any(x["m"] == "POST" and "B 계정" in json.dumps(x["b"], ensure_ascii=Fal
       and any(x["m"] == "PATCH" and str((x["b"] or {}).get("topic", "")).startswith("🔑 B · ") for x in new), f"전환 알림·주제: {new}")
 n = len(fdlog()); mb.account_tick()
 check(len(fdlog()) == n, "같은 계정이면 다시 안 알림")
+# 한도로 바꾼 직후(failover 가 이미 '…계정으로 바꿔 이어 띄울게' 라고 알렸다)엔 주제만 고치고 글은 안 쓴다(형 2026-11-17 '상황에 안 맞는 메시지 남발')
+(sd / "account-shown").write_text("a\n"); (sd / "account-failover-at").write_text(f"{time.time()}\n")
+n = len(fdlog()); mb.account_tick(); new = fdlog()[n:]
+check(not any(x["m"] == "POST" for x in new) and any(x["m"] == "PATCH" for x in new), f"failover 직후엔 주제만: {new}")
+(sd / "account-failover-at").unlink()
 # Discord 는 주제 끝 공백을 잘라 '🔑 B ·' 로 저장한다 — A 로 돌아갈 때 그것도 지워야 한다(2026-11-16 qwen-claude-a-dev 가 A 인데 B 로 보임)
 check(mb._TOPIC_ACCOUNT.sub("", "🔑 B ·") == "", "끝 공백 잘린 표시도 지움")
 check(mb._TOPIC_ACCOUNT.sub("", "🔑 B · 방 설명") == "방 설명", "설명 앞 표시 지움")
@@ -149,6 +154,12 @@ check(ok and forced and 0.25 < dt < 3.0 and "강제" in msg, f"grace 넘으면 �
 state["limit"] = True
 forced.clear(); ok, dt, msg = run(grace=5.0)
 check(ok and forced and dt < 1.0 and "한도" in msg, f"한도 창은 바로: dt={dt} {msg}")
+# 한도로 계정을 바꾼(failover) 재시작이면 failover 가 이미 한 줄로 알렸다 — 낡은 '끊은 것' 줄을 또 안 쓴다(형 2026-11-17)
+_sd = Path(ms.find_session("proj/feat/a")["stateDir"]); (_sd / "account-failover-at").write_text(f"{time.time()}\n")
+state["blockers"] = ["작업 중", "백그라운드 3"]
+forced.clear(); ok, dt, msg = run(grace=5.0)
+check(ok and forced and msg == "", f"failover 재시작은 조용히: {msg}")
+(_sd / "account-failover-at").unlink(); state["blockers"] = []
 state["limit"] = False
 # 5) 재시작 실패는 조용히 넘기지 않고 채널에 이유
 mb._room_busy = lambda rec: (True, False); state["fail"] = True
@@ -189,6 +200,31 @@ snap = {"usage": [{"key": "fiveHour", "label": "5시간", "usedPercent": 12, "re
 top = json.dumps(mb.render(snap)[0], ensure_ascii=False)
 check("A 5시간" in top and "B 5시간" in top and "3%" in top, f"사용량 줄 계정별: {top}")
 check("↻ <t:1792315200:R>" in top and top.count("↻") == 1, f"리셋 시각(있는 창만): {top}")
+# 로그인 만료(형 2026-11-17 "갱신해야되는거도 상태 채널에 넣어줘"): 사흘 안이면 그 계정 줄에 🔑, 지났으면 만료됨
+import time as _t
+now = _t.time()
+check("🔑" not in top, "만료 정보 없으면 표시 없음")
+snap["loginExpiry"] = {"a": now + 3600, "b": now + 30 * 86400}
+top = json.dumps(mb.render(snap)[0], ensure_ascii=False)
+check(top.count("🔑") == 1 and f"<t:{int(now + 3600)}:R>" in top, f"A 만 곧 만료 표시: {top}")
+check(top.index("🔑") < top.index("B 5시간"), f"A 줄에 붙는다: {top}")
+snap["loginExpiry"] = {"a": now + 30 * 86400, "b": now - 10}
+top = json.dumps(mb.render(snap)[0], ensure_ascii=False)
+check(top.count("🔑") == 1 and "만료됨" in top and top.index("🔑") > top.index("B 5시간"), f"B 만료됨: {top}")
+# 만료 시각 읽기: A = claude auth status 의 loginExpiresAt, 토큰 계정 = 토큰 파일 만든 때 + 1년(setup-token)
+check(mb._parse_login_expiry('{"loggedIn": true, "loginExpiresAt": "2026-12-16T16:02:53.782Z"}') == 1797436973.782, "auth status 파싱")
+check(mb._parse_login_expiry("not json") == 0.0 and mb._parse_login_expiry('{"loggedIn": false}') == 0.0, "모르면 0")
+snap.pop("loginExpiry")
+# 자동 연장(형 2026-11-17 "물어보지말고 자동으로 연장"): 사흘 안이면 한 번 돌리고, 실패하면 6시간 뒤에야 다시
+ran = []
+def rt(t, exp, ok=True):
+    return mb.login_renew_tick(t, expiry=lambda: {"a": exp}, run=lambda: ran.append(t) or ok, spawn=lambda f: f())
+check(not rt(1000.0, 1000.0 + 10 * 86400) and not ran, "멀면 안 함")
+check(not rt(1000.0, 0.0) and not ran, "모르면 안 함")
+check(rt(1000.0, 1000.0 + 86400, ok=False) and ran == [1000.0], "사흘 안이면 연장 시도")
+check(not rt(2000.0, 1000.0 + 86400) and len(ran) == 1, "실패 뒤 6시간 안엔 다시 안 함")
+mb._login_cache["at"] = 99.0
+check(rt(1000.0 + mb.LOGIN_RENEW_RETRY_S + 1, 1000.0 + 86400) and len(ran) == 2 and mb._login_cache["at"] == 0.0, "6시간 뒤 다시 · 성공하면 만료 캐시 비움")
 snap["accountUsage"] = {}
 top = json.dumps(mb.render(snap)[0], ensure_ascii=False)
 check("A 5시간" not in top and "5시간" in top, f"계정 하나면 예전 그대로: {top}")
