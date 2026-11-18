@@ -3741,6 +3741,121 @@ def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=
     return woke
 
 
+# ── 끝난 자식을 못 본 부모 ── 형 2026-11-18 "넣어야지"
+# mdc 방: 리드(배경 팀원)가 시킨 개발자가 끝났는데 완료 알림이 리드에게 안 가서 리드가 안 깨어났고, 리드를 기다리던 방도
+# 형이 글을 쓸 때까지 아홉 시간을 섰다. 자식이 끝난 뒤로 부모 기록이 그대로이고 부모가 턴을 끝낸 채면 방을 깨운다.
+ORPHAN_WAIT_S = 600.0         # 자식이 끝나고 이만큼 지나도 부모가 그대로면 — 알림이 오는 중일 수 있는 틈
+ORPHAN_MAX_AGE_S = 86400.0    # 이보다 오래된 자식은 안 본다(지난 일)
+ORPHAN_SEEN = "orphan-wake.json"
+ORPHAN_MSG = ("[마리나] 하위 에이전트가 끝났는데 그걸 맡긴 쪽이 그 뒤로 안 깨어났어(완료 알림을 못 받은 것 같아):\n{lines}\n"
+              "맡긴 쪽에게 SendMessage 로 결과를 확인하고 이어 가라고 하거나, 네가 직접 이어 가. 이미 처리했으면 아무것도 하지 마.")
+ORPHAN_LINE = "- '{parent}' ← '{child}'({ago}분 전 끝남) · 결과 기록: {path}"
+
+
+def _room_started(rec: dict[str, Any]) -> "float | None":
+    """방 tmux 창의 프로세스가 뜬 시각. 다시 뜬 방엔 예전 팀원(in-process)이 없다 — 그 전에 멈춘 짝은 깨울 대상이 아니다(리뷰 I1)."""
+    name = str(rec.get("tmux") or "")
+    try:
+        pid = (ms._tmux("display", "-p", "-t", name, "#{pane_pid}").stdout or "").strip()
+        out = subprocess.run(["ps", "-o", "lstart=", "-p", pid], capture_output=True, text=True, timeout=5).stdout.strip()
+        return time.mktime(time.strptime(out, "%a %b %d %H:%M:%S %Y")) if out else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def _ended_turn(p: Path) -> bool:
+    """기록 끝쪽의 마지막 assistant 줄이 end_turn 이면 쉬는 중(도구를 기다리는 중이 아님)."""
+    try:
+        with open(p, "rb") as fh:
+            fh.seek(max(0, p.stat().st_size - 65536))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        try:
+            m = (json.loads(line).get("message") or {})
+        except (ValueError, AttributeError):
+            continue
+        if isinstance(m, dict) and m.get("role") == "assistant":
+            return m.get("stop_reason") == "end_turn"
+    return False
+
+
+def orphan_waits(tr: Path, now: float) -> list[dict[str, Any]]:
+    """끝난 자식(meta finished) 뒤로 부모 기록이 안 움직였고 부모가 턴을 끝낸 채인 짝."""
+    d = tr.parent / tr.stem / "subagents"
+    out: list[dict[str, Any]] = []
+    for mp in sorted(d.glob("agent-*.meta.json")) if d.is_dir() else []:
+        try:
+            if mp.stat().st_mtime < now - ORPHAN_MAX_AGE_S:
+                continue              # 끝날 때 meta 도 써진다 — 오래된 건 열지 않는다(방마다 meta 가 백 개 넘음, 리뷰 S1)
+        except OSError:
+            continue
+        meta = _load_json_dict(mp)
+        parent = str(meta.get("parentAgentId") or "")
+        if not parent or meta.get("finished") is not True:
+            continue
+        child = mp.name[len("agent-"):-len(".meta.json")]
+        cp, pp = d / f"agent-{child}.jsonl", d / f"agent-{parent}.jsonl"
+        try:
+            c_at, p_at = cp.stat().st_mtime, pp.stat().st_mtime
+        except OSError:
+            continue
+        if not (ORPHAN_WAIT_S <= now - c_at <= ORPHAN_MAX_AGE_S) or p_at >= c_at:
+            continue
+        pmeta = _load_json_dict(d / f"agent-{parent}.meta.json")
+        if pmeta.get("finished") is True or not _ended_turn(pp):
+            continue
+        out.append({"parent": parent, "parentName": str(pmeta.get("name") or pmeta.get("description") or parent),
+                    "child": child, "childDesc": str(meta.get("description") or child), "at": c_at, "parentAt": p_at,
+                    "path": str(cp)})
+    return out
+
+
+def orphan_wait_tick(now: "float | None" = None, transcript=None, busy=None, send=None, started=None) -> list[str]:
+    """쉬고 있는 클로드 방마다 orphan_waits 를 보고, 처음 보는 짝을 한 글로 모아 방을 깨운다(같은 자식은 한 번만)."""
+    now = time.time() if now is None else now
+    transcript = transcript or _session_transcript
+    busy = busy or _room_busy
+    send = send or _spawn_revive
+    started = started or _room_started
+    woke: list[str] = []
+    for rec in ms.load_sessions():
+        if ms.is_codex(rec) or str(rec.get("kind") or "").endswith("lobby"):
+            continue
+        sd = Path(str(rec.get("stateDir") or ""))
+        if not str(rec.get("stateDir") or "") or (sd / LIMIT_STALLED).is_file():
+            continue                  # 한도로 멈춘 방은 limit_revive 몫 — 이 글이 들어가면 한도 표시가 지워진다(리뷰 I3)
+        tr = transcript(rec)
+        waits = orphan_waits(tr, now) if tr else []
+        if not waits:
+            continue
+        seen_p = sd / ORPHAN_SEEN
+        seen = set(_load_json_dict(seen_p).get("children") or [])
+        new = [w for w in waits if w["child"] not in seen]
+        if not new:
+            continue
+        alive, working = busy(rec)
+        if not alive or working:
+            continue                  # 꺼진 방은 깨우지 않는다 · 일하는 방은 쉬는 틈에(다음 tick)
+        born = started(rec)
+        live = [w for w in new if born is None or born < w["parentAt"]]   # 방이 다시 뜨기 전에 멈춘 부모는 이미 없다
+        if live:
+            send(rec, ORPHAN_MSG.format(lines="\n".join(
+                ORPHAN_LINE.format(parent=w["parentName"], child=w["childDesc"], ago=int((now - w["at"]) // 60), path=w["path"])
+                for w in live)))
+        try:                          # 지금 걸린 것만 남긴다 — 지난 id 가 쌓이지 않게(리뷰 S3)
+            keep = {w["child"] for w in waits} & (seen | {w["child"] for w in new})
+            seen_p.write_text(json.dumps({"children": sorted(keep)}), encoding="utf-8")
+        except OSError:
+            pass
+        if live:
+            ref = f"{rec.get('project')}/{rec.get('task')}"
+            woke.append(ref)
+            _log(f"orphan_wait {ref}: " + ", ".join(f"{w['parentName']}←{w['childDesc']}" for w in live) + " 끝난 걸 못 봄 — 깨움")
+    return woke
+
+
 def _drop_pending_prompts(rec: dict[str, Any]) -> None:
     """죽은 세션이 남긴 질문·권한 버튼과 기록을 정리한다(기존 정리 함수 — 버튼은 늦게 눌러도 소용없다)."""
     sd, ch = Path(str(rec.get("stateDir") or "/nonexistent")), str(rec.get("channelId") or "")
@@ -4297,6 +4412,10 @@ class Loop:
                 login_renew_tick(now)
             except Exception as exc:
                 _log(f"login_renew failed: {type(exc).__name__}: {exc}")
+            try:
+                orphan_wait_tick(now)
+            except Exception as exc:
+                _log(f"orphan_wait failed: {type(exc).__name__}: {exc}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
