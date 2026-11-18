@@ -3981,41 +3981,63 @@ STUCK_INPUT = "stuck-input.json"
 STUCK_INPUT_S = 60.0
 
 
-def stuck_input_tick(now: "float | None" = None, screen=None, busy=None, enter=None) -> list[str]:
+def _human_at_pane(tmux: str, now: float) -> bool:
+    """사람이 그 창을 보고 있나 — 보기·복사 모드이거나, 붙은 터미널에서 최근 STUCK_INPUT_S 안에 키를 쳤으면 True."""
+    if (ms._tmux("display-message", "-p", "-t", tmux, "#{pane_in_mode}").stdout or "").strip() == "1":
+        return True
+    for ln in (ms._tmux("list-clients", "-t", tmux, "-F", "#{client_activity}").stdout or "").split():
+        try:
+            if now - float(ln) < STUCK_INPUT_S:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _stopped_at(sd: Path) -> float:
+    """Discord /stop 이 남긴 멈춘 시각(없으면 0)."""
+    try:
+        return float((sd / "interrupted").read_text().split()[1])
+    except (OSError, ValueError, IndexError):
+        return 0.0
+
+
+def stuck_input_tick(now: "float | None" = None, screen=None, busy=None, enter=None, human=None) -> list[str]:
     """쉬는 클로드 방 입력창에 마리나가 친 글('[마리나 …')이 60초 넘게 그대로 남아 있으면 Enter 로 보낸다.
     남아 있으면 입력창이 안 비어 뒤 글이 전부 '못 침'으로 막힌다(2026-11-18 ppojji-launch-dev: 일하는 중 친 글이 대기열에서
-    입력창으로 되돌아와 1시간 넘게 남음). 사람이 쓰던 초안(마리나 머리 없음)·일하는 중·꺼진 방은 건드리지 않는다."""
+    입력창으로 되돌아와 1시간 넘게 남음). 사람이 쓰던 초안(마리나 머리 없음)·일하는 중·꺼진 방·사람이 보고 치는 창은 건드리지 않는다.
+    /stop 직후(10분 안) 되돌아온 글은 형이 멈춘 것이라 그 글이 바뀔 때까지 보내지 않는다(리뷰 I1)."""
     now = time.time() if now is None else now
     screen = screen or (lambda r: ms._tmux("capture-pane", "-p", "-e", "-t", str(r.get("tmux") or "")).stdout or "")
     busy = busy or _room_busy
     enter = enter or (lambda r: ms._tmux("send-keys", "-t", str(r.get("tmux") or ""), "Enter"))
+    human = human or (lambda r: _human_at_pane(str(r.get("tmux") or ""), now))
     sent: list[str] = []
     for rec in ms.load_sessions():
         if ms.is_codex(rec) or not str(rec.get("stateDir") or "") or not str(rec.get("tmux") or ""):
             continue
-        p = Path(str(rec["stateDir"])) / STUCK_INPUT
-        alive, working = busy(rec)
-        text = input_box_text(screen(rec)) if alive and not working else None
-        if not text or not text.startswith("[마리나"):
-            try:
-                p.unlink()
-            except OSError:
-                pass
-            continue
-        last = _load_json_dict(p)
-        if last.get("text") != text:
-            ms._write_json(p, {"text": text, "since": now})
-            continue
-        if now - float(last.get("since") or now) < STUCK_INPUT_S:
-            continue
-        enter(rec)
-        try:
-            p.unlink()
-        except OSError:
-            pass
         ref = f"{rec.get('project')}/{rec.get('task')}"
-        sent.append(ref)
-        _log(f"stuck_input {ref}: 입력창에 남은 마리나 글 보냄 {text[:60]!r}")
+        try:                          # 방 하나의 예외가 뒤 방을 막지 않게(리뷰 S3)
+            sd = Path(str(rec["stateDir"]))
+            p = sd / STUCK_INPUT
+            alive, working = busy(rec)
+            text = input_box_text(screen(rec)) if alive and not working else None
+            if not text or not text.startswith("[마리나"):
+                p.unlink(missing_ok=True)
+                continue
+            last = _load_json_dict(p)
+            if last.get("text") != text or human(rec):     # 새 글이거나 사람이 만지는 중 — 처음부터 다시 잰다(리뷰 I2·S2)
+                held = last.get("held") if last.get("text") == text else 0 <= now - _stopped_at(sd) < 600
+                ms._write_json(p, {"text": text, "since": now, "held": bool(held)})
+                continue
+            if last.get("held") or now - float(last.get("since") or now) < STUCK_INPUT_S:
+                continue
+            enter(rec)
+            p.unlink(missing_ok=True)
+            sent.append(ref)
+            _log(f"stuck_input {ref}: 입력창에 남은 마리나 글 보냄 {text[:60]!r}")
+        except Exception as exc:
+            _log(f"stuck_input {ref} failed: {type(exc).__name__}: {exc}")
     return sent
 
 

@@ -27,10 +27,10 @@ check(mb.input_box_text(screen("다음 할 일 추천", dim=True, more=False)) =
 check(mb.input_box_text("아무것도 없음") is None, "입력창 못 찾음")
 
 entered = []
-state = {"scr": STUCK, "busy": False, "alive": True}
+state = {"scr": STUCK, "busy": False, "alive": True, "human": False}
 def tick(now):
     return mb.stuck_input_tick(now, screen=lambda r: state["scr"], busy=lambda r: (state["alive"], state["busy"]),
-                               enter=lambda r: entered.append(r["task"]))
+                               enter=lambda r: entered.append(r["task"]), human=lambda r: state["human"])
 T = 1000.0
 check(tick(T) == [] and not entered, "처음 본 건 기다림")
 check(tick(T + 30) == [] and not entered, "60초 안엔 기다림")
@@ -51,6 +51,26 @@ tick(T + 700)
 state["scr"] = screen("[마리나 · 다른 방에서] 새 글")
 check(tick(T + 770) == [] and not entered, "글이 바뀌면 다시 잼")
 check(tick(T + 840) == ["proj/feat/a"], "바뀐 글도 60초 지나면 보냄")
+entered.clear()
+# 권한·선택 창(❯ 1. Yes)에선 Enter 가 승인이 된다 — 안 친다
+state["scr"] = "\n".join(["Do you want to proceed?", "❯ 1. Yes", "  2. No", SEP])
+check(tick(T + 900) == [] and tick(T + 1000) == [] and not entered, "선택 창은 안 침")
+# 사람이 터미널에서 만지는 중이면(키 친 지 60초 안·보기 모드) 기다린다(리뷰 I2·S2)
+state["scr"] = STUCK; state["human"] = True
+check(tick(T + 1100) == [] and tick(T + 1200) == [] and not entered, "사람이 만지는 중엔 안 침")
+state["human"] = False
+check(tick(T + 1300) == ["proj/feat/a"], "사람이 손 뗀 뒤 60초 지나면 보냄")
+entered.clear()
+# /stop 으로 멈춰서 되돌아온 글은 형이 멈춘 것 — 안 보낸다(리뷰 I1)
+import time as _t
+from pathlib import Path
+sd = Path(ms.find_session("proj/feat/a")["stateDir"])
+(sd / "interrupted").write_text(f"m1 {_t.time() - 30}\n")
+state["scr"] = screen("[마리나 · 멈춘 뒤 돌아온 글]")
+check(mb.stuck_input_tick(None, screen=lambda r: state["scr"], busy=lambda r: (True, False),
+                          enter=lambda r: entered.append(1), human=lambda r: False) == [], "멈춘 직후 첫 tick")
+check(mb.stuck_input_tick(_t.time() + 120, screen=lambda r: state["scr"], busy=lambda r: (True, False),
+                          enter=lambda r: entered.append(1), human=lambda r: False) == [] and not entered, "/stop 뒤 돌아온 글은 안 보냄")
 
 if fails:
     print("FAIL:", *fails, sep="\n  "); raise SystemExit(1)
