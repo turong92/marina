@@ -256,6 +256,11 @@ ms.session_env(sd)
 check(ms.account_of(sd) == "c", f"띄울 때도 순서대로 c: {ms.account_of(sd)}")
 order.write_text("zz c\n")
 check(ms.failover_order("a") == ["c", "b"], f"없는 계정 이름은 건너뜀: {ms.failover_order('a')}")
+# '-이름' = 그 계정으로는 넘어가지 않는다(형 2026-11-18 "C로 띄우지마 ㅠㅠ B 기다렸다 하게해")
+order.write_text("b -c\n")
+check(ms.failover_order("a") == ["b"], f"-c 는 뺀다: {ms.failover_order('a')}")
+order.write_text("b -c -a\n")
+check(ms.failover_order("b") == [], f"넘어갈 데가 없으면 빈 목록(한도 풀릴 때까지 기다림): {ms.failover_order('b')}")
 st.unlink(); order.unlink(); cf.unlink(); ms.clear_account(sd)
 
 if fails:

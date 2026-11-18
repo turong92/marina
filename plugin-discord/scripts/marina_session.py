@@ -2660,8 +2660,9 @@ def failover_order(cur: str) -> list[str]:
         want = (accounts_dir() / "order").read_text(encoding="utf-8").split()
     except OSError:
         want = []
+    off = {w[1:] for w in want if w.startswith("-")}   # '-c' = c 로는 넘어가지 않는다(형 2026-11-18 "C로 띄우지마 … B 기다렸다 하게해")
     first = [n for n in dict.fromkeys(want) if n in have]
-    return [n for n in first + [n for n in have if n not in first] if n != cur]
+    return [n for n in first + [n for n in have if n not in first] if n != cur and n not in off]
 
 
 def account_token_file(name: str) -> "Path | None":
