@@ -3948,16 +3948,75 @@ def input_holds(screen: str, text: str) -> "bool | None":
     붙여넣기 표시('[Pasted text')가 있으면 True. 입력창(❯)을 못 찾으면 None(모른다 — 호출자가 '갔다'고 단정하지 않는다).
     흐린 글씨(ESC[2m = Claude Code 의 다음 입력 추천)는 내가 친 글이 아니다 — 빼고 본다. 방금 보낸 글이 추천으로 되비치면
     안 들어갔다고 오해해 Enter 를 또 치고, say 는 '넣었는지 모르겠다'로 끝났다(2026-10-16 실측). 화면은 `-e` 로 받아야 한다."""
+    box = _input_box_lines(screen)
+    if box is None:
+        return None
+    if "[Pastedtext" in "".join(_ANSI.sub("", ln).strip() for ln in box).replace(" ", ""):
+        return True                                   # 접힌 긴 글은 흐리든 아니든 남아 있는 것
+    squeezed = "".join(_ANSI.sub("", _DIM.sub("", ln)).strip() for ln in box).replace(" ", "")
+    return any(k in squeezed for k in (text[:12].replace(" ", ""), text[-12:].replace(" ", "")))
+
+
+def _input_box_lines(screen: str) -> "list[str] | None":
+    """마지막 ❯ 줄부터 그 아래 구분선(─) 앞까지(줄바꿈으로 이어진 칸 포함). 입력창이 없으면 None."""
     lines = screen.splitlines()
     idx = [i for i, ln in enumerate(lines) if "❯" in _ANSI.sub("", ln)]
     if not idx:
         return None
     tail = lines[idx[-1]:]
     end = next((i for i, ln in enumerate(tail) if i and _ANSI.sub("", ln).lstrip().startswith("─")), len(tail))  # 구분선 아래는 상태줄
-    if "[Pastedtext" in "".join(_ANSI.sub("", ln).strip() for ln in tail[:end]).replace(" ", ""):
-        return True                                   # 접힌 긴 글은 흐리든 아니든 남아 있는 것
-    squeezed = "".join(_ANSI.sub("", _DIM.sub("", ln)).strip() for ln in tail[:end]).replace(" ", "")
-    return any(k in squeezed for k in (text[:12].replace(" ", ""), text[-12:].replace(" ", "")))
+    return tail[:end]
+
+
+def input_box_text(screen: str) -> "str | None":
+    """입력창에 쓰여 있는 글(흐린 추천 빼고, 줄 앞뒤 공백 정리해 이음). 입력창이 없으면 None."""
+    box = _input_box_lines(screen)
+    if box is None:
+        return None
+    joined = " ".join(_ANSI.sub("", _DIM.sub("", ln)).strip() for ln in box).strip()
+    return joined[joined.find("❯") + 1:].strip() if "❯" in joined else joined
+
+
+STUCK_INPUT = "stuck-input.json"
+STUCK_INPUT_S = 60.0
+
+
+def stuck_input_tick(now: "float | None" = None, screen=None, busy=None, enter=None) -> list[str]:
+    """쉬는 클로드 방 입력창에 마리나가 친 글('[마리나 …')이 60초 넘게 그대로 남아 있으면 Enter 로 보낸다.
+    남아 있으면 입력창이 안 비어 뒤 글이 전부 '못 침'으로 막힌다(2026-11-18 ppojji-launch-dev: 일하는 중 친 글이 대기열에서
+    입력창으로 되돌아와 1시간 넘게 남음). 사람이 쓰던 초안(마리나 머리 없음)·일하는 중·꺼진 방은 건드리지 않는다."""
+    now = time.time() if now is None else now
+    screen = screen or (lambda r: ms._tmux("capture-pane", "-p", "-e", "-t", str(r.get("tmux") or "")).stdout or "")
+    busy = busy or _room_busy
+    enter = enter or (lambda r: ms._tmux("send-keys", "-t", str(r.get("tmux") or ""), "Enter"))
+    sent: list[str] = []
+    for rec in ms.load_sessions():
+        if ms.is_codex(rec) or not str(rec.get("stateDir") or "") or not str(rec.get("tmux") or ""):
+            continue
+        p = Path(str(rec["stateDir"])) / STUCK_INPUT
+        alive, working = busy(rec)
+        text = input_box_text(screen(rec)) if alive and not working else None
+        if not text or not text.startswith("[마리나"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+            continue
+        last = _load_json_dict(p)
+        if last.get("text") != text:
+            ms._write_json(p, {"text": text, "since": now})
+            continue
+        if now - float(last.get("since") or now) < STUCK_INPUT_S:
+            continue
+        enter(rec)
+        try:
+            p.unlink()
+        except OSError:
+            pass
+        ref = f"{rec.get('project')}/{rec.get('task')}"
+        sent.append(ref)
+        _log(f"stuck_input {ref}: 입력창에 남은 마리나 글 보냄 {text[:60]!r}")
+    return sent
 
 
 def run_slash(tmux: str, cmd: str, channel: str, mid: str, poll: float = 2.0, settle: float = 3.0,
@@ -4416,6 +4475,10 @@ class Loop:
                 orphan_wait_tick(now)
             except Exception as exc:
                 _log(f"orphan_wait failed: {type(exc).__name__}: {exc}")
+            try:
+                stuck_input_tick(now)
+            except Exception as exc:
+                _log(f"stuck_input failed: {type(exc).__name__}: {exc}")
         if should_render(now, self.last_render, dirty_mtime(), light["anyBusy"]):
             self.last_render = now
             dashboard_tick(self.dash)
