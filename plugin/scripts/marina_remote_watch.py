@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import time
 from pathlib import Path
@@ -125,6 +126,31 @@ def _pid_alive(pid: int) -> bool:
         return True
 
 
+def _close_tunnel(sd: Path) -> None:
+    """맥으로 옮길 때 옛 터널을 걷고 기록을 지운다. 박스 docker 는 안 닿아도 ssh -L 은 살아 있을 수 있다 —
+    기록만 지우면 고아가 돼 다음 stop --all 이 못 걷고 새 터널이 'Address already in use' 로 죽는다(2026-11-18 ovation).
+    pid 가 적어 둔 명령 그대로일 때만 죽인다(pid 재사용·옛 형식이면 남의 프로세스일 수 있다)."""
+    tun = sd / "remote-tunnel.pid"
+    try:
+        lines = tun.read_text(encoding="utf-8").splitlines()
+        pid = int(lines[0].split()[0])
+        argv = json.loads(lines[1]) if len(lines) > 1 else None
+    except (OSError, ValueError, IndexError):
+        argv = None
+    if isinstance(argv, list) and argv:
+        try:
+            cmd = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True,
+                                 text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            cmd = ""
+        if cmd == " ".join(str(a) for a in argv):
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                pass
+    tun.unlink(missing_ok=True)
+
+
 def reopen_tunnel(sd: Path, spawn=None) -> "int | None":
     """박스는 닿는데 맥으로 돌아오는 터널(ssh -L)만 죽었으면 적어 둔 같은 명령으로 다시 연다. 새 pid 또는 None.
     (2026-11-09 story-chat: 터널 프로세스가 사라져 게이트웨이 502 — 다시 여는 길이 start 뿐이었다)"""
@@ -189,7 +215,7 @@ def tick(roots, misses: dict, log=print, reachable=None, start_local=None, reope
             continue
         misses.pop(str(root), None)
         rt.pin_local(str(sd), rt.LocalTarget(fallback_from=host))     # 먼저 고정 — 이후 모든 판단이 맥을 본다
-        (sd / "remote-tunnel.pid").unlink(missing_ok=True)            # 죽은 터널 기록(다시 감시하지 않게)
+        _close_tunnel(sd)                                             # 살아 있으면 걷고 기록을 지운다(다시 감시하지 않게)
         rc = start_local(root)
         log(f"remote-watch: {host} 가 {MISSES}분째 안 닿아 {root} 를 맥에서 다시 띄움(rc={rc})")
         if rc != 0 and not local_running(_owned_name(sd)):

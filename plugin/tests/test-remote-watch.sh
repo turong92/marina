@@ -52,6 +52,32 @@ class WatchTests(unittest.TestCase):
         self.assertIn("맥에서 다시 띄움", self.logs[-1])
         self.assertEqual(self.tick(m), [], "고정 뒤엔 다시 안 옮긴다")
 
+    def test_move_to_mac_closes_live_tunnel_before_forgetting_it(self):
+        # 2026-11-18 ovation a2-1: 박스 docker 는 안 닿는데 ssh -L 은 살아 있었다 — 기록만 지워 고아가 됐고,
+        # 다음 stop --all 이 못 걷어 새 터널이 'Address already in use' 로 죽었다(게이트웨이 502)
+        live = subprocess.Popen(["sleep", "300"])
+        self.addCleanup(lambda: (live.poll() is None and live.kill(), live.wait()))
+        (self.sd / "remote-tunnel.pid").write_text(f"{live.pid}\n{json.dumps(['sleep', '300'])}\n")
+        self.up = False
+        m = {}
+        self.tick(m); self.tick(m)
+        self.assertEqual(self.started, [self.root])
+        self.assertIsNotNone(live.wait(timeout=5), "살아 있던 터널을 걷고 나서 기록을 지운다")
+        self.assertFalse((self.sd / "remote-tunnel.pid").exists())
+
+    def test_move_to_mac_never_kills_unrelated_pid(self):
+        # 기록된 명령과 다른 프로세스(pid 재사용)·명령 기록 없는 옛 형식이면 죽이지 않는다
+        other = subprocess.Popen(["sleep", "301"])
+        self.addCleanup(lambda: (other.poll() is None and other.kill(), other.wait()))
+        for body in (f"{other.pid}\n{json.dumps(['ssh', '-N', 'box'])}\n", f"{other.pid}\n"):
+            (self.sd / "remote-tunnel.pid").write_text(body)
+            (self.sd / "remote-owned.json").write_text(json.dumps({"host": "ssh://box", "project": "p"}))
+            rt.unpin_local(str(self.sd))
+            self.up = False
+            m = {}
+            self.tick(m); self.tick(m)
+            self.assertIsNone(other.poll(), f"남의 프로세스는 그대로: {body!r}")
+
     def test_blip_resets_count(self):
         m = {}
         self.up = False; self.tick(m)
