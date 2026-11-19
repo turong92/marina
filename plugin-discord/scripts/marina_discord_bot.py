@@ -1841,18 +1841,27 @@ def _pane_prompt(name: str) -> "tuple[str, list[str], str, bool] | None | bool":
     r = ms._tmux("capture-pane", "-p", "-t", f"={name}:")
     if r.returncode != 0:
         return False
-    lines = (r.stdout or "").rstrip().splitlines()[-20:]
+    # 줄 끝 테두리(│)는 떼고 본다 — heredoc 경고 창은 줄마다 붙어 점선이 제목에 나오고 '2. No │' 라 버튼도 안 달렸다(실사용 11-19)
+    lines = [l.rstrip().rstrip("│").rstrip() for l in (r.stdout or "").rstrip().splitlines()[-20:]]
     q = max((i for i, l in enumerate(lines) if "Do you want to " in l), default=-1)
     if q < 0 or not any(_PERM.match(l) for l in lines[q:]):
         return None
     head: list[str] = []
+    expl: list[str] = []
     cmd = ""
     top = q
+    # 점선(╌) 아래 '│ ' 줄은 명령이 아니라 경고 설명이다 — 점선 위가 명령 상자
+    dash = next((i for i in range(q - 1, max(-1, q - 16), -1)
+                 if lines[i].strip() and set(lines[i].strip()) <= set("╌┄")), -1)
     for i in range(q - 1, max(-1, q - 16), -1):
         t = lines[i].strip()
         top = i
         if t and set(t) <= set("─━"):
             break
+        if t.startswith("│") and dash >= 0 and i > dash:
+            if t.lstrip("│ ").strip():
+                expl.append(t.lstrip("│ ").strip())
+            continue
         if t.startswith("│"):
             cmd = t.lstrip("│ ").strip() or cmd       # 위로 올라가며 — 마지막에 남는 게 첫 줄
             continue
@@ -1865,7 +1874,8 @@ def _pane_prompt(name: str) -> "tuple[str, list[str], str, bool] | None | bool":
     # 초읽기(… block this request in 0:55)는 매초 바뀐다 — 서명에 넣으면 카드를 계속 새로 올리고 버튼도 안 먹는다(실사용 10-30)
     stable = [_COUNTDOWN.sub("", l) for l in lines[top:]]
     sig = hashlib.sha1("\n".join(stable).encode("utf-8", "replace")).hexdigest()[:16]
-    return sig, list(reversed(head))[-3:], _clean(cmd)[:80], ok
+    shown = list(reversed(head))[-3:] + ([" ".join(reversed(expl))[:200]] if expl else [])
+    return sig, shown, _clean(cmd)[:80], ok
 
 
 def _perm_entries(sd: Path) -> "list[tuple[Path, dict[str, Any]]]":
@@ -1913,7 +1923,9 @@ def _pane_perm_one(rec: dict[str, Any], names: "set[str] | None") -> None:
         return
     entries = _perm_entries(sd)
     mine = [(f, d) for f, d in entries if d.get("pane")]
-    if got and any(d.get("sig") == got[0] and d.get("msg") for _, d in mine):
+    same = [(f, d) for f, d in mine if got and d.get("sig") == got[0] and d.get("msg")]
+    if same:
+        _pane_perm_nudge(rec, *same[0])
         return
     for f, d in mine:
         _pane_perm_close(f, d, ch, "터미널에서 처리됨" if not got else "창이 바뀜")
@@ -1936,6 +1948,25 @@ def _pane_perm_one(rec: dict[str, Any], names: "set[str] | None") -> None:
     if msg:
         ms._write_json(sd / f"perm-{token}.json", {"token": token, "msg": msg, "pane": True, "sig": sig, "ok": ok,
                                                     "title": title, "at": time.time()})
+
+
+PANE_PERM_NUDGE = 600.0     # 권한 창이 이만큼 안 풀리면 형을 한 번 부른다 — 카드만으론 몇 시간 몰랐다(실사용 11-19)
+
+
+def _pane_perm_nudge(rec: dict[str, Any], f: Path, d: dict[str, Any]) -> None:
+    if d.get("nudged") or time.time() - float(d.get("at") or 0) < PANE_PERM_NUDGE:
+        return
+    pc = (ms.load_config().get("projects") or {}).get(str(rec.get("project") or "")) or {}
+    users = [str(u) for u in (pc.get("allow") or []) if str(u)] if isinstance(pc, dict) else []
+    ch = str(rec.get("channelId") or "")
+    mins = int((time.time() - float(d.get("at") or 0)) // 60)
+    body = {"content": " ".join(f"<@{u}>" for u in users) + f" 🔐 {mins}분째 권한 창에서 멈춰 있어 — 위 카드 버튼이나 터미널에서 풀어 줘",
+            "allowed_mentions": {"parse": [], "users": users}}
+    try:
+        _dc(ms.load_config())._req("POST", f"/channels/{ch}/messages", body)
+    except ms.SessionError:
+        return                                        # 다음 판에 다시
+    ms._write_json(f, dict(d, nudged=True))
 
 
 PANE_ASK_GRACE = 45.0       # 질문 훅이 카드를 올릴 틈 — 그 뒤에도 없으면 봇이 대신 올린다
