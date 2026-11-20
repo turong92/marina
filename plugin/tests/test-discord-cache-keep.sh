@@ -278,16 +278,16 @@ ks(H0 + 30)
 c2 = keep_json()["continueAfter"]
 check(ks(c2 + 29 * MIN) == [] and keep_json().get("continueAfter") is not None, "30분 전엔 표시를 둔다")
 check(ks(c2 + 31 * MIN) == [] and keep_json().get("continueAfter") is None, "30분 넘게 경계가 없으면 표시만 지운다")
-# SOFT: 60%↑ + 일 조각 끝 + 60초 뒤 즉시 압축, 이어서는 없다
-reset_room(); ctx[0] = 65.0
+# SOFT: 30%↑(1M 창 기준, 형 2026-11-20) + 일 조각 끝 + 60초 뒤 즉시 압축, 이어서는 없다
+reset_room(); ctx[0] = 40.0
 check(ks(H0 + 30) == [], "SOFT: 마지막 활동 뒤 60초 전엔 안 한다")
-check(ks(H0 + 90) == [ms.COMPACT_KEEP_TEXT] and keep_json().get("continueAfter") is None, f"SOFT: 일 조각이 끝난 60%↑ 방은 즉시 압축·이어서 없음: {typed} {keep_json()}")
-reset_room(); ctx[0] = 65.0; blockers[0] = ["백그라운드 셸 1"]
-check(ks(H0 + 90) == [], "SOFT: 일 조각이 안 끝났으면(하던 중) 60%대는 즉시 압축하지 않는다")
+check(ks(H0 + 90) == [ms.COMPACT_KEEP_TEXT] and keep_json().get("continueAfter") is None, f"SOFT: 일 조각이 끝난 30%↑ 방은 즉시 압축·이어서 없음: {typed} {keep_json()}")
+reset_room(); ctx[0] = 40.0; blockers[0] = ["백그라운드 셸 1"]
+check(ks(H0 + 90) == [], "SOFT: 일 조각이 안 끝났으면(하던 중) 30%대는 즉시 압축하지 않는다")
 # 하던 중(멈춘 에이전트·열린 진행 문서)으로 보여도 50분 쉬었으면 60%↑ 는 캐시를 데우지 말고 압축 + 이어서(2026-11-09 mdc 84% 방이 캐시 유지만 반복)
 check(ks(H0 + 55 * MIN) == [ms.COMPACT_KEEP_TEXT] and keep_json().get("continueAfter") is not None, f"SOFT+하던 중+50분 쉼 → 압축·이어서: {typed} {keep_json()}")
-reset_room(); ctx[0] = 50.0
-check(ks(H0 + 3 * MIN) == [] and ks(H0 + 20 * MIN) == [] and ks(H0 + 55 * MIN) == [ms.COMPACT_KEEP_TEXT], "60% 미만은 기존 50분 규칙")
+reset_room(); ctx[0] = 20.0
+check(ks(H0 + 3 * MIN) == [] and ks(H0 + 20 * MIN) == [] and ks(H0 + 55 * MIN) == [ms.COMPACT_KEEP_TEXT], "30% 미만은 기존 50분 규칙")
 # 건너뛰는 경우: 바쁜 방·터미널 보는 중·선택 창·같은 구간·코덱스
 reset_room(); ctx[0] = 90.0; mb._pane_busy = lambda n: (True, True)
 check(ks(H0 + 30) == [], "HARD: 턴 도는 방엔 안 한다")
@@ -358,7 +358,7 @@ real_find2 = ms.load_sessions
 ms.load_sessions = lambda: [dict(r, kind="chat") for r in real_find2()]
 reset_room(); ctx[0] = 90.0
 check(ks(H0 + 30) == [ms.COMPACT_KEEP_TEXT] and keep_json().get("continueAfter") is None, f"채팅방은 HARD 여도 압축만(이어서 없음): {keep_json()}")
-reset_room(); ctx[0] = 65.0; mi._selecting = lambda n: True
+reset_room(); ctx[0] = 40.0; mi._selecting = lambda n: True
 check(ks(H0 + 90) == [], "채팅방 SOFT 도 선택 창이 떠 있으면 안 한다")
 mi._selecting = lambda n: False
 ms.load_sessions = real_find2
