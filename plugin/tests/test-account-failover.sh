@@ -124,6 +124,11 @@ try:
     check(revive(9e12 + 750, {"b": 0.0}, limited=True) == ["proj/feat/a"] and restarted == ["proj/feat/a"],
           "계정 바꿔 띄운 방(failover)도 옛 한도 문구로 또 안 띄운다")
     check(len(told) == nt, f"계정 바꿔 띄운 방엔 '한도가 풀려서' 를 채널에 안 쓴다(failover 가 이미 알림, 2026-11-17): {told[nt:]}")
+    # 2026-11-20 형: '한도 풀려서 이어서 하게 했대' 를 보고 B 로 넘어간 줄 알았다 — 어느 계정이 풀렸는지, 계정은 그대로인지 밝힌다
+    (sd / "limit-stalled").write_text('{"freeAt": 0}')
+    check(revive(9e12 + 780, {"b": 0.0}) == ["proj/feat/a"], "떠 있는 방: 지금 계정이 풀리면 글을 넣는다")
+    check("B 계정" in told[-1][1] and "그대로" in told[-1][1], f"채널 글에 풀린 계정·계정 안 바뀜: {told[-1]}")
+    check("B 계정" in sent[-1][1] and "그대로" in sent[-1][1], f"방 안 글에도: {sent[-1]}")
     (sd / "limit-stalled").write_text('{"freeAt": 0}')
     n = len(sent)
     check(revive(9e12 + 800, {"b": 0.0}, busy=True) == [] and len(sent) == n and not (sd / "limit-stalled").exists(), "일하는 중이면 안 깨우고 표시만 지움")

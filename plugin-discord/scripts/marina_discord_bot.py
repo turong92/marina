@@ -3676,8 +3676,18 @@ def account_return_tick(now: "float | None" = None, usage=None, blockers=None, l
 
 
 LIMIT_STALLED = "limit-stalled"
-LIMIT_REVIVE_MSG = ("[마리나] 사용량 한도가 풀렸어. 한도로 멈췄던 일을 바로 이어서 해 줘 — 한도로 끊긴 서브에이전트가 있으면 "
-                    "SendMessage 로 이어 가거나 다시 맡겨. 할 일이 없으면 아무것도 하지 마.")
+LIMIT_REVIVE_TAIL = ("한도로 멈췄던 일을 바로 이어서 해 줘 — 한도로 끊긴 서브에이전트가 있으면 "
+                     "SendMessage 로 이어 가거나 다시 맡겨. 할 일이 없으면 아무것도 하지 마.")
+
+
+def _revive_texts(acct: str) -> "tuple[str, str]":
+    """(방 안 글, 방 채널 한 줄). acct = 떠 있는 방이 쓰는 계정(잠든 방은 '' — 깨울 때 여유 계정을 고른다).
+    2026-11-20 형: '한도 풀려서 이어서 하게 했대' 를 보고 B 로 넘어간 줄 알았다 — 어느 계정이 풀렸는지·계정은 그대로인지 밝힌다."""
+    if acct:
+        who = f"이 방이 쓰는 {acct.upper()} 계정 한도가 다시 풀렸어(계정은 그대로야)"
+        return f"[마리나] {who}. {LIMIT_REVIVE_TAIL}", f"🔄 {who}. 한도로 멈췄던 이 방을 깨워 이어서 하게 했어"
+    return (f"[마리나] 한도로 멈춰 잠들었던 방이라 지금 여유 있는 계정으로 다시 띄웠어. {LIMIT_REVIVE_TAIL}",
+            "🔄 한도로 멈춰 잠들었던 방을 지금 여유 있는 계정으로 깨워 멈췄던 일을 이어서 하게 했어")
 
 
 def _mark_stalled(sd: Path, free_at: float, restarted: bool = False) -> None:
@@ -3762,11 +3772,12 @@ def limit_revive_tick(now: "float | None" = None, free_at=None, busy=None, send=
         elif not any(usable(n) for n in ms.accounts()):
             continue
         _mark_stalled(sd, now + REVIVE_RETRY_S)
-        send(rec, LIMIT_REVIVE_MSG)
+        msg, line = _revive_texts(ms.running_account(sd) if alive else "")
+        send(rec, msg)
         # 형이 방 채널만 봐도 알게 — 방 안 입력창 글은 Discord 에 안 보인다(2026-11-12 "도는데 도는지도 모르겠고").
         # 계정을 바꿔 띄운 방은 한도가 풀린 게 아니고 failover 가 이미 알렸다 — 안 붙인다(2026-11-17)
         if not restarted:
-            (say or _say_channel)(str(rec.get("channelId") or ""), "🔄 사용량 한도가 풀려서 이 방을 깨워 멈췄던 일을 이어서 하게 했어")
+            (say or _say_channel)(str(rec.get("channelId") or ""), line)
         woke.append(ref)
         _log(f"limit_revive {ref}: 깨우기 보냄")
     return woke
